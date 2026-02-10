@@ -1,6 +1,13 @@
-.encore
+node_modules/
+dist/
+.next/
+.env
+.env.local
+.secrets.local.cue
+encore.gen/
+*.log
+/tmp/thefold-sandboxes/
 encore.gen.go
 encore.gen.cue
 /.encore
-node_modules
 /encore.gen

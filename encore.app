@@ -1,4 +1,4 @@
 {
-	"id":   "thefold-ozb2",
-	"lang": "typescript"
+    "id": "thefold",
+    "lang": "typescript"
 }

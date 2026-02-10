@@ -1,0 +1,7 @@
+CREATE DATABASE memory;
+\c memory;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+\c chat;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

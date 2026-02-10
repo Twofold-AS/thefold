@@ -1,0 +1,39 @@
+{
+  "$schema": "https://encore.dev/schemas/infra.schema.json",
+  "metadata": {
+    "app_id": "thefold",
+    "env_name": "production",
+    "env_type": "production",
+    "cloud": "gcp",
+    "base_url": "https://thefold.yourdomain.com"
+  },
+  "sql_servers": [
+    {
+      "host": "thefold-postgres:5432",
+      "databases": {
+        "chat": {
+          "username": "thefold",
+          "password": { "$env": "DB_PASSWORD" }
+        },
+        "memory": {
+          "username": "thefold",
+          "password": { "$env": "DB_PASSWORD" }
+        }
+      }
+    }
+  ],
+  "auth": [
+    {
+      "type": "key",
+      "id": 1,
+      "key": { "$env": "SERVICE_API_KEY" }
+    }
+  ],
+  "secrets": {
+    "AnthropicAPIKey": { "$env": "ANTHROPIC_API_KEY" },
+    "LinearAPIKey": { "$env": "LINEAR_API_KEY" },
+    "GitHubToken": { "$env": "GITHUB_TOKEN" },
+    "AuthSecret": { "$env": "AUTH_SECRET" },
+    "VoyageAPIKey": { "$env": "VOYAGE_API_KEY" }
+  }
+}

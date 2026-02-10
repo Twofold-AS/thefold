@@ -1,0 +1,22 @@
+thefold.yourdomain.com {
+    # API routes to Encore backend
+    handle /api/* {
+        reverse_proxy thefold-backend:8080
+    }
+
+    # Everything else to Next.js
+    handle {
+        reverse_proxy thefold-frontend:3000
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    log {
+        output file /var/log/caddy/thefold.log
+    }
+}
