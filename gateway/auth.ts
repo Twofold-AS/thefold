@@ -1,9 +1,12 @@
-import { APIError, Gateway, Header } from "encore.dev/api";
+import { api, APIError, Gateway, Header } from "encore.dev/api";
 import { authHandler } from "encore.dev/auth";
 import { secret } from "encore.dev/config";
 import * as crypto from "crypto";
 
 const authSecret = secret("AuthSecret");
+
+// Default admin password for development — override with AdminPassword secret in production
+const adminPassword = secret("AdminPassword");
 
 // --- Types ---
 
@@ -52,6 +55,39 @@ export function generateToken(userId: string, username: string, role: "admin" | 
     .digest("hex");
   return `${payload}.${signature}`;
 }
+
+// --- Login Endpoint ---
+
+interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+interface LoginResponse {
+  token: string;
+  user: {
+    userId: string;
+    username: string;
+    role: "admin" | "viewer";
+  };
+}
+
+export const login = api(
+  { method: "POST", path: "/auth/login", expose: true, auth: false },
+  async (req: LoginRequest): Promise<LoginResponse> => {
+    if (req.username === "admin" && req.password === adminPassword()) {
+      const userId = "admin-001";
+      const role = "admin" as const;
+      const token = generateToken(userId, req.username, role);
+      return {
+        token,
+        user: { userId, username: req.username, role },
+      };
+    }
+
+    throw APIError.unauthenticated("Feil brukernavn eller passord");
+  }
+);
 
 // --- Auth Handler ---
 

@@ -1,8 +1,17 @@
 import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 
+// --- Secrets ---
 const anthropicKey = secret("AnthropicAPIKey");
+
+// Optional secrets - will be checked at runtime
+const openaiKey = secret("OpenAIAPIKey");
+const moonshotKey = secret("MoonshotAPIKey");
+
+// --- Constants ---
+const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 
 // --- Types ---
 
@@ -16,6 +25,7 @@ export interface ChatRequest {
   messages: ChatMessage[];
   memoryContext: string[];
   systemContext: "direct_chat" | "agent_planning" | "agent_coding" | "agent_review";
+  model?: string; // Optional - uses DefaultAIModel if not set
 }
 
 export interface ChatResponse {
@@ -27,12 +37,13 @@ export interface ChatResponse {
 // Structured agent call — returns JSON for the agent to parse
 export interface AgentThinkRequest {
   task: string;
-  projectStructure: string;       // file tree from GitHub
-  relevantFiles: FileContent[];    // actual file contents
+  projectStructure: string; // file tree from GitHub
+  relevantFiles: FileContent[]; // actual file contents
   memoryContext: string[];
-  docsContext: string[];           // from Context7
-  previousAttempt?: string;        // if retrying after error
-  errorMessage?: string;           // the error to fix
+  docsContext: string[]; // from Context7
+  previousAttempt?: string; // if retrying after error
+  errorMessage?: string; // the error to fix
+  model?: string; // Optional - uses DefaultAIModel if not set
 }
 
 export interface FileContent {
@@ -50,17 +61,18 @@ export interface TaskStep {
   description: string;
   action: "create_file" | "modify_file" | "delete_file" | "run_command";
   filePath?: string;
-  content?: string;         // for create_file: full content. for modify_file: new content
-  command?: string;          // for run_command
+  content?: string; // for create_file: full content. for modify_file: new content
+  command?: string; // for run_command
 }
 
 // Code generation — returns actual file contents
 export interface CodeGenRequest {
   step: TaskStep;
-  projectContext: string;          // relevant surrounding code
+  projectContext: string; // relevant surrounding code
   memoryContext: string[];
   docsContext: string[];
-  encoreRules: boolean;            // enforce Encore conventions
+  encoreRules: boolean; // enforce Encore conventions
+  model?: string; // Optional - uses DefaultAIModel if not set
 }
 
 export interface CodeGenResponse {
@@ -81,14 +93,159 @@ export interface ReviewRequest {
   filesChanged: GeneratedFile[];
   validationOutput: string;
   memoryContext: string[];
+  model?: string; // Optional - uses DefaultAIModel if not set
 }
 
 export interface ReviewResponse {
-  documentation: string;         // markdown doc for Linear/PR
-  memoriesExtracted: string[];   // key decisions to remember
-  qualityScore: number;          // 1-10 self-assessment
-  concerns: string[];            // any issues found
+  documentation: string; // markdown doc for Linear/PR
+  memoriesExtracted: string[]; // key decisions to remember
+  qualityScore: number; // 1-10 self-assessment
+  concerns: string[]; // any issues found
   tokensUsed: number;
+}
+
+// --- AI Provider Detection ---
+
+type AIProvider = "anthropic" | "openai" | "moonshot";
+
+function getProvider(modelName: string): AIProvider {
+  if (modelName.startsWith("claude-")) return "anthropic";
+  if (modelName.startsWith("gpt-")) return "openai";
+  if (modelName.startsWith("moonshot-")) return "moonshot";
+  throw APIError.invalidArgument(`Unknown model: ${modelName}`);
+}
+
+// --- Helper Functions ---
+
+function stripMarkdownJson(text: string): string {
+  let jsonText = text.trim();
+  const codeBlockMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (codeBlockMatch) {
+    jsonText = codeBlockMatch[1].trim();
+  }
+  return jsonText;
+}
+
+interface AICallOptions {
+  model: string;
+  system: string;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  maxTokens: number;
+}
+
+interface AICallResponse {
+  content: string;
+  tokensUsed: number;
+  stopReason: string;
+}
+
+async function callAI(options: AICallOptions): Promise<AICallResponse> {
+  const provider = getProvider(options.model);
+
+  switch (provider) {
+    case "anthropic":
+      return callAnthropic(options);
+    case "openai":
+      return callOpenAI(options);
+    case "moonshot":
+      return callMoonshot(options);
+  }
+}
+
+async function callAnthropic(options: AICallOptions): Promise<AICallResponse> {
+  const client = new Anthropic({ apiKey: anthropicKey() });
+
+  const response = await client.messages.create({
+    model: options.model,
+    max_tokens: options.maxTokens,
+    system: options.system,
+    messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
+  });
+
+  const text = response.content.find((c) => c.type === "text");
+  if (!text || text.type !== "text") {
+    throw APIError.internal("no text in Anthropic response");
+  }
+
+  return {
+    content: text.text,
+    tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
+    stopReason: response.stop_reason || "end_turn",
+  };
+}
+
+async function callOpenAI(options: AICallOptions): Promise<AICallResponse> {
+  let apiKey: string;
+  try {
+    apiKey = openaiKey();
+  } catch {
+    throw APIError.failedPrecondition(
+      "OpenAI provider not configured. Set OpenAIAPIKey secret."
+    );
+  }
+
+  const client = new OpenAI({ apiKey });
+
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+    { role: "system", content: options.system },
+    ...options.messages,
+  ];
+
+  const response = await client.chat.completions.create({
+    model: options.model,
+    max_tokens: options.maxTokens,
+    messages,
+  });
+
+  const choice = response.choices[0];
+  if (!choice?.message?.content) {
+    throw APIError.internal("no content in OpenAI response");
+  }
+
+  return {
+    content: choice.message.content,
+    tokensUsed: response.usage?.total_tokens || 0,
+    stopReason: choice.finish_reason || "stop",
+  };
+}
+
+async function callMoonshot(options: AICallOptions): Promise<AICallResponse> {
+  let apiKey: string;
+  try {
+    apiKey = moonshotKey();
+  } catch {
+    throw APIError.failedPrecondition(
+      "Moonshot provider not configured. Set MoonshotAPIKey secret."
+    );
+  }
+
+  // Moonshot uses OpenAI-compatible API
+  const client = new OpenAI({
+    apiKey,
+    baseURL: "https://api.moonshot.cn/v1",
+  });
+
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+    { role: "system", content: options.system },
+    ...options.messages,
+  ];
+
+  const response = await client.chat.completions.create({
+    model: options.model,
+    max_tokens: options.maxTokens,
+    messages,
+  });
+
+  const choice = response.choices[0];
+  if (!choice?.message?.content) {
+    throw APIError.internal("no content in Moonshot response");
+  }
+
+  return {
+    content: choice.message.content,
+    tokensUsed: response.usage?.total_tokens || 0,
+    stopReason: choice.finish_reason || "stop",
+  };
 }
 
 // --- System Prompts ---
@@ -165,7 +322,7 @@ Respond with JSON:
 export const chat = api(
   { method: "POST", path: "/ai/chat", expose: false },
   async (req: ChatRequest): Promise<ChatResponse> => {
-    const client = new Anthropic({ apiKey: anthropicKey() });
+    const model = req.model || DEFAULT_MODEL;
 
     let system = CONTEXT_PROMPTS[req.systemContext] || CONTEXT_PROMPTS.direct_chat;
 
@@ -176,20 +333,17 @@ export const chat = api(
       });
     }
 
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8192,
+    const response = await callAI({
+      model,
       system,
-      messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: req.messages,
+      maxTokens: 8192,
     });
 
-    const text = response.content.find((c) => c.type === "text");
-    if (!text || text.type !== "text") throw APIError.internal("no text in AI response");
-
     return {
-      content: text.text,
-      tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
-      stopReason: response.stop_reason || "end_turn",
+      content: response.content,
+      tokensUsed: response.tokensUsed,
+      stopReason: response.stopReason,
     };
   }
 );
@@ -198,7 +352,7 @@ export const chat = api(
 export const planTask = api(
   { method: "POST", path: "/ai/plan", expose: false },
   async (req: AgentThinkRequest): Promise<AgentThinkResponse> => {
-    const client = new Anthropic({ apiKey: anthropicKey() });
+    const model = req.model || DEFAULT_MODEL;
 
     let prompt = `## Task\n${req.task}\n\n`;
     prompt += `## Project Structure\n\`\`\`\n${req.projectStructure}\n\`\`\`\n\n`;
@@ -224,27 +378,29 @@ export const planTask = api(
 
     prompt += `Create a step-by-step plan. Respond with JSON only.`;
 
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 16384,
+    const messages: ChatMessage[] = [{ role: "user", content: prompt }];
+
+    if (req.memoryContext.length > 0) {
+      messages.push({
+        role: "user",
+        content: `Relevant memories:\n${req.memoryContext.join("\n")}`,
+      });
+    }
+
+    const response = await callAI({
+      model,
       system: CONTEXT_PROMPTS.agent_planning,
-      messages: [
-        { role: "user", content: prompt },
-        ...(req.memoryContext.length > 0
-          ? [{ role: "user" as const, content: `Relevant memories:\n${req.memoryContext.join("\n")}` }]
-          : []),
-      ],
+      messages,
+      maxTokens: 16384,
     });
 
-    const text = response.content.find((c) => c.type === "text");
-    if (!text || text.type !== "text") throw APIError.internal("no text in planning response");
-
     try {
-      const parsed = JSON.parse(text.text);
+      const jsonText = stripMarkdownJson(response.content);
+      const parsed = JSON.parse(jsonText);
       return {
         plan: parsed.plan,
         reasoning: parsed.reasoning,
-        tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
+        tokensUsed: response.tokensUsed,
       };
     } catch {
       throw APIError.internal("failed to parse planning response as JSON");
@@ -256,7 +412,7 @@ export const planTask = api(
 export const reviewCode = api(
   { method: "POST", path: "/ai/review", expose: false },
   async (req: ReviewRequest): Promise<ReviewResponse> => {
-    const client = new Anthropic({ apiKey: anthropicKey() });
+    const model = req.model || DEFAULT_MODEL;
 
     let prompt = `## Task\n${req.taskDescription}\n\n`;
     prompt += `## Files Changed\n`;
@@ -266,24 +422,22 @@ export const reviewCode = api(
     prompt += `## Validation Output\n\`\`\`\n${req.validationOutput}\n\`\`\`\n\n`;
     prompt += `Review this work. Respond with JSON only.`;
 
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8192,
+    const response = await callAI({
+      model,
       system: CONTEXT_PROMPTS.agent_review,
       messages: [{ role: "user", content: prompt }],
+      maxTokens: 8192,
     });
 
-    const text = response.content.find((c) => c.type === "text");
-    if (!text || text.type !== "text") throw APIError.internal("no text in review response");
-
     try {
-      const parsed = JSON.parse(text.text);
+      const jsonText = stripMarkdownJson(response.content);
+      const parsed = JSON.parse(jsonText);
       return {
         documentation: parsed.documentation,
         memoriesExtracted: parsed.memoriesExtracted || [],
         qualityScore: parsed.qualityScore || 5,
         concerns: parsed.concerns || [],
-        tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
+        tokensUsed: response.tokensUsed,
       };
     } catch {
       throw APIError.internal("failed to parse review response");

@@ -1,0 +1,366 @@
+/* ============================================
+   Custom Fonts — All font files registered
+   ============================================ */
+
+@font-face {
+  font-family: "Suisse Intl";
+  src: url("/fonts/SuisseIntl-Regular-WebS.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Suisse Intl";
+  src: url("/fonts/SuisseIntl-RegularItalic-WebS.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Suisse Intl";
+  src: url("/fonts/SuisseIntl-Medium-WebS.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Suisse Intl";
+  src: url("/fonts/SuisseIntl-SemiBold-WebS.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Suisse Intl Mono";
+  src: url("/fonts/SuisseIntlMono-Regular-WebS.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "TheFold Brand";
+  src: url("/fonts/thefold.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============================================
+   TheFold Design System
+   ============================================ */
+
+:root {
+  /* Badges */
+  --badge-active-bg: #d5e8a0;
+  --badge-active-text: #3d5a00;
+  --badge-inactive-bg: #e8e8e4;
+  --badge-inactive-text: #6b6b6b;
+
+  /* Status */
+  --success: #22c55e;
+  --warning: #eab308;
+  --error: #ef4444;
+  --info: #3b82f6;
+
+  /* Code block left-border colors */
+  --code-border-orange: #f59e0b;
+  --code-border-blue: #3b82f6;
+  --code-border-green: #22c55e;
+  --code-border-purple: #8b5cf6;
+
+  /* Sidebar — ALWAYS dark */
+  --bg-sidebar: #171717;
+  --bg-sidebar-section: #1b1b1b;
+  --bg-sidebar-hover: #252528;
+  --bg-sidebar-active: #1b1b1b;
+  --sidebar-text: #a1a1a1;
+  --sidebar-text-active: #fafafa;
+  --sidebar-border: #27272a;
+}
+
+/* Dark theme (default) */
+[data-theme="dark"] {
+  --bg-page: #111111;
+  --bg-card: #171717;
+  --bg-card-secondary: #1b1b1b;
+  --bg-input: #141414;
+  --bg-code: #0d0d0d;
+  --bg-hover: #1b1b1b;
+
+  --text-primary: #fafaf9;
+  --text-secondary: #a1a1a1;
+  --text-muted: #52525b;
+
+  --border: #27272a;
+  --border-hover: #3f3f46;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --bg-page: #faf9f6;
+  --bg-card: #ffffff;
+  --bg-card-secondary: #f8f8f6;
+  --bg-input: #f4f3f0;
+  --bg-code: #f0efec;
+  --bg-hover: #f0efec;
+
+  --text-primary: #1a1a1a;
+  --text-secondary: #6b6b6b;
+  --text-muted: #9a9a9a;
+
+  --border: #e5e4e0;
+  --border-hover: #d4d3cf;
+}
+
+/* ============================================
+   Base
+   ============================================ */
+
+@layer base {
+  body {
+    background-color: var(--bg-page);
+    color: var(--text-primary);
+    font-family: "Suisse Intl", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background: rgba(255, 255, 255, 0.15);
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--border-hover);
+  }
+}
+
+/* ============================================
+   Components
+   ============================================ */
+
+@layer components {
+  /* --- Buttons (rounded-lg) --- */
+
+  .btn-primary {
+    background: #fafafa;
+    color: #000;
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    transition: background 100ms;
+  }
+  .btn-primary:hover {
+    background: #e4e4e7;
+  }
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn-secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 14px;
+    transition: border-color 100ms;
+  }
+  .btn-secondary:hover {
+    border-color: var(--border-hover);
+  }
+
+  .btn-outline {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-weight: 500;
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    transition: border-color 100ms;
+  }
+  .btn-outline:hover {
+    border-color: var(--border-hover);
+  }
+
+  /* --- Inputs (rounded-lg) --- */
+
+  .input-field {
+    width: 100%;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 14px;
+    color: var(--text-primary);
+    transition: border-color 100ms;
+  }
+  .input-field::placeholder {
+    color: var(--text-muted);
+  }
+  .input-field:focus {
+    outline: none;
+    border-color: var(--border-hover);
+  }
+  .input-field:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* --- Cards (rounded-xl) --- */
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+
+  .card-secondary {
+    background: var(--bg-card-secondary);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+
+  /* --- Badges --- */
+
+  .badge-active {
+    background: var(--badge-active-bg);
+    color: var(--badge-active-text);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 2px 10px;
+    border-radius: 6px;
+    display: inline-block;
+  }
+
+  .badge-inactive {
+    background: var(--badge-inactive-bg);
+    color: var(--badge-inactive-text);
+    font-size: 13px;
+    padding: 2px 10px;
+    border-radius: 6px;
+    display: inline-block;
+  }
+
+  .badge-error {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 2px 10px;
+    border-radius: 6px;
+    display: inline-block;
+  }
+
+  /* --- Code blocks (left-border, no rounding) --- */
+
+  .code-block {
+    background: var(--bg-code);
+    border-left: 3px solid var(--code-border-orange);
+    border-radius: 0;
+    padding: 12px 16px;
+    font-size: 14px;
+    color: var(--text-primary);
+    overflow-x: auto;
+  }
+
+  .code-block-blue {
+    border-left-color: var(--code-border-blue);
+  }
+  .code-block-green {
+    border-left-color: var(--code-border-green);
+  }
+  .code-block-purple {
+    border-left-color: var(--code-border-purple);
+  }
+
+  /* --- Status dots --- */
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
+  /* --- Table --- */
+
+  .table-header {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+  }
+
+  .table-cell {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+  }
+
+  .table-row:hover {
+    background: transparent;
+  }
+
+  /* --- Section labels (uppercase muted) --- */
+
+  .section-label {
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+  }
+
+  /* --- Chat scrollbar (visible, styled) --- */
+
+  .chat-scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+  .chat-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .chat-scroll::-webkit-scrollbar-thumb {
+    background: #333;
+    border-radius: 4px;
+  }
+  .chat-scroll::-webkit-scrollbar-thumb:hover {
+    background: #444;
+  }
+}

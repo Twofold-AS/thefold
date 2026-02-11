@@ -7,6 +7,11 @@ import { docs } from "~encore/clients";
 import { sandbox } from "~encore/clients";
 import { agentReports } from "../chat/chat";
 
+// --- Constants ---
+
+const REPO_OWNER = "Twofold-AS";
+const REPO_NAME = "thefold";
+
 // --- Types ---
 
 export interface StartTaskRequest {
@@ -291,8 +296,8 @@ export const startTask = api(
       taskId: req.taskId,
       taskDescription: "", // filled in during execution
       userMessage: req.userMessage,
-      repoOwner: "your-org",  // from config/memory
-      repoName: "your-project",
+      repoOwner: REPO_OWNER,
+      repoName: REPO_NAME,
       branch: "main",
     };
 

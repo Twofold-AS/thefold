@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "encore-mcp"
+  ],
+  "enableAllProjectMcpServers": true
+}

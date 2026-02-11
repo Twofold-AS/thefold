@@ -5,17 +5,19 @@
   "scripts": {
     "dev": "encore run",
     "build": "encore build docker thefold:latest --config infra-config.json",
-    "test": "encore test ./..."
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "encore.dev": "^1.54.0",
+    "openai": "^6.19.0",
     "pg": "^8.13.0",
     "pgvector": "^0.2.0",
-    "zod": "^3.24.0",
-    "encore.dev": "^1.54.0"
+    "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^4.0.18"
   }
 }
