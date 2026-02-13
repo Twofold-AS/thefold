@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chat, planTask, reviewCode } from "./ai";
+import { chat, planTask, reviewCode, assessConfidence } from "./ai";
 
 describe("AI service", () => {
   describe("chat", () => {
@@ -88,6 +88,77 @@ describe("AI service", () => {
 
         expect(Array.isArray(result.concerns)).toBe(true);
         expect(result.tokensUsed).toBeGreaterThan(0);
+      }
+    );
+  });
+
+  describe("assessConfidence", () => {
+    it(
+      "should return high confidence for clear, simple task",
+      { timeout: 30000 },
+      async () => {
+        const result = await assessConfidence({
+          taskDescription: "Add a GET /health endpoint that returns { status: 'ok' }",
+          projectStructure: "src/\n  api.ts\n  encore.service.ts\npackage.json",
+          relevantFiles: [
+            {
+              path: "src/api.ts",
+              content: `import { api } from "encore.dev/api";\nexport const ping = api({ method: "GET", path: "/ping", expose: true }, async () => ({ msg: "pong" }));`,
+            },
+          ],
+          memoryContext: ["Project uses Encore.ts"],
+          docsContext: ["Encore.ts API: use api() from encore.dev/api"],
+        });
+
+        expect(result.confidence).toBeDefined();
+        expect(result.confidence.overall).toBeGreaterThanOrEqual(70);
+        expect(result.confidence.recommended_action).toBe("proceed");
+        expect(result.confidence.breakdown).toBeDefined();
+        expect(result.confidence.breakdown.task_understanding).toBeGreaterThanOrEqual(70);
+        expect(result.tokensUsed).toBeGreaterThan(0);
+      }
+    );
+
+    it(
+      "should return low confidence for vague task with no context",
+      { timeout: 30000 },
+      async () => {
+        const result = await assessConfidence({
+          taskDescription: "Make it better",
+          projectStructure: "",
+          relevantFiles: [],
+          memoryContext: [],
+          docsContext: [],
+        });
+
+        expect(result.confidence).toBeDefined();
+        expect(result.confidence.overall).toBeLessThan(70);
+        expect(result.confidence.recommended_action).not.toBe("proceed");
+        expect(result.confidence.uncertainties.length).toBeGreaterThan(0);
+      }
+    );
+
+    it(
+      "should return valid breakdown scores between 0-100",
+      { timeout: 30000 },
+      async () => {
+        const result = await assessConfidence({
+          taskDescription: "Add input validation to the user registration form",
+          projectStructure: "frontend/\n  src/\n    app/\n      register/page.tsx",
+          relevantFiles: [],
+          memoryContext: [],
+          docsContext: [],
+        });
+
+        const b = result.confidence.breakdown;
+        expect(b.task_understanding).toBeGreaterThanOrEqual(0);
+        expect(b.task_understanding).toBeLessThanOrEqual(100);
+        expect(b.codebase_familiarity).toBeGreaterThanOrEqual(0);
+        expect(b.codebase_familiarity).toBeLessThanOrEqual(100);
+        expect(b.technical_complexity).toBeGreaterThanOrEqual(0);
+        expect(b.technical_complexity).toBeLessThanOrEqual(100);
+        expect(b.test_coverage_feasible).toBeGreaterThanOrEqual(0);
+        expect(b.test_coverage_feasible).toBeLessThanOrEqual(100);
       }
     );
   });

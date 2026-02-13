@@ -266,6 +266,105 @@ export const validate = api(
   }
 );
 
+// Validate a single file incrementally (typecheck only, much faster than full validate)
+interface ValidateIncrementalRequest {
+  sandboxId: string;
+  filePath: string;
+}
+
+interface ValidateIncrementalResponse {
+  success: boolean;
+  filePath: string;
+  output: string;
+  errors: string[];
+  durationMs: number;
+}
+
+export const validateIncremental = api(
+  { method: "POST", path: "/sandbox/validate-incremental", expose: false },
+  async (req: ValidateIncrementalRequest): Promise<ValidateIncrementalResponse> => {
+    const dir = ensureSandboxExists(req.sandboxId);
+    const repoDir = `${dir}/repo`;
+    const start = Date.now();
+    const errors: string[] = [];
+    let output = "";
+
+    // Validate that the file exists
+    const fullPath = path.join(repoDir, req.filePath);
+    const resolved = path.resolve(fullPath);
+    if (!resolved.startsWith(path.resolve(dir))) {
+      throw APIError.invalidArgument("path escapes sandbox");
+    }
+
+    if (!fs.existsSync(fullPath)) {
+      return {
+        success: false,
+        filePath: req.filePath,
+        output: `File not found: ${req.filePath}`,
+        errors: [`File not found: ${req.filePath}`],
+        durationMs: Date.now() - start,
+      };
+    }
+
+    // Only typecheck .ts/.tsx files
+    if (!req.filePath.endsWith(".ts") && !req.filePath.endsWith(".tsx")) {
+      return {
+        success: true,
+        filePath: req.filePath,
+        output: "Skipped: not a TypeScript file",
+        errors: [],
+        durationMs: Date.now() - start,
+      };
+    }
+
+    // Run tsc --noEmit on the specific file
+    // We use the project's tsconfig but check only this file
+    try {
+      const tscResult = execSync(
+        `npx tsc --noEmit --pretty false 2>&1 | grep -i "${req.filePath}" || true`,
+        {
+          cwd: repoDir,
+          timeout: 30_000,
+        }
+      ).toString().trim();
+
+      if (tscResult.length === 0) {
+        output = `No TypeScript errors in ${req.filePath}`;
+      } else {
+        output = tscResult;
+        // Parse individual errors
+        const lines = tscResult.split("\n").filter((l) => l.includes("error TS"));
+        errors.push(...lines.map((l) => l.substring(0, 500)));
+      }
+    } catch (error: any) {
+      // tsc returns non-zero on errors — capture and filter for this file
+      const fullOutput = error.stdout?.toString() || error.message || "";
+      const fileErrors = fullOutput
+        .split("\n")
+        .filter((line: string) => line.includes(req.filePath))
+        .join("\n")
+        .trim();
+
+      if (fileErrors.length > 0) {
+        output = fileErrors;
+        const errorLines = fileErrors.split("\n").filter((l: string) => l.includes("error TS"));
+        errors.push(...errorLines.map((l: string) => l.substring(0, 500)));
+      } else {
+        // No errors specific to this file — other files may have errors
+        output = `No TypeScript errors in ${req.filePath}`;
+      }
+    }
+
+    return {
+      success: errors.length === 0,
+      filePath: req.filePath,
+      output: output.substring(0, 10_000),
+      errors,
+      durationMs: Date.now() - start,
+    };
+  }
+);
+
 // Destroy a sandbox
 export const destroy = api(
   { method: "POST", path: "/sandbox/destroy", expose: false },

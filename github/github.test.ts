@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getTree, getFile, findRelevantFiles } from "./github";
+import { getTree, getFile, findRelevantFiles, getFileMetadata, getFileChunk } from "./github";
 
 describe("GitHub service", () => {
   const testOwner = "Twofold-AS";
@@ -182,6 +182,165 @@ describe("GitHub service", () => {
           path.toLowerCase().includes("memory")
         );
         expect(hasMemoryFiles).toBe(true);
+      }
+    );
+  });
+
+  describe("getFileMetadata", () => {
+    it(
+      "should return line count and size for a file",
+      { timeout: 30000 },
+      async () => {
+        const result = await getFileMetadata({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+        });
+
+        expect(result.path).toBe("package.json");
+        expect(result.totalLines).toBeGreaterThan(0);
+        expect(result.sizeBytes).toBeGreaterThan(0);
+      }
+    );
+  });
+
+  describe("getFileChunk", () => {
+    it(
+      "should return the first chunk of a file",
+      { timeout: 30000 },
+      async () => {
+        const result = await getFileChunk({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+          startLine: 1,
+          maxLines: 10,
+        });
+
+        expect(result.path).toBe("package.json");
+        expect(result.content).toBeDefined();
+        expect(result.content.length).toBeGreaterThan(0);
+        expect(result.startLine).toBe(1);
+        expect(result.endLine).toBeLessThanOrEqual(10);
+        expect(result.totalLines).toBeGreaterThan(0);
+        expect(typeof result.hasMore).toBe("boolean");
+        expect(result.tokenEstimate).toBeGreaterThan(0);
+      }
+    );
+
+    it(
+      "should handle reading from a specific start line",
+      { timeout: 30000 },
+      async () => {
+        const result = await getFileChunk({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+          startLine: 3,
+          maxLines: 5,
+        });
+
+        expect(result.startLine).toBe(3);
+        expect(result.endLine).toBeLessThanOrEqual(8);
+      }
+    );
+
+    it(
+      "should indicate hasMore=false when reading to end of file",
+      { timeout: 30000 },
+      async () => {
+        // Read with a very large maxLines to get the whole file
+        const result = await getFileChunk({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+          startLine: 1,
+          maxLines: 500,
+        });
+
+        expect(result.hasMore).toBe(false);
+        expect(result.nextStartLine).toBeNull();
+        expect(result.endLine).toBe(result.totalLines);
+      }
+    );
+
+    it(
+      "should return consistent totalLines with getFileMetadata",
+      { timeout: 30000 },
+      async () => {
+        const meta = await getFileMetadata({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+        });
+
+        const chunk = await getFileChunk({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+          startLine: 1,
+          maxLines: 500,
+        });
+
+        expect(chunk.totalLines).toBe(meta.totalLines);
+      }
+    );
+
+    it(
+      "should support paginated reading across chunks",
+      { timeout: 30000 },
+      async () => {
+        // Read first 3 lines
+        const chunk1 = await getFileChunk({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+          startLine: 1,
+          maxLines: 3,
+        });
+
+        expect(chunk1.hasMore).toBe(true);
+        expect(chunk1.nextStartLine).toBe(4);
+
+        // Read next chunk from where we left off
+        const chunk2 = await getFileChunk({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+          startLine: chunk1.nextStartLine!,
+          maxLines: 3,
+        });
+
+        expect(chunk2.startLine).toBe(4);
+        // Content should be different
+        expect(chunk2.content).not.toBe(chunk1.content);
+      }
+    );
+
+    it(
+      "should default to 100 maxLines when not specified",
+      { timeout: 30000 },
+      async () => {
+        const meta = await getFileMetadata({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+        });
+
+        const result = await getFileChunk({
+          owner: testOwner,
+          repo: testRepo,
+          path: "package.json",
+        });
+
+        // If file has fewer than 100 lines, endLine should equal totalLines
+        if (meta.totalLines <= 100) {
+          expect(result.endLine).toBe(meta.totalLines);
+          expect(result.hasMore).toBe(false);
+        } else {
+          expect(result.endLine).toBe(100);
+          expect(result.hasMore).toBe(true);
+        }
       }
     );
   });

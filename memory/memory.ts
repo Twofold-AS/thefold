@@ -1,26 +1,41 @@
 import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { secret } from "encore.dev/config";
+import { cache } from "~encore/clients";
 
 const voyageKey = secret("VoyageAPIKey");
 
 const db = new SQLDatabase("memory", { migrations: "./migrations" });
 
-// --- Embedding helper ---
+// --- Embedding helper (with cache) ---
 
 async function embed(text: string): Promise<number[]> {
+  const truncated = text.substring(0, 8000);
+
+  // Check cache first
+  const cached = await cache.getOrSetEmbedding({ content: truncated });
+  if (cached.hit && cached.embedding) {
+    return cached.embedding;
+  }
+
+  // Cache miss — call Voyage API
   const res = await fetch("https://api.voyageai.com/v1/embeddings", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${voyageKey()}`,
     },
-    body: JSON.stringify({ input: text.substring(0, 8000), model: "voyage-3-lite" }),
+    body: JSON.stringify({ input: truncated, model: "voyage-3-lite" }),
   });
 
   if (!res.ok) throw APIError.internal(`Voyage API error: ${res.status}`);
   const data = await res.json();
-  return data.data[0].embedding;
+  const embedding: number[] = data.data[0].embedding;
+
+  // Store in cache for next time
+  await cache.getOrSetEmbedding({ content: truncated, embedding });
+
+  return embedding;
 }
 
 // --- Types ---

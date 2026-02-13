@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { create, writeFile, validate, destroy } from "./sandbox";
+import { create, writeFile, validate, validateIncremental, destroy } from "./sandbox";
 
 describe("Sandbox service", () => {
   const testOwner = "Twofold-AS";
@@ -197,6 +197,153 @@ describe("Sandbox service", () => {
             content: "malicious content",
           })
         ).rejects.toThrow();
+      }
+    );
+  });
+
+  describe("validateIncremental", () => {
+    it(
+      "should validate a clean TypeScript file successfully",
+      { timeout: 120000 },
+      async () => {
+        const sandbox = await create({
+          repoOwner: testOwner,
+          repoName: testRepo,
+        });
+        createdSandboxes.push(sandbox.id);
+
+        // Write a valid TypeScript file
+        await writeFile({
+          sandboxId: sandbox.id,
+          path: "clean-file.ts",
+          content: `export const greet = (name: string): string => {
+  return \`Hello, \${name}!\`;
+};
+`,
+        });
+
+        const result = await validateIncremental({
+          sandboxId: sandbox.id,
+          filePath: "clean-file.ts",
+        });
+
+        expect(result).toBeDefined();
+        expect(result.success).toBe(true);
+        expect(result.filePath).toBe("clean-file.ts");
+        expect(result.errors).toHaveLength(0);
+        expect(result.durationMs).toBeGreaterThanOrEqual(0);
+      }
+    );
+
+    it(
+      "should detect type errors in a single file",
+      { timeout: 120000 },
+      async () => {
+        const sandbox = await create({
+          repoOwner: testOwner,
+          repoName: testRepo,
+        });
+        createdSandboxes.push(sandbox.id);
+
+        // Write a TypeScript file with a type error
+        await writeFile({
+          sandboxId: sandbox.id,
+          path: "bad-types.ts",
+          content: `export const broken = (): number => {
+  const x: number = "not a number";
+  return x;
+};
+`,
+        });
+
+        const result = await validateIncremental({
+          sandboxId: sandbox.id,
+          filePath: "bad-types.ts",
+        });
+
+        expect(result).toBeDefined();
+        expect(result.success).toBe(false);
+        expect(result.filePath).toBe("bad-types.ts");
+        expect(result.errors.length).toBeGreaterThan(0);
+        // Errors should contain TS error codes
+        expect(result.errors.some((e) => e.includes("error TS"))).toBe(true);
+      }
+    );
+
+    it(
+      "should skip non-TypeScript files",
+      { timeout: 120000 },
+      async () => {
+        const sandbox = await create({
+          repoOwner: testOwner,
+          repoName: testRepo,
+        });
+        createdSandboxes.push(sandbox.id);
+
+        // Write a JSON file
+        await writeFile({
+          sandboxId: sandbox.id,
+          path: "data.json",
+          content: '{"key": "value"}',
+        });
+
+        const result = await validateIncremental({
+          sandboxId: sandbox.id,
+          filePath: "data.json",
+        });
+
+        expect(result).toBeDefined();
+        expect(result.success).toBe(true);
+        expect(result.output).toContain("Skipped");
+        expect(result.errors).toHaveLength(0);
+      }
+    );
+
+    it(
+      "should return failure for non-existent file",
+      { timeout: 120000 },
+      async () => {
+        const sandbox = await create({
+          repoOwner: testOwner,
+          repoName: testRepo,
+        });
+        createdSandboxes.push(sandbox.id);
+
+        const result = await validateIncremental({
+          sandboxId: sandbox.id,
+          filePath: "does-not-exist.ts",
+        });
+
+        expect(result).toBeDefined();
+        expect(result.success).toBe(false);
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(result.output).toContain("File not found");
+      }
+    );
+
+    it(
+      "should return durationMs for performance tracking",
+      { timeout: 120000 },
+      async () => {
+        const sandbox = await create({
+          repoOwner: testOwner,
+          repoName: testRepo,
+        });
+        createdSandboxes.push(sandbox.id);
+
+        await writeFile({
+          sandboxId: sandbox.id,
+          path: "perf-check.ts",
+          content: `export const x = 1;\n`,
+        });
+
+        const result = await validateIncremental({
+          sandboxId: sandbox.id,
+          filePath: "perf-check.ts",
+        });
+
+        expect(typeof result.durationMs).toBe("number");
+        expect(result.durationMs).toBeGreaterThanOrEqual(0);
       }
     );
   });

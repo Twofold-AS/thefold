@@ -1,5 +1,6 @@
 import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
+import { cache } from "~encore/clients";
 
 const githubToken = secret("GitHubToken");
 
@@ -78,11 +79,41 @@ interface CreatePRResponse {
 
 // --- Endpoints ---
 
-// Get repository file tree
+// Get repository file tree (with cache — 1 hour TTL)
 export const getTree = api(
   { method: "POST", path: "/github/tree", expose: false },
   async (req: TreeRequest): Promise<TreeResponse> => {
     const ref = req.ref || "main";
+
+    // Check cache first
+    const cached = await cache.getOrSetRepoStructure({
+      owner: req.owner,
+      repo: req.repo,
+      branch: ref,
+    });
+
+    if (cached.hit && cached.structure) {
+      // Cache hit — still need packageJson (lightweight)
+      let packageJson;
+      try {
+        const pkg = await getFile({
+          owner: req.owner,
+          repo: req.repo,
+          path: "package.json",
+          ref,
+        });
+        packageJson = JSON.parse(pkg.content);
+      } catch {
+        packageJson = undefined;
+      }
+      return {
+        tree: cached.structure.tree,
+        treeString: cached.structure.treeString,
+        packageJson,
+      };
+    }
+
+    // Cache miss — fetch from GitHub
     const data = await ghApi(
       `/repos/${req.owner}/${req.repo}/git/trees/${ref}?recursive=1`
     );
@@ -99,6 +130,14 @@ export const getTree = api(
       );
 
     const treeString = tree.join("\n");
+
+    // Store in cache
+    await cache.getOrSetRepoStructure({
+      owner: req.owner,
+      repo: req.repo,
+      branch: ref,
+      structure: { tree, treeString },
+    });
 
     // Try to read package.json
     let packageJson;
@@ -129,6 +168,97 @@ export const getFile = api(
 
     const content = Buffer.from(data.content, "base64").toString("utf-8");
     return { content, sha: data.sha };
+  }
+);
+
+// Get file metadata (line count) without full content
+interface FileMetadataRequest {
+  owner: string;
+  repo: string;
+  path: string;
+  ref?: string;
+}
+
+interface FileMetadataResponse {
+  path: string;
+  totalLines: number;
+  sizeBytes: number;
+}
+
+export const getFileMetadata = api(
+  { method: "POST", path: "/github/file-metadata", expose: false },
+  async (req: FileMetadataRequest): Promise<FileMetadataResponse> => {
+    const ref = req.ref || "main";
+    const data = await ghApi(
+      `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${ref}`
+    );
+
+    const content = Buffer.from(data.content, "base64").toString("utf-8");
+    const totalLines = content.split("\n").length;
+
+    return {
+      path: req.path,
+      totalLines,
+      sizeBytes: data.size || content.length,
+    };
+  }
+);
+
+// Get a chunk of a file by line range
+interface FileChunkRequest {
+  owner: string;
+  repo: string;
+  path: string;
+  ref?: string;
+  startLine?: number; // 1-based, default 1
+  maxLines?: number;  // default 100
+}
+
+interface FileChunkResponse {
+  path: string;
+  content: string;
+  startLine: number;
+  endLine: number;
+  totalLines: number;
+  hasMore: boolean;
+  nextStartLine: number | null;
+  tokenEstimate: number; // rough estimate: ~4 chars per token
+}
+
+export const getFileChunk = api(
+  { method: "POST", path: "/github/file-chunk", expose: false },
+  async (req: FileChunkRequest): Promise<FileChunkResponse> => {
+    const ref = req.ref || "main";
+    const startLine = Math.max(req.startLine || 1, 1);
+    const maxLines = Math.min(req.maxLines || 100, 500);
+
+    // Fetch full file from GitHub
+    const data = await ghApi(
+      `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${ref}`
+    );
+
+    const fullContent = Buffer.from(data.content, "base64").toString("utf-8");
+    const allLines = fullContent.split("\n");
+    const totalLines = allLines.length;
+
+    // Slice requested range (convert to 0-based)
+    const startIdx = startLine - 1;
+    const endIdx = Math.min(startIdx + maxLines, totalLines);
+    const chunk = allLines.slice(startIdx, endIdx);
+
+    const content = chunk.join("\n");
+    const hasMore = endIdx < totalLines;
+
+    return {
+      path: req.path,
+      content,
+      startLine,
+      endLine: endIdx,
+      totalLines,
+      hasMore,
+      nextStartLine: hasMore ? endIdx + 1 : null,
+      tokenEstimate: Math.ceil(content.length / 4),
+    };
   }
 );
 
