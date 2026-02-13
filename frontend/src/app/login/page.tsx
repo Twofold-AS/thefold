@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Image from "next/image";
 import { setToken } from "@/lib/auth";
 import { requestOtp, verifyOtp } from "@/lib/api";
@@ -10,6 +10,8 @@ type Step = "email" | "code";
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const redirectTo = searchParams.get("from") || "/home";
   const [step, setStep] = useState<Step>("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState(["", "", "", "", "", ""]);
@@ -80,7 +82,7 @@ export default function LoginPage() {
 
       if (result.token) {
         setToken(result.token);
-        router.replace("/home");
+        router.replace(redirectTo);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Noe gikk galt");

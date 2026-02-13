@@ -51,7 +51,7 @@ interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer";
   metadata: string | null;
   createdAt: string;
 }
@@ -63,6 +63,8 @@ interface SendRequest {
   linearTaskId?: string;
   // If true, just chat — don't trigger agent work
   chatOnly?: boolean;
+  // Manuelt modellvalg for denne oppgaven (null = auto)
+  modelOverride?: string | null;
 }
 
 interface SendResponse {
@@ -123,6 +125,7 @@ export const send = api(
         conversationId: req.conversationId,
         taskId: req.linearTaskId!,
         userMessage: req.message,
+        modelOverride: req.modelOverride ?? undefined,
       });
 
       // Store a "task started" message
@@ -251,5 +254,91 @@ export const conversations = api(
     }
 
     return { conversations };
+  }
+);
+
+// --- Context Transfer ---
+
+interface TransferContextRequest {
+  sourceConversationId: string;
+  targetRepo: string;
+}
+
+interface TransferContextResponse {
+  targetConversationId: string;
+  contextSummary: string;
+  success: boolean;
+}
+
+// Transfer context from main chat to a repo chat
+export const transferContext = api(
+  { method: "POST", path: "/chat/transfer-context", expose: true, auth: true },
+  async (req: TransferContextRequest): Promise<TransferContextResponse> => {
+    // 1. Hent alle meldinger fra source conversation
+    const sourceRows = await db.query<Message>`
+      SELECT id, conversation_id as "conversationId", role, content,
+             message_type as "messageType", metadata, created_at as "createdAt"
+      FROM messages
+      WHERE conversation_id = ${req.sourceConversationId}
+      ORDER BY created_at ASC
+    `;
+
+    const sourceMessages: Message[] = [];
+    for await (const row of sourceRows) sourceMessages.push(row);
+
+    if (sourceMessages.length === 0) {
+      throw APIError.invalidArgument("Ingen meldinger i kildesamtalen");
+    }
+
+    // 2. Bygg context for AI
+    const conversationText = sourceMessages
+      .map((m) => `${m.role === "user" ? "Bruker" : "TheFold"}: ${m.content}`)
+      .join("\n\n");
+
+    // 3. Be AI om å destillere kun nødvendig context
+    const { ai } = await import("~encore/clients");
+
+    const summary = await ai.chat({
+      messages: [
+        {
+          role: "user",
+          content: `Følgende er en planleggingssamtale. Ekstraher KUN:
+- Hovedmål for prosjektet
+- Tekniske krav
+- Arkitektur-beslutninger
+- Viktige constraints
+
+Ignorer småprat, repetisjon, og irrelevante detaljer.
+
+SAMTALE:
+${conversationText}
+
+Ekstraher nødvendig context som skal sendes til utviklings-teamet:`,
+        },
+      ],
+      systemContext: "direct_chat",
+      memoryContext: [],
+    });
+
+    // 4. Opprett ny conversation i target repo
+    const targetConvId = `repo-${req.targetRepo}-${Date.now()}`;
+
+    // 5. Legg til system-melding med context
+    await db.exec`
+      INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+      VALUES (
+        ${targetConvId},
+        'assistant',
+        ${`Context fra hovedchat:\n\n${summary.content}`},
+        'context_transfer',
+        ${JSON.stringify({ sourceConversationId: req.sourceConversationId })}
+      )
+    `;
+
+    return {
+      targetConversationId: targetConvId,
+      contextSummary: summary.content,
+      success: true,
+    };
   }
 );

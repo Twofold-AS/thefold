@@ -4,60 +4,55 @@ import { useState, useEffect } from "react";
 import { clearToken } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { getUserPreferences, updateBudgetMode, listModels, type ModelInfo } from "@/lib/api";
+import { getUserPreferences, updateModelMode, listModels, type ModelInfo } from "@/lib/api";
+import { Zap, Settings, Shield, DollarSign, LogOut } from "lucide-react";
+import { usePreferences } from "@/contexts/UserPreferencesContext";
 
-const BUDGET_MODES = [
-  {
-    id: "aggressive_save",
-    label: "Aggressiv sparing",
-    description: "Bruker alltid billigste modell, oppgraderer kun ved feil",
-    icon: "💰",
-  },
-  {
-    id: "balanced",
-    label: "Balansert",
-    description: "Velger modell basert på oppgavens kompleksitet (anbefalt)",
-    icon: "⚖️",
-  },
-  {
-    id: "quality_first",
-    label: "Kvalitet først",
-    description: "Bruker alltid beste modell for høyest kvalitet",
-    icon: "🏆",
-  },
-];
+function tierLabel(tier: number | string): string {
+  if (tier === "high" || (typeof tier === "number" && tier >= 5)) return "Premium";
+  if (tier === "mid" || (typeof tier === "number" && tier >= 3)) return "Standard";
+  return "Budget";
+}
+
+function tierColor(tier: number | string): string {
+  if (tier === "high" || (typeof tier === "number" && tier >= 5)) return "var(--accent-purple)";
+  if (tier === "mid" || (typeof tier === "number" && tier >= 3)) return "var(--accent-blue)";
+  return "var(--accent-green)";
+}
 
 export default function SettingsPage() {
   const router = useRouter();
-  const [budgetMode, setBudgetMode] = useState("balanced");
+  const { preferences, refresh: refreshPreferences } = usePreferences();
+  const [modelMode, setModelMode] = useState<"auto" | "manual">("auto");
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [userId, setUserId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
+    setModelMode(preferences.modelMode);
+  }, [preferences.modelMode]);
+
+  useEffect(() => {
     getUserPreferences()
       .then((res) => {
         setUserId(res.user.id);
-        const prefs = res.user.preferences;
-        if (prefs.budgetMode && typeof prefs.budgetMode === "string") {
-          setBudgetMode(prefs.budgetMode);
-        }
       })
       .catch(() => {});
 
     listModels()
-      .then((res) => setModels(res.models))
+      .then((res) => setModels(res.models.sort((a, b) => a.tier - b.tier)))
       .catch(() => {});
   }, []);
 
-  async function handleBudgetChange(mode: string) {
-    setBudgetMode(mode);
+  async function handleModeChange(mode: "auto" | "manual") {
+    setModelMode(mode);
     if (!userId) return;
 
     setSaving(true);
     try {
-      await updateBudgetMode(userId, mode);
+      await updateModelMode(userId, mode);
+      await refreshPreferences();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
@@ -82,11 +77,11 @@ export default function SettingsPage() {
       </p>
 
       <div className="mt-8 space-y-10">
-        {/* Budget Mode */}
+        {/* AI-modellstrategi */}
         <section>
           <div className="flex items-center gap-2 mb-1">
             <h2 className="font-heading text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
-              AI-budsjett
+              AI-modellstrategi
             </h2>
             {saved && (
               <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--accent-green)", color: "white" }}>
@@ -98,37 +93,76 @@ export default function SettingsPage() {
             Hvordan TheFold velger AI-modell for oppgaver
           </p>
           <div className="space-y-2">
-            {BUDGET_MODES.map((mode) => (
-              <button
-                key={mode.id}
-                onClick={() => handleBudgetChange(mode.id)}
+            {/* Auto */}
+            <label
+              className="flex items-start gap-3 py-3 px-4 cursor-pointer transition-colors"
+              style={{
+                border: modelMode === "auto" ? "2px solid var(--accent-blue)" : "1px solid var(--border)",
+                borderRadius: "8px",
+                background: modelMode === "auto" ? "var(--bg-hover)" : "var(--bg-card)",
+                opacity: saving ? 0.6 : 1,
+              }}
+            >
+              <input
+                type="radio"
+                name="modelMode"
+                value="auto"
+                checked={modelMode === "auto"}
+                onChange={() => handleModeChange("auto")}
                 disabled={saving}
-                className="w-full flex items-start gap-3 py-3 px-4 rounded-xl text-left transition-colors"
-                style={{
-                  background: budgetMode === mode.id ? "var(--accent-blue)" : "var(--bg-card)",
-                  border: budgetMode === mode.id ? "2px solid var(--accent-blue)" : "1px solid var(--border)",
-                  color: budgetMode === mode.id ? "white" : "var(--text-primary)",
-                  opacity: saving ? 0.6 : 1,
-                }}
-              >
-                <span className="text-xl mt-0.5">{mode.icon}</span>
-                <div>
-                  <div className="text-sm font-medium">{mode.label}</div>
-                  <div className="text-xs mt-0.5" style={{ opacity: 0.8 }}>{mode.description}</div>
+                className="mt-1"
+              />
+              <Zap size={20} style={{ color: "var(--accent-blue)", marginTop: 2, flexShrink: 0 }} />
+              <div>
+                <div className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                  AI styrer beste modell
                 </div>
-              </button>
-            ))}
+                <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                  Velger automatisk basert p&aring; oppgavens kompleksitet
+                </div>
+              </div>
+            </label>
+
+            {/* Manual */}
+            <label
+              className="flex items-start gap-3 py-3 px-4 cursor-pointer transition-colors"
+              style={{
+                border: modelMode === "manual" ? "2px solid var(--accent-blue)" : "1px solid var(--border)",
+                borderRadius: "8px",
+                background: modelMode === "manual" ? "var(--bg-hover)" : "var(--bg-card)",
+                opacity: saving ? 0.6 : 1,
+              }}
+            >
+              <input
+                type="radio"
+                name="modelMode"
+                value="manual"
+                checked={modelMode === "manual"}
+                onChange={() => handleModeChange("manual")}
+                disabled={saving}
+                className="mt-1"
+              />
+              <Settings size={20} style={{ color: "var(--text-secondary)", marginTop: 2, flexShrink: 0 }} />
+              <div>
+                <div className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                  Jeg velger selv
+                </div>
+                <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                  Velg modell manuelt for hver oppgave
+                </div>
+              </div>
+            </label>
           </div>
         </section>
 
-        {/* Available Models */}
+        {/* Tilgjengelige modeller */}
         {models.length > 0 && (
           <section>
             <h2 className="font-heading text-lg font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
               Tilgjengelige modeller
             </h2>
             <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
-              Modeller TheFold velger mellom basert på budsjett-modus
+              Modeller TheFold kan velge mellom
             </p>
             <div className="overflow-x-auto">
               <table className="w-full text-sm" style={{ borderCollapse: "collapse" }}>
@@ -136,24 +170,34 @@ export default function SettingsPage() {
                   <tr style={{ borderBottom: "1px solid var(--border)" }}>
                     <th className="text-left py-2 px-3 font-medium" style={{ color: "var(--text-muted)" }}>Modell</th>
                     <th className="text-left py-2 px-3 font-medium" style={{ color: "var(--text-muted)" }}>Tier</th>
-                    <th className="text-right py-2 px-3 font-medium" style={{ color: "var(--text-muted)" }}>Input $/1M</th>
-                    <th className="text-right py-2 px-3 font-medium" style={{ color: "var(--text-muted)" }}>Output $/1M</th>
+                    <th className="text-right py-2 px-3 font-medium" style={{ color: "var(--text-muted)" }}>
+                      <span className="inline-flex items-center gap-1"><DollarSign size={12} /> Input/1M</span>
+                    </th>
+                    <th className="text-right py-2 px-3 font-medium" style={{ color: "var(--text-muted)" }}>
+                      <span className="inline-flex items-center gap-1"><DollarSign size={12} /> Output/1M</span>
+                    </th>
                     <th className="text-left py-2 px-3 font-medium" style={{ color: "var(--text-muted)" }}>Styrker</th>
+                    <th className="text-left py-2 px-3 font-medium" style={{ color: "var(--text-muted)" }}>Best for</th>
                   </tr>
                 </thead>
                 <tbody>
                   {models.map((m) => (
-                    <tr key={m.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                      <td className="py-2 px-3 font-medium" style={{ color: "var(--text-primary)" }}>{m.name}</td>
+                    <tr
+                      key={m.id}
+                      className="transition-colors"
+                      style={{ borderBottom: "1px solid var(--border)" }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                    >
+                      <td className="py-2 px-3 font-medium" style={{ color: "var(--text-primary)" }}>
+                        {m.displayName || (m as any).name || m.id}
+                      </td>
                       <td className="py-2 px-3">
                         <span
                           className="text-xs px-2 py-0.5 rounded-full"
-                          style={{
-                            background: m.tier === "high" ? "var(--accent-purple)" : m.tier === "mid" ? "var(--accent-blue)" : "var(--accent-green)",
-                            color: "white",
-                          }}
+                          style={{ background: tierColor(m.tier), color: "white" }}
                         >
-                          {m.tier === "high" ? "Premium" : m.tier === "mid" ? "Standard" : "Budget"}
+                          {tierLabel(m.tier)}
                         </span>
                       </td>
                       <td className="py-2 px-3 text-right font-mono" style={{ color: "var(--text-secondary)" }}>
@@ -165,6 +209,9 @@ export default function SettingsPage() {
                       <td className="py-2 px-3 text-xs" style={{ color: "var(--text-muted)" }}>
                         {m.strengths.join(", ")}
                       </td>
+                      <td className="py-2 px-3 text-xs" style={{ color: "var(--text-muted)" }}>
+                        {(m.bestFor || []).join(", ")}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -173,7 +220,7 @@ export default function SettingsPage() {
           </section>
         )}
 
-        {/* Integrations */}
+        {/* Integrasjoner */}
         <section>
           <h2 className="font-heading text-lg font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
             Integrasjoner
@@ -188,7 +235,7 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        {/* Security & Audit */}
+        {/* Sikkerhet & Audit */}
         <section>
           <h2 className="font-heading text-lg font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
             Sikkerhet & Audit
@@ -201,19 +248,18 @@ export default function SettingsPage() {
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-colors"
             style={{ background: "var(--bg-card)", border: "1px solid var(--border)", color: "var(--text-primary)" }}
           >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
-            </svg>
+            <Shield size={16} />
             Se audit-logg
           </Link>
         </section>
 
-        {/* Account */}
+        {/* Konto */}
         <section>
           <h2 className="font-heading text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
             Konto
           </h2>
-          <button onClick={handleLogout} className="btn-secondary">
+          <button onClick={handleLogout} className="btn-secondary inline-flex items-center gap-2">
+            <LogOut size={16} />
             Logg ut
           </button>
         </section>

@@ -11,54 +11,74 @@ import {
 
 describe("AI Router", () => {
   describe("selectOptimalModel", () => {
-    it("should return haiku for low complexity with balanced mode", () => {
-      expect(selectOptimalModel(1, "balanced")).toBe("claude-haiku-4-20250514");
-      expect(selectOptimalModel(2, "balanced")).toBe("claude-haiku-4-20250514");
-      expect(selectOptimalModel(3, "balanced")).toBe("claude-haiku-4-20250514");
+    it("auto mode picks kimi for simple tasks", () => {
+      const model = selectOptimalModel(2, "auto");
+      expect(model).toBe("moonshot-v1-128k");
     });
 
-    it("should return sonnet for medium complexity with balanced mode", () => {
-      expect(selectOptimalModel(4, "balanced")).toBe("claude-sonnet-4-20250514");
-      expect(selectOptimalModel(5, "balanced")).toBe("claude-sonnet-4-20250514");
-      expect(selectOptimalModel(6, "balanced")).toBe("claude-sonnet-4-20250514");
+    it("auto mode picks sonnet for medium tasks", () => {
+      const model = selectOptimalModel(5, "auto");
+      expect(model).toBe("claude-sonnet-4-5-20250929");
     });
 
-    it("should return opus for high complexity with balanced mode", () => {
-      expect(selectOptimalModel(7, "balanced")).toBe("claude-opus-4-20250514");
-      expect(selectOptimalModel(8, "balanced")).toBe("claude-opus-4-20250514");
-      expect(selectOptimalModel(10, "balanced")).toBe("claude-opus-4-20250514");
+    it("auto mode picks opus for complex tasks", () => {
+      const model = selectOptimalModel(9, "auto");
+      expect(model).toBe("claude-opus-4-5-20251101");
     });
 
-    it("should always return haiku for aggressive_save mode", () => {
-      expect(selectOptimalModel(1, "aggressive_save")).toBe("claude-haiku-4-20250514");
-      expect(selectOptimalModel(5, "aggressive_save")).toBe("claude-haiku-4-20250514");
-      expect(selectOptimalModel(10, "aggressive_save")).toBe("claude-haiku-4-20250514");
+    it("manual mode respects override", () => {
+      const model = selectOptimalModel(2, "manual", "claude-opus-4-5-20251101");
+      expect(model).toBe("claude-opus-4-5-20251101");
     });
 
-    it("should always return opus for quality_first mode", () => {
-      expect(selectOptimalModel(1, "quality_first")).toBe("claude-opus-4-20250514");
-      expect(selectOptimalModel(5, "quality_first")).toBe("claude-opus-4-20250514");
-      expect(selectOptimalModel(10, "quality_first")).toBe("claude-opus-4-20250514");
+    it("auto mode boundary: complexity 3 uses kimi", () => {
+      expect(selectOptimalModel(3, "auto")).toBe("moonshot-v1-128k");
     });
 
-    it("should default to balanced mode when not specified", () => {
-      expect(selectOptimalModel(1)).toBe("claude-haiku-4-20250514");
-      expect(selectOptimalModel(5)).toBe("claude-sonnet-4-20250514");
-      expect(selectOptimalModel(8)).toBe("claude-opus-4-20250514");
+    it("auto mode boundary: complexity 4 uses sonnet", () => {
+      expect(selectOptimalModel(4, "auto")).toBe("claude-sonnet-4-5-20250929");
+    });
+
+    it("auto mode boundary: complexity 7 uses sonnet", () => {
+      expect(selectOptimalModel(7, "auto")).toBe("claude-sonnet-4-5-20250929");
+    });
+
+    it("auto mode boundary: complexity 8 uses opus", () => {
+      expect(selectOptimalModel(8, "auto")).toBe("claude-opus-4-5-20251101");
+    });
+
+    it("defaults to auto mode when not specified", () => {
+      expect(selectOptimalModel(1)).toBe("moonshot-v1-128k");
+      expect(selectOptimalModel(5)).toBe("claude-sonnet-4-5-20250929");
+      expect(selectOptimalModel(8)).toBe("claude-opus-4-5-20251101");
+    });
+
+    it("manual mode without override falls back to auto logic", () => {
+      // manual without manualModelId uses auto logic
+      const model = selectOptimalModel(5, "manual");
+      expect(model).toBe("claude-sonnet-4-5-20250929");
     });
   });
 
   describe("getUpgradeModel", () => {
+    it("should upgrade kimi 32k to kimi 128k", () => {
+      expect(getUpgradeModel("moonshot-v1-32k")).toBe("moonshot-v1-128k");
+    });
+
+    it("should upgrade kimi 128k to haiku", () => {
+      expect(getUpgradeModel("moonshot-v1-128k")).toBe("claude-haiku-4-5-20251001");
+    });
+
     it("should upgrade haiku to sonnet", () => {
-      expect(getUpgradeModel("claude-haiku-4-20250514")).toBe("claude-sonnet-4-20250514");
+      expect(getUpgradeModel("claude-haiku-4-5-20251001")).toBe("claude-sonnet-4-5-20250929");
     });
 
     it("should upgrade sonnet to opus", () => {
-      expect(getUpgradeModel("claude-sonnet-4-20250514")).toBe("claude-opus-4-20250514");
+      expect(getUpgradeModel("claude-sonnet-4-5-20250929")).toBe("claude-opus-4-5-20251101");
     });
 
     it("should return null for opus (already highest)", () => {
-      expect(getUpgradeModel("claude-opus-4-20250514")).toBeNull();
+      expect(getUpgradeModel("claude-opus-4-5-20251101")).toBeNull();
     });
 
     it("should upgrade gpt-4o-mini to gpt-4o", () => {
@@ -72,8 +92,8 @@ describe("AI Router", () => {
 
   describe("estimateCost", () => {
     it("should calculate cost for sonnet correctly", () => {
-      const cost = estimateCost(1_000_000, 500_000, "claude-sonnet-4-20250514");
-      expect(cost.model).toBe("claude-sonnet-4-20250514");
+      const cost = estimateCost(1_000_000, 500_000, "claude-sonnet-4-5-20250929");
+      expect(cost.model).toBe("claude-sonnet-4-5-20250929");
       expect(cost.inputTokens).toBe(1_000_000);
       expect(cost.outputTokens).toBe(500_000);
       expect(cost.inputCost).toBe(3.00); // $3/1M input
@@ -81,11 +101,11 @@ describe("AI Router", () => {
       expect(cost.totalCost).toBe(10.50);
     });
 
-    it("should calculate cost for haiku (cheaper)", () => {
-      const cost = estimateCost(1_000_000, 500_000, "claude-haiku-4-20250514");
-      expect(cost.inputCost).toBe(0.80);
-      expect(cost.outputCost).toBe(2.00);
-      expect(cost.totalCost).toBe(2.80);
+    it("should calculate cost for moonshot (cheapest)", () => {
+      const cost = estimateCost(1_000_000, 500_000, "moonshot-v1-128k");
+      expect(cost.inputCost).toBe(0.30);
+      expect(cost.outputCost).toBe(0.15);
+      expect(cost.totalCost).toBe(0.45);
     });
 
     it("should return zero cost for unknown models", () => {
@@ -94,14 +114,14 @@ describe("AI Router", () => {
     });
 
     it("should handle zero tokens", () => {
-      const cost = estimateCost(0, 0, "claude-sonnet-4-20250514");
+      const cost = estimateCost(0, 0, "claude-sonnet-4-5-20250929");
       expect(cost.totalCost).toBe(0);
     });
   });
 
   describe("calculateSavings", () => {
-    it("should show savings when using haiku vs opus", () => {
-      const savings = calculateSavings(100_000, 50_000, "claude-haiku-4-20250514");
+    it("should show savings when using moonshot vs opus", () => {
+      const savings = calculateSavings(100_000, 50_000, "moonshot-v1-128k");
       expect(savings.actualCost).toBeGreaterThan(0);
       expect(savings.opusCost).toBeGreaterThan(savings.actualCost);
       expect(savings.savedUsd).toBeGreaterThan(0);
@@ -109,26 +129,33 @@ describe("AI Router", () => {
     });
 
     it("should show zero savings when using opus", () => {
-      const savings = calculateSavings(100_000, 50_000, "claude-opus-4-20250514");
+      const savings = calculateSavings(100_000, 50_000, "claude-opus-4-5-20251101");
       expect(savings.savedUsd).toBe(0);
       expect(savings.savedPercent).toBe(0);
     });
 
     it("should calculate correct percentage", () => {
-      const savings = calculateSavings(1_000_000, 0, "claude-haiku-4-20250514");
-      // Haiku: $0.80, Opus: $15.00
-      // Savings: $14.20 / $15.00 = 94.67%
-      expect(savings.savedPercent).toBeGreaterThan(90);
+      const savings = calculateSavings(1_000_000, 0, "moonshot-v1-128k");
+      // Moonshot: $0.30, Opus: $15.00
+      // Savings: $14.70 / $15.00 = 98%
+      expect(savings.savedPercent).toBeGreaterThan(95);
     });
   });
 
   describe("getModelInfo", () => {
     it("should return info for known models", () => {
-      const info = getModelInfo("claude-sonnet-4-20250514");
+      const info = getModelInfo("claude-sonnet-4-5-20250929");
       expect(info).not.toBeNull();
-      expect(info!.name).toBe("Claude Sonnet 4");
-      expect(info!.tier).toBe("mid");
+      expect(info!.displayName).toBe("Claude Sonnet 4.5");
+      expect(info!.tier).toBe(3);
       expect(info!.provider).toBe("anthropic");
+    });
+
+    it("should return info for moonshot models", () => {
+      const info = getModelInfo("moonshot-v1-128k");
+      expect(info).not.toBeNull();
+      expect(info!.displayName).toBe("Moonshot Kimi v1 128K");
+      expect(info!.provider).toBe("moonshot");
     });
 
     it("should return null for unknown models", () => {
@@ -140,7 +167,7 @@ describe("AI Router", () => {
     it("should return all registered models", () => {
       const models = listModels();
       expect(models.length).toBe(Object.keys(MODEL_REGISTRY).length);
-      expect(models.length).toBeGreaterThanOrEqual(5);
+      expect(models.length).toBeGreaterThanOrEqual(7);
     });
 
     it("should include required fields on each model", () => {
@@ -148,12 +175,22 @@ describe("AI Router", () => {
       for (const model of models) {
         expect(model.id).toBeDefined();
         expect(model.provider).toBeDefined();
-        expect(model.name).toBeDefined();
-        expect(model.tier).toBeDefined();
+        expect(model.displayName).toBeDefined();
+        expect(model.tier).toBeGreaterThanOrEqual(1);
         expect(model.inputCostPer1M).toBeGreaterThan(0);
         expect(model.outputCostPer1M).toBeGreaterThan(0);
+        expect(model.contextWindow).toBeGreaterThan(0);
         expect(model.strengths.length).toBeGreaterThan(0);
+        expect(model.bestFor.length).toBeGreaterThan(0);
       }
+    });
+
+    it("should include moonshot, anthropic, and openai models", () => {
+      const models = listModels();
+      const providers = new Set(models.map((m) => m.provider));
+      expect(providers.has("moonshot")).toBe(true);
+      expect(providers.has("anthropic")).toBe(true);
+      expect(providers.has("openai")).toBe(true);
     });
   });
 });

@@ -42,7 +42,7 @@ export interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer";
   metadata: string | null;
   createdAt: string;
 }
@@ -78,6 +78,7 @@ export interface MemoryResult {
 export async function sendMessage(conversationId: string, message: string, options?: {
   linearTaskId?: string;
   chatOnly?: boolean;
+  modelOverride?: string | null;
 }) {
   return apiFetch<{
     message: Message;
@@ -321,12 +322,13 @@ export async function previewPrompt(context: string) {
 export interface ModelInfo {
   id: string;
   provider: string;
-  name: string;
-  tier: "low" | "mid" | "high";
+  displayName: string;
+  tier: number; // 1-5 (1 = billigst, 5 = best)
   inputCostPer1M: number;
   outputCostPer1M: number;
-  maxOutputTokens: number;
+  contextWindow: number;
   strengths: string[];
+  bestFor: string[];
 }
 
 export async function listModels() {
@@ -365,10 +367,23 @@ export async function getUserPreferences() {
   });
 }
 
-export async function updateBudgetMode(userId: string, budgetMode: string) {
+export async function updateModelMode(userId: string, modelMode: string) {
   return apiFetch<{ success: boolean }>("/users/preferences", {
     method: "POST",
-    body: { userId, preferences: { budgetMode } },
+    body: { userId, preferences: { modelMode } },
+  });
+}
+
+// --- Context Transfer ---
+
+export async function transferContext(sourceConversationId: string, targetRepo: string) {
+  return apiFetch<{
+    targetConversationId: string;
+    contextSummary: string;
+    success: boolean;
+  }>("/chat/transfer-context", {
+    method: "POST",
+    body: { sourceConversationId, targetRepo },
   });
 }
 

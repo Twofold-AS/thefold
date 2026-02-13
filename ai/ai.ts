@@ -13,7 +13,7 @@ const openaiKey = secret("OpenAIAPIKey");
 const moonshotKey = secret("MoonshotAPIKey");
 
 // --- Constants ---
-const DEFAULT_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
 const MAX_FALLBACK_UPGRADES = 2;
 
 // --- Types ---

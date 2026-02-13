@@ -99,7 +99,7 @@ async function sendOTPEmail(email: string, code: string): Promise<void> {
       Authorization: `Bearer ${resendApiKey()}`,
     },
     body: JSON.stringify({
-      from: "TheFold <noreply@twofold.no>",
+      from: "TheFold <onboarding@resend.dev>",
       to: [email],
       subject: "Din innloggingskode",
       html: `
@@ -362,7 +362,7 @@ interface UpdatePreferencesRequest {
 }
 
 export const updatePreferences = api(
-  { method: "POST", path: "/users/preferences", expose: false },
+  { method: "POST", path: "/users/preferences", expose: true, auth: true },
   async (req: UpdatePreferencesRequest): Promise<{ success: boolean }> => {
     await db.exec`
       UPDATE users

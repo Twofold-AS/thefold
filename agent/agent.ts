@@ -11,7 +11,7 @@ import { agentReports } from "../chat/chat";
 import {
   selectOptimalModel,
   calculateSavings,
-  type BudgetMode,
+  type ModelMode,
 } from "../ai/router";
 
 // --- Database (audit log) ---
@@ -29,7 +29,8 @@ export interface StartTaskRequest {
   conversationId: string;
   taskId: string;
   userMessage: string;
-  userId?: string; // optional — used to fetch budget preference
+  userId?: string; // optional — used to fetch model preference
+  modelOverride?: string; // manuelt modellvalg fra chat
 }
 
 export interface StartTaskResponse {
@@ -46,7 +47,8 @@ interface TaskContext {
   repoName: string;
   branch: string;
   // Model routing
-  budgetMode: BudgetMode;
+  modelMode: ModelMode;
+  modelOverride?: string;
   selectedModel: string;
   totalCostUsd: number;
   totalTokensUsed: number;
@@ -374,36 +376,50 @@ async function executeTask(ctx: TaskContext): Promise<void> {
     );
 
     // === STEP 4.5: Assess complexity and select model ===
-    const complexityResult = await auditedStep(ctx, "complexity_assessed", {
-      budgetMode: ctx.budgetMode,
-    }, () => ai.assessComplexity({
-      taskDescription: ctx.taskDescription,
-      projectStructure: projectTree.treeString.substring(0, 2000),
-      fileCount: projectTree.tree.length,
-    }));
+    let selectedModel: string;
 
-    ctx.selectedModel = selectOptimalModel(complexityResult.complexity, ctx.budgetMode);
+    if (ctx.modelOverride) {
+      // Bruker valgte manuelt modell for denne oppgaven
+      selectedModel = ctx.modelOverride;
+    } else if (ctx.modelMode === "manual") {
+      // Manuell modus men ingen override — be bruker velge
+      await report(ctx, "Hvilken modell vil du bruke?", "needs_input");
+      return;
+    } else {
+      // Auto modus — vurder kompleksitet og velg
+      const complexityResult = await auditedStep(ctx, "complexity_assessed", {
+        modelMode: ctx.modelMode,
+      }, () => ai.assessComplexity({
+        taskDescription: ctx.taskDescription,
+        projectStructure: projectTree.treeString.substring(0, 2000),
+        fileCount: projectTree.tree.length,
+      }));
 
-    await audit({
-      sessionId: ctx.conversationId,
-      actionType: "model_selected",
-      details: {
-        complexity: complexityResult.complexity,
-        reasoning: complexityResult.reasoning,
-        budgetMode: ctx.budgetMode,
-        selectedModel: ctx.selectedModel,
-        suggestedModel: complexityResult.suggestedModel,
-      },
-      success: true,
-      taskId: ctx.taskId,
-      repoName: `${ctx.repoOwner}/${ctx.repoName}`,
-    });
+      selectedModel = selectOptimalModel(complexityResult.complexity, "auto");
 
-    await report(
-      ctx,
-      `Kompleksitet: ${complexityResult.complexity}/10 → Bruker ${ctx.selectedModel} (${ctx.budgetMode} modus)`,
-      "working"
-    );
+      await audit({
+        sessionId: ctx.conversationId,
+        actionType: "model_selected",
+        details: {
+          complexity: complexityResult.complexity,
+          reasoning: complexityResult.reasoning,
+          modelMode: ctx.modelMode,
+          selectedModel,
+          suggestedModel: complexityResult.suggestedModel,
+        },
+        success: true,
+        taskId: ctx.taskId,
+        repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+      });
+
+      await report(
+        ctx,
+        `Kompleksitet: ${complexityResult.complexity}/10 \u2192 Bruker ${selectedModel} (auto modus)`,
+        "working"
+      );
+    }
+
+    ctx.selectedModel = selectedModel;
 
     // === STEP 5: Plan the work ===
     await report(ctx, "Planlegger arbeidet...", "working");
@@ -713,7 +729,7 @@ async function executeTask(ctx: TaskContext): Promise<void> {
           totalCostUsd: ctx.totalCostUsd,
           totalTokensUsed: ctx.totalTokensUsed,
           modelUsed: ctx.selectedModel,
-          budgetMode: ctx.budgetMode,
+          modelMode: ctx.modelMode,
           savedVsOpusUsd: savings.savedUsd,
           savedVsOpusPercent: savings.savedPercent,
         },
@@ -772,17 +788,17 @@ async function executeTask(ctx: TaskContext): Promise<void> {
 export const startTask = api(
   { method: "POST", path: "/agent/start", expose: false },
   async (req: StartTaskRequest): Promise<StartTaskResponse> => {
-    // Fetch user budget preference
-    let budgetMode: BudgetMode = "balanced";
+    // Hent brukerens modellpreferanse
+    let modelMode: ModelMode = "auto";
     if (req.userId) {
       try {
         const userInfo = await users.getUser({ userId: req.userId });
         const prefs = userInfo.preferences as Record<string, unknown>;
-        if (prefs.budgetMode && ["aggressive_save", "balanced", "quality_first"].includes(prefs.budgetMode as string)) {
-          budgetMode = prefs.budgetMode as BudgetMode;
+        if (prefs.modelMode && ["auto", "manual"].includes(prefs.modelMode as string)) {
+          modelMode = prefs.modelMode as ModelMode;
         }
       } catch {
-        // Default to balanced if user lookup fails
+        // Default til auto hvis oppslag feiler
       }
     }
 
@@ -796,8 +812,9 @@ export const startTask = api(
       repoOwner: REPO_OWNER,
       repoName: REPO_NAME,
       branch: "main",
-      budgetMode,
-      selectedModel: "claude-sonnet-4-20250514", // default, updated after complexity assessment
+      modelMode,
+      modelOverride: req.modelOverride,
+      selectedModel: "claude-sonnet-4-5-20250929", // default, oppdateres etter complexity assessment
       totalCostUsd: 0,
       totalTokensUsed: 0,
     };

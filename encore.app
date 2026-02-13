@@ -1,4 +1,5 @@
 {
 	"id":   "thefold-aoti",
-	"lang": "typescript"
+	"lang": "typescript",
+	"ignore": ["frontend"]
 }
