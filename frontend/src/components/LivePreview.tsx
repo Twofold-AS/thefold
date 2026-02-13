@@ -15,16 +15,11 @@ export function LivePreview({ isActive, onClose }: LivePreviewProps) {
 
   return (
     <div className="live-preview-container" style={{
-      position: "fixed",
-      right: 0,
-      top: 64,
-      width: "50%",
-      height: "calc(100vh - 64px)",
+      width: "100%",
+      height: "100%",
       background: "var(--bg-primary)",
-      borderLeft: "1px solid var(--border)",
       display: "flex",
       flexDirection: "column",
-      zIndex: 100,
     }}>
       {/* Header */}
       <div style={{

@@ -12,7 +12,7 @@ interface AuthParams {
 }
 
 export interface AuthData {
-  userId: string;
+  userID: string;
   email: string;
   role: "admin" | "viewer";
 }
@@ -41,7 +41,7 @@ function verifyToken(token: string): AuthData | null {
     }
 
     return {
-      userId: decoded.userId,
+      userID: decoded.userId,
       email: decoded.email,
       role: decoded.role,
     };

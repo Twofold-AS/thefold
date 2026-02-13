@@ -57,14 +57,12 @@ export default function LoginPage() {
     }
   }
 
-  async function handleVerifyOtp() {
+  async function handleVerifyOtp(codeOverride?: string[]) {
     setError("");
-    const fullCode = code.join("");
+    const digits = codeOverride || code;
+    const fullCode = digits.join("");
 
-    if (fullCode.length !== 6) {
-      setError("Skriv inn hele koden");
-      return;
-    }
+    if (fullCode.length !== 6) return;
 
     setLoading(true);
     try {
@@ -82,7 +80,9 @@ export default function LoginPage() {
 
       if (result.token) {
         setToken(result.token);
-        router.replace(redirectTo);
+        // Full page load — ensures cookie is sent with the first request
+        window.location.href = redirectTo;
+        return;
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Noe gikk galt");
@@ -103,9 +103,9 @@ export default function LoginPage() {
       codeRefs.current[index + 1]?.focus();
     }
 
-    // Auto-submit when all 6 digits entered
+    // Auto-submit when all 6 digits entered — pass newCode directly to avoid stale closure
     if (digit && index === 5 && newCode.every((d) => d !== "")) {
-      setTimeout(() => handleVerifyOtp(), 50);
+      setTimeout(() => handleVerifyOtp(newCode), 100);
     }
   }
 
@@ -135,7 +135,7 @@ export default function LoginPage() {
       codeRefs.current[lastIdx]?.focus();
     }
     if (pasted.length === 6) {
-      setTimeout(() => handleVerifyOtp(), 50);
+      setTimeout(() => handleVerifyOtp(newCode), 100);
     }
   }
 
@@ -278,7 +278,7 @@ export default function LoginPage() {
               )}
 
               <button
-                onClick={handleVerifyOtp}
+                onClick={() => handleVerifyOtp()}
                 disabled={loading || code.some((d) => !d)}
                 className="btn-primary w-full flex items-center justify-center gap-2"
               >

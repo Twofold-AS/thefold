@@ -1,4 +1,5 @@
 import { api, APIError } from "encore.dev/api";
+import { getAuthData } from "~encore/auth";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { Topic, Subscription } from "encore.dev/pubsub";
 
@@ -65,6 +66,8 @@ interface SendRequest {
   chatOnly?: boolean;
   // Manuelt modellvalg for denne oppgaven (null = auto)
   modelOverride?: string | null;
+  // Skills aktive for denne samtalen
+  skillIds?: string[];
 }
 
 interface SendResponse {
@@ -96,12 +99,54 @@ interface ConversationsResponse {
   conversations: ConversationSummary[];
 }
 
+// --- Ownership helpers (OWASP A01:2025 — Broken Access Control) ---
+
+/** Ensure the current user owns this conversation, or create ownership for new ones */
+async function ensureConversationOwner(conversationId: string): Promise<void> {
+  const auth = getAuthData();
+  if (!auth) throw APIError.unauthenticated("not authenticated");
+
+  const existing = await db.queryRow<{ owner_email: string }>`
+    SELECT owner_email FROM conversations WHERE id = ${conversationId}
+  `;
+
+  if (existing) {
+    if (existing.owner_email !== auth.email) {
+      throw APIError.permissionDenied("du har ikke tilgang til denne samtalen");
+    }
+    return;
+  }
+
+  // New conversation — register ownership
+  await db.exec`
+    INSERT INTO conversations (id, owner_email)
+    VALUES (${conversationId}, ${auth.email})
+    ON CONFLICT (id) DO NOTHING
+  `;
+}
+
+/** Verify the current user owns this conversation (read-only check) */
+async function verifyConversationAccess(conversationId: string): Promise<void> {
+  const auth = getAuthData();
+  if (!auth) throw APIError.unauthenticated("not authenticated");
+
+  const existing = await db.queryRow<{ owner_email: string }>`
+    SELECT owner_email FROM conversations WHERE id = ${conversationId}
+  `;
+
+  if (existing && existing.owner_email !== auth.email) {
+    throw APIError.permissionDenied("du har ikke tilgang til denne samtalen");
+  }
+}
+
 // --- Endpoints ---
 
 // Send a message — either triggers agent work or direct chat
 export const send = api(
   { method: "POST", path: "/chat/send", expose: true, auth: true },
   async (req: SendRequest): Promise<SendResponse> => {
+    await ensureConversationOwner(req.conversationId);
+
     // Store user message
     const msg = await db.queryRow<Message>`
       INSERT INTO messages (conversation_id, role, content, message_type, metadata)
@@ -194,6 +239,7 @@ export const send = api(
 export const history = api(
   { method: "POST", path: "/chat/history", expose: true, auth: true },
   async (req: HistoryRequest): Promise<HistoryResponse> => {
+    await verifyConversationAccess(req.conversationId);
     const limit = Math.min(req.limit ?? 50, 200);
 
     const rows = req.before
@@ -223,10 +269,14 @@ export const history = api(
   }
 );
 
-// List all conversations
+// List all conversations (filtered by owner — OWASP A01)
 export const conversations = api(
   { method: "GET", path: "/chat/conversations", expose: true, auth: true },
   async (): Promise<ConversationsResponse> => {
+    const auth = getAuthData();
+    if (!auth) throw APIError.unauthenticated("not authenticated");
+
+    // Ownership-filtered query (OWASP A01 — only show user's own conversations)
     const rows = await db.query`
       SELECT
         m.conversation_id as id,
@@ -238,14 +288,16 @@ export const conversations = api(
         FROM messages GROUP BY conversation_id
       ) latest ON m.conversation_id = latest.conversation_id
                 AND m.created_at = latest.max_created
+      LEFT JOIN conversations c ON c.id = m.conversation_id
+      WHERE c.owner_email = ${auth.email} OR c.id IS NULL
       ORDER BY m.created_at DESC
       LIMIT 50
     `;
 
-    const conversations: ConversationSummary[] = [];
+    const convList: ConversationSummary[] = [];
     for await (const row of rows) {
       const lastMsg = row.lastMessage as string;
-      conversations.push({
+      convList.push({
         id: row.id as string,
         title: lastMsg.substring(0, 80) + (lastMsg.length > 80 ? "..." : ""),
         lastMessage: lastMsg,
@@ -253,7 +305,7 @@ export const conversations = api(
       });
     }
 
-    return { conversations };
+    return { conversations: convList };
   }
 );
 
@@ -274,6 +326,9 @@ interface TransferContextResponse {
 export const transferContext = api(
   { method: "POST", path: "/chat/transfer-context", expose: true, auth: true },
   async (req: TransferContextRequest): Promise<TransferContextResponse> => {
+    // Verify source ownership and register target ownership
+    await verifyConversationAccess(req.sourceConversationId);
+
     // 1. Hent alle meldinger fra source conversation
     const sourceRows = await db.query<Message>`
       SELECT id, conversation_id as "conversationId", role, content,
@@ -290,19 +345,20 @@ export const transferContext = api(
       throw APIError.invalidArgument("Ingen meldinger i kildesamtalen");
     }
 
-    // 2. Bygg context for AI
+    // 2. Bygg context
     const conversationText = sourceMessages
       .map((m) => `${m.role === "user" ? "Bruker" : "TheFold"}: ${m.content}`)
       .join("\n\n");
 
-    // 3. Be AI om å destillere kun nødvendig context
-    const { ai } = await import("~encore/clients");
-
-    const summary = await ai.chat({
-      messages: [
-        {
-          role: "user",
-          content: `Følgende er en planleggingssamtale. Ekstraher KUN:
+    // 3. Prøv AI-sammendrag, fall tilbake til rå meldinger hvis det feiler
+    let summaryText: string;
+    try {
+      const { ai } = await import("~encore/clients");
+      const summary = await ai.chat({
+        messages: [
+          {
+            role: "user",
+            content: `Følgende er en planleggingssamtale. Ekstraher KUN:
 - Hovedmål for prosjektet
 - Tekniske krav
 - Arkitektur-beslutninger
@@ -314,14 +370,25 @@ SAMTALE:
 ${conversationText}
 
 Ekstraher nødvendig context som skal sendes til utviklings-teamet:`,
-        },
-      ],
-      systemContext: "direct_chat",
-      memoryContext: [],
-    });
+          },
+        ],
+        systemContext: "direct_chat",
+        memoryContext: [],
+      });
+      summaryText = summary.content;
+    } catch {
+      // AI-sammendrag feilet — bruk siste meldinger direkte
+      const recent = sourceMessages.slice(-10);
+      summaryText = recent
+        .map((m) => `${m.role === "user" ? "Bruker" : "TheFold"}: ${m.content}`)
+        .join("\n\n");
+    }
 
     // 4. Opprett ny conversation i target repo
     const targetConvId = `repo-${req.targetRepo}-${Date.now()}`;
+
+    // Register ownership on target conversation
+    await ensureConversationOwner(targetConvId);
 
     // 5. Legg til system-melding med context
     await db.exec`
@@ -329,7 +396,7 @@ Ekstraher nødvendig context som skal sendes til utviklings-teamet:`,
       VALUES (
         ${targetConvId},
         'assistant',
-        ${`Context fra hovedchat:\n\n${summary.content}`},
+        ${`Context fra hovedchat:\n\n${summaryText}`},
         'context_transfer',
         ${JSON.stringify({ sourceConversationId: req.sourceConversationId })}
       )
@@ -337,7 +404,7 @@ Ekstraher nødvendig context som skal sendes til utviklings-teamet:`,
 
     return {
       targetConversationId: targetConvId,
-      contextSummary: summary.content,
+      contextSummary: summaryText,
       success: true,
     };
   }

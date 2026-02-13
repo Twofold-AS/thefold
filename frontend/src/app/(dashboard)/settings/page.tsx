@@ -1,12 +1,18 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { clearToken } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { getUserPreferences, updateModelMode, listModels, type ModelInfo } from "@/lib/api";
-import { Zap, Settings, Shield, DollarSign, LogOut } from "lucide-react";
-import { usePreferences } from "@/contexts/UserPreferencesContext";
+import { updateModelMode, updateProfile, listModels, type ModelInfo } from "@/lib/api";
+import { Zap, Settings, Shield, DollarSign, LogOut, Check, Bug } from "lucide-react";
+import { usePreferences, useUser } from "@/contexts/UserPreferencesContext";
+import { isDebugEnabled, setDebugEnabled } from "@/lib/debug";
+
+const AVATAR_COLORS = [
+  "#6366f1", "#8b5cf6", "#ec4899", "#ef4444",
+  "#f59e0b", "#22c55e", "#06b6d4", "#3b82f6",
+];
 
 function tierLabel(tier: number | string): string {
   if (tier === "high" || (typeof tier === "number" && tier >= 5)) return "Premium";
@@ -15,31 +21,44 @@ function tierLabel(tier: number | string): string {
 }
 
 function tierColor(tier: number | string): string {
-  if (tier === "high" || (typeof tier === "number" && tier >= 5)) return "var(--accent-purple)";
-  if (tier === "mid" || (typeof tier === "number" && tier >= 3)) return "var(--accent-blue)";
-  return "var(--accent-green)";
+  if (tier === "high" || (typeof tier === "number" && tier >= 5)) return "#8b5cf6";
+  if (tier === "mid" || (typeof tier === "number" && tier >= 3)) return "#3b82f6";
+  return "#22c55e";
 }
 
 export default function SettingsPage() {
   const router = useRouter();
   const { preferences, refresh: refreshPreferences } = usePreferences();
+  const { user, initial, avatarColor, refresh: refreshUser } = useUser();
   const [modelMode, setModelMode] = useState<"auto" | "manual">("auto");
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [userId, setUserId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  // Profile
+  const [editName, setEditName] = useState("");
+  const [nameSaving, setNameSaving] = useState(false);
+  const [localColor, setLocalColor] = useState(avatarColor);
+  const [debugMode, setDebugMode] = useState(false);
+  const nameTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setModelMode(preferences.modelMode);
   }, [preferences.modelMode]);
 
   useEffect(() => {
-    getUserPreferences()
-      .then((res) => {
-        setUserId(res.user.id);
-      })
-      .catch(() => {});
+    if (user?.name) setEditName(user.name);
+  }, [user?.name]);
 
+  useEffect(() => {
+    setDebugMode(isDebugEnabled());
+  }, []);
+
+  useEffect(() => {
+    setLocalColor(avatarColor);
+  }, [avatarColor]);
+
+  useEffect(() => {
     listModels()
       .then((res) => setModels(res.models.sort((a, b) => a.tier - b.tier)))
       .catch(() => {});
@@ -47,18 +66,44 @@ export default function SettingsPage() {
 
   async function handleModeChange(mode: "auto" | "manual") {
     setModelMode(mode);
-    if (!userId) return;
-
     setSaving(true);
     try {
-      await updateModelMode(userId, mode);
+      await updateModelMode(mode);
       await refreshPreferences();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
-      // Revert on error
+      // Silent
     } finally {
       setSaving(false);
+    }
+  }
+
+  function handleNameChange(value: string) {
+    setEditName(value);
+    if (nameTimeout.current) clearTimeout(nameTimeout.current);
+    nameTimeout.current = setTimeout(async () => {
+      const trimmed = value.trim();
+      if (!trimmed || trimmed === user?.name) return;
+      setNameSaving(true);
+      try {
+        await updateProfile({ name: trimmed });
+        await refreshUser();
+      } catch {
+        // Silent
+      } finally {
+        setNameSaving(false);
+      }
+    }, 800);
+  }
+
+  async function handleColorChange(color: string) {
+    setLocalColor(color);
+    try {
+      await updateProfile({ avatarColor: color });
+      await refreshUser();
+    } catch {
+      setLocalColor(avatarColor);
     }
   }
 
@@ -77,6 +122,91 @@ export default function SettingsPage() {
       </p>
 
       <div className="mt-8 space-y-10">
+        {/* Profil */}
+        <section>
+          <h2 className="font-heading text-lg font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
+            Profil
+          </h2>
+          <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
+            Din brukerinformasjon
+          </p>
+
+          <div className="flex items-start gap-6">
+            {/* Avatar */}
+            <div className="flex flex-col items-center gap-2">
+              <div
+                className="w-16 h-16 rounded-full flex items-center justify-center text-xl font-semibold"
+                style={{ background: localColor, color: "#fff" }}
+              >
+                {initial}
+              </div>
+              <div className="flex gap-1.5 flex-wrap justify-center" style={{ maxWidth: "120px" }}>
+                {AVATAR_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => handleColorChange(c)}
+                    className="w-5 h-5 rounded-full transition-transform hover:scale-110 flex items-center justify-center"
+                    style={{
+                      background: c,
+                      outline: c === localColor ? "2px solid var(--text-primary)" : "none",
+                      outlineOffset: "2px",
+                    }}
+                  >
+                    {c === localColor && <Check size={10} color="#fff" />}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Fields */}
+            <div className="flex-1 space-y-3">
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+                  Visningsnavn
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={editName}
+                    onChange={(e) => handleNameChange(e.target.value)}
+                    className="input-field"
+                    style={{ maxWidth: "300px" }}
+                  />
+                  {nameSaving && (
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs" style={{ color: "var(--text-muted)" }}>
+                      Lagrer...
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+                  E-post
+                </label>
+                <p className="text-sm" style={{ color: "var(--text-primary)" }}>
+                  {user?.email || "..."}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium mb-1" style={{ color: "var(--text-secondary)" }}>
+                  Rolle
+                </label>
+                <span
+                  className="text-xs px-2 py-0.5 rounded-full font-medium"
+                  style={{
+                    background: user?.role === "admin" ? "#6366f1" : "var(--border)",
+                    color: user?.role === "admin" ? "#fff" : "var(--text-secondary)",
+                  }}
+                >
+                  {user?.role || "..."}
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
+
         {/* AI-modellstrategi */}
         <section>
           <div className="flex items-center gap-2 mb-1">
@@ -84,7 +214,7 @@ export default function SettingsPage() {
               AI-modellstrategi
             </h2>
             {saved && (
-              <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "var(--accent-green)", color: "white" }}>
+              <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "#22c55e", color: "white" }}>
                 Lagret
               </span>
             )}
@@ -93,11 +223,10 @@ export default function SettingsPage() {
             Hvordan TheFold velger AI-modell for oppgaver
           </p>
           <div className="space-y-2">
-            {/* Auto */}
             <label
               className="flex items-start gap-3 py-3 px-4 cursor-pointer transition-colors"
               style={{
-                border: modelMode === "auto" ? "2px solid var(--accent-blue)" : "1px solid var(--border)",
+                border: modelMode === "auto" ? "2px solid #3b82f6" : "1px solid var(--border)",
                 borderRadius: "8px",
                 background: modelMode === "auto" ? "var(--bg-hover)" : "var(--bg-card)",
                 opacity: saving ? 0.6 : 1,
@@ -112,22 +241,21 @@ export default function SettingsPage() {
                 disabled={saving}
                 className="mt-1"
               />
-              <Zap size={20} style={{ color: "var(--accent-blue)", marginTop: 2, flexShrink: 0 }} />
+              <Zap size={20} style={{ color: "#3b82f6", marginTop: 2, flexShrink: 0 }} />
               <div>
                 <div className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
                   AI styrer beste modell
                 </div>
                 <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-                  Velger automatisk basert p&aring; oppgavens kompleksitet
+                  Velger automatisk basert på oppgavens kompleksitet
                 </div>
               </div>
             </label>
 
-            {/* Manual */}
             <label
               className="flex items-start gap-3 py-3 px-4 cursor-pointer transition-colors"
               style={{
-                border: modelMode === "manual" ? "2px solid var(--accent-blue)" : "1px solid var(--border)",
+                border: modelMode === "manual" ? "2px solid #3b82f6" : "1px solid var(--border)",
                 borderRadius: "8px",
                 background: modelMode === "manual" ? "var(--bg-hover)" : "var(--bg-card)",
                 opacity: saving ? 0.6 : 1,
@@ -190,7 +318,7 @@ export default function SettingsPage() {
                       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                     >
                       <td className="py-2 px-3 font-medium" style={{ color: "var(--text-primary)" }}>
-                        {m.displayName || (m as any).name || m.id}
+                        {m.displayName || m.id}
                       </td>
                       <td className="py-2 px-3">
                         <span
@@ -251,6 +379,67 @@ export default function SettingsPage() {
             <Shield size={16} />
             Se audit-logg
           </Link>
+        </section>
+
+        {/* Developer */}
+        <section>
+          <div className="flex items-center gap-2 mb-1">
+            <Bug size={18} style={{ color: "var(--text-muted)" }} />
+            <h2 className="font-heading text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
+              Developer
+            </h2>
+          </div>
+          <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
+            Verktøy for utvikling og feilsøking
+          </p>
+
+          <label
+            className="flex items-center justify-between py-3 px-4 cursor-pointer transition-colors"
+            style={{
+              border: "1px solid var(--border)",
+              borderRadius: "8px",
+              background: debugMode ? "var(--bg-hover)" : "var(--bg-card)",
+            }}
+          >
+            <div>
+              <div className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                Debug-modus
+              </div>
+              <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                Vis debug-popups ved API-kall
+              </div>
+            </div>
+            <div
+              onClick={() => {
+                const next = !debugMode;
+                setDebugMode(next);
+                setDebugEnabled(next);
+              }}
+              style={{
+                width: "40px",
+                height: "22px",
+                borderRadius: "11px",
+                background: debugMode ? "#6366f1" : "var(--border)",
+                position: "relative",
+                cursor: "pointer",
+                transition: "background 0.15s",
+                flexShrink: 0,
+              }}
+            >
+              <div
+                style={{
+                  width: "18px",
+                  height: "18px",
+                  borderRadius: "50%",
+                  background: "#fff",
+                  position: "absolute",
+                  top: "2px",
+                  left: debugMode ? "20px" : "2px",
+                  transition: "left 0.15s",
+                }}
+              />
+            </div>
+          </label>
         </section>
 
         {/* Konto */}

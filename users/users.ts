@@ -92,6 +92,8 @@ async function logAudit(
 }
 
 async function sendOTPEmail(email: string, code: string): Promise<void> {
+  // OTP code intentionally NOT logged — see OWASP A02:2025 Cryptographic Failures
+
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
@@ -99,7 +101,7 @@ async function sendOTPEmail(email: string, code: string): Promise<void> {
       Authorization: `Bearer ${resendApiKey()}`,
     },
     body: JSON.stringify({
-      from: "TheFold <onboarding@resend.dev>",
+      from: "TheFold <noreply@noreply.twofold.no>",
       to: [email],
       subject: "Din innloggingskode",
       html: `
@@ -116,10 +118,12 @@ async function sendOTPEmail(email: string, code: string): Promise<void> {
     }),
   });
 
+  const body = await res.text();
   if (!res.ok) {
-    const body = await res.text();
-    console.error("Resend API error:", res.status, body);
+    console.error("[OTP] Resend API error:", res.status, body);
+    throw new Error(`Resend API error: ${res.status} ${body}`);
   }
+  // Email sent — no verbose logging in production
 }
 
 // --- Endpoints ---
@@ -129,14 +133,12 @@ export const requestOtp = api(
   { method: "POST", path: "/auth/request-otp", expose: true, auth: false },
   async (req: RequestOTPRequest): Promise<RequestOTPResponse> => {
     const email = req.email.toLowerCase().trim();
-
     // Find user (may not exist — we still return success to prevent enumeration)
     const user = await db.queryRow<{ id: string }>`
       SELECT id FROM users WHERE email = ${email}
     `;
 
     if (!user) {
-      // Log the attempt but don't reveal that the email doesn't exist
       await logAudit(email, false);
       return { success: true, message: "Hvis e-posten finnes, vil du motta en kode." };
     }
@@ -150,7 +152,6 @@ export const requestOtp = api(
     `;
 
     if (recentCount && recentCount.count >= 5) {
-      // Still return success to prevent enumeration
       await logAudit(email, false, user.id);
       return { success: true, message: "Hvis e-posten finnes, vil du motta en kode." };
     }
@@ -273,7 +274,7 @@ export const logout = api(
   { method: "POST", path: "/auth/logout", expose: true, auth: true },
   async (): Promise<LogoutResponse> => {
     const authData = getAuthData()!;
-    await logAudit(authData.email, true, authData.userId);
+    await logAudit(authData.email, true, authData.userID);
     return { success: true };
   }
 );
@@ -297,7 +298,7 @@ export const me = api(
       SELECT id, email, name, role, avatar_url, preferences,
              created_at, last_login_at
       FROM users
-      WHERE id::text = ${authData.userId}
+      WHERE id::text = ${authData.userID}
     `;
 
     if (!row) {
@@ -355,20 +356,70 @@ export const getUser = api(
   }
 );
 
-// Internal: Update user preferences (for service-to-service calls)
+// Safe preferences merge: read → merge in JS → write back
+// Avoids JSONB || operator bug where Encore parameter binding creates arrays
+async function mergePreferences(userId: string, updates: Record<string, unknown>): Promise<void> {
+  const row = await db.queryRow<{ preferences: unknown }>`
+    SELECT preferences FROM users WHERE id::text = ${userId}
+  `;
+
+  let current: Record<string, unknown> = {};
+  if (row?.preferences) {
+    if (typeof row.preferences === "string") {
+      try { current = JSON.parse(row.preferences); } catch { current = {}; }
+    } else if (typeof row.preferences === "object" && !Array.isArray(row.preferences)) {
+      current = row.preferences as Record<string, unknown>;
+    }
+    // If corrupted to array, reset
+    if (Array.isArray(current)) current = {};
+  }
+
+  const merged = { ...current, ...updates };
+  await db.exec`
+    UPDATE users SET preferences = ${JSON.stringify(merged)}
+    WHERE id::text = ${userId}
+  `;
+}
+
+// Update user preferences (uses auth data for user ID)
 interface UpdatePreferencesRequest {
-  userId: string;
   preferences: Record<string, unknown>;
 }
 
 export const updatePreferences = api(
   { method: "POST", path: "/users/preferences", expose: true, auth: true },
   async (req: UpdatePreferencesRequest): Promise<{ success: boolean }> => {
-    await db.exec`
-      UPDATE users
-      SET preferences = preferences || ${JSON.stringify(req.preferences)}::jsonb
-      WHERE id::text = ${req.userId}
-    `;
+    const authData = getAuthData()!;
+    await mergePreferences(authData.userID, req.preferences);
+    return { success: true };
+  }
+);
+
+// Update user profile (name, avatarColor)
+interface UpdateProfileRequest {
+  name?: string;
+  avatarColor?: string;
+}
+
+export const updateProfile = api(
+  { method: "POST", path: "/users/update-profile", expose: true, auth: true },
+  async (req: UpdateProfileRequest): Promise<{ success: boolean }> => {
+    const authData = getAuthData()!;
+
+    if (req.name !== undefined) {
+      const trimmed = req.name.trim();
+      if (trimmed.length < 1 || trimmed.length > 100) {
+        throw APIError.invalidArgument("Navn må være mellom 1 og 100 tegn");
+      }
+      await db.exec`
+        UPDATE users SET name = ${trimmed} WHERE id::text = ${authData.userID}
+      `;
+    }
+
+    if (req.avatarColor !== undefined) {
+      await mergePreferences(authData.userID, { avatarColor: req.avatarColor });
+    }
+
     return { success: true };
   }
 );

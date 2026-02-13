@@ -5,6 +5,7 @@ import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { useRepoContext, type Repo } from "@/lib/repo-context";
+import { useUser } from "@/contexts/UserPreferencesContext";
 
 /* ============================================
    Navigation definitions
@@ -88,6 +89,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const { repos, selectedRepo, selectRepo } = useRepoContext();
+  const { initial, avatarColor } = useUser();
   const [repoDropdownOpen, setRepoDropdownOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -120,9 +122,9 @@ export function Sidebar() {
         </div>
         <div
           className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0"
-          style={{ background: "#2a2a2a", color: "#888" }}
+          style={{ background: avatarColor, color: "#fff" }}
         >
-          KJ
+          {initial}
         </div>
       </div>
 

@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const PUBLIC_PATHS = ["/login"];
-
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -17,16 +15,9 @@ export function middleware(request: NextRequest) {
   }
 
   const token = request.cookies.get("thefold_token")?.value;
-  const isPublicPath = PUBLIC_PATHS.includes(pathname);
 
-  // No token + protected page -> redirect to login
-  if (!token && !isPublicPath) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("from", pathname);
-    return NextResponse.redirect(loginUrl);
-  }
-
-  // Has token + on login page -> redirect to home
+  // Only positive redirect: logged-in user on /login -> send to /home
+  // Route protection is handled client-side by useRequireAuth
   if (token && pathname === "/login") {
     return NextResponse.redirect(new URL("/home", request.url));
   }

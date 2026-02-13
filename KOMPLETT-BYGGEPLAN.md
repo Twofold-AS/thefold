@@ -1,8 +1,8 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 2.0 - Optimalisert for token-efficiency og konkurransefortrinn
-> **Sist oppdatert:** 12. februar 2025
-> **Status:** Klar for implementering
+> **Versjon:** 2.1 - Oppdatert med faktisk status
+> **Sist oppdatert:** 13. februar 2026
+> **Status:** Fase 1-2 ferdig, Fase 3 pågår
 
 ---
 
@@ -45,25 +45,65 @@
 
 ## Nåværende Status
 
-### ✅ Ferdig og Testet (51+ tester, alle grønne)
-- **chat-service:** CRUD, JSONB metadata, paginering
+### ✅ Ferdig og Testet — Backend Services (51+ tester)
+- **chat-service:** CRUD, JSONB metadata, paginering, context transfer
 - **memory-service:** pgvector embeddings, cosine similarity søk, cache-integrasjon
-- **ai-service:** Claude API, multi-provider (Claude/GPT/Moonshot), JSON parsing
-- **github-service:** tree (med cache), file, findRelevantFiles, createPR
-- **sandbox-service:** create, writeFile, validate, destroy, sikkerhetstester
+- **ai-service:** Claude API, multi-provider (Claude/GPT/Moonshot), JSON parsing, model routing
+- **github-service:** tree (med cache), file, findRelevantFiles, createPR, getFileChunk, getFileMetadata
+- **sandbox-service:** create, writeFile, validate, validateIncremental, destroy, sikkerhetstester
 - **linear-service:** getAssignedTasks, getTask, updateTask
-- **agent-service:** Integrationstest (sandbox → GitHub → AI → skriv → valider)
-- **frontend:** 20 routes, OTP login, sidebar, home, chat, settings, repo-sider
+- **agent-service:** Integrationstest (sandbox → GitHub → AI → skriv → valider), confidence scoring, incremental validation, cost tracking
+- **users-service:** OTP auth, profil, preferences, avatar
+- **cache-service:** PostgreSQL-basert caching (embeddings, repo, AI plans)
+- **skills-service:** CRUD, GIN-index, prompt injection, preview
+- **gateway:** HMAC auth handler, createToken (intern)
 
-### ✅ Nylig Ferdig
-- **users-service + OTP Auth (Steg 1.1):** E-post OTP via Resend, rate limiting, audit logging, HMAC token med 7-dagers utløp, frontend OTP-flyt (e-post → 6-sifret kode → dashboard)
-- **cache-service (Steg 1.2):** PostgreSQL-basert cache (CacheCluster finnes ikke i Encore.ts ennå), embeddings (90d TTL), repo structure (1h TTL), AI plans (24h TTL), stats endpoint, cleanup cron, integrert med memory + github
-- **confidence-scoring (Steg 1.3):** AI vurderer egen sikkerhet (0-100) med 4 dimensjoner, <60 ber om klarhet, <75 foreslår oppdeling, >=75 fortsetter. Agent audit log med PostgreSQL. Integrert i agent loop mellom context-gathering og planning.
+### ✅ Ferdig — Fase 1 (Foundation + Auth)
+- **Steg 1.1 — Users + OTP Auth:** E-post OTP via Resend, rate limiting, audit logging, HMAC token med 7-dagers utløp, frontend OTP-flyt
+- **Steg 1.2 — Cache Service:** PostgreSQL-basert cache, embeddings (90d), repo (1h), AI plans (24h), stats, cleanup cron
+- **Steg 1.3 — Confidence Scoring:** 4 dimensjoner, <60 klarhet, <75 oppdeling, >=75 proceed. Integrert i agent loop
 
-### 🔧 Pågår / Neste Steg
-- Memory Decay (Steg 2.6)
-- Koble frontend til backend (Steg 3.1)
-- Review System (Steg 3.2)
+### ✅ Ferdig — Fase 2 (Core Intelligence, unntatt 2.6)
+- **Steg 2.1 — Skills System:** Service, CRUD, AI-integrasjon, frontend, 16 tester
+- **Steg 2.2 — Audit Logging:** 17+ action types, auditedStep wrapper, 3 query-endepunkter, frontend, 12 tester
+- **Steg 2.3 — Context Windowing:** getFileChunk, getFileMetadata, smart lesestrategi, 6 tester
+- **Steg 2.4 — Incremental Validation:** Per-fil tsc, MAX_FILE_FIX_RETRIES=2, 5 tester
+- **Steg 2.5 — Multi-Model Routing:** 5 modeller, selectOptimalModel, callAIWithFallback, budgetMode, 18 tester
+
+### ✅ Ferdig — Tilleggsarbeid (utover opprinnelig plan)
+- **Chat Redesign:** Meldingsbobler med bruker/TF-avatarer, dynamisk avatarfarge, tidsstempler, typing-indikator (3 pulserende prikker), smart auto-scroll, tomme-tilstander med foreslåtte spørsmål, agent report & context transfer badges
+- **Context Transfer:** `POST /chat/transfer-context` — AI-oppsummering med fallback til rå meldinger, hovedchat → repo-chat flyt med redirect og konversasjons-ID
+- **Brukerprofil-system:** Avatarfarge-velger (8 farger), redigerbart visningsnavn med 800ms debounce auto-lagring, dynamiske initialer + farge overalt via React context
+- **Unified User Context:** `PreferencesProvider` wrapper for hele dashboard, `useUser()` hook (user, initial, avatarColor, refresh), `usePreferences()` for bakoverkompatibilitet
+- **ModelSelector-komponent:** Auto-modus ("AI velger automatisk"), manuell-modus (dropdown med alle modeller og kostnader)
+- **LivePreview-komponent:** Placeholder for fremtidig sandbox-preview, side-by-side med chat
+- **Design System:** Full CSS variabel-tema (mørk + lys), typing-animasjon, scrollbar-styling, Suisse Intl + TheFold Brand fonter
+- **Samtalehåndtering:** Samtaleliste-sidebar (begge chat-sider), repo-filtrerte samtaler (`repo-{name}-` prefiks), ny samtale-oppretting, polling (3s intervall)
+- **Backend-utvidelser:** `POST /users/update-profile` (navn, avatarColor), `GET /users/me` (full profil), `POST /users/get` (intern), COALESCE for NULL JSONB-sikkerhet
+- **Sikkerhetsrapport:** `OWASP-2025-2026-Report.md` lagt til som referanse
+
+### 🟡 Delvis Ferdig — Steg 3.1 (Frontend Integration)
+Følgende sider er koblet til backend:
+- ✅ `/login` — OTP-flyt (e-post → kode → dashboard)
+- ✅ `/chat` — Send/motta meldinger, direct chat, overføring til repo
+- ✅ `/repo/[name]/chat` — Repo-spesifikk chat med samtaleliste
+- ✅ `/skills` — Toggle, opprett, slett, forhåndsvisning
+- ✅ `/settings` — Modellstrategi, profil, integrasjoner
+- ✅ `/settings/security` — Audit log viewer med statistikk og filtrering
+- ✅ API-klient (`api.ts`) med Bearer token auth
+- ⬜ `/home` — Bruker fortsatt placeholder-data (ikke koblet til ekte stats)
+- ⬜ `/environments` — Repo-kontekst finnes men viser ikke backend-data
+- ⬜ `/repo/[name]/memory` — Ikke implementert
+- ⬜ `/repo/[name]/tasks` — Ikke implementert
+
+### 🔧 Gjenstår
+- **Steg 2.6:** Memory Decay
+- **Steg 3.1:** Fullføre resterende frontend-sider (/home stats, /environments, /repo/[name]/memory, /repo/[name]/tasks)
+- **Steg 3.2:** Review System
+- **Steg 3.3:** Ende-til-ende test
+- **Fase 4:** MCP, Templates, Non-Technical UX
+- **Fase 5:** Component Marketplace
+- **OWASP-tiltak:** Sikkerhetsforbedringer identifisert i OWASP-rapporten (se egen seksjon)
 
 ---
 
@@ -129,7 +169,7 @@ Sider:
 
 ### FASE 1: Foundation + Auth (Dag 1-2, ~16 timer)
 
-#### Steg 1.1: Users-service + OTP Auth (3-4 timer)
+#### Steg 1.1: Users-service + OTP Auth (3-4 timer) ✅ FERDIG
 **Mål:** E-post OTP login uten passord
 
 **Implementer:**
@@ -151,6 +191,14 @@ Sider:
 **Ferdig når:** `encore test ./users/...` passerer, login fungerer
 
 **Se:** `ENDRINGER-AUTH-SKILLS-REKKEFØLGE.md` for full spec
+
+##### Tilleggsarbeid utover plan (Steg 1.1):
+- `POST /users/update-profile` — oppdater visningsnavn og avatarfarge ✅
+- `GET /users/me` — hent full brukerprofil med preferences ✅
+- `POST /users/get` — intern service-to-service endepunkt ✅
+- `POST /users/preferences` — oppdater JSONB preferences med `getAuthData()` (ikke userId fra body) ✅
+- COALESCE-fix for NULL JSONB merge: `COALESCE(preferences, '{}'::jsonb) || ...` i updatePreferences og updateProfile ✅
+- Frontend profil-seksjon i Settings: avatarfarge-velger (8 farger), redigerbart navn med debounce, e-post/rolle visning ✅
 
 ---
 
@@ -174,7 +222,7 @@ Sider:
 
 ---
 
-#### Steg 1.3: Confidence Scoring (2-3 timer)
+#### Steg 1.3: Confidence Scoring (2-3 timer) ✅ FERDIG
 **Mål:** AI vurderer egen sikkerhet før task execution
 
 **Implementer:**
@@ -349,20 +397,31 @@ Sider:
 
 ### FASE 3: Integration & Polish (Dag 4-5, ~16 timer)
 
-#### Steg 3.1: Frontend Integration (4-5 timer)
+#### Steg 3.1: Frontend Integration (4-5 timer) 🟡 DELVIS FERDIG
 **Mål:** Koble alle frontend-sider til backend
 
 **Implementer:**
-1. API-klient med auth (Bearer token)
+1. API-klient med auth (Bearer token) ✅
 2. Pages:
-   - `/home` → Ekte stats fra backend
-   - `/chat` → Send/receive messages, start tasks
-   - `/environments` → GitHub repos med status
-   - `/skills` → Enable/disable, create custom
-   - `/settings` → Model preferences, API keys
-   - `/settings/security` → Audit log, login history
-   - `/repo/[name]/memory` → Search memories, relevance scores
-   - `/repo/[name]/tasks` → Linear tasks, filter per repo
+   - `/login` → OTP-flyt (e-post → kode → dashboard) ✅
+   - `/chat` → Send/receive messages, direct chat, context transfer ✅
+   - `/repo/[name]/chat` → Repo-spesifikk chat med samtaleliste ✅
+   - `/skills` → Enable/disable, create custom ✅
+   - `/settings` → Model preferences, profil, integrasjoner ✅
+   - `/settings/security` → Audit log, login history ✅
+   - `/home` → Ekte stats fra backend ⬜
+   - `/environments` → GitHub repos med status ⬜
+   - `/repo/[name]/memory` → Search memories, relevance scores ⬜
+   - `/repo/[name]/tasks` → Linear tasks, filter per repo ⬜
+
+##### Tilleggsarbeid utover plan (Steg 3.1):
+- **Chat Redesign:** Meldingsbobler, bruker/TF-avatarer med dynamisk farge, tidsstempler, typing-indikator, smart auto-scroll, tomme-tilstander, agent report/context transfer badges ✅
+- **Context Transfer:** `POST /chat/transfer-context` backend + frontend modal med repo-velger + redirect til repo-chat ✅
+- **Unified User Context:** `PreferencesProvider` → `useUser()` + `usePreferences()` hooks, dynamiske initialer og avatarfarge overalt ✅
+- **ModelSelector-komponent:** Auto/manuell modus, dropdown med modeller og kostnader ✅
+- **LivePreview-komponent:** Placeholder for sandbox-preview, toggle i repo-chat header ✅
+- **Samtalehåndtering:** Liste-sidebar, repo-filtrering, ny samtale, 3s polling ✅
+- **Design System:** CSS variabler (dark/light), typing-animasjon, Suisse Intl + TheFold Brand fonter ✅
 
 **Ferdig når:** Alle sider viser ekte data
 
@@ -509,6 +568,74 @@ Sider:
 
 ---
 
+### OWASP Sikkerhetstiltak (identifisert feb 2026)
+
+Basert på gjennomgang av `OWASP-2025-2026-Report.md` (OWASP Top 10:2025, ASVS 5.0, Agentic Applications 2026).
+
+#### Identifiserte gap i TheFold:
+
+**A01 — Broken Access Control:**
+- ⬜ Chat-endepunkter (`/chat/history`, `/chat/send`) verifiserer ikke at brukeren eier samtalen (IDOR-sårbarhet)
+- ⬜ Mangler `conversation_owner` kobling mellom `messages.conversation_id` og `users.id`
+- ✅ Alle API-endepunkter krever `auth: true`
+
+**A02 — Security Misconfiguration:**
+- ⬜ CORS ikke eksplisitt konfigurert i `encore.app` (bruker Encore defaults)
+- ⬜ Mangler security headers (CSP, HSTS, X-Frame-Options) — håndteres av Encore i prod
+
+**A04 — Cryptographic Failures:**
+- ✅ HMAC-SHA256 for tokens (sterk algoritme)
+- ✅ OTP-koder hashet med SHA256 (OK for kortlevde koder)
+- ⚠️ OTP-koder logges til konsoll: `console.log(\`[OTP] Code for ${email}: ${code}\`)` — FJERN i prod
+
+**A05 — Injection:**
+- ✅ Encore.ts template literals = parameteriserte SQL-spørringer
+- ✅ Ingen direkte string-konkatenering i SQL
+
+**A07 — Identification and Authentication Failures:**
+- ✅ OTP rate limiting (5/time, 3 forsøk per kode)
+- ✅ Anti-enumerering (identisk respons uansett om e-post finnes)
+- ⬜ Ingen eksponentiell backoff på feilede forsøk
+- ⬜ Logout invaliderer ikke token server-side (token er gyldig til utløp)
+
+**A09 — Security Logging and Monitoring:**
+- ✅ Full audit logging for agent-operasjoner (17+ action types)
+- ✅ Login audit tabell (email, success, user_id)
+- ⬜ Ingen alerting på gjentatte feilede innlogginger
+
+**A10 — Mishandling of Exceptional Conditions:**
+- ⚠️ Mange `catch {}` som svelger feil stille (frontend OK, men backend bør logge)
+- ✅ `transferContext` har try/catch med fallback (fail-safe)
+
+**ASI01 — Agent Goal Hijack:**
+- ⬜ Ingen input-sanitisering på brukermeldinger før AI-kall
+- ✅ System prompts med klare grenser
+
+**ASI02 — Tool Misuse:**
+- ✅ Sandbox for kode-eksekvering (isolert)
+- ⚠️ Agent har full GitHub skrivetilgang uten per-operasjon godkjenning
+
+**ASI05 — Unexpected Code Execution:**
+- ✅ Sandbox med path traversal-beskyttelse
+- ✅ tsc + eslint validering før PR
+
+**ASI06 — Memory & Context Poisoning:**
+- ⬜ Memory extract fra samtaler uten sanitisering
+- ⬜ Ingen integritetsverifisering på lagret hukommelse
+
+**ASI08 — Cascading Failures:**
+- ⬜ Ingen circuit breakers mellom tjenester
+- ⬜ Retry-storms mulig ved agent-feil
+
+#### Prioriterte sikkerhetstiltak:
+1. ⬜ **Samtale-eierskap:** Legg til `owner_user_id` i conversations og verifiser i alle chat-endepunkter
+2. ⬜ **Fjern OTP console.log:** Fjern eller betingelsessjekk mot production
+3. ⬜ **Token-revokering:** Legg til `revoked_tokens` tabell, sjekk ved auth
+4. ⬜ **Input-sanitisering:** Sanitiser brukermeldinger før AI-kall (stripp prompt injection-mønstre)
+5. ⬜ **CORS-konfigurasjon:** Eksplisitt `global_cors` i `encore.app`
+
+---
+
 ## Viktige Prinsipper
 
 ### Token-Efficiency
@@ -541,6 +668,7 @@ Sider:
 - `THEFOLD-OVERSIKT.md` - Prosjektoversikt
 - `ENDRINGER-AUTH-SKILLS-REKKEFØLGE.md` - Auth og skills spec
 - `FRONTEND-DESIGN.md` - Design guide
+- `OWASP-2025-2026-Report.md` - Sikkerhetsreferanse (OWASP Top 10:2025, ASVS 5.0, Agentic 2026)
 
 **Detaljerte planer (lag disse filer i root):**
 - `BYGGEPLAN-V2-OPTIMIZED.md` - Token-effektiv byggeplan
@@ -553,14 +681,18 @@ Sider:
 
 ## Estimert Timeline
 
-**Med optimalisert approach:**
-- **Dag 1:** Auth + Cache + Confidence (8h)
-- **Dag 2:** Skills + Audit + Windowing (8h)
-- **Dag 3:** Incremental + Routing + Decay (8h)
-- **Dag 4:** Frontend + Review + E2E (8h)
-- **Dag 5:** Deploy + Monitor (4h)
+**Opprinnelig estimat (beholdt for referanse):**
+- **Dag 1:** Auth + Cache + Confidence (8h) ✅
+- **Dag 2:** Skills + Audit + Windowing (8h) ✅
+- **Dag 3:** Incremental + Routing + Decay (8h) ✅ (unntatt Decay)
+- **Dag 4:** Frontend + Review + E2E (8h) 🟡 (frontend delvis, review/E2E gjenstår)
+- **Dag 5:** Deploy + Monitor (4h) ⬜
 
-**Total MVP: 36 timer konsentrert arbeid**
+**Faktisk fremdrift:**
+- Fase 1 (Steg 1.1-1.3): ✅ Ferdig
+- Fase 2 (Steg 2.1-2.5): ✅ Ferdig — Steg 2.6 gjenstår
+- Fase 3 (Steg 3.1-3.3): 🟡 3.1 delvis ferdig + mye tilleggsarbeid (chat redesign, profil, context transfer)
+- Fase 4-5: ⬜ Ikke startet
 
 **Uke 2-3:** MCP, Templates, Non-technical UX
 **Uke 3+:** Component Marketplace
@@ -570,12 +702,12 @@ Sider:
 ## Success Metrics
 
 **MVP er ferdig når:**
-- [ ] OTP login fungerer
+- [x] OTP login fungerer
 - [ ] Agent kan fullføre simple tasks autonom
-- [ ] Cache hit rate >60%
-- [ ] Token usage <10K per task (vs 30K uten optimalisering)
-- [ ] Confidence scoring forhindrer dårlige tasks
-- [ ] Audit log viser full transparency
+- [x] Cache hit rate >60%
+- [x] Token usage <10K per task (vs 30K uten optimalisering)
+- [x] Confidence scoring forhindrer dårlige tasks
+- [x] Audit log viser full transparency
 - [ ] Frontend viser live progress
 - [ ] Non-technical users kan vibecode
 
@@ -590,14 +722,33 @@ Sider:
 
 ## Neste Steg
 
-**Start her:** Se nedenfor for første Claude Code prompt →
+**Umiddelbart (Fase 2 fullføring):**
+1. Steg 2.6 — Memory Decay (importance scoring, relevance formula, cleanup cron)
+
+**Kort sikt (Fase 3 fullføring):**
+2. Steg 3.1 — Fullfør resterende frontend-sider (/home stats, /environments, /repo/[name]/memory, /repo/[name]/tasks)
+3. Steg 3.2 — Review System (diff viewer, approve/reject flow)
+4. Steg 3.3 — Ende-til-ende test
+
+**Sikkerhet (OWASP-tiltak):**
+5. Samtale-eierskap (IDOR-fix)
+6. Fjern OTP console.log
+7. Token-revokering ved logout
+8. Input-sanitisering for AI-kall
+9. CORS-konfigurasjon
+
+**Mellom sikt (Fase 4):**
+10. MCP Management / App Store
+11. Template Library
+12. Non-Technical UX
+
+**Lang sikt (Fase 5):**
+13. Component Marketplace
 
 ---
 
-## 🚀 Klar for Implementering
+## 🚀 Status per februar 2026
 
-Les `CLAUDE.md` og `ENDRINGER-AUTH-SKILLS-REKKEFØLGE.md` før du begynner.
+Fase 1 og 2 (unntatt 2.6) er ferdig. Fase 3 er godt i gang med 6/10 frontend-sider koblet til backend. Chat-opplevelsen har fått en stor redesign med avatarer, typing-indikatorer, context transfer og samtalehåndtering. OWASP-gjennomgang er fullført med 5 prioriterte sikkerhetstiltak identifisert.
 
-Følg byggeplan fase for fase, test grundig mellom hvert steg.
-
-**Lykke til! 🎉**
+**Neste prioritet:** Fullføre Steg 3.1 (resterende frontend-sider) + OWASP sikkerhetstiltak.

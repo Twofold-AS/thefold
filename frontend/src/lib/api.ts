@@ -1,8 +1,9 @@
 import { getToken } from "./auth";
+import { debugToast } from "./debug";
 
 // --- Base fetch wrapper ---
 
-const API_BASE = "/api";
+const API_BASE = "http://localhost:4000";
 
 interface FetchOptions {
   method?: string;
@@ -12,27 +13,33 @@ interface FetchOptions {
 
 async function apiFetch<T>(path: string, options?: FetchOptions): Promise<T> {
   const token = getToken();
+  const url = `${API_BASE}${path}`;
+  const method = options?.method || "GET";
+  const bodyStr = options?.body ? JSON.stringify(options.body) : undefined;
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: options?.method,
+  const res = await fetch(url, {
+    method,
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
-    body: options?.body ? JSON.stringify(options.body) : undefined,
+    body: bodyStr,
   });
 
-  if (res.status === 401) {
-    throw new Error("Unauthenticated");
-  }
-
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error(error.message || `API error ${res.status}`);
+    const errBody = await res.text();
+    debugToast(method, path, bodyStr, undefined, `${res.status} ${errBody}`);
+
+    if (res.status === 401) {
+      throw new Error("Unauthenticated");
+    }
+    throw new Error(errBody || `API error ${res.status}`);
   }
 
-  return res.json();
+  const data = await res.json();
+  debugToast(method, path, bodyStr, JSON.stringify(data).substring(0, 200));
+  return data;
 }
 
 // --- Types (mirrors backend) ---
@@ -79,6 +86,7 @@ export async function sendMessage(conversationId: string, message: string, optio
   linearTaskId?: string;
   chatOnly?: boolean;
   modelOverride?: string | null;
+  skillIds?: string[];
 }) {
   return apiFetch<{
     message: Message;
@@ -359,18 +367,39 @@ export async function estimateCost(inputTokens: number, outputTokens: number, mo
   });
 }
 
-export async function getUserPreferences() {
-  return apiFetch<{
-    user: { id: string; email: string; name: string; role: string; preferences: Record<string, unknown> };
-  }>("/users/me", {
+export interface UserProfile {
+  id: string;
+  email: string;
+  name: string;
+  role: string;
+  avatarUrl: string | null;
+  preferences: Record<string, unknown>;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export async function getMe() {
+  return apiFetch<{ user: UserProfile }>("/users/me", {
     method: "GET",
   });
 }
 
-export async function updateModelMode(userId: string, modelMode: string) {
+export async function updateProfile(data: { name?: string; avatarColor?: string }) {
+  return apiFetch<{ success: boolean }>("/users/update-profile", {
+    method: "POST",
+    body: data,
+  });
+}
+
+/** @deprecated Use getMe() instead */
+export async function getUserPreferences() {
+  return getMe();
+}
+
+export async function updateModelMode(modelMode: string) {
   return apiFetch<{ success: boolean }>("/users/preferences", {
     method: "POST",
-    body: { userId, preferences: { modelMode } },
+    body: { preferences: { modelMode } },
   });
 }
 
