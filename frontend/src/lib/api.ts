@@ -264,6 +264,34 @@ export interface Skill {
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
+  // Pipeline fields
+  executionPhase?: "pre_run" | "inject" | "post_run";
+  priority?: number;
+  tokenEstimate?: number;
+  tokenBudgetMax?: number;
+  routingRules?: { keywords?: string[]; file_patterns?: string[]; labels?: string[] };
+  category?: string;
+  tags?: string[];
+  version?: string;
+  dependsOn?: string[];
+  conflictsWith?: string[];
+  // Scoring
+  successCount?: number;
+  failureCount?: number;
+  avgTokenCost?: number;
+  confidenceScore?: number;
+  lastUsedAt?: string | null;
+  totalUses?: number;
+}
+
+export interface ResolvedSkill {
+  id: string;
+  name: string;
+  phase: "pre_run" | "inject" | "post_run";
+  priority: number;
+  promptFragment: string;
+  tokenEstimate: number;
+  routingRules: Record<string, unknown>;
 }
 
 export async function listSkills(context?: string, enabledOnly?: boolean) {
@@ -314,6 +342,13 @@ export async function deleteSkill(id: string) {
   });
 }
 
+export async function getSkill(id: string) {
+  return apiFetch<{ skill: Skill }>("/skills/get", {
+    method: "POST",
+    body: { id },
+  });
+}
+
 export async function previewPrompt(context: string) {
   return apiFetch<{
     systemPrompt: string;
@@ -322,6 +357,27 @@ export async function previewPrompt(context: string) {
   }>("/skills/preview-prompt", {
     method: "POST",
     body: { context },
+  });
+}
+
+export async function resolveSkills(context: { task: string; repo?: string }) {
+  return apiFetch<{
+    result: {
+      preRunResults: unknown[];
+      injectedPrompt: string;
+      injectedSkillIds: string[];
+      tokensUsed: number;
+      postRunSkills: ResolvedSkill[];
+    };
+  }>("/skills/resolve", {
+    method: "POST",
+    body: {
+      context: {
+        ...context,
+        userId: "frontend",
+        totalTokenBudget: 4000,
+      },
+    },
   });
 }
 

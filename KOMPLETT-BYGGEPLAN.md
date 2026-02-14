@@ -1,8 +1,8 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 2.1 - Oppdatert med faktisk status
-> **Sist oppdatert:** 13. februar 2026
-> **Status:** Fase 1-2 ferdig, Fase 3 pågår
+> **Versjon:** 3.0 - Grunnmur-oppgradering fullført
+> **Sist oppdatert:** 14. februar 2026
+> **Status:** Fase 1-2 ferdig, Fase 3 i gang. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
 ---
 
@@ -82,6 +82,12 @@
 - **Backend-utvidelser:** `POST /users/update-profile` (navn, avatarColor), `GET /users/me` (full profil), `POST /users/get` (intern), COALESCE for NULL JSONB-sikkerhet
 - **Sikkerhetsrapport:** `OWASP-2025-2026-Report.md` lagt til som referanse
 
+### ✅ Ferdig — Skills Pipeline + Chat Integration
+- **Skills Pipeline (Backend):** Execution phases (pre_run/inject/post_run), automatic routing via routing_rules (keywords, file_patterns, labels), token budgeting, dependency/conflict resolution, skill scoring (success/failure/confidence), pipeline engine (resolve, executePreRun, executePostRun, logResult)
+- **Skills Frontend Redesign:** Grid layout (3/2/1 kolonner), category-badges med farger, phase-badges, confidence bar, slide-over panel for create/edit/detail, pipeline-visualisering med token-budsjett
+- **Skills i Chat:** SkillsSelector med category-farger, phase-ikoner, token-visning, "Auto"-knapp (resolve), skill-IDs lagret i meldingsmetadata, MessageSkillBadges i meldingsbobler
+- **AI Pipeline Integration:** buildSystemPromptWithPipeline() erstatter buildSystemPromptWithSkills(), alle 6 AI-endepunkter bruker pipeline, logSkillResults() etter hvert kall
+
 ### 🟡 Delvis Ferdig — Steg 3.1 (Frontend Integration)
 Følgende sider er koblet til backend:
 - ✅ `/login` — OTP-flyt (e-post → kode → dashboard)
@@ -96,10 +102,47 @@ Følgende sider er koblet til backend:
 - ⬜ `/repo/[name]/memory` — Ikke implementert
 - ⬜ `/repo/[name]/tasks` — Ikke implementert
 
+### 🏗️ Grunnmur som er bygget inn men ikke aktivert
+
+Mange features har grunnmur (database-felter, interfaces, stub-implementeringer) på plass men er ikke aktivert ennå. Se **GRUNNMUR-STATUS.md** for full oversikt med verifisert status for alle 134 features.
+
+**Nøkkeltall:**
+| Status | Antall |
+|--------|--------|
+| 🟢 AKTIVE | 87 |
+| 🟡 STUBBEDE (kode finnes, passthrough) | 18 |
+| 🔴 GRUNNMUR (DB-felter/interfaces) | 22 |
+| ⚪ PLANLAGTE (ingen kode) | 7 |
+
+**Viktigste stubbede features klare for aktivering:**
+- Skills pipeline `executePreRun` / `executePostRun` — logikk finnes, returnerer passthrough
+- Monitor health checks `code_quality` / `doc_freshness` — stub returnerer "not implemented"
+- Monitor cron — hardkodet disabled, trenger kun fjerne disable
+- Sandbox `snapshot` / `performance` steg — pipeline-plass finnes, `enabled: false`
+- Linear `updateTask` — kall fungerer men state-mapping er ufullstendig
+- 11 frontend repo sub-pages — UI-skall finnes, mangler backend-kobling
+
+**Viktigste grunnmur-felter klare for implementering:**
+- `memories.parent_memory_id` — hierarkisk minne-traversering
+- `memories.source_task_id` — task-basert minnefiltrering
+- `code_patterns.solution_embedding` — finn lignende løsninger
+- `skills.parent_skill_id`, `composable`, `output_schema` — skill-hierarki
+- `skills.marketplace_id`, `version`, `downloads`, `rating` — marketplace
+- Token-revokering, CORS — sikkerhetskritisk
+
 ### 🔧 Gjenstår
-- **Steg 2.6:** Memory Decay
-- **Steg 3.1:** Fullføre resterende frontend-sider (/home stats, /environments, /repo/[name]/memory, /repo/[name]/tasks)
-- **Steg 3.2:** Review System
+
+**Aktivere eksisterende grunnmur (raskere, kode finnes allerede):**
+- Skills pipeline pre/post-run aktivering
+- Monitor cron + manglende health checks
+- Sandbox snapshot/performance steg
+- Frontend repo sub-pages kobling
+- Linear state-mapping
+- 3 manglende logSkillResults-kall (diagnose, revise, assessConfidence)
+
+**Bygge nytt:**
+- **Steg 2.6:** Memory Decay (importance scoring, relevans-formel)
+- **Steg 3.2:** Review System (ny service, diff viewer, approve/reject)
 - **Steg 3.3:** Ende-til-ende test
 - **Fase 4:** MCP, Templates, Non-Technical UX
 - **Fase 5:** Component Marketplace
@@ -665,6 +708,7 @@ Basert på gjennomgang av `OWASP-2025-2026-Report.md` (OWASP Top 10:2025, ASVS 5
 
 **I repo root:**
 - `CLAUDE.md` - Development instructions for AI
+- `GRUNNMUR-STATUS.md` - **Detaljert status for alle 134 features** (hva er aktivt, stubbet, grunnmur, planlagt)
 - `THEFOLD-OVERSIKT.md` - Prosjektoversikt
 - `ENDRINGER-AUTH-SKILLS-REKKEFØLGE.md` - Auth og skills spec
 - `FRONTEND-DESIGN.md` - Design guide
@@ -722,28 +766,36 @@ Basert på gjennomgang av `OWASP-2025-2026-Report.md` (OWASP Top 10:2025, ASVS 5
 
 ## Neste Steg
 
-**Umiddelbart (Fase 2 fullføring):**
-1. Steg 2.6 — Memory Decay (importance scoring, relevance formula, cleanup cron)
+> Se også **GRUNNMUR-STATUS.md** for detaljert status og aktiveringsplan per feature.
 
-**Kort sikt (Fase 3 fullføring):**
-2. Steg 3.1 — Fullfør resterende frontend-sider (/home stats, /environments, /repo/[name]/memory, /repo/[name]/tasks)
-3. Steg 3.2 — Review System (diff viewer, approve/reject flow)
-4. Steg 3.3 — Ende-til-ende test
+**Aktivere eksisterende grunnmur (rask gevinst):**
+1. Skills pre/post-run pipeline — kode finnes, returnerer passthrough
+2. Monitor cron — fjern hardkodet disable, aktiver health checks
+3. logSkillResults i 3 manglende AI-endpoints
+4. Frontend /home — koble til ekte stats fra backend
+5. Frontend /environments — koble til GitHub repos
+
+**Bygge nytt (Fase 2 fullføring):**
+6. Steg 2.6 — Memory Decay (importance scoring, relevance formula, cleanup cron)
+
+**Bygge nytt (Fase 3 fullføring):**
+7. Steg 3.1 — Fullfør resterende frontend-sider (/repo sub-pages)
+8. Steg 3.2 — Review System (diff viewer, approve/reject flow)
+9. Steg 3.3 — Ende-til-ende test
 
 **Sikkerhet (OWASP-tiltak):**
-5. Samtale-eierskap (IDOR-fix)
-6. Fjern OTP console.log
-7. Token-revokering ved logout
-8. Input-sanitisering for AI-kall
-9. CORS-konfigurasjon
+10. Token-revokering ved logout (grunnmur: 🔴 — trenger ny tabell)
+11. CORS-konfigurasjon (grunnmur: 🔴 — trenger encore.app config)
+12. Input-sanitisering for AI-kall
+13. Fjern OTP console.log
 
 **Mellom sikt (Fase 4):**
-10. MCP Management / App Store
-11. Template Library
-12. Non-Technical UX
+14. MCP Management / App Store
+15. Template Library
+16. Non-Technical UX
 
 **Lang sikt (Fase 5):**
-13. Component Marketplace
+17. Component Marketplace
 
 ---
 

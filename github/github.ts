@@ -6,9 +6,9 @@ const githubToken = secret("GitHubToken");
 
 // --- GitHub API helper ---
 
-async function ghApi(path: string, options?: RequestInit & { body?: unknown }) {
+async function ghApi(path: string, options?: { method?: string; body?: unknown; headers?: Record<string, string> }) {
   const res = await fetch(`https://api.github.com${path}`, {
-    ...options,
+    method: options?.method,
     headers: {
       Authorization: `Bearer ${githubToken()}`,
       Accept: "application/vnd.github.v3+json",

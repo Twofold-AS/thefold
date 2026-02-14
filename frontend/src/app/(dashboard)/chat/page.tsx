@@ -8,12 +8,14 @@ import {
   getMainConversations,
   mainConversationId,
   transferContext,
+  listSkills,
   type Message,
   type ConversationSummary,
+  type Skill,
 } from "@/lib/api";
 import { ArrowRight, Send, MessageSquare, PanelLeftClose, PanelLeft } from "lucide-react";
 import { ModelSelector } from "@/components/ModelSelector";
-import { SkillsSelector } from "@/components/SkillsSelector";
+import { SkillsSelector, MessageSkillBadges } from "@/components/SkillsSelector";
 import { ChatToolsMenu } from "@/components/ChatToolsMenu";
 import { InlineSkillForm } from "@/components/InlineSkillForm";
 import { usePreferences, useUser } from "@/contexts/UserPreferencesContext";
@@ -40,6 +42,7 @@ export default function ChatPage() {
   const [activeSkillIds, setActiveSkillIds] = useState<string[]>([]);
   const [showSkillForm, setShowSkillForm] = useState(false);
   const [showTaskForm, setShowTaskForm] = useState(false);
+  const [allSkills, setAllSkills] = useState<Skill[]>([]);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -77,6 +80,7 @@ export default function ChatPage() {
         if (res.conversations.length > 0) setActiveConvId(res.conversations[0].id);
       })
       .catch(() => {});
+    listSkills().then((res) => setAllSkills(res.skills)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -396,13 +400,22 @@ export default function ChatPage() {
                           {msg.content}
                         </div>
 
-                        {/* Timestamp */}
+                        {/* Timestamp + Skills */}
                         <div
                           className="text-[10px] mt-1 px-1"
                           style={{ color: "var(--text-muted)" }}
                         >
                           {formatTime(msg.createdAt)}
                         </div>
+                        {msg.metadata && (() => {
+                          try {
+                            const meta = JSON.parse(msg.metadata);
+                            if (meta.skillIds?.length > 0) {
+                              return <div className="px-1"><MessageSkillBadges skillIds={meta.skillIds} allSkills={allSkills} /></div>;
+                            }
+                          } catch { /* ignore */ }
+                          return null;
+                        })()}
                       </div>
                     </div>
                   );

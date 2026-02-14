@@ -13,6 +13,7 @@ import {
   calculateSavings,
   type ModelMode,
 } from "../ai/router";
+import type { AgentExecutionContext, AttemptRecord, ErrorPattern } from "./types";
 
 // --- Database (audit log) ---
 
@@ -38,23 +39,11 @@ export interface StartTaskResponse {
   taskId: string;
 }
 
-interface TaskContext {
-  conversationId: string;
-  taskId: string;
-  taskDescription: string;
-  userMessage: string;
-  repoOwner: string;
-  repoName: string;
-  branch: string;
-  // Model routing
-  modelMode: ModelMode;
-  modelOverride?: string;
-  selectedModel: string;
-  totalCostUsd: number;
-  totalTokensUsed: number;
-}
+// TaskContext is now AgentExecutionContext from ./types
+type TaskContext = AgentExecutionContext;
 
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 5;
+const MAX_PLAN_REVISIONS = 2;
 const MAX_FILE_FIX_RETRIES = 2; // per-file incremental fix attempts
 const MAX_CHUNKS_PER_FILE = 5;
 const CHUNK_SIZE = 100; // lines per chunk
@@ -447,6 +436,23 @@ async function executeTask(ctx: TaskContext): Promise<void> {
       "working"
     );
 
+    // === STEP 5.5: Fetch error patterns from memory ===
+    try {
+      const errorPatternResults = await memory.search({
+        query: `error pattern: ${ctx.taskDescription.substring(0, 200)}`,
+        limit: 5,
+        memoryType: "error_pattern",
+      });
+      ctx.errorPatterns = errorPatternResults.results.map((r) => ({
+        pattern: r.content,
+        frequency: r.accessCount,
+        lastSeen: r.createdAt,
+        knownFix: undefined,
+      }));
+    } catch {
+      ctx.errorPatterns = [];
+    }
+
     // === STEP 6: Create sandbox and execute plan ===
     const sandboxId = await auditedStep(ctx, "sandbox_created", {
       repoOwner: ctx.repoOwner,
@@ -454,21 +460,22 @@ async function executeTask(ctx: TaskContext): Promise<void> {
     }, () => sandbox.create({ repoOwner: ctx.repoOwner, repoName: ctx.repoName }));
 
     const allFiles: { path: string; content: string; action: string }[] = [];
-    let attempt = 0;
     let lastError: string | null = null;
+    const previousErrors: string[] = [];
 
-    while (attempt < MAX_RETRIES) {
-      attempt++;
+    while (ctx.totalAttempts < ctx.maxAttempts) {
+      ctx.totalAttempts++;
+      const attemptStart = Date.now();
 
       try {
         // Execute each step in the plan with incremental validation
-        for (const step of plan.plan) {
+        for (let stepIdx = 0; stepIdx < plan.plan.length; stepIdx++) {
+          const step = plan.plan[stepIdx];
+
           if (step.action === "create_file" || step.action === "modify_file") {
             let fileContent = step.content!;
-            let filePassed = false;
 
             for (let fileAttempt = 0; fileAttempt <= MAX_FILE_FIX_RETRIES; fileAttempt++) {
-              // Write the file
               await auditedStep(ctx, "file_written", {
                 path: step.filePath,
                 action: step.action,
@@ -480,7 +487,6 @@ async function executeTask(ctx: TaskContext): Promise<void> {
                 content: fileContent,
               }));
 
-              // Incremental validation (only for .ts/.tsx files)
               if (step.filePath!.endsWith(".ts") || step.filePath!.endsWith(".tsx")) {
                 const incVal = await auditedStep(ctx, "validation_incremental", {
                   filePath: step.filePath,
@@ -490,21 +496,12 @@ async function executeTask(ctx: TaskContext): Promise<void> {
                   filePath: step.filePath!,
                 }));
 
-                if (incVal.success) {
-                  filePassed = true;
-                  break;
-                }
+                if (incVal.success) break;
 
-                // Incremental validation failed
                 await audit({
                   sessionId: ctx.conversationId,
                   actionType: "validation_incremental_failed",
-                  details: {
-                    filePath: step.filePath,
-                    errors: incVal.errors,
-                    attempt: fileAttempt,
-                    durationMs: incVal.durationMs,
-                  },
+                  details: { filePath: step.filePath, errors: incVal.errors, attempt: fileAttempt },
                   success: false,
                   errorMessage: incVal.output.substring(0, 500),
                   taskId: ctx.taskId,
@@ -512,12 +509,7 @@ async function executeTask(ctx: TaskContext): Promise<void> {
                 });
 
                 if (fileAttempt < MAX_FILE_FIX_RETRIES) {
-                  // Ask AI to fix just this file
-                  await report(
-                    ctx,
-                    `Feil i ${step.filePath} — fikser (forsøk ${fileAttempt + 1})...`,
-                    "working"
-                  );
+                  await report(ctx, `Feil i ${step.filePath} — fikser (forsøk ${fileAttempt + 1})...`, "working");
 
                   const fixResult = await auditedStep(ctx, "file_fix_requested", {
                     filePath: step.filePath,
@@ -536,19 +528,16 @@ async function executeTask(ctx: TaskContext): Promise<void> {
                   ctx.totalCostUsd += fixResult.costUsd;
                   ctx.totalTokensUsed += fixResult.tokensUsed;
 
-                  // Find the fixed content from the plan
                   const fixStep = fixResult.plan.find(
                     (s) => (s.action === "create_file" || s.action === "modify_file") && s.filePath === step.filePath
                   );
                   if (fixStep?.content) {
                     fileContent = fixStep.content;
                   } else {
-                    // AI didn't return a fix for this specific file — break out
                     break;
                   }
                 }
               } else {
-                filePassed = true;
                 break;
               }
             }
@@ -560,58 +549,168 @@ async function executeTask(ctx: TaskContext): Promise<void> {
             });
 
           } else if (step.action === "delete_file") {
-            await auditedStep(ctx, "file_deleted", {
-              path: step.filePath,
-            }, () => sandbox.deleteFile({
-              sandboxId: sandboxId.id,
-              path: step.filePath!,
-            }));
+            await auditedStep(ctx, "file_deleted", { path: step.filePath }, () =>
+              sandbox.deleteFile({ sandboxId: sandboxId.id, path: step.filePath! })
+            );
             allFiles.push({ path: step.filePath!, content: "", action: "delete" });
           } else if (step.action === "run_command") {
-            await auditedStep(ctx, "command_executed", {
-              command: step.command,
-            }, () => sandbox.runCommand({
-              sandboxId: sandboxId.id,
-              command: step.command!,
-              timeout: 60,
-            }));
+            await auditedStep(ctx, "command_executed", { command: step.command }, () =>
+              sandbox.runCommand({ sandboxId: sandboxId.id, command: step.command!, timeout: 60 })
+            );
           }
+
+          // Record attempt
+          ctx.attemptHistory.push({
+            stepIndex: stepIdx,
+            action: step.action,
+            result: "success",
+            duration: Date.now() - attemptStart,
+            tokensUsed: 0,
+          });
         }
 
         // === STEP 7: Validate ===
-        await report(ctx, "✅ Validerer kode (typesjekk, lint)...", "working");
+        await report(ctx, "Validerer kode (typesjekk, lint, tester)...", "working");
 
         const validation = await auditedStep(ctx, "validation_run", {
-          attempt,
-          maxRetries: MAX_RETRIES,
+          attempt: ctx.totalAttempts,
+          maxRetries: ctx.maxAttempts,
         }, () => sandbox.validate({ sandboxId: sandboxId.id }));
 
         if (!validation.success) {
           lastError = validation.output;
+          previousErrors.push(validation.output.substring(0, 500));
 
           await audit({
             sessionId: ctx.conversationId,
             actionType: "validation_failed",
-            details: {
-              attempt,
-              output: validation.output.substring(0, 1000),
-            },
+            details: { attempt: ctx.totalAttempts, output: validation.output.substring(0, 1000) },
             success: false,
             errorMessage: validation.output.substring(0, 500),
             taskId: ctx.taskId,
             repoName: `${ctx.repoOwner}/${ctx.repoName}`,
           });
 
-          if (attempt < MAX_RETRIES) {
-            await report(
-              ctx,
-              `⚠️ Validering feilet (forsøk ${attempt}/${MAX_RETRIES}):\n\`\`\`\n${validation.output.substring(0, 500)}\n\`\`\`\nPrøver å fikse...`,
-              "working"
-            );
+          if (ctx.totalAttempts < ctx.maxAttempts) {
+            // === META-REASONING: Diagnose the failure ===
+            await report(ctx, `Analyserer feil (forsøk ${ctx.totalAttempts}/${ctx.maxAttempts})...`, "working");
 
+            const diagResult = await auditedStep(ctx, "failure_diagnosed", {
+              attempt: ctx.totalAttempts,
+              error: validation.output.substring(0, 500),
+            }, () => ai.diagnoseFailure({
+              task: ctx.taskDescription,
+              plan: plan.plan,
+              currentStep: plan.plan.length - 1,
+              error: validation.output,
+              previousErrors,
+              codeContext: allFiles.map((f) => `--- ${f.path} ---\n${f.content.substring(0, 1000)}`).join("\n\n"),
+              model: ctx.selectedModel,
+            }));
+
+            ctx.totalCostUsd += diagResult.costUsd;
+            ctx.totalTokensUsed += diagResult.tokensUsed;
+            const diagnosis = diagResult.diagnosis;
+
+            await audit({
+              sessionId: ctx.conversationId,
+              actionType: "diagnosis_result",
+              details: { diagnosis },
+              success: true,
+              taskId: ctx.taskId,
+              repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+            });
+
+            // Act on diagnosis
+            if (diagnosis.rootCause === "bad_plan" && ctx.planRevisions < ctx.maxPlanRevisions) {
+              // Revise the plan entirely
+              await report(ctx, `Plan er feil — lager ny plan (revisjon ${ctx.planRevisions + 1})...`, "working");
+              ctx.planRevisions++;
+
+              plan = await auditedStep(ctx, "plan_revised", {
+                revision: ctx.planRevisions,
+                diagnosis: diagnosis.rootCause,
+              }, () => ai.revisePlan({
+                task: ctx.taskDescription,
+                originalPlan: plan.plan,
+                diagnosis,
+                constraints: ["avoid_previous_approach", "simpler_solution"],
+                model: ctx.selectedModel,
+              }));
+
+              ctx.totalCostUsd += plan.costUsd;
+              ctx.totalTokensUsed += plan.tokensUsed;
+              allFiles.length = 0; // Reset files for new plan
+              continue;
+
+            } else if (diagnosis.rootCause === "implementation_error" || diagnosis.suggestedAction === "fix_code") {
+              // Fix code with error context
+              await report(ctx, `Implementeringsfeil — fikser kode...`, "working");
+
+              plan = await auditedStep(ctx, "plan_retry", {
+                attempt: ctx.totalAttempts,
+                diagnosis: diagnosis.rootCause,
+                model: ctx.selectedModel,
+              }, () => ai.planTask({
+                task: ctx.taskDescription,
+                projectStructure: projectTree.treeString,
+                relevantFiles,
+                memoryContext: memories.results.map((r) => r.content),
+                docsContext: docsResults.docs.map((d) => `[${d.source}] ${d.content}`),
+                previousAttempt: planSummary,
+                errorMessage: validation.output,
+                model: ctx.selectedModel,
+              }));
+
+              ctx.totalCostUsd += plan.costUsd;
+              ctx.totalTokensUsed += plan.tokensUsed;
+              continue;
+
+            } else if (diagnosis.rootCause === "missing_context") {
+              // Fetch more context and retry
+              await report(ctx, `Mangler kontekst — henter mer informasjon...`, "working");
+
+              const moreMemories = await memory.search({
+                query: `${ctx.taskDescription} ${validation.output.substring(0, 200)}`,
+                limit: 10,
+              });
+
+              plan = await auditedStep(ctx, "plan_retry_with_context", {
+                extraMemories: moreMemories.results.length,
+              }, () => ai.planTask({
+                task: ctx.taskDescription,
+                projectStructure: projectTree.treeString,
+                relevantFiles,
+                memoryContext: moreMemories.results.map((r) => r.content),
+                docsContext: docsResults.docs.map((d) => `[${d.source}] ${d.content}`),
+                errorMessage: validation.output,
+                model: ctx.selectedModel,
+              }));
+
+              ctx.totalCostUsd += plan.costUsd;
+              ctx.totalTokensUsed += plan.tokensUsed;
+              continue;
+
+            } else if (diagnosis.rootCause === "impossible_task") {
+              // Escalate to human
+              await report(ctx, `Denne oppgaven ser umulig ut: ${diagnosis.reason}`, "needs_input");
+              await linear.updateTask({
+                taskId: ctx.taskId,
+                state: "blocked",
+                comment: `TheFold klarer ikke denne oppgaven: ${diagnosis.reason}`,
+              });
+              return;
+
+            } else if (diagnosis.rootCause === "environment_error") {
+              // Wait and retry
+              await report(ctx, `Miljøfeil — venter 30 sekunder og prøver igjen...`, "working");
+              await new Promise((resolve) => setTimeout(resolve, 30_000));
+              continue;
+            }
+
+            // Default: standard retry
             plan = await auditedStep(ctx, "plan_retry", {
-              attempt,
-              previousError: validation.output.substring(0, 500),
+              attempt: ctx.totalAttempts,
               model: ctx.selectedModel,
             }, () => ai.planTask({
               task: ctx.taskDescription,
@@ -626,17 +725,24 @@ async function executeTask(ctx: TaskContext): Promise<void> {
 
             ctx.totalCostUsd += plan.costUsd;
             ctx.totalTokensUsed += plan.tokensUsed;
-
-            continue; // retry
+            continue;
           }
 
-          throw new Error(`Validation failed after ${MAX_RETRIES} attempts: ${validation.output}`);
+          throw new Error(`Validation failed after ${ctx.maxAttempts} attempts: ${validation.output}`);
         }
 
-        // Validation passed! Break out of retry loop.
+        // Validation passed!
         break;
       } catch (error) {
-        if (attempt >= MAX_RETRIES) throw error;
+        ctx.attemptHistory.push({
+          stepIndex: -1,
+          action: "validation",
+          result: "failure",
+          error: error instanceof Error ? error.message : String(error),
+          duration: Date.now() - attemptStart,
+          tokensUsed: 0,
+        });
+        if (ctx.totalAttempts >= ctx.maxAttempts) throw error;
       }
     }
 
@@ -693,7 +799,7 @@ async function executeTask(ctx: TaskContext): Promise<void> {
       comment: `## TheFold har fullført denne oppgaven\n\n${review.documentation}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.qualityScore}/10\n\n${review.concerns.length > 0 ? "**Bekymringer:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : "Ingen bekymringer."}`,
     }));
 
-    // === STEP 11: Store memories ===
+    // === STEP 11: Store memories + error patterns ===
     for (const mem of review.memoriesExtracted) {
       await auditedStep(ctx, "memory_stored", {
         content: mem.substring(0, 200),
@@ -702,7 +808,24 @@ async function executeTask(ctx: TaskContext): Promise<void> {
         content: mem,
         category: "decision",
         linearTaskId: ctx.taskId,
+        memoryType: "decision",
+        sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
+        sourceTaskId: ctx.taskId,
       }));
+    }
+
+    // Store error patterns for future learning
+    if (previousErrors.length > 0) {
+      const errorSummary = previousErrors.join("\n---\n").substring(0, 3000);
+      await memory.store({
+        content: `Error patterns from task ${ctx.taskId}:\n${errorSummary}\n\nResolution: Task completed after ${ctx.totalAttempts} attempts with ${ctx.planRevisions} plan revisions.`,
+        category: "error_pattern",
+        memoryType: "error_pattern",
+        sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
+        sourceTaskId: ctx.taskId,
+        tags: ["error_pattern", "auto_resolved"],
+        ttlDays: 180,
+      });
     }
 
     // === STEP 12: Clean up sandbox ===
@@ -723,7 +846,7 @@ async function executeTask(ctx: TaskContext): Promise<void> {
         qualityScore: review.qualityScore,
         concerns: review.concerns,
         totalDurationMs: Date.now() - taskStart,
-        attempts: attempt,
+        attempts: ctx.totalAttempts,
         prUrl: pr.url,
         costTracking: {
           totalCostUsd: ctx.totalCostUsd,
@@ -817,6 +940,13 @@ export const startTask = api(
       selectedModel: "claude-sonnet-4-5-20250929", // default, oppdateres etter complexity assessment
       totalCostUsd: 0,
       totalTokensUsed: 0,
+      // Meta-reasoning
+      attemptHistory: [],
+      errorPatterns: [],
+      totalAttempts: 0,
+      maxAttempts: MAX_RETRIES,
+      planRevisions: 0,
+      maxPlanRevisions: MAX_PLAN_REVISIONS,
     };
 
     // Fire and forget — agent reports progress via pub/sub

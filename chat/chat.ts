@@ -147,10 +147,14 @@ export const send = api(
   async (req: SendRequest): Promise<SendResponse> => {
     await ensureConversationOwner(req.conversationId);
 
-    // Store user message
+    // Store user message (include skillIds in metadata if present)
+    const userMetadata = req.skillIds && req.skillIds.length > 0
+      ? JSON.stringify({ skillIds: req.skillIds })
+      : null;
+
     const msg = await db.queryRow<Message>`
       INSERT INTO messages (conversation_id, role, content, message_type, metadata)
-      VALUES (${req.conversationId}, 'user', ${req.message}, 'chat', NULL)
+      VALUES (${req.conversationId}, 'user', ${req.message}, 'chat', ${userMetadata})
       RETURNING id, conversation_id as "conversationId", role, content,
                 message_type as "messageType", metadata, created_at as "createdAt"
     `;

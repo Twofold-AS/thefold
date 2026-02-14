@@ -202,66 +202,175 @@ export const runCommand = api(
   }
 );
 
-// Validate the sandbox code (typecheck + lint)
+// --- Validation Pipeline (DEL 3A) ---
+
+interface ValidationStepResult {
+  step: string;
+  success: boolean;
+  errors: string[];
+  warnings: string[];
+  metrics?: Record<string, number>;
+}
+
+interface ValidationPipelineResult {
+  success: boolean;
+  steps: ValidationStepResult[];
+  totalDuration: number;
+}
+
+async function runTypeCheck(repoDir: string): Promise<ValidationStepResult> {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  try {
+    const tscResult = execSync("npx tsc --noEmit 2>&1", {
+      cwd: repoDir,
+      timeout: 60_000,
+    }).toString();
+    if (tscResult.includes("warning")) {
+      warnings.push(tscResult.substring(0, 500));
+    }
+  } catch (error: any) {
+    const tscOutput = error.stdout?.toString() || error.message;
+    errors.push(tscOutput.substring(0, 2000));
+  }
+
+  return { step: "typecheck", success: errors.length === 0, errors, warnings };
+}
+
+async function runLint(repoDir: string): Promise<ValidationStepResult> {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  try {
+    const eslintResult = execSync("npx eslint . --no-error-on-unmatched-pattern 2>&1", {
+      cwd: repoDir,
+      timeout: 60_000,
+    }).toString();
+    if (eslintResult.includes("warning")) {
+      warnings.push(eslintResult.substring(0, 500));
+    }
+  } catch (error: any) {
+    const eslintOutput = error.stdout?.toString() || error.message;
+    errors.push(eslintOutput.substring(0, 2000));
+  }
+
+  return { step: "lint", success: errors.length === 0, errors, warnings };
+}
+
+async function runTests(repoDir: string): Promise<ValidationStepResult> {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const metrics: Record<string, number> = {};
+
+  // Check if tests exist
+  const hasTestConfig =
+    fs.existsSync(`${repoDir}/jest.config.ts`) ||
+    fs.existsSync(`${repoDir}/jest.config.js`) ||
+    fs.existsSync(`${repoDir}/vitest.config.ts`) ||
+    fs.existsSync(`${repoDir}/vitest.config.js`);
+
+  // Check package.json for test script
+  let hasTestScript = false;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(`${repoDir}/package.json`, "utf-8"));
+    hasTestScript = !!pkg.scripts?.test;
+  } catch { /* no package.json */ }
+
+  if (!hasTestConfig && !hasTestScript) {
+    return { step: "test", success: true, errors, warnings: ["No test configuration found — skipped"], metrics };
+  }
+
+  try {
+    const testResult = execSync("npm test --if-present 2>&1", {
+      cwd: repoDir,
+      timeout: 120_000,
+    }).toString();
+
+    // Try to parse test counts from output
+    const passMatch = testResult.match(/(\d+)\s+pass/i);
+    const failMatch = testResult.match(/(\d+)\s+fail/i);
+    if (passMatch) metrics.testsPassed = parseInt(passMatch[1]);
+    if (failMatch) metrics.testsFailed = parseInt(failMatch[1]);
+  } catch (error: any) {
+    const testOutput = error.stdout?.toString() || error.message;
+    errors.push(testOutput.substring(0, 2000));
+
+    const failMatch = testOutput.match(/(\d+)\s+fail/i);
+    if (failMatch) metrics.testsFailed = parseInt(failMatch[1]);
+  }
+
+  return { step: "test", success: errors.length === 0, errors, warnings, metrics };
+}
+
+async function runSnapshotComparison(_repoDir: string): Promise<ValidationStepResult> {
+  return { step: "snapshot", success: true, errors: [], warnings: ["Snapshot comparison not yet enabled"] };
+}
+
+async function runPerformanceBenchmark(_repoDir: string): Promise<ValidationStepResult> {
+  return { step: "performance", success: true, errors: [], warnings: ["Performance benchmarks not yet enabled"] };
+}
+
+interface PipelineStep {
+  name: string;
+  enabled: boolean;
+  run: (repoDir: string) => Promise<ValidationStepResult>;
+}
+
+const VALIDATION_PIPELINE: PipelineStep[] = [
+  { name: "typecheck", enabled: true, run: runTypeCheck },
+  { name: "lint", enabled: true, run: runLint },
+  { name: "test", enabled: true, run: runTests },
+  { name: "snapshot", enabled: false, run: runSnapshotComparison },
+  { name: "performance", enabled: false, run: runPerformanceBenchmark },
+];
+
+// Validate the sandbox code via pipeline
 export const validate = api(
   { method: "POST", path: "/sandbox/validate", expose: false },
   async (req: ValidateRequest): Promise<ValidateResponse> => {
     const dir = ensureSandboxExists(req.sandboxId);
     const repoDir = `${dir}/repo`;
-    const errors: string[] = [];
+    const pipelineStart = Date.now();
+
+    const steps: ValidationStepResult[] = [];
+    const allErrors: string[] = [];
+
+    for (const step of VALIDATION_PIPELINE) {
+      if (!step.enabled) {
+        const stub = await step.run(repoDir);
+        steps.push(stub);
+        continue;
+      }
+
+      const result = await step.run(repoDir);
+      steps.push(result);
+      allErrors.push(...result.errors);
+    }
+
+    const pipelineResult: ValidationPipelineResult = {
+      success: allErrors.length === 0,
+      steps,
+      totalDuration: Date.now() - pipelineStart,
+    };
+
+    // Build output string for backward compatibility
     let output = "";
-
-    // 1. TypeScript typecheck
-    try {
-      const tscResult = execSync("npx tsc --noEmit 2>&1", {
-        cwd: repoDir,
-        timeout: 60_000,
-      }).toString();
-      output += `=== TypeScript ===\n${tscResult || "No errors"}\n\n`;
-    } catch (error: any) {
-      const tscOutput = error.stdout?.toString() || error.message;
-      output += `=== TypeScript ERRORS ===\n${tscOutput}\n\n`;
-      errors.push(`TypeScript: ${tscOutput.substring(0, 500)}`);
-    }
-
-    // 2. ESLint (if configured)
-    try {
-      if (fs.existsSync(`${repoDir}/.eslintrc.json`) || fs.existsSync(`${repoDir}/eslint.config.js`)) {
-        const eslintResult = execSync("npx eslint . --ext .ts,.tsx 2>&1", {
-          cwd: repoDir,
-          timeout: 60_000,
-        }).toString();
-        output += `=== ESLint ===\n${eslintResult || "No errors"}\n\n`;
+    for (const step of steps) {
+      if (step.errors.length > 0) {
+        output += `=== ${step.step.toUpperCase()} ERRORS ===\n${step.errors.join("\n")}\n\n`;
+      } else if (step.warnings.length > 0) {
+        output += `=== ${step.step.toUpperCase()} ===\n${step.warnings.join("\n")}\n\n`;
+      } else {
+        output += `=== ${step.step.toUpperCase()} ===\nNo errors\n\n`;
       }
-    } catch (error: any) {
-      const eslintOutput = error.stdout?.toString() || error.message;
-      output += `=== ESLint ERRORS ===\n${eslintOutput}\n\n`;
-      errors.push(`ESLint: ${eslintOutput.substring(0, 500)}`);
     }
-
-    // 3. Run tests (if they exist)
-    try {
-      const hasTests =
-        fs.existsSync(`${repoDir}/jest.config.ts`) ||
-        fs.existsSync(`${repoDir}/vitest.config.ts`);
-
-      if (hasTests) {
-        const testResult = execSync("npm test -- --passWithNoTests 2>&1", {
-          cwd: repoDir,
-          timeout: 120_000,
-        }).toString();
-        output += `=== Tests ===\n${testResult}\n\n`;
-      }
-    } catch (error: any) {
-      const testOutput = error.stdout?.toString() || error.message;
-      output += `=== Test ERRORS ===\n${testOutput}\n\n`;
-      errors.push(`Tests: ${testOutput.substring(0, 500)}`);
-    }
+    output += `Pipeline duration: ${pipelineResult.totalDuration}ms`;
 
     return {
-      success: errors.length === 0,
+      success: pipelineResult.success,
       output: output.substring(0, 100_000),
-      errors,
+      errors: allErrors,
     };
   }
 );

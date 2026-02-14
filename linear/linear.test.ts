@@ -7,7 +7,7 @@ describe("Linear service", () => {
       "should return a list of tasks (can be empty)",
       { timeout: 30000 },
       async () => {
-        const result = await getAssignedTasks({});
+        const result = await getAssignedTasks();
 
         expect(result).toBeDefined();
         expect(result.tasks).toBeDefined();
@@ -32,7 +32,7 @@ describe("Linear service", () => {
       "should only return tasks with thefold label",
       { timeout: 30000 },
       async () => {
-        const result = await getAssignedTasks({});
+        const result = await getAssignedTasks();
 
         expect(result).toBeDefined();
         expect(Array.isArray(result.tasks)).toBe(true);
@@ -55,7 +55,7 @@ describe("Linear service", () => {
       "should not return completed or canceled tasks",
       { timeout: 30000 },
       async () => {
-        const result = await getAssignedTasks({});
+        const result = await getAssignedTasks();
 
         expect(result).toBeDefined();
         expect(Array.isArray(result.tasks)).toBe(true);
@@ -99,7 +99,7 @@ describe("Linear service", () => {
       { timeout: 30000 },
       async () => {
         // First get a list of tasks
-        const tasks = await getAssignedTasks({});
+        const tasks = await getAssignedTasks();
 
         // If there are tasks, test getting one
         if (tasks.tasks.length > 0) {
@@ -141,7 +141,7 @@ describe("Linear service", () => {
       { timeout: 30000 },
       async () => {
         // First get a list of tasks
-        const tasks = await getAssignedTasks({});
+        const tasks = await getAssignedTasks();
 
         // If there are tasks, test updating one
         if (tasks.tasks.length > 0) {
@@ -165,7 +165,7 @@ describe("Linear service", () => {
       { timeout: 30000 },
       async () => {
         // First get a list of tasks
-        const tasks = await getAssignedTasks({});
+        const tasks = await getAssignedTasks();
 
         // If there are tasks, test updating without a comment
         if (tasks.tasks.length > 0) {
@@ -192,7 +192,7 @@ describe("Linear service", () => {
       async () => {
         // This test verifies that we can connect to Linear
         // Even if there are no tasks, it should not throw an error
-        const result = await getAssignedTasks({});
+        const result = await getAssignedTasks();
 
         expect(result).toBeDefined();
         expect(result.tasks).toBeDefined();

@@ -1,7 +1,4 @@
-import { api, APIError } from "encore.dev/api";
-import { secret } from "encore.dev/config";
-
-const anthropicKey = secret("AnthropicAPIKey");
+import { api } from "encore.dev/api";
 
 // --- Types ---
 
@@ -243,89 +240,6 @@ export function calculateSavings(
     savedPercent,
   };
 }
-
-// --- Complexity Assessment Endpoint ---
-
-interface AssessComplexityRequest {
-  taskDescription: string;
-  projectStructure?: string;
-  fileCount?: number;
-}
-
-interface AssessComplexityResponse {
-  complexity: number; // 1-10
-  reasoning: string;
-  suggestedModel: string;
-  tokensUsed: number;
-}
-
-export const assessComplexity = api(
-  { method: "POST", path: "/ai/assess-complexity", expose: false },
-  async (req: AssessComplexityRequest): Promise<AssessComplexityResponse> => {
-    // Use Haiku for complexity assessment itself (meta-task, should be cheap)
-    const Anthropic = (await import("@anthropic-ai/sdk")).default;
-    const client = new Anthropic({ apiKey: anthropicKey() });
-
-    let prompt = `Rate the complexity of this development task on a scale of 1-10.
-
-## Task
-${req.taskDescription}
-`;
-
-    if (req.projectStructure) {
-      prompt += `\n## Project Structure (${req.fileCount || "unknown"} files)\n\`\`\`\n${req.projectStructure.substring(0, 2000)}\n\`\`\`\n`;
-    }
-
-    prompt += `
-## Complexity Scale
-1-3: Simple (rename variable, fix typo, add field, small UI change)
-4-6: Medium (new endpoint, refactor function, add feature, write tests)
-7-10: Complex (new service, multi-file architecture, debugging race conditions, cross-service changes)
-
-Respond with JSON only:
-{"complexity": <number 1-10>, "reasoning": "<one sentence>"}`;
-
-    const response = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 256,
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    const text = response.content.find((c) => c.type === "text");
-    if (!text || text.type !== "text") {
-      throw APIError.internal("no text in complexity assessment response");
-    }
-
-    const tokensUsed = response.usage.input_tokens + response.usage.output_tokens;
-
-    try {
-      // Strip markdown fences if present
-      let jsonText = text.text.trim();
-      const codeBlockMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-      if (codeBlockMatch) {
-        jsonText = codeBlockMatch[1].trim();
-      }
-
-      const parsed = JSON.parse(jsonText);
-      const complexity = Math.max(1, Math.min(10, Math.round(parsed.complexity)));
-
-      return {
-        complexity,
-        reasoning: parsed.reasoning || "",
-        suggestedModel: selectOptimalModel(complexity, "auto"),
-        tokensUsed,
-      };
-    } catch {
-      // Default to medium complexity if parsing fails
-      return {
-        complexity: 5,
-        reasoning: "Failed to parse complexity assessment, defaulting to medium",
-        suggestedModel: "claude-sonnet-4-5-20250929",
-        tokensUsed,
-      };
-    }
-  }
-);
 
 // --- Model Listing Endpoint ---
 

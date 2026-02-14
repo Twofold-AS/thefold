@@ -61,7 +61,7 @@ interface UpdateTaskResponse {
 // Get tasks assigned to TheFold (with "thefold" label)
 export const getAssignedTasks = api(
   { method: "POST", path: "/linear/tasks", expose: true, auth: true },
-  async (_req: {}): Promise<TaskListResponse> => {
+  async (): Promise<TaskListResponse> => {
     const data = await gql(`
       query {
         issues(filter: {

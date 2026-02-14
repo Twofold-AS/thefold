@@ -2,6 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import log from "encore.dev/log";
 import { skills } from "~encore/clients";
 import { estimateCost, getUpgradeModel, type CostEstimate } from "./router";
 
@@ -151,6 +152,8 @@ interface AICallResponse {
   modelUsed: string;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   costEstimate: CostEstimate;
 }
 
@@ -198,10 +201,19 @@ async function callAIWithFallback(options: AICallOptions): Promise<AICallRespons
 async function callAnthropic(options: AICallOptions): Promise<AICallResponse> {
   const client = new Anthropic({ apiKey: anthropicKey() });
 
+  // DEL 7A: Use cache_control for system prompts (stable per conversation)
+  const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
+    {
+      type: "text",
+      text: options.system,
+      cache_control: { type: "ephemeral" },
+    },
+  ];
+
   const response = await client.messages.create({
     model: options.model,
     max_tokens: options.maxTokens,
-    system: options.system,
+    system: systemBlocks,
     messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
   });
 
@@ -212,6 +224,18 @@ async function callAnthropic(options: AICallOptions): Promise<AICallResponse> {
 
   const inputTokens = response.usage.input_tokens;
   const outputTokens = response.usage.output_tokens;
+  const cacheReadTokens = (response.usage as any).cache_read_input_tokens ?? 0;
+  const cacheCreationTokens = (response.usage as any).cache_creation_input_tokens ?? 0;
+
+  // DEL 7B: Token tracking
+  logTokenUsage({
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    model: options.model,
+    endpoint: "anthropic",
+  });
 
   return {
     content: text.text,
@@ -220,6 +244,8 @@ async function callAnthropic(options: AICallOptions): Promise<AICallResponse> {
     modelUsed: options.model,
     inputTokens,
     outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
     costEstimate: estimateCost(inputTokens, outputTokens, options.model),
   };
 }
@@ -255,6 +281,8 @@ async function callOpenAI(options: AICallOptions): Promise<AICallResponse> {
   const inputTokens = response.usage?.prompt_tokens || 0;
   const outputTokens = response.usage?.completion_tokens || 0;
 
+  logTokenUsage({ inputTokens, outputTokens, cacheReadTokens: 0, cacheCreationTokens: 0, model: options.model, endpoint: "openai" });
+
   return {
     content: choice.message.content,
     tokensUsed: response.usage?.total_tokens || 0,
@@ -262,6 +290,8 @@ async function callOpenAI(options: AICallOptions): Promise<AICallResponse> {
     modelUsed: options.model,
     inputTokens,
     outputTokens,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
     costEstimate: estimateCost(inputTokens, outputTokens, options.model),
   };
 }
@@ -301,6 +331,8 @@ async function callMoonshot(options: AICallOptions): Promise<AICallResponse> {
   const inputTokensMoon = response.usage?.prompt_tokens || 0;
   const outputTokensMoon = response.usage?.completion_tokens || 0;
 
+  logTokenUsage({ inputTokens: inputTokensMoon, outputTokens: outputTokensMoon, cacheReadTokens: 0, cacheCreationTokens: 0, model: options.model, endpoint: "moonshot" });
+
   return {
     content: choice.message.content,
     tokensUsed: response.usage?.total_tokens || 0,
@@ -308,8 +340,28 @@ async function callMoonshot(options: AICallOptions): Promise<AICallResponse> {
     modelUsed: options.model,
     inputTokens: inputTokensMoon,
     outputTokens: outputTokensMoon,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
     costEstimate: estimateCost(inputTokensMoon, outputTokensMoon, options.model),
   };
+}
+
+// --- Token Tracking (DEL 7B) ---
+
+interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  model: string;
+  endpoint: string;
+}
+
+function logTokenUsage(usage: TokenUsage): void {
+  const cacheSavings = usage.cacheReadTokens > 0
+    ? ` (cache read: ${usage.cacheReadTokens}, cache creation: ${usage.cacheCreationTokens})`
+    : "";
+  log.info(`[AI Token Usage] ${usage.model} via ${usage.endpoint}: ${usage.inputTokens} in / ${usage.outputTokens} out${cacheSavings}`);
 }
 
 // --- System Prompts ---
@@ -435,9 +487,8 @@ Respond with JSON only matching this exact shape:
 Be specific about uncertainties and questions. Never say "I'm not sure" — say exactly WHAT you're not sure about.`,
 };
 
-// --- Skills Integration ---
+// --- Skills Pipeline Integration ---
 
-// Map systemContext to skills context
 const CONTEXT_TO_SKILLS_CONTEXT: Record<string, string> = {
   direct_chat: "chat",
   agent_planning: "planning",
@@ -446,27 +497,95 @@ const CONTEXT_TO_SKILLS_CONTEXT: Record<string, string> = {
   confidence_assessment: "planning",
 };
 
-async function buildSystemPromptWithSkills(baseContext: string): Promise<string> {
+interface PipelineContext {
+  task: string;
+  repo?: string;
+  labels?: string[];
+  files?: string[];
+  userId?: string;
+  tokenBudget?: number;
+}
+
+interface PipelineResult {
+  systemPrompt: string;
+  skillIds: string[];
+  postRunSkillIds: string[];
+  tokensUsed: number;
+}
+
+async function buildSystemPromptWithPipeline(
+  baseContext: string,
+  pipelineCtx?: PipelineContext
+): Promise<PipelineResult> {
   const basePrompt = CONTEXT_PROMPTS[baseContext] || CONTEXT_PROMPTS.direct_chat;
-  const skillsContext = CONTEXT_TO_SKILLS_CONTEXT[baseContext] || "coding";
+
+  // If no pipeline context, fall back to legacy approach
+  if (!pipelineCtx) {
+    return await buildSystemPromptLegacy(baseContext, basePrompt);
+  }
 
   try {
-    const activeSkills = await skills.getActiveSkills({ context: skillsContext });
+    const resolved = await skills.resolve({
+      context: {
+        task: pipelineCtx.task,
+        repo: pipelineCtx.repo,
+        labels: pipelineCtx.labels,
+        files: pipelineCtx.files,
+        userId: pipelineCtx.userId || "system",
+        totalTokenBudget: pipelineCtx.tokenBudget || 4000,
+      },
+    });
 
-    if (activeSkills.promptFragments.length === 0) {
-      return basePrompt;
+    const result = resolved.result;
+
+    // Execute pre-run skills (v1: passthrough)
+    if (result.preRunResults && result.preRunResults.length > 0) {
+      // Pre-run skills are already resolved; in v1 they are always approved
     }
 
+    // Build system prompt with injected skills
     let prompt = basePrompt;
-    prompt += "\n\n## Active Skills\n";
+    if (result.injectedPrompt) {
+      prompt += "\n\n## Active Skills\n" + result.injectedPrompt;
+    }
+
+    return {
+      systemPrompt: prompt,
+      skillIds: result.injectedSkillIds || [],
+      postRunSkillIds: (result.postRunSkills || []).map((s: { id: string }) => s.id),
+      tokensUsed: result.tokensUsed || 0,
+    };
+  } catch {
+    // Fallback to legacy if pipeline fails
+    return await buildSystemPromptLegacy(baseContext, basePrompt);
+  }
+}
+
+async function buildSystemPromptLegacy(baseContext: string, basePrompt: string): Promise<PipelineResult> {
+  const skillsContext = CONTEXT_TO_SKILLS_CONTEXT[baseContext] || "coding";
+  try {
+    const activeSkills = await skills.getActiveSkills({ context: skillsContext });
+    if (activeSkills.promptFragments.length === 0) {
+      return { systemPrompt: basePrompt, skillIds: [], postRunSkillIds: [], tokensUsed: 0 };
+    }
+    let prompt = basePrompt + "\n\n## Active Skills\n";
     for (const fragment of activeSkills.promptFragments) {
       prompt += `\n${fragment}\n`;
     }
-
-    return prompt;
+    return { systemPrompt: prompt, skillIds: [], postRunSkillIds: [], tokensUsed: 0 };
   } catch {
-    // If skills service is unavailable, use base prompt
-    return basePrompt;
+    return { systemPrompt: basePrompt, skillIds: [], postRunSkillIds: [], tokensUsed: 0 };
+  }
+}
+
+async function logSkillResults(skillIds: string[], success: boolean, tokensUsed: number): Promise<void> {
+  const tokensPerSkill = skillIds.length > 0 ? Math.round(tokensUsed / skillIds.length) : 0;
+  for (const id of skillIds) {
+    try {
+      await skills.logResult({ skillId: id, success, tokensUsed: tokensPerSkill });
+    } catch {
+      // Non-critical, don't fail the request
+    }
   }
 }
 
@@ -478,8 +597,13 @@ export const chat = api(
   async (req: ChatRequest): Promise<ChatResponse> => {
     const model = req.model || DEFAULT_MODEL;
 
-    let system = await buildSystemPromptWithSkills(req.systemContext);
+    // Extract task from last user message for skill routing
+    const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
+    const pipeline = await buildSystemPromptWithPipeline(req.systemContext, {
+      task: lastUserMsg?.content || "",
+    });
 
+    let system = pipeline.systemPrompt;
     if (req.memoryContext.length > 0) {
       system += "\n\n## Relevant Context from Memory\n";
       req.memoryContext.forEach((m, i) => {
@@ -493,6 +617,9 @@ export const chat = api(
       messages: req.messages,
       maxTokens: 8192,
     });
+
+    // Log skill usage
+    await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
 
     return {
       content: response.content,
@@ -543,14 +670,19 @@ export const planTask = api(
       });
     }
 
-    const system = await buildSystemPromptWithSkills("agent_planning");
+    const pipeline = await buildSystemPromptWithPipeline("agent_planning", {
+      task: req.task,
+    });
 
     const response = await callAIWithFallback({
       model,
-      system,
+      system: pipeline.systemPrompt,
       messages,
       maxTokens: 16384,
     });
+
+    // Log skill usage
+    await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
 
     try {
       const jsonText = stripMarkdownJson(response.content);
@@ -563,6 +695,7 @@ export const planTask = api(
         costUsd: response.costEstimate.totalCost,
       };
     } catch {
+      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
       throw APIError.internal("failed to parse planning response as JSON");
     }
   }
@@ -582,14 +715,19 @@ export const reviewCode = api(
     prompt += `## Validation Output\n\`\`\`\n${req.validationOutput}\n\`\`\`\n\n`;
     prompt += `Review this work. Respond with JSON only.`;
 
-    const system = await buildSystemPromptWithSkills("agent_review");
+    const pipeline = await buildSystemPromptWithPipeline("agent_review", {
+      task: req.taskDescription,
+    });
 
     const response = await callAIWithFallback({
       model,
-      system,
+      system: pipeline.systemPrompt,
       messages: [{ role: "user", content: prompt }],
       maxTokens: 8192,
     });
+
+    // Log skill usage
+    await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
 
     try {
       const jsonText = stripMarkdownJson(response.content);
@@ -604,7 +742,230 @@ export const reviewCode = api(
         costUsd: response.costEstimate.totalCost,
       };
     } catch {
+      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
       throw APIError.internal("failed to parse review response");
+    }
+  }
+);
+
+// --- Complexity Assessment ---
+
+export interface AssessComplexityRequest {
+  taskDescription: string;
+  projectStructure: string;
+  fileCount: number;
+  model?: string;
+}
+
+export interface AssessComplexityResponse {
+  complexity: number; // 1-10
+  reasoning: string;
+  suggestedModel: string;
+  tokensUsed: number;
+  modelUsed: string;
+  costUsd: number;
+}
+
+export const assessComplexity = api(
+  { method: "POST", path: "/ai/assess-complexity", expose: false },
+  async (req: AssessComplexityRequest): Promise<AssessComplexityResponse> => {
+    const model = req.model || DEFAULT_MODEL;
+
+    const prompt = `Assess the complexity of this task on a scale of 1-10.
+
+## Task
+${req.taskDescription}
+
+## Project (${req.fileCount} files)
+${req.projectStructure.substring(0, 2000)}
+
+Respond with JSON only:
+{
+  "complexity": 5,
+  "reasoning": "why this complexity level",
+  "suggestedModel": "claude-sonnet-4-5-20250929"
+}
+
+Guidelines:
+- 1-3: Simple (rename, add field, small fix) → use haiku/budget model
+- 4-6: Standard (new endpoint, refactor, bug fix) → use sonnet/standard model
+- 7-10: Complex (new service, architecture change, multi-file) → use opus/premium model`;
+
+    const response = await callAIWithFallback({
+      model,
+      system: BASE_RULES,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 1024,
+    });
+
+    try {
+      const parsed = JSON.parse(stripMarkdownJson(response.content));
+      return {
+        complexity: parsed.complexity || 5,
+        reasoning: parsed.reasoning || "",
+        suggestedModel: parsed.suggestedModel || DEFAULT_MODEL,
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    } catch {
+      return {
+        complexity: 5,
+        reasoning: "Could not parse complexity assessment",
+        suggestedModel: DEFAULT_MODEL,
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    }
+  }
+);
+
+// --- Diagnosis & Plan Revision (DEL 2C) ---
+
+export interface DiagnoseRequest {
+  task: string;
+  plan: TaskStep[];
+  currentStep: number;
+  error: string;
+  previousErrors: string[];
+  codeContext: string;
+  model?: string;
+}
+
+export interface DiagnosisResult {
+  rootCause: 'bad_plan' | 'implementation_error' | 'missing_context' | 'impossible_task' | 'environment_error';
+  reason: string;
+  suggestedAction: 'revise_plan' | 'fix_code' | 'fetch_more_context' | 'escalate_to_human' | 'retry';
+  confidence: number;
+}
+
+export const diagnoseFailure = api(
+  { method: "POST", path: "/ai/diagnose", expose: false },
+  async (req: DiagnoseRequest): Promise<{ diagnosis: DiagnosisResult; tokensUsed: number; costUsd: number }> => {
+    const model = req.model || DEFAULT_MODEL;
+
+    const prompt = `You are diagnosing why a step in an autonomous coding task failed.
+
+## Task
+${req.task}
+
+## Current Plan
+${req.plan.map((s, i) => `${i + 1}. [${s.action}] ${s.description}${s.filePath ? ` (${s.filePath})` : ''}`).join('\n')}
+
+## Failed at Step ${req.currentStep + 1}
+Error: ${req.error}
+
+${req.previousErrors.length > 0 ? `## Previous Errors in This Session\n${req.previousErrors.map((e, i) => `${i + 1}. ${e}`).join('\n')}` : ''}
+
+## Code Context
+${req.codeContext.substring(0, 3000)}
+
+Analyze the root cause and suggest the best action. Respond with JSON only:
+{
+  "rootCause": "bad_plan|implementation_error|missing_context|impossible_task|environment_error",
+  "reason": "specific explanation of what went wrong",
+  "suggestedAction": "revise_plan|fix_code|fetch_more_context|escalate_to_human|retry",
+  "confidence": 0.8
+}
+
+Root cause guidelines:
+- bad_plan: The approach itself is wrong, need a different strategy
+- implementation_error: Right approach, but code has bugs (typos, wrong API, logic error)
+- missing_context: Need more information about the codebase or requirements
+- impossible_task: The task cannot be done with current constraints
+- environment_error: Transient issue (timeout, API down, network)`;
+
+    const pipeline = await buildSystemPromptWithPipeline("agent_planning", {
+      task: req.task,
+    });
+
+    const response = await callAIWithFallback({
+      model,
+      system: pipeline.systemPrompt,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 2048,
+    });
+
+    try {
+      const parsed = JSON.parse(stripMarkdownJson(response.content)) as DiagnosisResult;
+      return {
+        diagnosis: parsed,
+        tokensUsed: response.tokensUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    } catch {
+      return {
+        diagnosis: {
+          rootCause: 'implementation_error',
+          reason: 'Could not parse diagnosis — defaulting to implementation error',
+          suggestedAction: 'fix_code',
+          confidence: 0.3,
+        },
+        tokensUsed: response.tokensUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    }
+  }
+);
+
+export interface RevisePlanRequest {
+  task: string;
+  originalPlan: TaskStep[];
+  diagnosis: DiagnosisResult;
+  constraints: string[];
+  model?: string;
+}
+
+export const revisePlan = api(
+  { method: "POST", path: "/ai/revise-plan", expose: false },
+  async (req: RevisePlanRequest): Promise<AgentThinkResponse> => {
+    const model = req.model || DEFAULT_MODEL;
+
+    const prompt = `You need to create a NEW plan for this task. The previous plan failed.
+
+## Task
+${req.task}
+
+## Previous Plan (FAILED)
+${req.originalPlan.map((s, i) => `${i + 1}. [${s.action}] ${s.description}`).join('\n')}
+
+## Diagnosis
+Root cause: ${req.diagnosis.rootCause}
+Reason: ${req.diagnosis.reason}
+Suggested action: ${req.diagnosis.suggestedAction}
+
+## Constraints
+${req.constraints.map((c) => `- ${c}`).join('\n')}
+
+Create a DIFFERENT approach that avoids the previous failure. Respond with JSON:
+{
+  "plan": [{ "description": "...", "action": "create_file|modify_file|delete_file|run_command", "filePath": "...", "content": "...", "command": "..." }],
+  "reasoning": "why this new approach will work"
+}`;
+
+    const pipeline = await buildSystemPromptWithPipeline("agent_planning", {
+      task: req.task,
+    });
+
+    const response = await callAIWithFallback({
+      model,
+      system: pipeline.systemPrompt,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 16384,
+    });
+
+    try {
+      const parsed = JSON.parse(stripMarkdownJson(response.content));
+      return {
+        plan: parsed.plan,
+        reasoning: parsed.reasoning,
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    } catch {
+      throw APIError.internal("failed to parse revised plan as JSON");
     }
   }
 );
@@ -676,11 +1037,13 @@ export const assessConfidence = api(
 
     const messages: ChatMessage[] = [{ role: "user", content: prompt }];
 
-    const system = await buildSystemPromptWithSkills("confidence_assessment");
+    const pipeline = await buildSystemPromptWithPipeline("confidence_assessment", {
+      task: req.taskDescription,
+    });
 
     const response = await callAIWithFallback({
       model,
-      system,
+      system: pipeline.systemPrompt,
       messages,
       maxTokens: 4096,
     });

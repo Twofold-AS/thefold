@@ -1,0 +1,404 @@
+import { api, APIError } from "encore.dev/api";
+import { db } from "./skills";
+
+// --- Types ---
+
+type ExecutionPhase = "pre_run" | "inject" | "post_run";
+
+interface SkillPipelineContext {
+  task: string;
+  repo?: string;
+  labels?: string[];
+  files?: string[];
+  userId: string;
+  totalTokenBudget: number;
+}
+
+interface ResolvedSkill {
+  id: string;
+  name: string;
+  phase: ExecutionPhase;
+  priority: number;
+  promptFragment: string;
+  tokenEstimate: number;
+  routingRules: Record<string, unknown>;
+}
+
+interface SkillPipelineResult {
+  preRunResults: SkillRunResult[];
+  injectedPrompt: string;
+  injectedSkillIds: string[];
+  tokensUsed: number;
+  postRunSkills: ResolvedSkill[];
+}
+
+interface SkillRunResult {
+  skillId: string;
+  skillName: string;
+  phase: ExecutionPhase;
+  success: boolean;
+  output: unknown;
+  tokensUsed: number;
+  duration: number;
+}
+
+// --- Resolve: automatic routing ---
+
+interface ResolveRequest {
+  context: SkillPipelineContext;
+}
+
+interface ResolveResponse {
+  result: SkillPipelineResult;
+}
+
+export const resolve = api(
+  { method: "POST", path: "/skills/resolve", expose: false },
+  async (req: ResolveRequest): Promise<ResolveResponse> => {
+    const ctx = req.context;
+
+    // 1. Fetch all enabled skills
+    const rows = await db.query<{
+      id: string;
+      name: string;
+      prompt_fragment: string;
+      execution_phase: string;
+      priority: number;
+      token_estimate: number;
+      routing_rules: Record<string, unknown>;
+      scope: string;
+      applies_to: string[];
+      depends_on: string[];
+      conflicts_with: string[];
+    }>`
+      SELECT id, name, prompt_fragment, execution_phase, priority,
+             COALESCE(token_estimate, 0) as token_estimate,
+             COALESCE(routing_rules, '{}'::jsonb) as routing_rules,
+             scope, applies_to,
+             COALESCE(depends_on, '{}') as depends_on,
+             COALESCE(conflicts_with, '{}') as conflicts_with
+      FROM skills
+      WHERE enabled = TRUE
+      ORDER BY priority ASC
+    `;
+
+    const allSkills: Array<{
+      id: string;
+      name: string;
+      promptFragment: string;
+      phase: ExecutionPhase;
+      priority: number;
+      tokenEstimate: number;
+      routingRules: Record<string, unknown>;
+      scope: string;
+      appliesTo: string[];
+      dependsOn: string[];
+      conflictsWith: string[];
+    }> = [];
+
+    for await (const row of rows) {
+      allSkills.push({
+        id: row.id,
+        name: row.name,
+        promptFragment: row.prompt_fragment,
+        phase: row.execution_phase as ExecutionPhase,
+        priority: row.priority ?? 100,
+        tokenEstimate: row.token_estimate ?? 0,
+        routingRules: row.routing_rules ?? {},
+        scope: row.scope,
+        appliesTo: row.applies_to ?? [],
+        dependsOn: row.depends_on ?? [],
+        conflictsWith: row.conflicts_with ?? [],
+      });
+    }
+
+    // 2. Filter by scope (global + repo-specific)
+    const filtered = allSkills.filter((s) => {
+      if (s.scope === "global") return true;
+      if (ctx.repo && s.scope === `repo:${ctx.repo}`) return true;
+      if (s.scope === `user:${ctx.userId}`) return true;
+      return false;
+    });
+
+    // 3. Automatic routing: match routing_rules against task context
+    const matched = filtered.filter((s) => matchesRoutingRules(s.routingRules, ctx));
+
+    // 4. Handle dependencies: if skill A depends_on B, include B
+    const matchedIds = new Set(matched.map((s) => s.id));
+    for (const skill of matched) {
+      for (const depId of skill.dependsOn) {
+        if (!matchedIds.has(depId)) {
+          const dep = allSkills.find((s) => s.id === depId);
+          if (dep) {
+            matched.push(dep);
+            matchedIds.add(depId);
+          }
+        }
+      }
+    }
+
+    // 5. Handle conflicts: if A conflicts_with B, keep higher priority (lower number)
+    const conflictResolved: typeof matched = [];
+    const excluded = new Set<string>();
+
+    for (const skill of matched) {
+      if (excluded.has(skill.id)) continue;
+
+      // Check if this skill conflicts with any already-included skill
+      let dominated = false;
+      for (const conflictId of skill.conflictsWith) {
+        const existing = conflictResolved.find((s) => s.id === conflictId);
+        if (existing) {
+          // existing already included, skip this skill (existing has higher priority since sorted)
+          dominated = true;
+          break;
+        }
+      }
+
+      if (!dominated) {
+        conflictResolved.push(skill);
+        // Mark conflicting skills as excluded
+        for (const conflictId of skill.conflictsWith) {
+          excluded.add(conflictId);
+        }
+      }
+    }
+
+    // 6. Token budget: include skills until budget is exhausted
+    let tokensUsed = 0;
+    const budgeted: typeof conflictResolved = [];
+
+    for (const skill of conflictResolved) {
+      if (ctx.totalTokenBudget > 0 && tokensUsed + skill.tokenEstimate > ctx.totalTokenBudget) {
+        continue; // Skip, over budget
+      }
+      budgeted.push(skill);
+      tokensUsed += skill.tokenEstimate;
+    }
+
+    // 7. Group by phase
+    const preRun = budgeted.filter((s) => s.phase === "pre_run");
+    const inject = budgeted.filter((s) => s.phase === "inject");
+    const postRun = budgeted.filter((s) => s.phase === "post_run");
+
+    // Build injected prompt
+    const injectedPrompt = inject.map((s) => s.promptFragment).join("\n\n");
+
+    return {
+      result: {
+        preRunResults: [], // Will be populated by executePreRun
+        injectedPrompt,
+        injectedSkillIds: inject.map((s) => s.id),
+        tokensUsed,
+        postRunSkills: postRun.map(toResolvedSkill),
+      },
+    };
+  }
+);
+
+// --- Execute Pre-Run ---
+
+interface ExecutePreRunRequest {
+  skills: ResolvedSkill[];
+  context: SkillPipelineContext;
+}
+
+interface ExecutePreRunResponse {
+  results: SkillRunResult[];
+  approved: boolean;
+}
+
+export const executePreRun = api(
+  { method: "POST", path: "/skills/execute-pre-run", expose: false },
+  async (req: ExecutePreRunRequest): Promise<ExecutePreRunResponse> => {
+    const results: SkillRunResult[] = [];
+
+    for (const skill of req.skills) {
+      const start = Date.now();
+
+      // v1: passthrough — always approved
+      results.push({
+        skillId: skill.id,
+        skillName: skill.name,
+        phase: "pre_run",
+        success: true,
+        output: { approved: true },
+        tokensUsed: 0,
+        duration: Date.now() - start,
+      });
+    }
+
+    return {
+      results,
+      approved: true, // v1: always approved
+    };
+  }
+);
+
+// --- Execute Post-Run ---
+
+interface ExecutePostRunRequest {
+  skills: ResolvedSkill[];
+  aiOutput: string;
+  context: SkillPipelineContext;
+}
+
+interface ExecutePostRunResponse {
+  results: SkillRunResult[];
+  approved: boolean;
+}
+
+export const executePostRun = api(
+  { method: "POST", path: "/skills/execute-post-run", expose: false },
+  async (req: ExecutePostRunRequest): Promise<ExecutePostRunResponse> => {
+    const results: SkillRunResult[] = [];
+
+    for (const skill of req.skills) {
+      const start = Date.now();
+
+      // v1: passthrough — always approved
+      results.push({
+        skillId: skill.id,
+        skillName: skill.name,
+        phase: "post_run",
+        success: true,
+        output: { approved: true },
+        tokensUsed: 0,
+        duration: Date.now() - start,
+      });
+    }
+
+    return {
+      results,
+      approved: true, // v1: always approved
+    };
+  }
+);
+
+// --- Log Result ---
+
+interface LogResultRequest {
+  skillId: string;
+  success: boolean;
+  tokensUsed: number;
+}
+
+interface LogResultResponse {
+  updated: boolean;
+}
+
+export const logResult = api(
+  { method: "POST", path: "/skills/log-result", expose: false },
+  async (req: LogResultRequest): Promise<LogResultResponse> => {
+    // Increment the appropriate counter
+    if (req.success) {
+      await db.exec`
+        UPDATE skills SET
+          success_count = COALESCE(success_count, 0) + 1,
+          total_uses = COALESCE(total_uses, 0) + 1,
+          last_used_at = NOW(),
+          avg_token_cost = CASE
+            WHEN COALESCE(total_uses, 0) = 0 THEN ${req.tokensUsed}
+            ELSE (COALESCE(avg_token_cost, 0) * COALESCE(total_uses, 0) + ${req.tokensUsed}) / (COALESCE(total_uses, 0) + 1)
+          END,
+          confidence_score = CASE
+            WHEN (COALESCE(success_count, 0) + 1 + COALESCE(failure_count, 0)) = 0 THEN 0.5
+            ELSE (COALESCE(success_count, 0) + 1)::decimal / (COALESCE(success_count, 0) + 1 + COALESCE(failure_count, 0))
+          END
+        WHERE id = ${req.skillId}::uuid
+      `;
+    } else {
+      await db.exec`
+        UPDATE skills SET
+          failure_count = COALESCE(failure_count, 0) + 1,
+          total_uses = COALESCE(total_uses, 0) + 1,
+          last_used_at = NOW(),
+          avg_token_cost = CASE
+            WHEN COALESCE(total_uses, 0) = 0 THEN ${req.tokensUsed}
+            ELSE (COALESCE(avg_token_cost, 0) * COALESCE(total_uses, 0) + ${req.tokensUsed}) / (COALESCE(total_uses, 0) + 1)
+          END,
+          confidence_score = CASE
+            WHEN (COALESCE(success_count, 0) + COALESCE(failure_count, 0) + 1) = 0 THEN 0.5
+            ELSE COALESCE(success_count, 0)::decimal / (COALESCE(success_count, 0) + COALESCE(failure_count, 0) + 1)
+          END
+        WHERE id = ${req.skillId}::uuid
+      `;
+    }
+
+    return { updated: true };
+  }
+);
+
+// --- Helpers ---
+
+function matchesRoutingRules(
+  rules: Record<string, unknown>,
+  ctx: SkillPipelineContext
+): boolean {
+  // If no routing rules, always include (backward compatible)
+  if (!rules || Object.keys(rules).length === 0) return true;
+
+  const keywords = (rules.keywords as string[]) || [];
+  const filePatterns = (rules.file_patterns as string[]) || [];
+  const labels = (rules.labels as string[]) || [];
+
+  // If all rule arrays are empty, include by default
+  if (keywords.length === 0 && filePatterns.length === 0 && labels.length === 0) {
+    return true;
+  }
+
+  const taskLower = ctx.task.toLowerCase();
+
+  // Keyword matching
+  if (keywords.length > 0) {
+    const hasKeyword = keywords.some((kw) => taskLower.includes(kw.toLowerCase()));
+    if (hasKeyword) return true;
+  }
+
+  // File pattern matching
+  if (filePatterns.length > 0 && ctx.files && ctx.files.length > 0) {
+    const hasMatch = filePatterns.some((pattern) =>
+      ctx.files!.some((file) => matchGlob(pattern, file))
+    );
+    if (hasMatch) return true;
+  }
+
+  // Label matching
+  if (labels.length > 0 && ctx.labels && ctx.labels.length > 0) {
+    const hasLabel = labels.some((label) =>
+      ctx.labels!.some((l) => l.toLowerCase() === label.toLowerCase())
+    );
+    if (hasLabel) return true;
+  }
+
+  return false;
+}
+
+function matchGlob(pattern: string, filename: string): boolean {
+  // Simple glob matching: *.ts matches any .ts file
+  const regex = pattern
+    .replace(/\./g, "\\.")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${regex}$`, "i").test(filename);
+}
+
+function toResolvedSkill(s: {
+  id: string;
+  name: string;
+  phase: ExecutionPhase;
+  priority: number;
+  promptFragment: string;
+  tokenEstimate: number;
+  routingRules: Record<string, unknown>;
+}): ResolvedSkill {
+  return {
+    id: s.id,
+    name: s.name,
+    phase: s.phase,
+    priority: s.priority,
+    promptFragment: s.promptFragment,
+    tokenEstimate: s.tokenEstimate,
+    routingRules: s.routingRules,
+  };
+}

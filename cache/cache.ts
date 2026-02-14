@@ -252,13 +252,7 @@ export const invalidate = api(
   }
 );
 
-// --- Cleanup CronJob: remove expired entries every hour ---
-
-const _ = new CronJob("cache-cleanup", {
-  title: "Clean up expired cache entries",
-  every: "1h",
-  endpoint: cleanupExpired,
-});
+// --- Cleanup endpoint ---
 
 export const cleanupExpired = api(
   { method: "POST", path: "/cache/cleanup", expose: false },
@@ -274,3 +268,11 @@ export const cleanupExpired = api(
     return { deleted: row?.count ?? 0 };
   }
 );
+
+// --- Cleanup CronJob: remove expired entries every hour ---
+
+const _ = new CronJob("cache-cleanup", {
+  title: "Clean up expired cache entries",
+  every: "1h",
+  endpoint: cleanupExpired,
+});
