@@ -276,3 +276,24 @@ export const getEstimatedCost = api(
     return { estimate, savings };
   }
 );
+
+// --- Sub-Agent Cost Estimation Endpoint ---
+
+import {
+  estimateSubAgentCostPreview,
+  type SubAgentCostPreview,
+} from "./orchestrate-sub-agents";
+import type { BudgetMode } from "./sub-agents";
+
+interface EstimateSubAgentCostRequest {
+  complexity: number;
+  budgetMode?: BudgetMode;
+}
+
+export const estimateSubAgentCost = api(
+  { method: "POST", path: "/ai/estimate-sub-agent-cost", expose: true, auth: true },
+  async (req: EstimateSubAgentCostRequest): Promise<SubAgentCostPreview> => {
+    const complexity = Math.max(1, Math.min(10, req.complexity));
+    return estimateSubAgentCostPreview(complexity, req.budgetMode || "balanced");
+  }
+);

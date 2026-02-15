@@ -40,19 +40,15 @@ export function ModelSelector({ value, onChange, mode }: ModelSelectorProps) {
       : "Velg modell...";
 
   return (
-    <div ref={ref} style={{ position: "relative" }}>
+    <div ref={ref} className="w-full h-full" style={{ position: "relative" }}>
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 text-xs px-2 py-1 transition-colors"
+        className="w-full h-full flex items-center gap-2 px-4 text-sm transition-colors cursor-pointer hover:bg-white/5"
         style={{
           color: mode === "manual" && value ? "var(--text-primary)" : "var(--text-muted)",
           background: "transparent",
-          border: "1px solid var(--border)",
-          borderRadius: "4px",
-          cursor: "pointer",
+          border: "none",
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
-        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
         <Cpu size={14} />
         <span>{label}</span>
@@ -67,16 +63,14 @@ export function ModelSelector({ value, onChange, mode }: ModelSelectorProps) {
             left: 0,
             zIndex: 50,
             minWidth: "280px",
-            background: "var(--bg-primary)",
+            background: "var(--bg-page)",
             border: "1px solid var(--border)",
-            borderRadius: "8px",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
             overflow: "hidden",
           }}
         >
           <div className="px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
             <span className="text-[10px] font-medium" style={{ color: "var(--text-muted)" }}>
-              {mode === "auto" ? "Auto-modus — AI velger basert på oppgave" : "Manuell modus — velg modell"}
+              {mode === "auto" ? "Auto-modus — AI velger basert pa oppgave" : "Manuell modus — velg modell"}
             </span>
           </div>
 
@@ -97,7 +91,7 @@ export function ModelSelector({ value, onChange, mode }: ModelSelectorProps) {
             <Cpu size={14} style={{ color: "#3b82f6" }} />
             <div>
               <div className="text-sm">Auto (AI velger)</div>
-              <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>Anbefalt — velger basert på kompleksitet</div>
+              <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>Anbefalt — velger basert pa kompleksitet</div>
             </div>
           </button>
 
@@ -133,7 +127,6 @@ export function ModelSelector({ value, onChange, mode }: ModelSelectorProps) {
                       </div>
                     </div>
                     <div className="text-right flex-shrink-0 ml-3">
-                      <TierBadge tier={m.tier} />
                       <div className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
                         ${m.inputCostPer1M.toFixed(2)}/1M
                       </div>
@@ -146,18 +139,5 @@ export function ModelSelector({ value, onChange, mode }: ModelSelectorProps) {
         </div>
       )}
     </div>
-  );
-}
-
-function TierBadge({ tier }: { tier: number }) {
-  const label = tier >= 5 ? "Premium" : tier >= 3 ? "Standard" : "Budget";
-  const color = tier >= 5 ? "#8b5cf6" : tier >= 3 ? "#3b82f6" : "#22c55e";
-  return (
-    <span
-      className="text-[10px] px-1.5 py-0.5 rounded-full"
-      style={{ background: color, color: "#fff" }}
-    >
-      {label}
-    </span>
   );
 }

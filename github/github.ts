@@ -401,3 +401,52 @@ export const createPR = api(
     return { url: pr.html_url, number: pr.number };
   }
 );
+
+// --- List repos for an org/user ---
+
+interface ListReposRequest {
+  owner: string;
+}
+
+interface RepoInfo {
+  name: string;
+  fullName: string;
+  description: string;
+  language: string;
+  defaultBranch: string;
+  pushedAt: string;
+  updatedAt: string;
+  private: boolean;
+  archived: boolean;
+  stargazersCount: number;
+  openIssuesCount: number;
+}
+
+interface ListReposResponse {
+  repos: RepoInfo[];
+}
+
+export const listRepos = api(
+  { method: "POST", path: "/github/repos", expose: true, auth: true },
+  async (req: ListReposRequest): Promise<ListReposResponse> => {
+    const data = await ghApi(`/orgs/${req.owner}/repos?sort=pushed&per_page=30&type=all`);
+
+    const repos: RepoInfo[] = (data as Array<Record<string, unknown>>)
+      .filter((r) => !r.archived)
+      .map((r) => ({
+        name: r.name as string,
+        fullName: r.full_name as string,
+        description: (r.description as string) || "",
+        language: (r.language as string) || "",
+        defaultBranch: (r.default_branch as string) || "main",
+        pushedAt: (r.pushed_at as string) || "",
+        updatedAt: (r.updated_at as string) || "",
+        private: (r.private as boolean) || false,
+        archived: false,
+        stargazersCount: (r.stargazers_count as number) || 0,
+        openIssuesCount: (r.open_issues_count as number) || 0,
+      }));
+
+    return { repos };
+  }
+);

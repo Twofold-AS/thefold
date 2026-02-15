@@ -5,6 +5,7 @@ import OpenAI from "openai";
 import log from "encore.dev/log";
 import { skills } from "~encore/clients";
 import { estimateCost, getUpgradeModel, type CostEstimate } from "./router";
+import { sanitize } from "./sanitize";
 
 // --- Secrets ---
 const anthropicKey = secret("AnthropicAPIKey");
@@ -138,14 +139,14 @@ function stripMarkdownJson(text: string): string {
   return jsonText;
 }
 
-interface AICallOptions {
+export interface AICallOptions {
   model: string;
   system: string;
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   maxTokens: number;
 }
 
-interface AICallResponse {
+export interface AICallResponse {
   content: string;
   tokensUsed: number;
   stopReason: string;
@@ -174,7 +175,7 @@ async function callAI(options: AICallOptions): Promise<AICallResponse> {
  * Call AI with automatic fallback — if the model fails, upgrade to next tier.
  * Retries up to MAX_FALLBACK_UPGRADES times with progressively better models.
  */
-async function callAIWithFallback(options: AICallOptions): Promise<AICallResponse> {
+export async function callAIWithFallback(options: AICallOptions): Promise<AICallResponse> {
   let currentModel = options.model;
   let attempts = 0;
 
@@ -390,9 +391,16 @@ const BASE_RULES = `You are TheFold, an autonomous internal fullstack developer.
 const CONTEXT_PROMPTS: Record<string, string> = {
   direct_chat: `${BASE_RULES}
 
-You are chatting directly with a team member. Be helpful, concise, and technical.
-If they ask about code, reference the actual project files you know about.
-If you suggest changes, explain why clearly.`,
+Du er TheFold, en AI-utviklingsagent. I chatten svarer du konversasjonelt og kort.
+
+Regler:
+- IKKE generer kode med mindre brukeren eksplisitt ber om det
+- IKKE lag lange planer med mindre brukeren ber om det
+- For spørsmål som "se over repoet": gi en kort oppsummering (3-5 setninger) av hva du finner
+- For spørsmål som "hva bør vi endre": gi 3-5 konkrete forslag som korte punkter
+- Bruk norsk
+- Vær direkte og konsis
+- Hvis brukeren vil at du GJØR endringer (ikke bare snakker om dem), forklar at de kan starte en task`,
 
   agent_planning: `${BASE_RULES}
 
@@ -430,6 +438,59 @@ Respond with JSON:
   "qualityScore": 8,
   "concerns": ["potential issue 1"]
 }`,
+
+  project_decomposition: `${BASE_RULES}
+
+You are an experienced technical architect decomposing a large project request into atomic, independently executable tasks.
+
+## Decomposition Rules
+1. Each task MUST be independently executable with a fresh context window
+2. Each task should produce at most 3-5 files
+3. Tasks within the same phase can execute in parallel (no inter-dependencies within a phase)
+4. Tasks in later phases depend on earlier phases completing first
+5. Generate context_hints describing what each task needs from completed tasks
+6. Generate a compact conventions document (<2000 tokens) covering:
+   - File naming conventions
+   - Import patterns
+   - Error handling patterns
+   - Test patterns
+   - Framework-specific rules (Encore.ts in our case)
+
+## Output Format
+Respond with JSON only:
+{
+  "phases": [
+    {
+      "name": "Phase Name",
+      "description": "What this phase accomplishes",
+      "tasks": [
+        {
+          "title": "Short task title",
+          "description": "Detailed description sufficient for an autonomous agent to execute this task independently. Include specific file paths, patterns to follow, and expected outputs.",
+          "dependsOnIndices": [],
+          "contextHints": ["what context curator should fetch for this task"]
+        }
+      ]
+    }
+  ],
+  "conventions": "# Project Conventions\\n...",
+  "reasoning": "Explanation of decomposition strategy",
+  "estimatedTotalTasks": 12
+}
+
+## Phase Organization
+- Phase 0: Foundation (data models, schemas, types)
+- Phase 1: Core logic (services, business rules)
+- Phase 2: Integration (API endpoints, connections between services)
+- Phase 3: UI/Frontend (if applicable)
+- Phase 4: Tests and documentation
+
+## Task Description Quality
+Each task description must include:
+- What to build (specific files and their purpose)
+- How it connects to other parts (imports, API calls)
+- Patterns to follow (reference existing code or conventions)
+- Expected output (files created, types exported, endpoints added)`,
 
   confidence_assessment: `${BASE_RULES}
 
@@ -495,6 +556,7 @@ const CONTEXT_TO_SKILLS_CONTEXT: Record<string, string> = {
   agent_coding: "coding",
   agent_review: "review",
   confidence_assessment: "planning",
+  project_decomposition: "planning",
 };
 
 interface PipelineContext {
@@ -597,6 +659,11 @@ export const chat = api(
   async (req: ChatRequest): Promise<ChatResponse> => {
     const model = req.model || DEFAULT_MODEL;
 
+    // OWASP A03: Sanitize user messages
+    req.messages = req.messages.map((m) =>
+      m.role === "user" ? { ...m, content: sanitize(m.content) } : m
+    );
+
     // Extract task from last user message for skill routing
     const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
     const pipeline = await buildSystemPromptWithPipeline(req.systemContext, {
@@ -636,6 +703,9 @@ export const planTask = api(
   { method: "POST", path: "/ai/plan", expose: false },
   async (req: AgentThinkRequest): Promise<AgentThinkResponse> => {
     const model = req.model || DEFAULT_MODEL;
+
+    // OWASP A03: Sanitize task description (may come from Linear)
+    req.task = sanitize(req.task, { maxLength: 100_000 });
 
     let prompt = `## Task\n${req.task}\n\n`;
     prompt += `## Project Structure\n\`\`\`\n${req.projectStructure}\n\`\`\`\n\n`;
@@ -889,12 +959,18 @@ Root cause guidelines:
 
     try {
       const parsed = JSON.parse(stripMarkdownJson(response.content)) as DiagnosisResult;
+
+      // Log skill usage
+      await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
+
       return {
         diagnosis: parsed,
         tokensUsed: response.tokensUsed,
         costUsd: response.costEstimate.totalCost,
       };
     } catch {
+      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
+
       return {
         diagnosis: {
           rootCause: 'implementation_error',
@@ -957,6 +1033,10 @@ Create a DIFFERENT approach that avoids the previous failure. Respond with JSON:
 
     try {
       const parsed = JSON.parse(stripMarkdownJson(response.content));
+
+      // Log skill usage
+      await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
+
       return {
         plan: parsed.plan,
         reasoning: parsed.reasoning,
@@ -965,6 +1045,7 @@ Create a DIFFERENT approach that avoids the previous failure. Respond with JSON:
         costUsd: response.costEstimate.totalCost,
       };
     } catch {
+      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
       throw APIError.internal("failed to parse revised plan as JSON");
     }
   }
@@ -1074,6 +1155,9 @@ export const assessConfidence = api(
         }
       }
 
+      // Log skill usage
+      await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
+
       return {
         confidence,
         tokensUsed: response.tokensUsed,
@@ -1081,7 +1165,541 @@ export const assessConfidence = api(
         costUsd: response.costEstimate.totalCost,
       };
     } catch {
+      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
       throw APIError.internal("failed to parse confidence assessment as JSON");
     }
+  }
+);
+
+// --- Project Decomposition ---
+
+interface DecomposeProjectRequest {
+  userMessage: string;
+  repoOwner: string;
+  repoName: string;
+  projectStructure: string;
+  existingFiles?: Array<{ path: string; content: string }>;
+}
+
+interface DecomposeProjectResponse {
+  phases: Array<{
+    name: string;
+    description: string;
+    tasks: Array<{
+      title: string;
+      description: string;
+      dependsOnIndices: number[];
+      contextHints: string[];
+    }>;
+  }>;
+  conventions: string;
+  reasoning: string;
+  estimatedTotalTasks: number;
+  tokensUsed: number;
+  modelUsed: string;
+  costUsd: number;
+}
+
+export const decomposeProject = api(
+  { method: "POST", path: "/ai/decompose-project", expose: false },
+  async (req: DecomposeProjectRequest): Promise<DecomposeProjectResponse> => {
+    // OWASP A03: Sanitize user message (may be very long project description)
+    req.userMessage = sanitize(req.userMessage, { maxLength: 100_000 });
+
+    // Use a higher-tier model for decomposition — this is architectural planning
+    const model = "claude-sonnet-4-5-20250929";
+
+    let prompt = `## User Request\n${req.userMessage}\n\n`;
+    prompt += `## Repository\n${req.repoOwner}/${req.repoName}\n\n`;
+    prompt += `## Project Structure\n\`\`\`\n${req.projectStructure}\n\`\`\`\n\n`;
+
+    if (req.existingFiles && req.existingFiles.length > 0) {
+      prompt += `## Existing Files (for context)\n`;
+      for (const f of req.existingFiles) {
+        prompt += `### ${f.path}\n\`\`\`typescript\n${f.content}\n\`\`\`\n\n`;
+      }
+    }
+
+    prompt += `Decompose this request into atomic tasks organized in phases. Respond with JSON only.`;
+
+    const pipeline = await buildSystemPromptWithPipeline("project_decomposition", {
+      task: req.userMessage,
+      repo: `${req.repoOwner}/${req.repoName}`,
+    });
+
+    const response = await callAIWithFallback({
+      model,
+      system: pipeline.systemPrompt,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 16384,
+    });
+
+    try {
+      const jsonText = stripMarkdownJson(response.content);
+      const parsed = JSON.parse(jsonText);
+
+      // Validate structure
+      if (!parsed.phases || !Array.isArray(parsed.phases)) {
+        throw new Error("missing phases array");
+      }
+
+      // Validate dependsOnIndices consistency
+      let totalTaskCount = 0;
+      for (const phase of parsed.phases) {
+        totalTaskCount += phase.tasks?.length || 0;
+      }
+
+      let taskIndex = 0;
+      for (const phase of parsed.phases) {
+        for (const task of phase.tasks || []) {
+          for (const depIdx of task.dependsOnIndices || []) {
+            if (depIdx < 0 || depIdx >= totalTaskCount || depIdx === taskIndex) {
+              log.warn("invalid dependsOnIndex detected, removing", { depIdx, taskIndex, totalTaskCount });
+              task.dependsOnIndices = (task.dependsOnIndices || []).filter((i: number) => i !== depIdx);
+            }
+          }
+          taskIndex++;
+        }
+      }
+
+      // Validate conventions length (<2000 tokens ~ <8000 chars)
+      const conventions = parsed.conventions || "";
+      if (conventions.length > 8000) {
+        log.warn("conventions too long, truncating", { length: conventions.length });
+      }
+
+      // Log skill usage
+      await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
+
+      return {
+        phases: parsed.phases,
+        conventions: conventions.substring(0, 8000),
+        reasoning: parsed.reasoning || "",
+        estimatedTotalTasks: parsed.estimatedTotalTasks || totalTaskCount,
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    } catch (err) {
+      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
+
+      if (err instanceof SyntaxError) {
+        throw APIError.internal("failed to parse decomposition response as JSON");
+      }
+      throw APIError.internal(`decomposition validation failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    }
+  }
+);
+
+// --- Phase Revision (between-phase re-planning) ---
+
+interface ReviseProjectPhaseRequest {
+  projectConventions: string;
+  completedPhase: {
+    name: string;
+    tasks: Array<{
+      title: string;
+      status: string;
+      outputFiles: string[];
+      outputTypes: string[];
+      errorMessage?: string;
+    }>;
+  };
+  nextPhase: {
+    name: string;
+    tasks: Array<{
+      title: string;
+      description: string;
+      contextHints: string[];
+    }>;
+  };
+  projectStructure: string;
+}
+
+interface ReviseProjectPhaseResponse {
+  revisedTasks: Array<{
+    originalTitle: string;
+    revisedDescription?: string;
+    shouldSkip?: boolean;
+    newContextHints?: string[];
+    reason: string;
+  }>;
+  newTasksToAdd: Array<{
+    title: string;
+    description: string;
+    contextHints: string[];
+    insertAfterTitle?: string;
+  }>;
+  reasoning: string;
+  tokensUsed: number;
+  modelUsed: string;
+  costUsd: number;
+}
+
+export const reviseProjectPhase = api(
+  { method: "POST", path: "/ai/revise-project-phase", expose: false },
+  async (req: ReviseProjectPhaseRequest): Promise<ReviseProjectPhaseResponse> => {
+    // Use a lower-tier model — this is a short meta-reasoning task
+    const model = "claude-haiku-4-5-20251001";
+
+    const completedSummary = req.completedPhase.tasks.map((t) => {
+      const status = t.status === "completed" ? "\u2705" : t.status === "failed" ? "\u274C" : "\u23ED\uFE0F";
+      const files = t.outputFiles.length > 0 ? ` (files: ${t.outputFiles.join(", ")})` : "";
+      const err = t.errorMessage ? ` Error: ${t.errorMessage}` : "";
+      return `${status} ${t.title}${files}${err}`;
+    }).join("\n");
+
+    const nextTasksSummary = req.nextPhase.tasks.map((t) =>
+      `- ${t.title}: ${t.description.substring(0, 200)}${t.description.length > 200 ? "..." : ""}\n  Context hints: ${t.contextHints.join(", ") || "none"}`
+    ).join("\n");
+
+    const prompt = `## Completed Phase: ${req.completedPhase.name}
+${completedSummary}
+
+## Next Phase: ${req.nextPhase.name}
+${nextTasksSummary}
+
+## Project Conventions (summary)
+${req.projectConventions.substring(0, 1000)}
+
+## Current Project Structure
+${req.projectStructure.substring(0, 2000)}
+
+Based on what was ACTUALLY built (or failed) in the completed phase, revise the next phase's tasks.
+
+Respond with JSON only:
+{
+  "revisedTasks": [
+    {
+      "originalTitle": "exact title from next phase",
+      "revisedDescription": "updated description if needed, or omit",
+      "shouldSkip": false,
+      "newContextHints": ["updated hints if needed"],
+      "reason": "why this change"
+    }
+  ],
+  "newTasksToAdd": [
+    {
+      "title": "new task if needed",
+      "description": "what to build",
+      "contextHints": ["relevant context"],
+      "insertAfterTitle": "title of task to insert after"
+    }
+  ],
+  "reasoning": "overall explanation of adjustments"
+}
+
+Rules:
+- Only revise tasks that NEED changes based on completed phase results
+- If a dependency failed, consider skipping dependent tasks or adjusting them
+- Update contextHints to reference actual output files from completed tasks
+- Keep changes minimal — don't rewrite tasks that are already correct
+- If everything went well, return empty revisedTasks and newTasksToAdd arrays`;
+
+    const pipeline = await buildSystemPromptWithPipeline("agent_planning", {
+      task: "phase revision",
+    });
+
+    const response = await callAIWithFallback({
+      model,
+      system: pipeline.systemPrompt,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 4096,
+    });
+
+    try {
+      const parsed = JSON.parse(stripMarkdownJson(response.content));
+
+      await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
+
+      return {
+        revisedTasks: parsed.revisedTasks || [],
+        newTasksToAdd: parsed.newTasksToAdd || [],
+        reasoning: parsed.reasoning || "",
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    } catch {
+      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
+
+      // Revision parsing failed — return no changes (safe fallback)
+      return {
+        revisedTasks: [],
+        newTasksToAdd: [],
+        reasoning: "Could not parse revision response — keeping original plan",
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    }
+  }
+);
+
+// --- Task Order Planning (for tasks service) ---
+
+interface PlanTaskOrderRequest {
+  tasks: Array<{
+    id: string;
+    title: string;
+    description: string | null;
+    labels: string[];
+    dependsOn: string[];
+  }>;
+  repo: string;
+}
+
+interface PlanTaskOrderResponse {
+  orderedTasks: Array<{
+    id: string;
+    plannedOrder: number;
+    estimatedComplexity: number;
+    reasoning: string;
+  }>;
+}
+
+export const planTaskOrder = api(
+  { method: "POST", path: "/ai/plan-task-order", expose: false },
+  async (req: PlanTaskOrderRequest): Promise<PlanTaskOrderResponse> => {
+    if (!req.tasks || req.tasks.length === 0) {
+      return { orderedTasks: [] };
+    }
+
+    const model = "claude-haiku-4-5-20251001";
+
+    const taskList = req.tasks.map((t, i) => `${i + 1}. [${t.id}] ${t.title}${t.description ? ` — ${t.description}` : ""}${t.labels.length > 0 ? ` (labels: ${t.labels.join(", ")})` : ""}${t.dependsOn.length > 0 ? ` (depends on: ${t.dependsOn.join(", ")})` : ""}`).join("\n");
+
+    const prompt = `## Tasks for repo: ${req.repo}\n\n${taskList}\n\nAnalyze these tasks and return an optimal execution order as JSON.`;
+
+    const systemPrompt = `You are a project planner. Analyze the given tasks and suggest an optimal execution order.
+
+Prioritize:
+1. Dependencies (depends_on must be resolved first)
+2. Foundation first (types → lib → features → tests)
+3. Simple tasks first for momentum
+4. Security fixes > bugs > upgrades
+
+Respond with JSON only:
+{
+  "orderedTasks": [
+    { "id": "uuid", "plannedOrder": 1, "estimatedComplexity": 3, "reasoning": "short explanation" }
+  ]
+}
+
+estimatedComplexity is 1-5 (1=trivial, 5=very complex).
+plannedOrder starts at 1 and increments sequentially.`;
+
+    const pipeline = await buildSystemPromptWithPipeline("agent_planning", {
+      task: "task order planning",
+      repo: req.repo,
+    });
+
+    const response = await callAIWithFallback({
+      model,
+      system: systemPrompt + "\n\n" + pipeline.systemPrompt,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 4096,
+    });
+
+    try {
+      const parsed = JSON.parse(stripMarkdownJson(response.content));
+
+      await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
+
+      return {
+        orderedTasks: (parsed.orderedTasks || []).map((t: { id: string; plannedOrder: number; estimatedComplexity: number; reasoning: string }) => ({
+          id: t.id,
+          plannedOrder: t.plannedOrder,
+          estimatedComplexity: t.estimatedComplexity || 3,
+          reasoning: t.reasoning || "",
+        })),
+      };
+    } catch {
+      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
+
+      // Fallback: return tasks in original order with default complexity
+      return {
+        orderedTasks: req.tasks.map((t, i) => ({
+          id: t.id,
+          plannedOrder: i + 1,
+          estimatedComplexity: 3,
+          reasoning: "AI planning failed — using default order",
+        })),
+      };
+    }
+  }
+);
+
+// --- File Generation (for builder service) ---
+
+interface GenerateFileRequest {
+  task: string;
+  fileSpec: {
+    filePath: string;
+    description: string;
+    action: "create" | "modify";
+    existingContent?: string;
+  };
+  existingFiles: Record<string, string>;
+  projectStructure: string[];
+  skillFragments: string[];
+  patterns: Array<{ problem: string; solution: string }>;
+  model?: string;
+}
+
+interface GenerateFileResponse {
+  content: string;
+  tokensUsed: number;
+  modelUsed: string;
+  costUsd: number;
+}
+
+export const generateFile = api(
+  { method: "POST", path: "/ai/generate-file", expose: false },
+  async (req: GenerateFileRequest): Promise<GenerateFileResponse> => {
+    const model = req.model || DEFAULT_MODEL;
+
+    const pipeline = await buildSystemPromptWithPipeline("agent_coding", {
+      task: req.task,
+      files: [req.fileSpec.filePath],
+    });
+
+    let systemPrompt = `Du er en kode-generator. Returner KUN filinnholdet uten markdown-blokker, uten forklaring, uten kommentarer om hva du gjør. Bare ren kode.
+
+Oppgave: ${sanitize(req.task)}`;
+
+    if (pipeline.systemPrompt) {
+      systemPrompt += "\n\n" + pipeline.systemPrompt;
+    }
+
+    if (req.skillFragments.length > 0) {
+      systemPrompt += "\n\n## Skill Instructions\n" + req.skillFragments.join("\n\n");
+    }
+
+    // Build user prompt with file-specific context
+    let userPrompt = `## File to generate: ${req.fileSpec.filePath}\n`;
+    userPrompt += `Action: ${req.fileSpec.action}\n`;
+    if (req.fileSpec.description) {
+      userPrompt += `Description: ${req.fileSpec.description}\n`;
+    }
+
+    if (req.fileSpec.action === "modify" && req.fileSpec.existingContent) {
+      userPrompt += `\n## Existing content:\n\`\`\`\n${req.fileSpec.existingContent.substring(0, 20000)}\n\`\`\`\n`;
+    }
+
+    if (req.projectStructure.length > 0) {
+      userPrompt += `\n## Project structure:\n${req.projectStructure.slice(0, 100).join("\n")}\n`;
+    }
+
+    const existingFileEntries = Object.entries(req.existingFiles);
+    if (existingFileEntries.length > 0) {
+      userPrompt += "\n## Context from completed files:\n";
+      let contextTokens = 0;
+      for (const [fpath, fcontent] of existingFileEntries) {
+        const contentSlice = fcontent.substring(0, 8000);
+        contextTokens += contentSlice.length / 4;
+        if (contextTokens > 20000) break;
+        userPrompt += `\n### ${fpath}\n\`\`\`\n${contentSlice}\n\`\`\`\n`;
+      }
+    }
+
+    if (req.patterns.length > 0) {
+      userPrompt += "\n## Relevant patterns:\n";
+      for (const p of req.patterns.slice(0, 3)) {
+        userPrompt += `- Problem: ${p.problem}\n  Solution: ${p.solution}\n`;
+      }
+    }
+
+    userPrompt += "\n\nGenerate ONLY the file content. No markdown blocks, no explanations.";
+
+    const response = await callAIWithFallback({
+      model,
+      system: systemPrompt,
+      messages: [{ role: "user", content: sanitize(userPrompt) }],
+      maxTokens: 16384,
+    });
+
+    await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
+
+    // Strip any markdown code blocks the AI might still add
+    let content = response.content;
+    const codeBlockMatch = content.match(/^```[\w]*\n([\s\S]*?)```\s*$/);
+    if (codeBlockMatch) {
+      content = codeBlockMatch[1];
+    }
+    if (content.startsWith("```")) {
+      content = content.replace(/^```[\w]*\n?/, "").replace(/\n?```\s*$/, "");
+    }
+
+    return {
+      content,
+      tokensUsed: response.tokensUsed,
+      modelUsed: response.modelUsed,
+      costUsd: response.costUsd,
+    };
+  }
+);
+
+// --- Fix File (for builder service) ---
+
+interface FixFileRequest {
+  task: string;
+  filePath: string;
+  currentContent: string;
+  errors: string[];
+  existingFiles: Record<string, string>;
+  model?: string;
+}
+
+interface FixFileResponse {
+  content: string;
+  tokensUsed: number;
+  modelUsed: string;
+  costUsd: number;
+}
+
+export const fixFile = api(
+  { method: "POST", path: "/ai/fix-file", expose: false },
+  async (req: FixFileRequest): Promise<FixFileResponse> => {
+    const model = req.model || DEFAULT_MODEL;
+
+    const systemPrompt = `Du er en feilfikser. Du får en fil med TypeScript-feil. Returner den KORRIGERTE filen, komplett, uten markdown-blokker, uten forklaring. Bare ren kode.`;
+
+    let userPrompt = `## Fix errors in: ${req.filePath}\n\n`;
+    userPrompt += `## Errors:\n${req.errors.slice(0, 10).join("\n")}\n\n`;
+    userPrompt += `## Current file content:\n\`\`\`\n${req.currentContent.substring(0, 20000)}\n\`\`\`\n`;
+
+    const deps = Object.entries(req.existingFiles);
+    if (deps.length > 0) {
+      userPrompt += "\n## Related files:\n";
+      for (const [depPath, depContent] of deps.slice(0, 5)) {
+        userPrompt += `\n### ${depPath}\n\`\`\`\n${depContent.substring(0, 5000)}\n\`\`\`\n`;
+      }
+    }
+
+    userPrompt += `\nOriginal task: ${req.task}\n\nReturn the COMPLETE corrected file. No markdown, no explanations.`;
+
+    const response = await callAIWithFallback({
+      model,
+      system: systemPrompt,
+      messages: [{ role: "user", content: sanitize(userPrompt) }],
+      maxTokens: 16384,
+    });
+
+    let content = response.content;
+    const codeBlockMatch = content.match(/^```[\w]*\n([\s\S]*?)```\s*$/);
+    if (codeBlockMatch) {
+      content = codeBlockMatch[1];
+    }
+    if (content.startsWith("```")) {
+      content = content.replace(/^```[\w]*\n?/, "").replace(/\n?```\s*$/, "");
+    }
+
+    return {
+      content,
+      tokensUsed: response.tokensUsed,
+      modelUsed: response.modelUsed,
+      costUsd: response.costUsd,
+    };
   }
 );

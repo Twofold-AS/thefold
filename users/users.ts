@@ -126,6 +126,61 @@ async function sendOTPEmail(email: string, code: string): Promise<void> {
   // Email sent — no verbose logging in production
 }
 
+// --- Exponential Backoff (OWASP A07) ---
+
+interface LockoutResult {
+  locked: boolean;
+  retryAfterSeconds?: number;
+}
+
+async function checkLockout(email: string): Promise<LockoutResult> {
+  // 3+ failures in 5 min → 60s lockout
+  const recent5 = await db.queryRow<{ count: number }>`
+    SELECT COUNT(*)::int AS count FROM login_audit
+    WHERE email = ${email} AND success = false
+      AND created_at > NOW() - INTERVAL '5 minutes'
+  `;
+  if (recent5 && recent5.count >= 3) {
+    // Check if the most recent failure is within lockout window
+    const lastFail = await db.queryRow<{ created_at: Date }>`
+      SELECT created_at FROM login_audit
+      WHERE email = ${email} AND success = false
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    if (lastFail) {
+      const elapsed = (Date.now() - new Date(lastFail.created_at).getTime()) / 1000;
+      let lockoutSeconds = 60;
+
+      // 10+ failures in 2 hours → 30 min lockout
+      const recent2h = await db.queryRow<{ count: number }>`
+        SELECT COUNT(*)::int AS count FROM login_audit
+        WHERE email = ${email} AND success = false
+          AND created_at > NOW() - INTERVAL '2 hours'
+      `;
+      if (recent2h && recent2h.count >= 10) {
+        lockoutSeconds = 1800;
+      }
+      // 5+ failures in 30 min → 5 min lockout
+      else {
+        const recent30 = await db.queryRow<{ count: number }>`
+          SELECT COUNT(*)::int AS count FROM login_audit
+          WHERE email = ${email} AND success = false
+            AND created_at > NOW() - INTERVAL '30 minutes'
+        `;
+        if (recent30 && recent30.count >= 5) {
+          lockoutSeconds = 300;
+        }
+      }
+
+      const remaining = lockoutSeconds - elapsed;
+      if (remaining > 0) {
+        return { locked: true, retryAfterSeconds: Math.ceil(remaining) };
+      }
+    }
+  }
+  return { locked: false };
+}
+
 // --- Endpoints ---
 
 // POST /auth/request-otp — generate and send OTP code
@@ -181,6 +236,15 @@ export const verifyOtp = api(
   { method: "POST", path: "/auth/verify-otp", expose: true, auth: false },
   async (req: VerifyOTPRequest): Promise<VerifyOTPResponse> => {
     const email = req.email.toLowerCase().trim();
+
+    // Exponential backoff check (OWASP A07)
+    const lockout = await checkLockout(email);
+    if (lockout.locked) {
+      return {
+        success: false,
+        error: `For mange mislykkede forsøk. Prøv igjen om ${lockout.retryAfterSeconds} sekunder.`,
+      };
+    }
 
     // Find user
     const user = await db.queryRow<{

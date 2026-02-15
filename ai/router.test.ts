@@ -103,9 +103,9 @@ describe("AI Router", () => {
 
     it("should calculate cost for moonshot (cheapest)", () => {
       const cost = estimateCost(1_000_000, 500_000, "moonshot-v1-128k");
-      expect(cost.inputCost).toBe(0.30);
-      expect(cost.outputCost).toBe(0.15);
-      expect(cost.totalCost).toBe(0.45);
+      expect(cost.inputCost).toBeCloseTo(0.30, 10);
+      expect(cost.outputCost).toBeCloseTo(0.15, 10);
+      expect(cost.totalCost).toBeCloseTo(0.45, 10);
     });
 
     it("should return zero cost for unknown models", () => {

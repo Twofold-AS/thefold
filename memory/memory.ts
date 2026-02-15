@@ -2,7 +2,11 @@ import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
+import log from "encore.dev/log";
 import { cache } from "~encore/clients";
+import { calculateImportanceScore, calculateDecayedRelevance } from "./decay";
+import type { MemoryType } from "./decay";
+import { sanitize } from "../ai/sanitize";
 
 const voyageKey = secret("VoyageAPIKey");
 
@@ -38,10 +42,6 @@ async function embed(text: string): Promise<number[]> {
 
   return embedding;
 }
-
-// --- Types ---
-
-type MemoryType = 'skill' | 'task' | 'session' | 'error_pattern' | 'decision' | 'general';
 
 interface SearchRequest {
   query: string;
@@ -122,7 +122,7 @@ interface MemoryStats {
 // --- Endpoints ---
 
 export const search = api(
-  { method: "POST", path: "/memory/search", expose: false },
+  { method: "POST", path: "/memory/search", expose: true, auth: true },
   async (req: SearchRequest): Promise<SearchResponse> => {
     const limit = req.limit ?? 5;
     const embedding = await embed(req.query);
@@ -133,16 +133,16 @@ export const search = api(
     const repoFilter = req.sourceRepo ? req.sourceRepo : null;
     const minRelevance = req.includeDecayed ? 0.0 : 0.1;
 
-    // Decayed scoring: similarity * temporal_decay * (1 + access_boost * 0.1)
-    // temporal_decay = relevance_score * EXP(-0.01 * days_since_creation)
-    // access_boost = LOG(1 + access_count)
+    // Decay scoring with type-based half-lives:
+    //   half_life = 90 days for error_pattern/decision, 30 days for others
+    //   recency = exp(-ln2 × age_days / half_life)
+    //   access_boost = exp(-0.1 × days_since_access) × log10(1 + access_count)
+    //   combined = 0.7 × similarity + 0.3 × min(1, relevance × recency × (1 + access_boost × 0.5))
     const rows = await db.query`
       SELECT
-        id, content, category, created_at, memory_type, relevance_score,
-        access_count, tags, source_repo,
-        1 - (embedding <=> ${vec}::vector) as similarity,
-        relevance_score * EXP(-0.01 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400) as temporal_decay,
-        LOG(1 + access_count) as access_boost
+        id, content, category, created_at, last_accessed_at, memory_type,
+        relevance_score::float as relevance_score, access_count, tags, source_repo, pinned,
+        1 - (embedding <=> ${vec}::vector) as similarity
       FROM memories
       WHERE 1 - (embedding <=> ${vec}::vector) > 0.15
         AND superseded_by IS NULL
@@ -150,9 +150,14 @@ export const search = api(
         AND (${repoFilter}::text IS NULL OR source_repo = ${repoFilter})
         AND relevance_score >= ${minRelevance}
       ORDER BY (
-        (1 - (embedding <=> ${vec}::vector))
-        * (relevance_score * EXP(-0.01 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400))
-        * (1 + LOG(1 + access_count) * 0.1)
+        0.7 * (1 - (embedding <=> ${vec}::vector))
+        + 0.3 * LEAST(1.0,
+          relevance_score
+          * EXP(-0.693147 * EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400
+              / CASE WHEN memory_type IN ('error_pattern', 'decision') THEN 90.0 ELSE 30.0 END)
+          * (1 + EXP(-0.1 * EXTRACT(EPOCH FROM (NOW() - COALESCE(last_accessed_at, created_at))) / 86400)
+              * LOG(1 + access_count) * 0.5)
+        )
       ) DESC
       LIMIT ${limit}
     `;
@@ -161,8 +166,6 @@ export const search = api(
     const ids: string[] = [];
     for await (const row of rows) {
       const similarity = row.similarity as number;
-      const temporalDecay = row.temporal_decay as number;
-      const accessBoost = row.access_boost as number;
       const id = row.id as string;
       ids.push(id);
 
@@ -173,17 +176,30 @@ export const search = api(
         if (!hasMatch) continue;
       }
 
+      const relevanceScore = Number(row.relevance_score) || 0;
+      const accessCount = Number(row.access_count) || 0;
+
+      // Compute exact decayed score in JS for display
+      const decayedScore = calculateDecayedRelevance(
+        relevanceScore,
+        new Date(row.created_at as string),
+        accessCount,
+        new Date((row.last_accessed_at ?? row.created_at) as string),
+        row.memory_type as MemoryType,
+        (row.pinned as boolean) ?? false,
+      );
+
       results.push({
         id,
         content: row.content as string,
         category: row.category as string,
         similarity,
         memoryType: row.memory_type as MemoryType,
-        relevanceScore: row.relevance_score as number,
-        decayedScore: similarity * temporalDecay * (1 + accessBoost * 0.1),
-        accessCount: row.access_count as number,
+        relevanceScore,
+        decayedScore: 0.7 * similarity + 0.3 * decayedScore,
+        accessCount,
         tags: (row.tags as string[]) || [],
-        sourceRepo: row.source_repo as string | undefined,
+        sourceRepo: (row.source_repo as string) || undefined,
         createdAt: String(row.created_at),
       });
     }
@@ -206,26 +222,29 @@ export const search = api(
 export const store = api(
   { method: "POST", path: "/memory/store", expose: true, auth: true },
   async (req: StoreRequest): Promise<StoreResponse> => {
-    const embedding = await embed(req.content);
+    // Sanitize content before storing (OWASP ASI06)
+    const content = sanitize(req.content);
+    const embedding = await embed(content);
     const vec = `[${embedding.join(",")}]`;
     const memoryType = req.memoryType || "general";
     const ttlDays = req.ttlDays ?? 90;
     const pinned = req.pinned ?? false;
     const tags = req.tags ?? [];
+    const relevanceScore = calculateImportanceScore(memoryType as MemoryType, req.category, pinned);
 
     const row = await db.queryRow`
       INSERT INTO memories (
         content, category, conversation_id, linear_task_id, embedding,
         memory_type, parent_memory_id, source_repo, source_task_id,
-        tags, ttl_days, pinned
+        tags, ttl_days, pinned, relevance_score
       )
       VALUES (
-        ${req.content}, ${req.category},
+        ${content}, ${req.category},
         ${req.conversationId || null}, ${req.linearTaskId || null},
         ${vec}::vector,
         ${memoryType}, ${req.parentMemoryId || null}::uuid,
         ${req.sourceRepo || null}, ${req.sourceTaskId || null},
-        ${tags}::text[], ${ttlDays}, ${pinned}
+        ${tags}::text[], ${ttlDays}, ${pinned}, ${relevanceScore}
       )
       RETURNING id
     `;
@@ -241,12 +260,14 @@ export const extract = api(
     // Only store if content is substantial enough
     if (req.content.length < 50) return { stored: false };
 
-    const embedding = await embed(req.content);
+    // Sanitize content before storing (OWASP ASI06)
+    const content = sanitize(req.content.substring(0, 5000));
+    const embedding = await embed(content);
     const vec = `[${embedding.join(",")}]`;
 
     await db.exec`
       INSERT INTO memories (content, category, conversation_id, linear_task_id, embedding, memory_type)
-      VALUES (${req.content.substring(0, 5000)}, ${req.category}, ${req.conversationId}, ${req.linearTaskId || null}, ${vec}::vector, 'session')
+      VALUES (${content}, ${req.category}, ${req.conversationId}, ${req.linearTaskId || null}, ${vec}::vector, 'session')
     `;
 
     return { stored: true };
@@ -337,6 +358,92 @@ export const cleanup = api(
   }
 );
 
+// --- Memory Decay (Steg 2.6) ---
+
+interface DecayResponse {
+  updated: number;
+  deleted: number;
+  total: number;
+}
+
+/** Core decay logic — shared between manual endpoint and cron */
+async function runDecayLogic(): Promise<DecayResponse> {
+  const rows = await db.query<{
+    id: string;
+    memory_type: string;
+    category: string;
+    created_at: string;
+    access_count: number;
+    last_accessed_at: string | null;
+    ttl_days: number;
+  }>`
+    SELECT id, memory_type, category, created_at, access_count,
+           last_accessed_at, ttl_days
+    FROM memories
+    WHERE pinned = false AND superseded_by IS NULL
+  `;
+
+  let updated = 0;
+  let deleted = 0;
+  const now = new Date();
+
+  for await (const row of rows) {
+    const importance = calculateImportanceScore(
+      row.memory_type as MemoryType,
+      row.category,
+      false
+    );
+
+    const decayedRelevance = calculateDecayedRelevance(
+      importance,
+      new Date(row.created_at),
+      row.access_count,
+      new Date(row.last_accessed_at ?? row.created_at),
+      row.memory_type as MemoryType,
+      false,
+      now
+    );
+
+    const ageDays = (now.getTime() - new Date(row.created_at).getTime()) / 86_400_000;
+
+    // Delete if relevance too low AND past TTL
+    if (decayedRelevance < 0.05 && ageDays > row.ttl_days) {
+      await db.exec`DELETE FROM memories WHERE id = ${row.id}::uuid`;
+      deleted++;
+    } else {
+      await db.exec`
+        UPDATE memories SET relevance_score = ${decayedRelevance}
+        WHERE id = ${row.id}::uuid
+      `;
+      updated++;
+    }
+  }
+
+  const totalRow = await db.queryRow<{ count: number }>`
+    SELECT COUNT(*)::int as count FROM memories WHERE superseded_by IS NULL
+  `;
+
+  log.info("memory decay completed", { updated, deleted, total: totalRow?.count ?? 0 });
+
+  return {
+    updated,
+    deleted,
+    total: totalRow?.count ?? 0,
+  };
+}
+
+// POST /memory/decay — Manual decay trigger (requires auth)
+export const decay = api(
+  { method: "POST", path: "/memory/decay", expose: true, auth: true },
+  async (): Promise<DecayResponse> => runDecayLogic()
+);
+
+// POST /memory/decay-cron — Internal endpoint for scheduled decay
+export const decayCron = api(
+  { method: "POST", path: "/memory/decay-cron", expose: false },
+  async (): Promise<DecayResponse> => runDecayLogic()
+);
+
 // GET /memory/stats — Memory statistics
 export const stats = api(
   { method: "GET", path: "/memory/stats", expose: true, auth: true },
@@ -357,7 +464,7 @@ export const stats = api(
     }
 
     const avgRow = await db.queryRow<{ avg: number }>`
-      SELECT COALESCE(AVG(relevance_score), 0)::decimal as avg
+      SELECT COALESCE(AVG(relevance_score), 0)::float as avg
       FROM memories WHERE superseded_by IS NULL
     `;
 
@@ -391,6 +498,7 @@ interface StorePatternRequest {
   codeBefore?: string;
   codeAfter?: string;
   tags?: string[];
+  componentId?: string;
 }
 
 interface StorePatternResponse {
@@ -438,13 +546,14 @@ export const storePattern = api(
         pattern_type, source_repo, source_task_id,
         problem_description, solution_description,
         files_affected, code_before, code_after,
-        problem_embedding, solution_embedding, tags
+        problem_embedding, solution_embedding, tags, component_id
       )
       VALUES (
         ${req.patternType}, ${req.sourceRepo}, ${req.sourceTaskId || null},
         ${req.problemDescription}, ${req.solutionDescription},
         ${filesAffected}::text[], ${req.codeBefore || null}, ${req.codeAfter || null},
-        ${problemVec}::vector, ${solutionVec}::vector, ${tags}::text[]
+        ${problemVec}::vector, ${solutionVec}::vector, ${tags}::text[],
+        ${req.componentId ?? null}::uuid
       )
       RETURNING id
     `;
@@ -467,7 +576,7 @@ export const searchPatterns = api(
     const rows = await db.query`
       SELECT
         id, pattern_type, source_repo, problem_description, solution_description,
-        files_affected, times_reused, confidence_score, tags, created_at,
+        files_affected, times_reused, confidence_score::float as confidence_score, tags, created_at,
         1 - (problem_embedding <=> ${vec}::vector) as similarity
       FROM code_patterns
       WHERE 1 - (problem_embedding <=> ${vec}::vector) > 0.2
@@ -486,8 +595,8 @@ export const searchPatterns = api(
         problemDescription: row.problem_description as string,
         solutionDescription: row.solution_description as string,
         filesAffected: (row.files_affected as string[]) || [],
-        timesReused: row.times_reused as number,
-        confidenceScore: row.confidence_score as number,
+        timesReused: Number(row.times_reused) || 0,
+        confidenceScore: Number(row.confidence_score) || 0,
         tags: (row.tags as string[]) || [],
         similarity: row.similarity as number,
         createdAt: String(row.created_at),
@@ -503,10 +612,16 @@ export const searchPatterns = api(
   }
 );
 
-// --- Cron: Daily memory cleanup at 04:00 ---
+// --- Crons ---
 
-const _ = new CronJob("memory-cleanup", {
+const _cleanup = new CronJob("memory-cleanup", {
   title: "Clean expired memories",
   schedule: "0 4 * * *",
   endpoint: cleanup,
+});
+
+const _decay = new CronJob("memory-decay", {
+  title: "Decay memory relevance scores",
+  schedule: "0 3 * * *",
+  endpoint: decayCron,
 });

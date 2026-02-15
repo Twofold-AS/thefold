@@ -26,14 +26,14 @@ export function ChatToolsMenu({ onCreateSkill, onCreateTask, onTransfer }: ChatT
   const items = [
     { icon: Sparkles, label: "Opprett ny skill", action: onCreateSkill },
     { icon: ListTodo, label: "Opprett task", action: onCreateTask },
-    ...(onTransfer ? [{ icon: ArrowRight, label: "Overfør til repo", action: onTransfer }] : []),
+    ...(onTransfer ? [{ icon: ArrowRight, label: "Overfor til repo", action: onTransfer }] : []),
   ];
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center justify-center rounded-full transition-colors"
+        className="flex items-center justify-center transition-colors"
         style={{
           width: "44px",
           height: "44px",
@@ -57,10 +57,8 @@ export function ChatToolsMenu({ onCreateSkill, onCreateTask, onTransfer }: ChatT
             left: 0,
             zIndex: 50,
             minWidth: "200px",
-            background: "var(--bg-primary)",
+            background: "var(--bg-page)",
             border: "1px solid var(--border)",
-            borderRadius: "8px",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
             overflow: "hidden",
           }}
         >

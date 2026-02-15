@@ -1,7 +1,9 @@
 import { api, APIError, Gateway, Header } from "encore.dev/api";
 import { authHandler } from "encore.dev/auth";
 import { secret } from "encore.dev/config";
+import { CronJob } from "encore.dev/cron";
 import * as crypto from "crypto";
+import { db } from "./db";
 
 const authSecret = secret("AuthSecret");
 
@@ -19,6 +21,22 @@ export interface AuthData {
 
 // Token format: base64(JSON payload).hmac-sha256
 // Payload includes exp claim for 7-day expiry
+
+/** SHA-256 hash of the raw token string — used as key in revoked_tokens table */
+function hashToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+/** Extract expiry timestamp from a valid token payload (seconds since epoch) */
+function extractExpiry(token: string): number | null {
+  try {
+    const payload = token.split(".")[0];
+    const decoded = JSON.parse(Buffer.from(payload, "base64").toString());
+    return decoded.exp ?? null;
+  } catch {
+    return null;
+  }
+}
 
 function verifyToken(token: string): AuthData | null {
   const parts = token.split(".");
@@ -88,6 +106,90 @@ export const createToken = api(
   }
 );
 
+// --- Token Revocation (OWASP A07) ---
+
+interface RevokeResponse {
+  revoked: boolean;
+}
+
+/** Revoke the current Bearer token. Call this on logout. */
+export const revoke = api(
+  { method: "POST", path: "/gateway/revoke", expose: true, auth: true },
+  async (params: { authorization: Header<"Authorization"> }): Promise<RevokeResponse> => {
+    const header = params.authorization;
+    if (!header) {
+      throw APIError.invalidArgument("missing authorization header");
+    }
+
+    const token = header.replace("Bearer ", "");
+    const tokenHash = hashToken(token);
+    const exp = extractExpiry(token);
+
+    if (!exp) {
+      throw APIError.invalidArgument("invalid token");
+    }
+
+    const expiresAt = new Date(exp * 1000).toISOString();
+
+    await db.exec`
+      INSERT INTO revoked_tokens (token_hash, expires_at)
+      VALUES (${tokenHash}, ${expiresAt}::timestamptz)
+      ON CONFLICT (token_hash) DO NOTHING
+    `;
+
+    return { revoked: true };
+  }
+);
+
+/** Internal: revoke a specific token (called by services) */
+export const revokeToken = api(
+  { method: "POST", path: "/gateway/revoke-token", expose: false },
+  async (req: { token: string }): Promise<RevokeResponse> => {
+    const tokenHash = hashToken(req.token);
+    const exp = extractExpiry(req.token);
+
+    if (!exp) {
+      throw APIError.invalidArgument("invalid token");
+    }
+
+    const expiresAt = new Date(exp * 1000).toISOString();
+
+    await db.exec`
+      INSERT INTO revoked_tokens (token_hash, expires_at)
+      VALUES (${tokenHash}, ${expiresAt}::timestamptz)
+      ON CONFLICT (token_hash) DO NOTHING
+    `;
+
+    return { revoked: true };
+  }
+);
+
+// --- Cleanup expired revoked tokens (cron) ---
+
+interface CleanupResponse {
+  deleted: number;
+}
+
+export const cleanupRevokedTokens = api(
+  { method: "POST", path: "/gateway/cleanup-revoked", expose: false },
+  async (): Promise<CleanupResponse> => {
+    const result = await db.queryRow<{ count: number }>`
+      WITH deleted AS (
+        DELETE FROM revoked_tokens WHERE expires_at < NOW()
+        RETURNING token_hash
+      )
+      SELECT COUNT(*)::int as count FROM deleted
+    `;
+    return { deleted: result?.count ?? 0 };
+  }
+);
+
+const _cleanupCron = new CronJob("cleanup-revoked-tokens", {
+  title: "Clean up expired revoked tokens",
+  schedule: "0 2 * * *",
+  endpoint: cleanupRevokedTokens,
+});
+
 // --- Auth Handler ---
 
 export const auth = authHandler(async (params: AuthParams): Promise<AuthData> => {
@@ -101,6 +203,16 @@ export const auth = authHandler(async (params: AuthParams): Promise<AuthData> =>
 
   if (!data) {
     throw APIError.unauthenticated("invalid or expired token");
+  }
+
+  // Check if token has been revoked (OWASP A07)
+  const tokenHash = hashToken(token);
+  const revoked = await db.queryRow<{ token_hash: string }>`
+    SELECT token_hash FROM revoked_tokens WHERE token_hash = ${tokenHash}
+  `;
+
+  if (revoked) {
+    throw APIError.unauthenticated("token revoked");
   }
 
   return data;

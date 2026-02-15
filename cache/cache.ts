@@ -30,6 +30,10 @@ async function cacheGet(key: string): Promise<unknown | null> {
     UPDATE cache_entries SET last_used_at = NOW() WHERE key = ${key}
   `;
 
+  // Encore's Rust driver may return JSONB as a string — parse defensively
+  if (typeof row.value === "string") {
+    try { return JSON.parse(row.value); } catch { return row.value; }
+  }
   return row.value;
 }
 
@@ -45,7 +49,7 @@ async function cacheSet(
       ${key},
       ${namespace},
       ${JSON.stringify(value)}::jsonb,
-      NOW() + ${ttlSeconds + " seconds"}::interval
+      NOW() + (${ttlSeconds} * interval '1 second')
     )
     ON CONFLICT (key) DO UPDATE SET
       value = EXCLUDED.value,

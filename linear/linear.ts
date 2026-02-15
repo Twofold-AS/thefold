@@ -56,6 +56,53 @@ interface UpdateTaskResponse {
   success: boolean;
 }
 
+// --- State Mapping ---
+
+// TheFold status → Linear state name
+export const STATUS_TO_LINEAR: Record<string, string> = {
+  backlog: "Backlog",
+  planned: "Todo",
+  in_progress: "In Progress",
+  in_review: "In Review",
+  done: "Done",
+  blocked: "Cancelled",
+};
+
+// Cache workflow states per team to avoid repeated lookups
+let cachedWorkflowStates: Array<{ id: string; name: string }> | null = null;
+let cacheTimestamp = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+async function getWorkflowStates(): Promise<Array<{ id: string; name: string }>> {
+  if (cachedWorkflowStates && Date.now() - cacheTimestamp < CACHE_TTL_MS) {
+    return cachedWorkflowStates;
+  }
+
+  const data = await gql(`
+    query {
+      workflowStates(first: 50) {
+        nodes { id name }
+      }
+    }
+  `);
+
+  cachedWorkflowStates = data.data.workflowStates.nodes.map((s: any) => ({
+    id: s.id,
+    name: s.name,
+  }));
+  cacheTimestamp = Date.now();
+  return cachedWorkflowStates!;
+}
+
+/** Resolve a Linear workflow state ID from a state name */
+async function resolveStateId(stateName: string): Promise<string | null> {
+  const states = await getWorkflowStates();
+  const match = states.find(
+    (s) => s.name.toLowerCase() === stateName.toLowerCase()
+  );
+  return match?.id ?? null;
+}
+
 // --- Endpoints ---
 
 // Get tasks assigned to TheFold (with "thefold" label)
@@ -136,8 +183,22 @@ export const updateTask = api(
       );
     }
 
-    // Note: "in_review" maps to your team's actual state name in Linear
-    // You'll need to look up the state ID for your specific team
+    if (req.state) {
+      const linearStateName = STATUS_TO_LINEAR[req.state] ?? req.state;
+      const stateId = await resolveStateId(linearStateName);
+
+      if (stateId) {
+        await gql(
+          `mutation($id: String!, $stateId: String!) {
+            issueUpdate(id: $id, input: { stateId: $stateId }) {
+              success
+            }
+          }`,
+          { id: req.taskId, stateId }
+        );
+      }
+    }
+
     return { success: true };
   }
 );

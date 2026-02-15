@@ -212,17 +212,43 @@ export const executePreRun = api(
   { method: "POST", path: "/skills/execute-pre-run", expose: false },
   async (req: ExecutePreRunRequest): Promise<ExecutePreRunResponse> => {
     const results: SkillRunResult[] = [];
+    let allApproved = true;
 
     for (const skill of req.skills) {
       const start = Date.now();
 
-      // v1: passthrough — always approved
+      // Input validation: check that required context fields exist
+      const validationErrors: string[] = [];
+      if (!req.context.task || req.context.task.trim().length === 0) {
+        validationErrors.push("Missing or empty task description");
+      }
+      if (!req.context.userId || req.context.userId.trim().length === 0) {
+        validationErrors.push("Missing userId");
+      }
+
+      // Context enrichment: add metadata about the skill being applied
+      const enrichedContext: Record<string, unknown> = {
+        skillName: skill.name,
+        skillPriority: skill.priority,
+        tokenEstimate: skill.tokenEstimate,
+        hasRepo: !!req.context.repo,
+        fileCount: req.context.files?.length ?? 0,
+        labelCount: req.context.labels?.length ?? 0,
+      };
+
+      const approved = validationErrors.length === 0;
+      if (!approved) allApproved = false;
+
       results.push({
         skillId: skill.id,
         skillName: skill.name,
         phase: "pre_run",
-        success: true,
-        output: { approved: true },
+        success: approved,
+        output: {
+          approved,
+          validationErrors: validationErrors.length > 0 ? validationErrors : undefined,
+          enrichedContext,
+        },
         tokensUsed: 0,
         duration: Date.now() - start,
       });
@@ -230,7 +256,7 @@ export const executePreRun = api(
 
     return {
       results,
-      approved: true, // v1: always approved
+      approved: allApproved,
     };
   }
 );
@@ -252,17 +278,53 @@ export const executePostRun = api(
   { method: "POST", path: "/skills/execute-post-run", expose: false },
   async (req: ExecutePostRunRequest): Promise<ExecutePostRunResponse> => {
     const results: SkillRunResult[] = [];
+    let allApproved = true;
 
     for (const skill of req.skills) {
       const start = Date.now();
 
-      // v1: passthrough — always approved
+      // Quality review: check that AI output is not empty or failed
+      const qualityIssues: string[] = [];
+
+      if (!req.aiOutput || req.aiOutput.trim().length === 0) {
+        qualityIssues.push("AI output is empty");
+      } else if (req.aiOutput.trim().length < 10) {
+        qualityIssues.push("AI output is suspiciously short (< 10 chars)");
+      }
+
+      // Check for common failure patterns in output
+      const lowerOutput = (req.aiOutput || "").toLowerCase();
+      if (lowerOutput.includes("i cannot") || lowerOutput.includes("i'm unable")) {
+        qualityIssues.push("AI output indicates inability to complete task");
+      }
+      if (lowerOutput.includes("// todo") || lowerOutput.includes("// ...")) {
+        qualityIssues.push("AI output contains placeholder code (TODO or ...)");
+      }
+
+      const approved = qualityIssues.length === 0;
+      if (!approved) allApproved = false;
+
+      // Log the skill result
+      try {
+        await logResult({
+          skillId: skill.id,
+          success: approved,
+          tokensUsed: skill.tokenEstimate,
+        });
+      } catch {
+        // Non-critical — don't fail the pipeline
+      }
+
       results.push({
         skillId: skill.id,
         skillName: skill.name,
         phase: "post_run",
-        success: true,
-        output: { approved: true },
+        success: approved,
+        output: {
+          approved,
+          qualityIssues: qualityIssues.length > 0 ? qualityIssues : undefined,
+          outputLength: (req.aiOutput || "").length,
+        },
         tokensUsed: 0,
         duration: Date.now() - start,
       });
@@ -270,7 +332,7 @@ export const executePostRun = api(
 
     return {
       results,
-      approved: true, // v1: always approved
+      approved: allApproved,
     };
   }
 );

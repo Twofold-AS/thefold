@@ -1,11 +1,33 @@
 import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
+import { CronJob } from "encore.dev/cron";
 import { execSync, exec } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+import {
+  createDockerSandbox,
+  execInDocker,
+  writeFileDocker,
+  deleteFileDocker,
+  destroyDockerSandbox,
+  cleanupOldContainers,
+} from "./docker";
 
 const githubToken = secret("GitHubToken");
+const sandboxMode = secret("SandboxMode"); // "docker" | "filesystem"
+
+// --- Mode helper ---
+
+function getSandboxMode(): "docker" | "filesystem" {
+  try {
+    const mode = sandboxMode();
+    if (mode === "docker") return "docker";
+  } catch {
+    // Secret not set — default to filesystem
+  }
+  return "filesystem";
+}
 
 // Sandboxes are directories on the VPS, isolated by unique IDs
 // In production, use Docker containers for full isolation
@@ -88,6 +110,17 @@ function ensureSandboxExists(id: string): string {
 export const create = api(
   { method: "POST", path: "/sandbox/create", expose: false },
   async (req: CreateRequest): Promise<CreateResponse> => {
+    if (getSandboxMode() === "docker") {
+      const id = await createDockerSandbox({
+        repoOwner: req.repoOwner,
+        repoName: req.repoName,
+        ref: req.ref,
+        githubToken: githubToken(),
+      });
+      return { id };
+    }
+
+    // --- Filesystem mode (default for development) ---
     const id = crypto.randomUUID();
     const dir = sandboxPath(id);
     const ref = req.ref || "main";
@@ -122,6 +155,17 @@ export const create = api(
 export const writeFile = api(
   { method: "POST", path: "/sandbox/write", expose: false },
   async (req: WriteFileRequest): Promise<{ written: boolean }> => {
+    // Path traversal check (applies to both modes)
+    if (req.path.includes("..")) {
+      throw APIError.invalidArgument("path escapes sandbox");
+    }
+
+    if (getSandboxMode() === "docker") {
+      await writeFileDocker(req.sandboxId, req.path, req.content);
+      return { written: true };
+    }
+
+    // --- Filesystem mode ---
     const dir = ensureSandboxExists(req.sandboxId);
     const filePath = path.join(dir, "repo", req.path);
 
@@ -143,6 +187,16 @@ export const writeFile = api(
 export const deleteFile = api(
   { method: "POST", path: "/sandbox/delete-file", expose: false },
   async (req: DeleteFileRequest): Promise<{ deleted: boolean }> => {
+    if (req.path.includes("..")) {
+      throw APIError.invalidArgument("path escapes sandbox");
+    }
+
+    if (getSandboxMode() === "docker") {
+      await deleteFileDocker(req.sandboxId, req.path);
+      return { deleted: true };
+    }
+
+    // --- Filesystem mode ---
     const dir = ensureSandboxExists(req.sandboxId);
     const filePath = path.join(dir, "repo", req.path);
 
@@ -163,7 +217,6 @@ export const deleteFile = api(
 export const runCommand = api(
   { method: "POST", path: "/sandbox/run", expose: false },
   async (req: RunCommandRequest): Promise<RunCommandResponse> => {
-    const dir = ensureSandboxExists(req.sandboxId);
     const timeout = (req.timeout || 30) * 1000;
 
     // Whitelist safe commands
@@ -185,6 +238,13 @@ export const runCommand = api(
         `command not allowed: ${req.command}. Allowed: ${safeCommands.join(", ")}`
       );
     }
+
+    if (getSandboxMode() === "docker") {
+      return execInDocker(req.sandboxId, `cd /workspace/repo && ${req.command}`, timeout);
+    }
+
+    // --- Filesystem mode ---
+    const dir = ensureSandboxExists(req.sandboxId);
 
     return new Promise((resolve) => {
       exec(
@@ -218,132 +278,145 @@ interface ValidationPipelineResult {
   totalDuration: number;
 }
 
-async function runTypeCheck(repoDir: string): Promise<ValidationStepResult> {
+// Command runner abstraction for filesystem vs docker mode
+type CommandRunner = (command: string, timeout: number) => Promise<{ stdout: string; exitCode: number }>;
+
+function filesystemRunner(repoDir: string): CommandRunner {
+  return async (command: string, timeout: number) => {
+    try {
+      const stdout = execSync(`${command} 2>&1`, { cwd: repoDir, timeout }).toString();
+      return { stdout, exitCode: 0 };
+    } catch (error: any) {
+      return {
+        stdout: error.stdout?.toString() || error.message || "",
+        exitCode: error.status ?? 1,
+      };
+    }
+  };
+}
+
+function dockerRunner(sandboxId: string): CommandRunner {
+  return async (command: string, timeout: number) => {
+    const result = await execInDocker(sandboxId, `cd /workspace/repo && ${command}`, timeout);
+    return { stdout: result.stdout || result.stderr, exitCode: result.exitCode };
+  };
+}
+
+async function runTypeCheck(run: CommandRunner): Promise<ValidationStepResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  try {
-    const tscResult = execSync("npx tsc --noEmit 2>&1", {
-      cwd: repoDir,
-      timeout: 60_000,
-    }).toString();
-    if (tscResult.includes("warning")) {
-      warnings.push(tscResult.substring(0, 500));
+  const result = await run("npx tsc --noEmit", 60_000);
+  if (result.exitCode === 0) {
+    if (result.stdout.includes("warning")) {
+      warnings.push(result.stdout.substring(0, 500));
     }
-  } catch (error: any) {
-    const tscOutput = error.stdout?.toString() || error.message;
-    errors.push(tscOutput.substring(0, 2000));
+  } else {
+    errors.push(result.stdout.substring(0, 2000));
   }
 
   return { step: "typecheck", success: errors.length === 0, errors, warnings };
 }
 
-async function runLint(repoDir: string): Promise<ValidationStepResult> {
+async function runLint(run: CommandRunner): Promise<ValidationStepResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  try {
-    const eslintResult = execSync("npx eslint . --no-error-on-unmatched-pattern 2>&1", {
-      cwd: repoDir,
-      timeout: 60_000,
-    }).toString();
-    if (eslintResult.includes("warning")) {
-      warnings.push(eslintResult.substring(0, 500));
+  const result = await run("npx eslint . --no-error-on-unmatched-pattern", 60_000);
+  if (result.exitCode === 0) {
+    if (result.stdout.includes("warning")) {
+      warnings.push(result.stdout.substring(0, 500));
     }
-  } catch (error: any) {
-    const eslintOutput = error.stdout?.toString() || error.message;
-    errors.push(eslintOutput.substring(0, 2000));
+  } else {
+    errors.push(result.stdout.substring(0, 2000));
   }
 
   return { step: "lint", success: errors.length === 0, errors, warnings };
 }
 
-async function runTests(repoDir: string): Promise<ValidationStepResult> {
+async function runTests(run: CommandRunner, repoDir: string, isDocker: boolean): Promise<ValidationStepResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
   const metrics: Record<string, number> = {};
 
-  // Check if tests exist
-  const hasTestConfig =
-    fs.existsSync(`${repoDir}/jest.config.ts`) ||
-    fs.existsSync(`${repoDir}/jest.config.js`) ||
-    fs.existsSync(`${repoDir}/vitest.config.ts`) ||
-    fs.existsSync(`${repoDir}/vitest.config.js`);
+  if (!isDocker) {
+    // Check if tests exist (filesystem only — in Docker we just try running)
+    const hasTestConfig =
+      fs.existsSync(`${repoDir}/jest.config.ts`) ||
+      fs.existsSync(`${repoDir}/jest.config.js`) ||
+      fs.existsSync(`${repoDir}/vitest.config.ts`) ||
+      fs.existsSync(`${repoDir}/vitest.config.js`);
 
-  // Check package.json for test script
-  let hasTestScript = false;
-  try {
-    const pkg = JSON.parse(fs.readFileSync(`${repoDir}/package.json`, "utf-8"));
-    hasTestScript = !!pkg.scripts?.test;
-  } catch { /* no package.json */ }
+    let hasTestScript = false;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(`${repoDir}/package.json`, "utf-8"));
+      hasTestScript = !!pkg.scripts?.test;
+    } catch { /* no package.json */ }
 
-  if (!hasTestConfig && !hasTestScript) {
-    return { step: "test", success: true, errors, warnings: ["No test configuration found — skipped"], metrics };
+    if (!hasTestConfig && !hasTestScript) {
+      return { step: "test", success: true, errors, warnings: ["No test configuration found — skipped"], metrics };
+    }
   }
 
-  try {
-    const testResult = execSync("npm test --if-present 2>&1", {
-      cwd: repoDir,
-      timeout: 120_000,
-    }).toString();
-
-    // Try to parse test counts from output
-    const passMatch = testResult.match(/(\d+)\s+pass/i);
-    const failMatch = testResult.match(/(\d+)\s+fail/i);
+  const result = await run("npm test --if-present", 120_000);
+  if (result.exitCode === 0) {
+    const passMatch = result.stdout.match(/(\d+)\s+pass/i);
+    const failMatch = result.stdout.match(/(\d+)\s+fail/i);
     if (passMatch) metrics.testsPassed = parseInt(passMatch[1]);
     if (failMatch) metrics.testsFailed = parseInt(failMatch[1]);
-  } catch (error: any) {
-    const testOutput = error.stdout?.toString() || error.message;
-    errors.push(testOutput.substring(0, 2000));
-
-    const failMatch = testOutput.match(/(\d+)\s+fail/i);
+  } else {
+    errors.push(result.stdout.substring(0, 2000));
+    const failMatch = result.stdout.match(/(\d+)\s+fail/i);
     if (failMatch) metrics.testsFailed = parseInt(failMatch[1]);
   }
 
   return { step: "test", success: errors.length === 0, errors, warnings, metrics };
 }
 
-async function runSnapshotComparison(_repoDir: string): Promise<ValidationStepResult> {
+async function runSnapshotComparison(): Promise<ValidationStepResult> {
   return { step: "snapshot", success: true, errors: [], warnings: ["Snapshot comparison not yet enabled"] };
 }
 
-async function runPerformanceBenchmark(_repoDir: string): Promise<ValidationStepResult> {
+async function runPerformanceBenchmark(): Promise<ValidationStepResult> {
   return { step: "performance", success: true, errors: [], warnings: ["Performance benchmarks not yet enabled"] };
 }
 
 interface PipelineStep {
   name: string;
   enabled: boolean;
-  run: (repoDir: string) => Promise<ValidationStepResult>;
+  run: (runner: CommandRunner, repoDir: string, isDocker: boolean) => Promise<ValidationStepResult>;
 }
 
 const VALIDATION_PIPELINE: PipelineStep[] = [
-  { name: "typecheck", enabled: true, run: runTypeCheck },
-  { name: "lint", enabled: true, run: runLint },
-  { name: "test", enabled: true, run: runTests },
-  { name: "snapshot", enabled: false, run: runSnapshotComparison },
-  { name: "performance", enabled: false, run: runPerformanceBenchmark },
+  { name: "typecheck", enabled: true, run: (r) => runTypeCheck(r) },
+  { name: "lint", enabled: true, run: (r) => runLint(r) },
+  { name: "test", enabled: true, run: (r, d, docker) => runTests(r, d, docker) },
+  { name: "snapshot", enabled: false, run: () => runSnapshotComparison() },
+  { name: "performance", enabled: false, run: () => runPerformanceBenchmark() },
 ];
 
 // Validate the sandbox code via pipeline
 export const validate = api(
   { method: "POST", path: "/sandbox/validate", expose: false },
   async (req: ValidateRequest): Promise<ValidateResponse> => {
-    const dir = ensureSandboxExists(req.sandboxId);
-    const repoDir = `${dir}/repo`;
+    const isDocker = getSandboxMode() === "docker";
+    const dir = isDocker ? "" : ensureSandboxExists(req.sandboxId);
+    const repoDir = isDocker ? `/workspace/repo` : `${dir}/repo`;
     const pipelineStart = Date.now();
 
     const steps: ValidationStepResult[] = [];
     const allErrors: string[] = [];
 
+    const runner = isDocker ? dockerRunner(req.sandboxId) : filesystemRunner(repoDir);
+
     for (const step of VALIDATION_PIPELINE) {
       if (!step.enabled) {
-        const stub = await step.run(repoDir);
+        const stub = await step.run(runner, repoDir, isDocker);
         steps.push(stub);
         continue;
       }
 
-      const result = await step.run(repoDir);
+      const result = await step.run(runner, repoDir, isDocker);
       steps.push(result);
       allErrors.push(...result.errors);
     }
@@ -392,27 +465,14 @@ interface ValidateIncrementalResponse {
 export const validateIncremental = api(
   { method: "POST", path: "/sandbox/validate-incremental", expose: false },
   async (req: ValidateIncrementalRequest): Promise<ValidateIncrementalResponse> => {
-    const dir = ensureSandboxExists(req.sandboxId);
-    const repoDir = `${dir}/repo`;
+    const isDocker = getSandboxMode() === "docker";
     const start = Date.now();
     const errors: string[] = [];
     let output = "";
 
-    // Validate that the file exists
-    const fullPath = path.join(repoDir, req.filePath);
-    const resolved = path.resolve(fullPath);
-    if (!resolved.startsWith(path.resolve(dir))) {
+    // Path traversal check
+    if (req.filePath.includes("..")) {
       throw APIError.invalidArgument("path escapes sandbox");
-    }
-
-    if (!fs.existsSync(fullPath)) {
-      return {
-        success: false,
-        filePath: req.filePath,
-        output: `File not found: ${req.filePath}`,
-        errors: [`File not found: ${req.filePath}`],
-        durationMs: Date.now() - start,
-      };
     }
 
     // Only typecheck .ts/.tsx files
@@ -426,41 +486,70 @@ export const validateIncremental = api(
       };
     }
 
-    // Run tsc --noEmit on the specific file
-    // We use the project's tsconfig but check only this file
-    try {
-      const tscResult = execSync(
+    if (isDocker) {
+      // Docker mode — run tsc inside container, filter for this file
+      const run = dockerRunner(req.sandboxId);
+      const result = await run(
         `npx tsc --noEmit --pretty false 2>&1 | grep -i "${req.filePath}" || true`,
-        {
-          cwd: repoDir,
-          timeout: 30_000,
-        }
-      ).toString().trim();
+        30_000
+      );
 
-      if (tscResult.length === 0) {
+      if (result.stdout.trim().length === 0) {
         output = `No TypeScript errors in ${req.filePath}`;
       } else {
-        output = tscResult;
-        // Parse individual errors
-        const lines = tscResult.split("\n").filter((l) => l.includes("error TS"));
+        output = result.stdout.trim();
+        const lines = output.split("\n").filter((l) => l.includes("error TS"));
         errors.push(...lines.map((l) => l.substring(0, 500)));
       }
-    } catch (error: any) {
-      // tsc returns non-zero on errors — capture and filter for this file
-      const fullOutput = error.stdout?.toString() || error.message || "";
-      const fileErrors = fullOutput
-        .split("\n")
-        .filter((line: string) => line.includes(req.filePath))
-        .join("\n")
-        .trim();
+    } else {
+      // Filesystem mode
+      const dir = ensureSandboxExists(req.sandboxId);
+      const repoDir = `${dir}/repo`;
 
-      if (fileErrors.length > 0) {
-        output = fileErrors;
-        const errorLines = fileErrors.split("\n").filter((l: string) => l.includes("error TS"));
-        errors.push(...errorLines.map((l: string) => l.substring(0, 500)));
-      } else {
-        // No errors specific to this file — other files may have errors
-        output = `No TypeScript errors in ${req.filePath}`;
+      const fullPath = path.join(repoDir, req.filePath);
+      const resolved = path.resolve(fullPath);
+      if (!resolved.startsWith(path.resolve(dir))) {
+        throw APIError.invalidArgument("path escapes sandbox");
+      }
+
+      if (!fs.existsSync(fullPath)) {
+        return {
+          success: false,
+          filePath: req.filePath,
+          output: `File not found: ${req.filePath}`,
+          errors: [`File not found: ${req.filePath}`],
+          durationMs: Date.now() - start,
+        };
+      }
+
+      try {
+        const tscResult = execSync(
+          `npx tsc --noEmit --pretty false 2>&1 | grep -i "${req.filePath}" || true`,
+          { cwd: repoDir, timeout: 30_000 }
+        ).toString().trim();
+
+        if (tscResult.length === 0) {
+          output = `No TypeScript errors in ${req.filePath}`;
+        } else {
+          output = tscResult;
+          const lines = tscResult.split("\n").filter((l) => l.includes("error TS"));
+          errors.push(...lines.map((l) => l.substring(0, 500)));
+        }
+      } catch (error: any) {
+        const fullOutput = error.stdout?.toString() || error.message || "";
+        const fileErrors = fullOutput
+          .split("\n")
+          .filter((line: string) => line.includes(req.filePath))
+          .join("\n")
+          .trim();
+
+        if (fileErrors.length > 0) {
+          output = fileErrors;
+          const errorLines = fileErrors.split("\n").filter((l: string) => l.includes("error TS"));
+          errors.push(...errorLines.map((l: string) => l.substring(0, 500)));
+        } else {
+          output = `No TypeScript errors in ${req.filePath}`;
+        }
       }
     }
 
@@ -478,6 +567,12 @@ export const validateIncremental = api(
 export const destroy = api(
   { method: "POST", path: "/sandbox/destroy", expose: false },
   async (req: DestroyRequest): Promise<DestroyResponse> => {
+    if (getSandboxMode() === "docker") {
+      await destroyDockerSandbox(req.sandboxId);
+      return { destroyed: true };
+    }
+
+    // --- Filesystem mode ---
     const dir = sandboxPath(req.sandboxId);
     if (fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -485,3 +580,22 @@ export const destroy = api(
     return { destroyed: true };
   }
 );
+
+// --- Cleanup Cron (Docker mode) ---
+
+export const cleanupDockerSandboxes = api(
+  { method: "POST", path: "/sandbox/cleanup", expose: false },
+  async (): Promise<{ removed: number }> => {
+    if (getSandboxMode() !== "docker") {
+      return { removed: 0 };
+    }
+    const removed = cleanupOldContainers(30);
+    return { removed };
+  }
+);
+
+const _ = new CronJob("sandbox-cleanup", {
+  title: "Cleanup old Docker sandbox containers",
+  every: "30m",
+  endpoint: cleanupDockerSandboxes,
+});

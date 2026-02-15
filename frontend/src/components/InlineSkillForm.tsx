@@ -54,7 +54,7 @@ export function InlineSkillForm({ onClose, onCreated }: InlineSkillFormProps) {
       style={{
         background: "var(--bg-card)",
         border: "1px solid var(--border)",
-        borderRadius: "8px",
+        borderRadius: "0",
         padding: "16px",
         marginBottom: "8px",
       }}

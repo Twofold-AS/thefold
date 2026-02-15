@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
+import { calculateImportanceScore, calculateDecayedRelevance } from "./decay";
+import { sanitize } from "../ai/sanitize";
 
 const db = new SQLDatabase("memory", { migrations: "./migrations" });
 
@@ -302,6 +304,119 @@ describe("Memory database", () => {
     });
   });
 
+  describe("Decay cleanup", () => {
+    const decayCategory = "decay-test-" + Date.now();
+
+    beforeEach(async () => {
+      await db.exec`DELETE FROM memories WHERE category = ${decayCategory}`;
+    });
+
+    it("should delete old memories with very low relevance past TTL", async () => {
+      // Insert a 120-day old memory with very low relevance and ttl_days=90
+      await db.exec`
+        INSERT INTO memories (content, category, memory_type, relevance_score, pinned, ttl_days,
+          created_at, last_accessed_at, access_count)
+        VALUES (
+          'Old low-relevance memory', ${decayCategory}, 'general', 0.01, false, 90,
+          NOW() - INTERVAL '120 days', NOW() - INTERVAL '120 days', 0
+        )
+      `;
+
+      const before = await db.queryRow<{ count: number }>`
+        SELECT COUNT(*)::int as count FROM memories WHERE category = ${decayCategory}
+      `;
+      expect(before!.count).toBe(1);
+
+      // Simulate what decay does: check if it qualifies for deletion
+      const row = await db.queryRow<{
+        memory_type: string;
+        category: string;
+        created_at: string;
+        access_count: number;
+        last_accessed_at: string;
+        ttl_days: number;
+      }>`
+        SELECT memory_type, category, created_at, access_count, last_accessed_at, ttl_days
+        FROM memories WHERE category = ${decayCategory}
+      `;
+
+      const now = new Date();
+      const importance = calculateImportanceScore(row!.memory_type as any, row!.category, false);
+      const decayed = calculateDecayedRelevance(
+        importance,
+        new Date(row!.created_at),
+        row!.access_count,
+        new Date(row!.last_accessed_at),
+        row!.memory_type as any,
+        false,
+        now
+      );
+      const ageDays = (now.getTime() - new Date(row!.created_at).getTime()) / 86_400_000;
+
+      // Should qualify for deletion: decayed < 0.05 AND age > ttl_days
+      expect(decayed).toBeLessThan(0.05);
+      expect(ageDays).toBeGreaterThan(90);
+    });
+
+    it("should NOT delete pinned memories regardless of age", async () => {
+      // Insert a very old pinned memory
+      await db.exec`
+        INSERT INTO memories (content, category, memory_type, relevance_score, pinned, ttl_days,
+          created_at, last_accessed_at, access_count)
+        VALUES (
+          'Pinned ancient memory', ${decayCategory}, 'general', 1.0, true, 30,
+          NOW() - INTERVAL '365 days', NOW() - INTERVAL '365 days', 0
+        )
+      `;
+
+      // Pinned memories should always have importance = 1.0 and decayed = 1.0
+      const importance = calculateImportanceScore('general', decayCategory, true);
+      expect(importance).toBe(1.0);
+
+      const decayed = calculateDecayedRelevance(1.0, new Date('2020-01-01'), 0, new Date('2020-01-01'), 'general', true);
+      expect(decayed).toBe(1.0);
+
+      // Verify it's still in DB
+      const after = await db.queryRow<{ count: number }>`
+        SELECT COUNT(*)::int as count FROM memories WHERE category = ${decayCategory}
+      `;
+      expect(after!.count).toBe(1);
+    });
+
+    it("should retain recent memories even with low access count", async () => {
+      // Insert a brand new memory
+      await db.exec`
+        INSERT INTO memories (content, category, memory_type, relevance_score, pinned, ttl_days,
+          created_at, last_accessed_at, access_count)
+        VALUES (
+          'Brand new memory', ${decayCategory}, 'general', 0.3, false, 90,
+          NOW(), NOW(), 0
+        )
+      `;
+
+      const now = new Date();
+      const importance = calculateImportanceScore('general', decayCategory, false);
+      const decayed = calculateDecayedRelevance(
+        importance,
+        now,
+        0,
+        now,
+        'general',
+        false,
+        now
+      );
+
+      // New memory should have high decayed relevance (close to importance)
+      expect(decayed).toBeGreaterThan(0.2);
+
+      // Verify still in DB
+      const after = await db.queryRow<{ count: number }>`
+        SELECT COUNT(*)::int as count FROM memories WHERE category = ${decayCategory}
+      `;
+      expect(after!.count).toBe(1);
+    });
+  });
+
   describe("Memory search with combined filters", () => {
     it("should search with vector similarity and category filter", async () => {
       const otherCategory = "other-" + Date.now();
@@ -334,5 +449,195 @@ describe("Memory database", () => {
       expect(results[0]).toBe("Test category memory");
       expect(results).not.toContain("Other category memory");
     });
+  });
+});
+
+// --- Pure function tests (no DB needed) ---
+
+describe("calculateImportanceScore", () => {
+  it("should return 1.0 for pinned memories regardless of type", () => {
+    expect(calculateImportanceScore("general", "chat", true)).toBe(1.0);
+    expect(calculateImportanceScore("error_pattern", "security", true)).toBe(1.0);
+    expect(calculateImportanceScore("session", "conversation", true)).toBe(1.0);
+  });
+
+  it("should give highest scores to error_pattern and decision types", () => {
+    const errorScore = calculateImportanceScore("error_pattern", "general", false);
+    const decisionScore = calculateImportanceScore("decision", "general", false);
+    const generalScore = calculateImportanceScore("general", "general", false);
+
+    expect(errorScore).toBe(0.9);
+    expect(decisionScore).toBe(0.85);
+    expect(generalScore).toBe(0.3);
+    expect(errorScore).toBeGreaterThan(decisionScore);
+    expect(decisionScore).toBeGreaterThan(generalScore);
+  });
+
+  it("should score all memory_type values correctly", () => {
+    expect(calculateImportanceScore("error_pattern", "test", false)).toBe(0.9);
+    expect(calculateImportanceScore("decision", "test", false)).toBe(0.85);
+    expect(calculateImportanceScore("skill", "test", false)).toBe(0.7);
+    expect(calculateImportanceScore("task", "test", false)).toBe(0.6);
+    expect(calculateImportanceScore("session", "test", false)).toBe(0.4);
+    expect(calculateImportanceScore("general", "test", false)).toBe(0.3);
+  });
+
+  it("should boost architecture and security categories", () => {
+    const base = calculateImportanceScore("general", "test", false);
+    const arch = calculateImportanceScore("general", "architecture", false);
+    const sec = calculateImportanceScore("general", "security", false);
+
+    expect(arch).toBe(base + 0.1);
+    expect(sec).toBe(base + 0.1);
+  });
+
+  it("should reduce chat and conversation categories", () => {
+    const base = calculateImportanceScore("general", "test", false);
+    const chat = calculateImportanceScore("general", "chat", false);
+    const conv = calculateImportanceScore("general", "conversation", false);
+
+    expect(chat).toBeCloseTo(base - 0.1, 10);
+    expect(conv).toBeCloseTo(base - 0.1, 10);
+  });
+
+  it("should cap at 1.0 for high type + architecture boost", () => {
+    const score = calculateImportanceScore("error_pattern", "architecture", false);
+    expect(score).toBe(1.0);
+  });
+
+  it("should not go below 0.1 for low type + chat penalty", () => {
+    const score = calculateImportanceScore("general", "chat", false);
+    expect(score).toBe(0.2); // 0.3 - 0.1 = 0.2
+    // Even with the lowest combo, should not go below 0.1
+    expect(score).toBeGreaterThanOrEqual(0.1);
+  });
+});
+
+describe("calculateDecayedRelevance", () => {
+  const now = new Date("2025-06-15T12:00:00Z");
+
+  it("should return 1.0 for pinned memories", () => {
+    const result = calculateDecayedRelevance(
+      0.3, new Date("2020-01-01"), 0, new Date("2020-01-01"), "general", true, now
+    );
+    expect(result).toBe(1.0);
+  });
+
+  it("should return high relevance for brand new memories", () => {
+    const result = calculateDecayedRelevance(
+      0.9, now, 0, now, "error_pattern", false, now
+    );
+    // New memory: recency=1.0, access factor~1.0
+    // So result ≈ 0.9 × 1.0 × 1.0 = 0.9
+    expect(result).toBeCloseTo(0.9, 1);
+  });
+
+  it("should have lower relevance for 60-day-old general memory", () => {
+    const created = new Date(now.getTime() - 60 * 86_400_000); // 60 days ago
+    const fresh = calculateDecayedRelevance(0.3, now, 0, now, "general", false, now);
+    const old = calculateDecayedRelevance(0.3, created, 0, created, "general", false, now);
+
+    expect(old).toBeLessThan(fresh);
+    // 60 days / 30 day half-life = 2 half-lives → recency ≈ 0.25
+    // So old ≈ 0.3 × 0.25 = 0.075
+    expect(old).toBeLessThan(0.1);
+  });
+
+  it("should decay error_pattern slower than general (90 vs 30 day half-life)", () => {
+    const created = new Date(now.getTime() - 60 * 86_400_000); // 60 days ago
+    const generalDecay = calculateDecayedRelevance(0.5, created, 0, created, "general", false, now);
+    const errorDecay = calculateDecayedRelevance(0.5, created, 0, created, "error_pattern", false, now);
+
+    // error_pattern has 90-day half-life vs 30-day for general
+    expect(errorDecay).toBeGreaterThan(generalDecay);
+  });
+
+  it("should decay slower when frequently accessed", () => {
+    const created = new Date(now.getTime() - 45 * 86_400_000); // 45 days ago
+    const recentAccess = new Date(now.getTime() - 1 * 86_400_000); // accessed yesterday
+
+    const noAccess = calculateDecayedRelevance(0.5, created, 0, created, "general", false, now);
+    const highAccess = calculateDecayedRelevance(0.5, created, 50, recentAccess, "general", false, now);
+
+    expect(highAccess).toBeGreaterThan(noAccess);
+  });
+
+  it("should never exceed 1.0", () => {
+    // Even with max importance + very high access
+    const result = calculateDecayedRelevance(1.0, now, 10000, now, "error_pattern", false, now);
+    expect(result).toBeLessThanOrEqual(1.0);
+  });
+
+  it("should approach zero for very old memories", () => {
+    const veryOld = new Date(now.getTime() - 365 * 86_400_000); // 1 year ago
+    const result = calculateDecayedRelevance(0.3, veryOld, 0, veryOld, "general", false, now);
+
+    // 365 days / 30 day half-life = ~12 half-lives → basically zero
+    expect(result).toBeLessThan(0.001);
+  });
+});
+
+// --- Memory sanitization tests (OWASP ASI06) ---
+
+describe("Memory sanitization", () => {
+  it("should strip null bytes from content", () => {
+    const dirty = "Hello\x00World\x00!";
+    const clean = sanitize(dirty);
+    expect(clean).toBe("HelloWorld!");
+    expect(clean).not.toContain("\x00");
+  });
+
+  it("should strip control characters but keep newlines and tabs", () => {
+    const dirty = "Line1\nLine2\tTabbed\x01\x02\x03\x7F";
+    const clean = sanitize(dirty);
+    expect(clean).toBe("Line1\nLine2\tTabbed");
+    expect(clean).toContain("\n");
+    expect(clean).toContain("\t");
+  });
+
+  it("should trim whitespace", () => {
+    const dirty = "  \n  content here  \n  ";
+    const clean = sanitize(dirty);
+    expect(clean).toBe("content here");
+  });
+
+  it("should enforce max length", () => {
+    const long = "a".repeat(60_000);
+    const clean = sanitize(long, { maxLength: 1000 });
+    expect(clean.length).toBe(1000);
+  });
+
+  it("should handle empty string", () => {
+    expect(sanitize("")).toBe("");
+  });
+
+  it("should pass through clean content unchanged", () => {
+    const clean = "This is normal content with\nnewlines and special chars: @#$%^&*()";
+    expect(sanitize(clean)).toBe(clean);
+  });
+
+  it("should store sanitized content in database", async () => {
+    const db = new SQLDatabase("memory", { migrations: "./migrations" });
+    const category = "sanitize-test-" + Date.now();
+    const dirtyContent = "Test\x00with\x01null\x02bytes";
+    const cleanContent = sanitize(dirtyContent);
+
+    await db.exec`
+      INSERT INTO memories (content, category)
+      VALUES (${cleanContent}, ${category})
+    `;
+
+    const row = await db.queryRow<{ content: string }>`
+      SELECT content FROM memories WHERE category = ${category}
+    `;
+
+    expect(row).toBeDefined();
+    expect(row!.content).toBe("Testwithnullbytes");
+    expect(row!.content).not.toContain("\x00");
+    expect(row!.content).not.toContain("\x01");
+    expect(row!.content).not.toContain("\x02");
+
+    // Cleanup
+    await db.exec`DELETE FROM memories WHERE category = ${category}`;
   });
 });

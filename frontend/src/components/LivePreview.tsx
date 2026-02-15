@@ -46,7 +46,7 @@ export function LivePreview({ isActive, onClose }: LivePreviewProps) {
             style={{
               background: "none",
               border: "1px solid var(--border)",
-              borderRadius: "4px",
+              borderRadius: "0",
               padding: "4px",
               cursor: "pointer",
               color: "var(--text-secondary)",
@@ -63,7 +63,7 @@ export function LivePreview({ isActive, onClose }: LivePreviewProps) {
             style={{
               background: "none",
               border: "1px solid var(--border)",
-              borderRadius: "4px",
+              borderRadius: "0",
               padding: "4px",
               cursor: "pointer",
               color: "var(--text-secondary)",
@@ -80,7 +80,7 @@ export function LivePreview({ isActive, onClose }: LivePreviewProps) {
             style={{
               background: "none",
               border: "1px solid var(--border)",
-              borderRadius: "4px",
+              borderRadius: "0",
               padding: "4px",
               cursor: "pointer",
               color: "var(--text-secondary)",
@@ -143,7 +143,7 @@ export function LivePreview({ isActive, onClose }: LivePreviewProps) {
           padding: "6px 12px",
           background: "var(--bg-primary)",
           border: "1px solid var(--border)",
-          borderRadius: "4px",
+          borderRadius: "0",
           fontSize: "12px",
           fontFamily: "monospace",
           color: "var(--text-muted)",

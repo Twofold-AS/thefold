@@ -15,6 +15,8 @@ export interface AgentExecutionContext {
   repoOwner: string;
   repoName: string;
   branch: string;
+  // TheFold task engine (optional — for tasks from /tasks service)
+  thefoldTaskId?: string;
   // Model routing
   modelMode: 'auto' | 'manual';
   modelOverride?: string;
@@ -28,6 +30,9 @@ export interface AgentExecutionContext {
   maxAttempts: number; // 5
   planRevisions: number;
   maxPlanRevisions: number; // 2
+  // Sub-agents
+  subAgentsEnabled: boolean;
+  subAgentResults?: import("../ai/sub-agents").SubAgentResult[];
 }
 
 export interface AttemptRecord {
@@ -44,4 +49,114 @@ export interface ErrorPattern {
   frequency: number;
   lastSeen: string;
   knownFix?: string;
+}
+
+// === Project Orchestrator Types ===
+
+export interface ProjectPlan {
+  id: string;
+  conversationId: string;
+  userRequest: string;
+  status: 'planning' | 'executing' | 'paused' | 'completed' | 'failed';
+  currentPhase: number;
+  phases: ProjectPhase[];
+  conventions: string;
+  totalTasks: number;
+  completedTasks: number;
+  failedTasks: number;
+  totalCostUsd: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ProjectPhase {
+  phase: number;
+  name: string;
+  description: string;
+  tasks: ProjectTask[];
+}
+
+export interface ProjectTask {
+  id: string;
+  projectId: string;
+  phase: number;
+  taskOrder: number;
+  title: string;
+  description: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'pending_review';
+  dependsOn: string[];
+  outputFiles: string[];
+  outputTypes: string[];
+  contextHints: string[];
+  linearTaskId?: string;
+  prUrl?: string;
+  costUsd: number;
+  errorMessage?: string;
+  attemptCount: number;
+  startedAt?: Date;
+  completedAt?: Date;
+}
+
+export interface CuratedContext {
+  relevantFiles: Array<{ path: string; content: string }>;
+  dependencyOutputs: Array<{ taskTitle: string; files: string[]; types: string[] }>;
+  memoryContext: string[];
+  docsContext: string[];
+  conventions: string;
+  tokenEstimate: number;
+}
+
+// === Code Review Types ===
+
+export interface ReviewFile {
+  path: string;
+  content: string;
+  action: 'create' | 'modify' | 'delete';
+}
+
+export interface AIReviewData {
+  documentation: string;
+  qualityScore: number;
+  concerns: string[];
+  memoriesExtracted: string[];
+}
+
+export interface CodeReview {
+  id: string;
+  conversationId: string;
+  taskId: string;
+  projectTaskId?: string;
+  sandboxId: string;
+  filesChanged: ReviewFile[];
+  aiReview?: AIReviewData;
+  status: 'pending' | 'approved' | 'changes_requested' | 'rejected';
+  reviewerId?: string;
+  feedback?: string;
+  createdAt: Date;
+  reviewedAt?: Date;
+  prUrl?: string;
+}
+
+export interface DecomposeProjectRequest {
+  userMessage: string;
+  repoOwner: string;
+  repoName: string;
+  projectStructure: string;
+  existingFiles?: Array<{ path: string; content: string }>;
+}
+
+export interface DecomposeProjectResponse {
+  phases: Array<{
+    name: string;
+    description: string;
+    tasks: Array<{
+      title: string;
+      description: string;
+      dependsOnIndices: number[];
+      contextHints: string[];
+    }>;
+  }>;
+  conventions: string;
+  reasoning: string;
+  estimatedTotalTasks: number;
 }

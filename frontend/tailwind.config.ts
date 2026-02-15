@@ -5,10 +5,10 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        general: ['"Suisse Intl"', "-apple-system", "BlinkMacSystemFont", '"Segoe UI"', "system-ui", "sans-serif"],
-        brand: ['"TheFold Brand"', '"Suisse Intl"', "sans-serif"],
-        heading: ['"Suisse Intl"', "sans-serif"],
-        mono: ['"Suisse Intl Mono"', "ui-monospace", "monospace"],
+        display: ['"ABC Diatype Plus"', "system-ui", "sans-serif"],
+        brand: ['"Ivar Text"', "system-ui", "sans-serif"],
+        sans: ['"Inter"', "system-ui", "sans-serif"],
+        mono: ['"Courier New"', "monospace"],
       },
     },
   },

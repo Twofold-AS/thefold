@@ -2,7 +2,7 @@
 
 ## Oversikt
 
-TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (9 mikrotjenester) og **Next.js** frontend. Den leser oppgaver fra Linear, leser/skriver kode via GitHub, validerer i sandbox, og leverer PRs med dokumentasjon.
+TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (12 mikrotjenester) og **Next.js** frontend. Den leser oppgaver fra Linear, leser/skriver kode via GitHub, validerer i sandbox, og leverer PRs med dokumentasjon.
 
 ## Tjenester
 
@@ -33,10 +33,18 @@ TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (9 mikr
 │ patterns     │  │ Exec + Log  │  │              │
 └──────────────┘  └─────────────┘  └──────────────┘
 
+┌──────────────┐  ┌─────────────┐  ┌──────────────┐
+│    cache     │  │    docs     │  │    tasks     │
+│ PostgreSQL   │  │ Context7    │  │ Task engine  │
+│ Key-value    │  │ MCP lookup  │  │ Linear sync  │
+└──────────────┘  └─────────────┘  │ AI planning  │
+                                   └──────────────┘
+
 ┌──────────────┐  ┌─────────────┐
-│    cache     │  │    docs     │
-│ PostgreSQL   │  │ Context7    │
-│ Key-value    │  │ MCP lookup  │
+│   builder    │  │  registry   │
+│ File-by-file │  │ Marketplace │
+│ Dep graph    │  │ Healing     │
+│ 6 phases     │  │ Components  │
 └──────────────┘  └─────────────┘
 ```
 
@@ -53,6 +61,13 @@ TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (9 mikr
 | preferences | JSONB | Brukerinnstillinger (modelMode, avatarColor, etc.) |
 | created_at | TIMESTAMPTZ | |
 | last_login_at | TIMESTAMPTZ | |
+
+### revoked_tokens (PostgreSQL) — gateway service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| token_hash | TEXT PK | SHA-256 hash av Bearer token |
+| revoked_at | TIMESTAMPTZ | Tidspunkt for revokering |
+| expires_at | TIMESTAMPTZ | Original token-utløpstid (for cleanup) |
 
 ### otp_codes (PostgreSQL)
 | Kolonne | Type | Beskrivelse |
@@ -125,6 +140,62 @@ TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (9 mikr
 | last_used_at | TIMESTAMPTZ | Sist brukt |
 | total_uses | INT | Totalt antall bruk |
 
+### project_plans (PostgreSQL) — agent service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| id | UUID PK | gen_random_uuid() |
+| conversation_id | VARCHAR(255) | Tilhørende samtale |
+| user_request | TEXT | Opprinnelig brukermelding |
+| status | TEXT | 'planning', 'executing', 'paused', 'completed', 'failed' |
+| current_phase | INT | Nåværende fase (0-basert) |
+| plan_data | JSONB | Strukturert plan med faser og metadata |
+| conventions | TEXT | Kompakt konvensjonsdokument (<2000 tokens) |
+| total_tasks | INT | Totalt antall oppgaver |
+| completed_tasks | INT | Fullførte oppgaver |
+| failed_tasks | INT | Feilede oppgaver |
+| total_cost_usd | DECIMAL | Total kostnad |
+| created_at | TIMESTAMPTZ | |
+| updated_at | TIMESTAMPTZ | |
+
+### project_tasks (PostgreSQL) — agent service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| id | UUID PK | gen_random_uuid() |
+| project_id | UUID FK | Referanse til project_plans |
+| phase | INT | Fase-nummer (0-basert) |
+| task_order | INT | Rekkefølge innen fase |
+| title | TEXT | Oppgavetittel |
+| description | TEXT | Detaljert beskrivelse for AI |
+| status | TEXT | 'pending', 'running', 'completed', 'failed', 'skipped', 'pending_review' |
+| depends_on | UUID[] | Andre task-IDer som må fullføres først |
+| output_files | TEXT[] | Filer produsert (fylles ut etter utførelse) |
+| output_types | TEXT[] | Type-definisjoner opprettet |
+| context_hints | TEXT[] | Hints til context curator |
+| linear_task_id | VARCHAR(255) | Linear task kobling |
+| pr_url | TEXT | PR-lenke |
+| cost_usd | DECIMAL | Kostnad for denne oppgaven |
+| error_message | TEXT | Feilmelding ved failure |
+| attempt_count | INT | Antall forsøk |
+| started_at | TIMESTAMPTZ | |
+| completed_at | TIMESTAMPTZ | |
+
+### code_reviews (PostgreSQL) — agent service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| id | UUID PK | gen_random_uuid() |
+| conversation_id | VARCHAR(255) | Chat-samtale |
+| task_id | TEXT | Linear/orchestrator task |
+| project_task_id | UUID | Valgfri FK til project_tasks |
+| sandbox_id | TEXT | Sandbox som holdes i live |
+| files_changed | JSONB | [{path, content, action}] |
+| ai_review | JSONB | {documentation, qualityScore, concerns, memoriesExtracted} |
+| status | TEXT | 'pending', 'approved', 'changes_requested', 'rejected' |
+| reviewer_id | UUID | Bruker som tok aksjon |
+| feedback | TEXT | Tilbakemelding fra bruker |
+| created_at | TIMESTAMPTZ | |
+| reviewed_at | TIMESTAMPTZ | |
+| pr_url | TEXT | PR-lenke (settes ved godkjenning) |
+
 ### health_checks (PostgreSQL)
 | Kolonne | Type | Beskrivelse |
 |---------|------|-------------|
@@ -149,6 +220,117 @@ TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (9 mikr
 |---------|------|-------------|
 | id | VARCHAR PK | |
 | owner_email | VARCHAR | OWASP A01 ownership |
+
+### tasks (PostgreSQL) — tasks service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| id | UUID PK | |
+| title | TEXT NOT NULL | Oppgavetittel |
+| description | TEXT | Detaljert beskrivelse |
+| repo | VARCHAR(255) | owner/name format |
+| status | TEXT | 'backlog', 'planned', 'in_progress', 'in_review', 'done', 'blocked' |
+| priority | INT | 0-4 (0=ingen, 4=urgent) |
+| labels | TEXT[] | Tags |
+| phase | TEXT | Fasegruppering |
+| depends_on | UUID[] | Andre task-IDer som må fullføres først |
+| source | TEXT | 'manual', 'linear', 'healing', 'marketplace' |
+| linear_task_id | VARCHAR(255) | Linear sync kobling |
+| linear_synced_at | TIMESTAMPTZ | Siste synktidspunkt |
+| healing_source_id | UUID | Kilde-task for auto-fix |
+| estimated_complexity | INT | 1-10 fra AI |
+| estimated_tokens | INT | Estimerte tokens |
+| planned_order | INT | AI-bestemt rekkefølge |
+| assigned_to | TEXT | Agent eller bruker |
+| build_job_id | TEXT | Builder-referanse |
+| pr_url | TEXT | PR-lenke |
+| review_id | UUID | Review-referanse |
+| created_by | TEXT | Bruker-e-post |
+| created_at | TIMESTAMPTZ | |
+| updated_at | TIMESTAMPTZ | |
+| completed_at | TIMESTAMPTZ | Satt ved status=done |
+
+### builder_jobs (PostgreSQL) — builder service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| id | UUID PK | gen_random_uuid() |
+| task_id | TEXT NOT NULL | Oppgave-ID fra agent |
+| sandbox_id | TEXT | Sandbox-ID for bygging |
+| status | TEXT | 'pending', 'planning', 'building', 'validating', 'complete', 'failed', 'cancelled' |
+| plan | JSONB | BuildPlan med steps, description, model |
+| build_strategy | TEXT | 'sequential', 'scaffold_first', 'dependency_order' |
+| current_phase | TEXT | Nåværende fase |
+| current_step | INT | Nåværende steg-nummer |
+| total_steps | INT | Totalt antall fil-steg |
+| files_written | JSONB | [{path, status, attempts, errors}] |
+| files_validated | JSONB | [{path, valid, errors}] |
+| build_iterations | INT | Antall integrate-iterasjoner |
+| max_iterations | INT | Maks iterasjoner (default 10) |
+| context_window | JSONB | Akkumulert fil-innhold for kontekst |
+| dependency_graph | JSONB | {file → [dependencies]} |
+| total_tokens_used | INT | Totalt tokens forbrukt |
+| total_cost_usd | DECIMAL | Total kostnad |
+| started_at | TIMESTAMPTZ | |
+| completed_at | TIMESTAMPTZ | |
+| created_at | TIMESTAMPTZ | |
+
+### build_steps (PostgreSQL) — builder service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| id | UUID PK | gen_random_uuid() |
+| job_id | UUID FK | Referanse til builder_jobs (CASCADE) |
+| step_number | INT | Steg-nummer |
+| phase | TEXT | 'init', 'scaffold', 'dependencies', 'implement', 'integrate', 'finalize' |
+| action | TEXT | 'create_file', 'modify_file', 'delete_file', 'run_command' |
+| file_path | TEXT | Filbane |
+| prompt_context | JSONB | AI-kontekst brukt |
+| ai_model | TEXT | Modell brukt |
+| tokens_used | INT | Tokens forbrukt |
+| status | TEXT | 'pending', 'running', 'success', 'failed', 'skipped' |
+| content | TEXT | Generert filinnhold |
+| output | TEXT | Kommando-output |
+| error | TEXT | Feilmelding |
+| validation_result | JSONB | Valideringsresultat |
+| fix_attempts | INT | Antall fiksforsøk |
+| created_at | TIMESTAMPTZ | |
+| completed_at | TIMESTAMPTZ | |
+
+### components (PostgreSQL) — registry service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| id | UUID PK | gen_random_uuid() |
+| name | TEXT NOT NULL | Komponentnavn |
+| description | TEXT | Beskrivelse |
+| category | TEXT | 'auth', 'api', 'ui', 'util', 'config' |
+| version | TEXT | Semantic versjon (default '1.0.0') |
+| previous_version_id | UUID | Lenke til forrige versjon |
+| files | JSONB NOT NULL | [{path, content, language}] |
+| entry_point | TEXT | Hovedfil |
+| dependencies | TEXT[] | npm-pakker |
+| source_repo | TEXT NOT NULL | Repo den ble ekstrahert fra |
+| source_task_id | UUID | Task som opprettet den |
+| extracted_by | TEXT | 'thefold' eller 'manual' |
+| used_by_repos | TEXT[] | Repos som bruker denne |
+| times_used | INT | Bruksteller |
+| test_coverage | DECIMAL | Testdekning |
+| validation_status | TEXT | 'pending', 'validated', 'failed' |
+| tags | TEXT[] | Merkelapper |
+| created_at | TIMESTAMPTZ | |
+| updated_at | TIMESTAMPTZ | |
+
+### healing_events (PostgreSQL) — registry service
+| Kolonne | Type | Beskrivelse |
+|---------|------|-------------|
+| id | UUID PK | gen_random_uuid() |
+| component_id | UUID FK | Referanse til components |
+| old_version | TEXT | Versjon før endring |
+| new_version | TEXT | Versjon etter endring |
+| trigger | TEXT | 'update', 'bugfix', 'security' |
+| severity | TEXT | 'low', 'normal', 'high', 'critical' |
+| affected_repos | TEXT[] | Berørte repos |
+| tasks_created | UUID[] | Opprettede task-IDer |
+| status | TEXT | 'pending', 'in_progress', 'completed', 'failed' |
+| created_at | TIMESTAMPTZ | |
+| completed_at | TIMESTAMPTZ | |
 
 ## API-endepunkt-katalog
 
@@ -180,6 +362,11 @@ TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (9 mikr
 | POST | /ai/assess-complexity | Ja | Vurder kompleksitet |
 | POST | /ai/diagnose | Ja | Diagnostiser feil |
 | POST | /ai/revise-plan | Ja | Revider plan |
+| POST | /ai/decompose-project | Ja | Dekomponér prosjekt til atomære tasks |
+| POST | /ai/revise-project-phase | Ja | AI-drevet re-planlegging mellom faser |
+| POST | /ai/plan-task-order | Ja | AI-basert task-prioritering og rekkefølge |
+| POST | /ai/generate-file | Ja | Generer enkeltfil med kontekst (builder) |
+| POST | /ai/fix-file | Ja | Fiks TypeScript-feil i fil (builder) |
 
 ### Agent
 | Metode | Path | Auth | Beskrivelse |
@@ -189,11 +376,22 @@ TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (9 mikr
 | POST | /agent/audit/list | Ja | Audit-logg |
 | POST | /agent/audit/trace | Ja | Oppgave-trace |
 | POST | /agent/audit/stats | Ja | Statistikk |
+| POST | /agent/project/start | Ja | Start prosjektkjøring |
+| POST | /agent/project/status | Ja | Prosjektstatus med tasks |
+| POST | /agent/project/pause | Ja | Pause prosjekt |
+| POST | /agent/project/resume | Ja | Gjenoppta prosjekt |
+| POST | /agent/project/store | Intern | Lagre dekomponert plan |
+| POST | /agent/review/submit | Intern | Lagre review fra agent loop |
+| POST | /agent/review/get | Ja | Hent full review med filer |
+| POST | /agent/review/list | Ja | Liste reviews med statusfilter |
+| POST | /agent/review/approve | Ja | Godkjenn → opprett PR |
+| POST | /agent/review/request-changes | Ja | Be om endringer → re-kjør agent |
+| POST | /agent/review/reject | Ja | Avvis → destroy sandbox |
 
 ### Memory
 | Metode | Path | Auth | Beskrivelse |
 |--------|------|------|-------------|
-| POST | /memory/search | Intern | Søk minner (decayed) |
+| POST | /memory/search | Ja | Søk minner (decayed) |
 | POST | /memory/store | Ja | Lagre minne |
 | POST | /memory/extract | Intern | Auto-ekstraher |
 | POST | /memory/consolidate | Intern | Slå sammen |
@@ -216,6 +414,42 @@ TheFold er en autonom fullstack utviklingsagent bygget med **Encore.ts** (9 mikr
 | POST | /skills/execute-pre-run | Intern | Kjør pre-run skills |
 | POST | /skills/execute-post-run | Intern | Kjør post-run skills |
 | POST | /skills/log-result | Intern | Logg skill-bruk og scoring |
+
+### Tasks
+| Metode | Path | Auth | Beskrivelse |
+|--------|------|------|-------------|
+| POST | /tasks/create | Ja | Opprett ny task |
+| POST | /tasks/update | Ja | Oppdater task-felter |
+| POST | /tasks/delete | Ja | Slett task |
+| GET | /tasks/get | Ja | Hent task |
+| POST | /tasks/get-internal | Intern | Hent task (service-to-service) |
+| POST | /tasks/list | Ja | Liste med filtre (repo, status, source, labels) |
+| POST | /tasks/sync-linear | Ja | Synk fra Linear |
+| POST | /tasks/push-to-linear | Ja | Push status til Linear |
+| POST | /tasks/plan-order | Ja | AI-basert task-prioritering |
+| GET | /tasks/stats | Ja | Statistikk (total, byStatus, bySource, byRepo) |
+| POST | /tasks/update-status | Intern | Agent oppdaterer task-status |
+
+### Builder
+| Metode | Path | Auth | Beskrivelse |
+|--------|------|------|-------------|
+| POST | /builder/start | Intern | Start build-jobb med plan |
+| POST | /builder/status | Intern | Hent jobb-status med steg |
+| POST | /builder/cancel | Intern | Avbryt pågående jobb |
+| GET | /builder/job | Ja | Hent jobb (frontend) |
+| POST | /builder/jobs | Ja | Liste jobber med filter |
+
+### Registry
+| Metode | Path | Auth | Beskrivelse |
+|--------|------|------|-------------|
+| POST | /registry/register | Intern | Registrer ny komponent |
+| GET | /registry/get | Ja | Hent komponent |
+| POST | /registry/list | Ja | Liste med filter (category, repo) |
+| POST | /registry/search | Ja | Søk (navn, beskrivelse, tags) |
+| POST | /registry/use | Intern | Marker bruk (oppdater used_by_repos) |
+| POST | /registry/find-for-task | Intern | Finn komponenter for en oppgave |
+| POST | /registry/trigger-healing | Intern | Trigger healing-pipeline |
+| GET | /registry/healing-status | Ja | Status for healing-events |
 
 ### Monitor
 | Metode | Path | Auth | Beskrivelse |
@@ -253,20 +487,23 @@ Pre-run          Inject              Post-run
 ## Service-avhengigheter
 
 ```
-chat → ai, memory, agent (via pub/sub)
-agent → ai, github, linear, memory, sandbox, users
+chat → ai, memory, agent (via pub/sub), github (for project detection), registry (healing sub)
+agent → ai, github, linear, memory, sandbox, users, docs, chat (pub/sub), tasks, builder
+builder → ai, sandbox (for file generation and validation)
+tasks → linear (for sync), ai (for planTaskOrder)
 ai → skills (for prompt enrichment)
 memory → cache (for embedding caching)
 github → cache (for repo structure caching)
 monitor → sandbox (for running checks)
+registry → tasks (healing tasks), memory (code patterns)
 ```
 
 ## Fremtidige features og grunnmur
 
 | Feature | Bygger på |
 |---------|-----------|
-| Marketplace | skills.marketplace_id, skills.version, skills.author_id |
-| Component Registry | code_patterns.component_id |
+| Marketplace Frontend | registry/ service, skills.marketplace_id, skills.version |
+| Component Auto-extraction | registry/extractor.ts stub, ai-basert komponentdeteksjon |
 | Multi-repo bug fixing | memory.source_repo, code_patterns.source_repo |
 | Proactive monitoring | monitor.health_rules, monitor.daily-health-check cron |
 | Memory consolidation | memory.consolidated_from, memory.superseded_by |

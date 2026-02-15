@@ -1,5 +1,4 @@
 import { api, APIError } from "encore.dev/api";
-import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { ai } from "~encore/clients";
 import { github } from "~encore/clients";
 import { linear } from "~encore/clients";
@@ -7,17 +6,30 @@ import { memory } from "~encore/clients";
 import { docs } from "~encore/clients";
 import { sandbox } from "~encore/clients";
 import { users } from "~encore/clients";
+import { tasks } from "~encore/clients";
+import { builder } from "~encore/clients";
+import { mcp } from "~encore/clients";
 import { agentReports } from "../chat/chat";
 import {
   selectOptimalModel,
   calculateSavings,
   type ModelMode,
 } from "../ai/router";
-import type { AgentExecutionContext, AttemptRecord, ErrorPattern } from "./types";
+import {
+  planSubAgents,
+  executeSubAgents,
+  mergeResults,
+  sumCosts,
+  sumTokens,
+} from "../ai/orchestrate-sub-agents";
+import type { BudgetMode } from "../ai/sub-agents";
+import type { AgentExecutionContext, AttemptRecord, ErrorPattern, CuratedContext, AIReviewData } from "./types";
+import { submitReviewInternal } from "./review";
+import { aiBreaker, githubBreaker, sandboxBreaker } from "./circuit-breaker";
 
-// --- Database (audit log) ---
+// --- Database (shared) ---
 
-const db = new SQLDatabase("agent", { migrations: "./migrations" });
+import { db } from "./db";
 
 // --- Constants ---
 
@@ -32,6 +44,7 @@ export interface StartTaskRequest {
   userMessage: string;
   userId?: string; // optional — used to fetch model preference
   modelOverride?: string; // manuelt modellvalg fra chat
+  thefoldTaskId?: string; // TheFold task engine ID (if task comes from tasks service)
 }
 
 export interface StartTaskResponse {
@@ -41,6 +54,27 @@ export interface StartTaskResponse {
 
 // TaskContext is now AgentExecutionContext from ./types
 type TaskContext = AgentExecutionContext;
+
+// --- ExecuteTask Options (for orchestrator integration) ---
+
+export interface ExecuteTaskOptions {
+  curatedContext?: CuratedContext;  // If set, skip steps 1-3 (context gathering)
+  projectConventions?: string;     // Included in system prompt
+  skipLinear?: boolean;            // Skip Linear read/update (orchestrator tasks)
+  taskDescription?: string;        // Override task description (from orchestrator)
+  skipReview?: boolean;            // Skip review gate (default: false)
+}
+
+export interface ExecuteTaskResult {
+  success: boolean;
+  prUrl?: string;
+  filesChanged: string[];
+  costUsd: number;
+  tokensUsed: number;
+  errorMessage?: string;
+  reviewId?: string;
+  status?: 'completed' | 'pending_review' | 'failed';
+}
 
 const MAX_RETRIES = 5;
 const MAX_PLAN_REVISIONS = 2;
@@ -137,251 +171,328 @@ async function auditedStep<T>(
 
 // --- The Agent Loop ---
 
-async function executeTask(ctx: TaskContext): Promise<void> {
+export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions): Promise<ExecuteTaskResult> {
   const taskStart = Date.now();
+  const useCurated = !!options?.curatedContext;
+
+  // Common variables populated by either path
+  let treeString = "";
+  let relevantFiles: Array<{ path: string; content: string }> = [];
+  let memoryStrings: string[] = [];
+  let docsStrings: string[] = [];
+  let packageJson: Record<string, unknown> = {};
+  let treeArray: Array<{ path: string; type: string; size?: number }> = [];
+  let taskTitle = ctx.taskId;
 
   try {
-    // === STEP 1: Understand the task ===
-    await report(ctx, `📋 Leser task ${ctx.taskId}...`, "working");
+    if (useCurated) {
+      // === CURATED PATH: Context already gathered by orchestrator ===
+      const curated = options!.curatedContext!;
+      relevantFiles = curated.relevantFiles;
+      memoryStrings = options?.projectConventions
+        ? [options.projectConventions, ...curated.memoryContext]
+        : curated.memoryContext;
+      docsStrings = curated.docsContext;
+      ctx.taskDescription = options?.taskDescription || ctx.taskDescription;
+      taskTitle = ctx.taskDescription.split("\n")[0].substring(0, 80);
 
-    const taskDetail = await auditedStep(ctx, "task_read", { taskId: ctx.taskId }, async () => {
-      const detail = await linear.getTask({ taskId: ctx.taskId });
-      ctx.taskDescription = detail.task.title + "\n\n" + detail.task.description;
-      return detail;
-    });
+      // Still need tree for planning — fetch it
+      const projectTree = await github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName });
+      treeString = projectTree.treeString;
+      treeArray = projectTree.tree;
+      packageJson = projectTree.packageJson || {};
 
-    // === STEP 2: Read the project ===
-    await report(ctx, "📂 Leser prosjektstruktur fra GitHub...", "working");
+      // Fetch installed MCP tools for curated path too
+      try {
+        const mcpResult = await mcp.installed();
+        if (mcpResult.servers.length > 0) {
+          const toolList = mcpResult.servers
+            .map((s) => `- **${s.name}**: ${s.description ?? "No description"} (${s.category})`)
+            .join("\n");
+          docsStrings.push(`[MCP Tools] Du har tilgang til disse verktøyene:\n${toolList}\n\nNOTE: MCP-kall routing er ikke implementert ennå. Bare vær klar over at disse verktøyene finnes.`);
+        }
+      } catch {
+        // Non-critical
+      }
 
-    const projectTree = await auditedStep(ctx, "project_tree_read", {
-      owner: ctx.repoOwner,
-      repo: ctx.repoName,
-    }, () => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName }));
+      await report(ctx, `📋 Starter oppgave: ${taskTitle}`, "working");
+    } else {
+      // === STANDARD PATH: Full context gathering (steps 1-3) ===
 
-    const relevantPaths = await auditedStep(ctx, "relevant_files_identified", {
-      taskDescription: ctx.taskDescription.substring(0, 200),
-    }, () => github.findRelevantFiles({
-      owner: ctx.repoOwner,
-      repo: ctx.repoName,
-      taskDescription: ctx.taskDescription,
-      tree: projectTree.tree,
-    }));
+      // === STEP 1: Understand the task ===
+      if (ctx.thefoldTaskId) {
+        // TheFold task engine path — read from tasks service
+        await report(ctx, `📋 Leser task fra TheFold...`, "working");
 
-    const relevantFiles = await auditedStep(ctx, "files_read", {
-      paths: relevantPaths.paths,
-      fileCount: relevantPaths.paths.length,
-    }, async () => {
-      const files: Array<{ path: string; content: string }> = [];
-      let totalTokensSaved = 0;
-
-      for (const path of relevantPaths.paths) {
-        // Get metadata first to decide reading strategy
-        const meta = await github.getFileMetadata({
-          owner: ctx.repoOwner,
-          repo: ctx.repoName,
-          path,
+        const tfTask = await auditedStep(ctx, "task_read", { taskId: ctx.thefoldTaskId, source: "thefold" }, async () => {
+          const result = await tasks.getTaskInternal({ id: ctx.thefoldTaskId! });
+          ctx.taskDescription = result.task.title + (result.task.description ? "\n\n" + result.task.description : "");
+          return result;
         });
+        taskTitle = tfTask.task.title;
 
-        if (meta.totalLines <= SMALL_FILE_THRESHOLD) {
-          // Small file: read full
-          const file = await github.getFile({ owner: ctx.repoOwner, repo: ctx.repoName, path });
-          files.push({ path, content: file.content });
-        } else if (meta.totalLines <= MEDIUM_FILE_THRESHOLD) {
-          // Medium file: read in chunks (up to MAX_CHUNKS_PER_FILE)
-          let content = "";
-          let startLine = 1;
-          let chunksRead = 0;
+        // Update task status to in_progress
+        try {
+          await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "in_progress" });
+        } catch { /* non-critical */ }
+      } else if (!options?.skipLinear) {
+        await report(ctx, `📋 Leser task ${ctx.taskId}...`, "working");
 
-          while (chunksRead < MAX_CHUNKS_PER_FILE) {
-            const chunk = await github.getFileChunk({
+        const taskDetail = await auditedStep(ctx, "task_read", { taskId: ctx.taskId }, async () => {
+          const detail = await linear.getTask({ taskId: ctx.taskId });
+          ctx.taskDescription = detail.task.title + "\n\n" + detail.task.description;
+          return detail;
+        });
+        taskTitle = taskDetail.task.title;
+      } else if (options?.taskDescription) {
+        ctx.taskDescription = options.taskDescription;
+        taskTitle = ctx.taskDescription.split("\n")[0].substring(0, 80);
+        await report(ctx, `📋 Starter oppgave: ${taskTitle}`, "working");
+      }
+
+      // === STEP 2: Read the project ===
+      await report(ctx, "📂 Leser prosjektstruktur fra GitHub...", "working");
+
+      const projectTree = await auditedStep(ctx, "project_tree_read", {
+        owner: ctx.repoOwner,
+        repo: ctx.repoName,
+      }, () => githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName })));
+
+      treeString = projectTree.treeString;
+      treeArray = projectTree.tree;
+      packageJson = projectTree.packageJson || {};
+
+      const relevantPaths = await auditedStep(ctx, "relevant_files_identified", {
+        taskDescription: ctx.taskDescription.substring(0, 200),
+      }, () => github.findRelevantFiles({
+        owner: ctx.repoOwner,
+        repo: ctx.repoName,
+        taskDescription: ctx.taskDescription,
+        tree: projectTree.tree,
+      }));
+
+      relevantFiles = await auditedStep(ctx, "files_read", {
+        paths: relevantPaths.paths,
+        fileCount: relevantPaths.paths.length,
+      }, async () => {
+        const files: Array<{ path: string; content: string }> = [];
+        let totalTokensSaved = 0;
+
+        for (const path of relevantPaths.paths) {
+          const meta = await github.getFileMetadata({
+            owner: ctx.repoOwner,
+            repo: ctx.repoName,
+            path,
+          });
+
+          if (meta.totalLines <= SMALL_FILE_THRESHOLD) {
+            const file = await github.getFile({ owner: ctx.repoOwner, repo: ctx.repoName, path });
+            files.push({ path, content: file.content });
+          } else if (meta.totalLines <= MEDIUM_FILE_THRESHOLD) {
+            let content = "";
+            let startLine = 1;
+            let chunksRead = 0;
+
+            while (chunksRead < MAX_CHUNKS_PER_FILE) {
+              const chunk = await github.getFileChunk({
+                owner: ctx.repoOwner,
+                repo: ctx.repoName,
+                path,
+                startLine,
+                maxLines: CHUNK_SIZE,
+              });
+              content += (content ? "\n" : "") + chunk.content;
+              chunksRead++;
+
+              if (!chunk.hasMore) break;
+              startLine = chunk.nextStartLine!;
+            }
+
+            const fullTokenEstimate = Math.ceil(meta.totalLines * 30 / 4);
+            const readTokenEstimate = Math.ceil(content.length / 4);
+            totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
+
+            files.push({ path, content });
+          } else {
+            const firstChunk = await github.getFileChunk({
               owner: ctx.repoOwner,
               repo: ctx.repoName,
               path,
-              startLine,
+              startLine: 1,
               maxLines: CHUNK_SIZE,
             });
-            content += (content ? "\n" : "") + chunk.content;
-            chunksRead++;
 
-            if (!chunk.hasMore) break;
-            startLine = chunk.nextStartLine!;
+            const lastStart = Math.max(1, meta.totalLines - CHUNK_SIZE);
+            const lastChunk = await github.getFileChunk({
+              owner: ctx.repoOwner,
+              repo: ctx.repoName,
+              path,
+              startLine: lastStart,
+              maxLines: CHUNK_SIZE,
+            });
+
+            const content = firstChunk.content
+              + `\n\n// ... [${meta.totalLines - (CHUNK_SIZE * 2)} lines omitted — file has ${meta.totalLines} lines total] ...\n\n`
+              + lastChunk.content;
+
+            const fullTokenEstimate = Math.ceil(meta.totalLines * 30 / 4);
+            const readTokenEstimate = Math.ceil(content.length / 4);
+            totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
+
+            files.push({ path, content });
           }
-
-          // Estimate tokens saved
-          const fullTokenEstimate = Math.ceil(meta.totalLines * 30 / 4); // ~30 chars/line, ~4 chars/token
-          const readTokenEstimate = Math.ceil(content.length / 4);
-          totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
-
-          files.push({ path, content });
-        } else {
-          // Large file (>500 lines): read only first and last chunks to give AI context
-          const firstChunk = await github.getFileChunk({
-            owner: ctx.repoOwner,
-            repo: ctx.repoName,
-            path,
-            startLine: 1,
-            maxLines: CHUNK_SIZE,
-          });
-
-          const lastStart = Math.max(1, meta.totalLines - CHUNK_SIZE);
-          const lastChunk = await github.getFileChunk({
-            owner: ctx.repoOwner,
-            repo: ctx.repoName,
-            path,
-            startLine: lastStart,
-            maxLines: CHUNK_SIZE,
-          });
-
-          const content = firstChunk.content
-            + `\n\n// ... [${meta.totalLines - (CHUNK_SIZE * 2)} lines omitted — file has ${meta.totalLines} lines total] ...\n\n`
-            + lastChunk.content;
-
-          // Estimate tokens saved
-          const fullTokenEstimate = Math.ceil(meta.totalLines * 30 / 4);
-          const readTokenEstimate = Math.ceil(content.length / 4);
-          totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
-
-          files.push({ path, content });
         }
-      }
 
-      // Log tokens saved in audit
-      if (totalTokensSaved > 0) {
+        if (totalTokensSaved > 0) {
+          await audit({
+            sessionId: ctx.conversationId,
+            actionType: "context_windowing_savings",
+            details: {
+              tokensSaved: totalTokensSaved,
+              filesProcessed: files.length,
+            },
+            success: true,
+            taskId: ctx.taskId,
+            repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+          });
+        }
+
+        return files;
+      });
+
+      // === STEP 3: Gather context ===
+      await report(ctx, "🧠 Henter relevant kontekst og dokumentasjon...", "working");
+
+      const memories = await auditedStep(ctx, "memory_searched", {
+        query: ctx.taskDescription.substring(0, 200),
+      }, () => memory.search({ query: ctx.taskDescription, limit: 10 }));
+
+      const docsResults = await auditedStep(ctx, "docs_looked_up", {
+        dependencyCount: Object.keys(packageJson.dependencies as Record<string, string> || {}).length,
+      }, () => docs.lookupForTask({
+        taskDescription: ctx.taskDescription,
+        existingDependencies: packageJson.dependencies as Record<string, string> || {},
+      }));
+
+      memoryStrings = memories.results.map((r) => r.content);
+      docsStrings = docsResults.docs.map((d) => `[${d.source}] ${d.content}`);
+
+      // === STEP 3.5: Fetch installed MCP tools ===
+      try {
+        const mcpResult = await mcp.installed();
+        if (mcpResult.servers.length > 0) {
+          const toolList = mcpResult.servers
+            .map((s) => `- **${s.name}**: ${s.description ?? "No description"} (${s.category})`)
+            .join("\n");
+          docsStrings.push(`[MCP Tools] Du har tilgang til disse verktøyene:\n${toolList}\n\nNOTE: MCP-kall routing er ikke implementert ennå. Bare vær klar over at disse verktøyene finnes.`);
+        }
+      } catch {
+        // Non-critical — MCP service may not be running
+      }
+    }
+
+    // === STEP 4: Assess Confidence (skip for curated — orchestrator handles this) ===
+    if (!useCurated) {
+      await report(ctx, "Vurderer min evne til å løse oppgaven...", "working");
+
+      const confidenceResult = await auditedStep(ctx, "confidence_assessed", {}, async () => {
+        const result = await ai.assessConfidence({
+          taskDescription: ctx.taskDescription,
+          projectStructure: treeString,
+          relevantFiles,
+          memoryContext: memoryStrings,
+          docsContext: docsStrings,
+        });
+        return result;
+      });
+
+      const { confidence } = confidenceResult;
+
+      await audit({
+        sessionId: ctx.conversationId,
+        actionType: "confidence_details",
+        details: {
+          overall: confidence.overall,
+          breakdown: confidence.breakdown,
+          recommended_action: confidence.recommended_action,
+          uncertainties: confidence.uncertainties,
+        },
+        success: true,
+        confidenceScore: confidence.overall,
+        taskId: ctx.taskId,
+        repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+      });
+
+      if (confidence.overall < 60 || confidence.recommended_action === "clarify") {
+        let msg = `Jeg er usikker (${confidence.overall}% sikker) og trenger avklaringer:\n\n`;
+        msg += `**Usikkerheter:**\n`;
+        confidence.uncertainties.forEach((u: string, i: number) => {
+          msg += `${i + 1}. ${u}\n`;
+        });
+        if (confidence.clarifying_questions && confidence.clarifying_questions.length > 0) {
+          msg += `\n**Spørsmål:**\n`;
+          confidence.clarifying_questions.forEach((q: string, i: number) => {
+            msg += `${i + 1}. ${q}\n`;
+          });
+        }
+        msg += `\nVennligst gi mer informasjon før jeg starter.`;
         await audit({
           sessionId: ctx.conversationId,
-          actionType: "context_windowing_savings",
-          details: {
-            tokensSaved: totalTokensSaved,
-            filesProcessed: files.length,
-          },
+          actionType: "task_paused_clarification",
+          details: { confidence: confidence.overall, reason: "low_confidence" },
           success: true,
+          confidenceScore: confidence.overall,
           taskId: ctx.taskId,
           repoName: `${ctx.repoOwner}/${ctx.repoName}`,
         });
+        await report(ctx, msg, "needs_input");
+        return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "low_confidence" };
       }
 
-      return files;
-    });
-
-    // === STEP 3: Gather context ===
-    await report(ctx, "🧠 Henter relevant kontekst og dokumentasjon...", "working");
-
-    const memories = await auditedStep(ctx, "memory_searched", {
-      query: ctx.taskDescription.substring(0, 200),
-    }, () => memory.search({ query: ctx.taskDescription, limit: 10 }));
-
-    const docsResults = await auditedStep(ctx, "docs_looked_up", {
-      dependencyCount: Object.keys(projectTree.packageJson?.dependencies || {}).length,
-    }, () => docs.lookupForTask({
-      taskDescription: ctx.taskDescription,
-      existingDependencies: projectTree.packageJson?.dependencies || {},
-    }));
-
-    // === STEP 4: Assess Confidence ===
-    await report(ctx, "Vurderer min evne til å løse oppgaven...", "working");
-
-    const confidenceResult = await auditedStep(ctx, "confidence_assessed", {}, async () => {
-      const result = await ai.assessConfidence({
-        taskDescription: ctx.taskDescription,
-        projectStructure: projectTree.treeString,
-        relevantFiles,
-        memoryContext: memories.results.map((r) => r.content),
-        docsContext: docsResults.docs.map((d) => `[${d.source}] ${d.content}`),
-      });
-      return result;
-    });
-
-    const { confidence } = confidenceResult;
-
-    // Log confidence details separately for easy querying
-    await audit({
-      sessionId: ctx.conversationId,
-      actionType: "confidence_details",
-      details: {
-        overall: confidence.overall,
-        breakdown: confidence.breakdown,
-        recommended_action: confidence.recommended_action,
-        uncertainties: confidence.uncertainties,
-      },
-      success: true,
-      confidenceScore: confidence.overall,
-      taskId: ctx.taskId,
-      repoName: `${ctx.repoOwner}/${ctx.repoName}`,
-    });
-
-    // Decision logic based on confidence
-    if (confidence.overall < 60 || confidence.recommended_action === "clarify") {
-      let msg = `Jeg er usikker (${confidence.overall}% sikker) og trenger avklaringer:\n\n`;
-      msg += `**Usikkerheter:**\n`;
-      confidence.uncertainties.forEach((u: string, i: number) => {
-        msg += `${i + 1}. ${u}\n`;
-      });
-      if (confidence.clarifying_questions && confidence.clarifying_questions.length > 0) {
-        msg += `\n**Spørsmål:**\n`;
-        confidence.clarifying_questions.forEach((q: string, i: number) => {
-          msg += `${i + 1}. ${q}\n`;
+      if (confidence.overall < 75 || confidence.recommended_action === "break_down") {
+        let msg = `Dette ser komplekst ut (${confidence.overall}% sikker). `;
+        msg += `Jeg anbefaler å dele det opp:\n\n`;
+        if (confidence.suggested_subtasks && confidence.suggested_subtasks.length > 0) {
+          confidence.suggested_subtasks.forEach((t: string, i: number) => {
+            msg += `${i + 1}. ${t}\n`;
+          });
+        }
+        msg += `\nVil du at jeg skal fortsette likevel, eller dele det opp?`;
+        await audit({
+          sessionId: ctx.conversationId,
+          actionType: "task_paused_breakdown",
+          details: { confidence: confidence.overall, subtasks: confidence.suggested_subtasks },
+          success: true,
+          confidenceScore: confidence.overall,
+          taskId: ctx.taskId,
+          repoName: `${ctx.repoOwner}/${ctx.repoName}`,
         });
+        await report(ctx, msg, "needs_input");
+        return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "needs_breakdown" };
       }
-      msg += `\nVennligst gi mer informasjon før jeg starter.`;
-      await audit({
-        sessionId: ctx.conversationId,
-        actionType: "task_paused_clarification",
-        details: { confidence: confidence.overall, reason: "low_confidence" },
-        success: true,
-        confidenceScore: confidence.overall,
-        taskId: ctx.taskId,
-        repoName: `${ctx.repoOwner}/${ctx.repoName}`,
-      });
-      await report(ctx, msg, "needs_input");
-      return;
-    }
 
-    if (confidence.overall < 75 || confidence.recommended_action === "break_down") {
-      let msg = `Dette ser komplekst ut (${confidence.overall}% sikker). `;
-      msg += `Jeg anbefaler å dele det opp:\n\n`;
-      if (confidence.suggested_subtasks && confidence.suggested_subtasks.length > 0) {
-        confidence.suggested_subtasks.forEach((t: string, i: number) => {
-          msg += `${i + 1}. ${t}\n`;
-        });
-      }
-      msg += `\nVil du at jeg skal fortsette likevel, eller dele det opp?`;
-      await audit({
-        sessionId: ctx.conversationId,
-        actionType: "task_paused_breakdown",
-        details: { confidence: confidence.overall, subtasks: confidence.suggested_subtasks },
-        success: true,
-        confidenceScore: confidence.overall,
-        taskId: ctx.taskId,
-        repoName: `${ctx.repoOwner}/${ctx.repoName}`,
-      });
-      await report(ctx, msg, "needs_input");
-      return;
+      await report(
+        ctx,
+        `Jeg er ${confidence.overall}% sikker på å løse dette. Starter arbeid...`,
+        "working"
+      );
     }
-
-    await report(
-      ctx,
-      `Jeg er ${confidence.overall}% sikker på å løse dette. Starter arbeid...`,
-      "working"
-    );
 
     // === STEP 4.5: Assess complexity and select model ===
     let selectedModel: string;
 
     if (ctx.modelOverride) {
-      // Bruker valgte manuelt modell for denne oppgaven
       selectedModel = ctx.modelOverride;
     } else if (ctx.modelMode === "manual") {
-      // Manuell modus men ingen override — be bruker velge
       await report(ctx, "Hvilken modell vil du bruke?", "needs_input");
-      return;
+      return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "needs_model_selection" };
     } else {
-      // Auto modus — vurder kompleksitet og velg
       const complexityResult = await auditedStep(ctx, "complexity_assessed", {
         modelMode: ctx.modelMode,
       }, () => ai.assessComplexity({
         taskDescription: ctx.taskDescription,
-        projectStructure: projectTree.treeString.substring(0, 2000),
-        fileCount: projectTree.tree.length,
+        projectStructure: treeString.substring(0, 2000),
+        fileCount: treeArray.length,
       }));
 
       selectedModel = selectOptimalModel(complexityResult.complexity, "auto");
@@ -416,14 +527,14 @@ async function executeTask(ctx: TaskContext): Promise<void> {
     let plan = await auditedStep(ctx, "plan_created", {
       taskDescription: ctx.taskDescription.substring(0, 200),
       model: ctx.selectedModel,
-    }, () => ai.planTask({
+    }, () => aiBreaker.call(() => ai.planTask({
       task: `${ctx.taskDescription}\n\nUser context: ${ctx.userMessage}`,
-      projectStructure: projectTree.treeString,
+      projectStructure: treeString,
       relevantFiles,
-      memoryContext: memories.results.map((r) => r.content),
-      docsContext: docsResults.docs.map((d) => `[${d.source}] ${d.content}`),
+      memoryContext: memoryStrings,
+      docsContext: docsStrings,
       model: ctx.selectedModel,
-    }));
+    })));
 
     // Track cost
     ctx.totalCostUsd += plan.costUsd;
@@ -453,11 +564,85 @@ async function executeTask(ctx: TaskContext): Promise<void> {
       ctx.errorPatterns = [];
     }
 
-    // === STEP 6: Create sandbox and execute plan ===
+    // === STEP 5.6: Run sub-agents if enabled and complexity warrants it ===
+    let subAgentContext = "";
+    if (ctx.subAgentsEnabled) {
+      // Derive complexity from plan size as proxy (already assessed in step 4.5)
+      const estimatedComplexity = Math.min(10, Math.max(1, plan.plan.length * 2));
+
+      if (estimatedComplexity >= 5) {
+        await report(ctx, "Sub-agenter aktivert — kjører spesialiserte AI-agenter parallelt...", "working");
+
+        const budgetMode: BudgetMode = ctx.modelMode === "manual" ? "quality_first" : "balanced";
+        const subPlanSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
+        const subPlan = planSubAgents(ctx.taskDescription, subPlanSummary, estimatedComplexity, budgetMode);
+
+        if (subPlan.agents.length > 0) {
+          await audit({
+            sessionId: ctx.conversationId,
+            actionType: "sub_agent_started",
+            details: {
+              agentCount: subPlan.agents.length,
+              roles: subPlan.agents.map((a) => a.role),
+              models: subPlan.agents.map((a) => a.model),
+              complexity: estimatedComplexity,
+              budgetMode,
+            },
+            success: true,
+            taskId: ctx.taskId,
+            repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+          });
+
+          const subResults = await executeSubAgents(subPlan);
+          const merged = await mergeResults(subResults, subPlan.mergeStrategy);
+
+          ctx.subAgentResults = subResults;
+          ctx.totalCostUsd += sumCosts(subResults);
+          ctx.totalTokensUsed += sumTokens(subResults);
+          subAgentContext = merged;
+
+          const successCount = subResults.filter((r) => r.success).length;
+          const failCount = subResults.filter((r) => !r.success).length;
+
+          await audit({
+            sessionId: ctx.conversationId,
+            actionType: "sub_agent_completed",
+            details: {
+              results: subResults.map((r) => ({
+                id: r.id,
+                role: r.role,
+                model: r.model,
+                success: r.success,
+                costUsd: r.costUsd,
+                tokensUsed: r.tokensUsed,
+                durationMs: r.durationMs,
+                error: r.error,
+              })),
+              totalCostUsd: sumCosts(subResults),
+              totalTokensUsed: sumTokens(subResults),
+              successCount,
+              failCount,
+              mergeStrategy: subPlan.mergeStrategy,
+            },
+            success: true,
+            taskId: ctx.taskId,
+            repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+          });
+
+          await report(
+            ctx,
+            `Sub-agenter ferdig: ${successCount}/${subResults.length} vellykket ($${sumCosts(subResults).toFixed(4)})`,
+            "working"
+          );
+        }
+      }
+    }
+
+    // === STEP 6: Create sandbox and execute plan via Builder ===
     const sandboxId = await auditedStep(ctx, "sandbox_created", {
       repoOwner: ctx.repoOwner,
       repoName: ctx.repoName,
-    }, () => sandbox.create({ repoOwner: ctx.repoOwner, repoName: ctx.repoName }));
+    }, () => sandboxBreaker.call(() => sandbox.create({ repoOwner: ctx.repoOwner, repoName: ctx.repoName })));
 
     const allFiles: { path: string; content: string; action: string }[] = [];
     let lastError: string | null = null;
@@ -468,114 +653,59 @@ async function executeTask(ctx: TaskContext): Promise<void> {
       const attemptStart = Date.now();
 
       try {
-        // Execute each step in the plan with incremental validation
-        for (let stepIdx = 0; stepIdx < plan.plan.length; stepIdx++) {
-          const step = plan.plan[stepIdx];
+        // Delegate to Builder service for file-by-file generation with dependency analysis
+        await report(ctx, "Builder kjører: fil-for-fil generering med avhengighetsanalyse...", "working");
 
-          if (step.action === "create_file" || step.action === "modify_file") {
-            let fileContent = step.content!;
+        const buildResult = await auditedStep(ctx, "builder_executed", {
+          taskId: ctx.taskId,
+          sandboxId: sandboxId.id,
+          strategy: "auto",
+          planSteps: plan.plan.length,
+        }, () => {
+          // Enrich description with sub-agent context if available
+          const enrichedDescription = subAgentContext
+            ? `${ctx.taskDescription}\n\n## Sub-agent Analysis\n${subAgentContext}`
+            : ctx.taskDescription;
 
-            for (let fileAttempt = 0; fileAttempt <= MAX_FILE_FIX_RETRIES; fileAttempt++) {
-              await auditedStep(ctx, "file_written", {
-                path: step.filePath,
-                action: step.action,
-                contentLength: fileContent.length,
-                fixAttempt: fileAttempt,
-              }, () => sandbox.writeFile({
-                sandboxId: sandboxId.id,
-                path: step.filePath!,
-                content: fileContent,
-              }));
+          return aiBreaker.call(() => builder.start({
+            taskId: ctx.taskId,
+            sandboxId: sandboxId.id,
+            plan: {
+              description: enrichedDescription,
+              repo: `${ctx.repoOwner}/${ctx.repoName}`,
+              repoOwner: ctx.repoOwner,
+              repoName: ctx.repoName,
+              model: ctx.selectedModel,
+              steps: plan.plan,
+            },
+          }));
+        });
 
-              if (step.filePath!.endsWith(".ts") || step.filePath!.endsWith(".tsx")) {
-                const incVal = await auditedStep(ctx, "validation_incremental", {
-                  filePath: step.filePath,
-                  attempt: fileAttempt,
-                }, () => sandbox.validateIncremental({
-                  sandboxId: sandboxId.id,
-                  filePath: step.filePath!,
-                }));
+        // Track cost from builder
+        ctx.totalCostUsd += buildResult.result.totalCostUsd;
+        ctx.totalTokensUsed += buildResult.result.totalTokensUsed;
 
-                if (incVal.success) break;
-
-                await audit({
-                  sessionId: ctx.conversationId,
-                  actionType: "validation_incremental_failed",
-                  details: { filePath: step.filePath, errors: incVal.errors, attempt: fileAttempt },
-                  success: false,
-                  errorMessage: incVal.output.substring(0, 500),
-                  taskId: ctx.taskId,
-                  repoName: `${ctx.repoOwner}/${ctx.repoName}`,
-                });
-
-                if (fileAttempt < MAX_FILE_FIX_RETRIES) {
-                  await report(ctx, `Feil i ${step.filePath} — fikser (forsøk ${fileAttempt + 1})...`, "working");
-
-                  const fixResult = await auditedStep(ctx, "file_fix_requested", {
-                    filePath: step.filePath,
-                    errors: incVal.errors.slice(0, 5),
-                    model: ctx.selectedModel,
-                  }, () => ai.planTask({
-                    task: `Fix TypeScript errors in ${step.filePath}:\n\n${incVal.output}\n\nOriginal task: ${ctx.taskDescription}`,
-                    projectStructure: projectTree.treeString,
-                    relevantFiles: [{ path: step.filePath!, content: fileContent }],
-                    memoryContext: [],
-                    docsContext: [],
-                    errorMessage: incVal.output,
-                    model: ctx.selectedModel,
-                  }));
-
-                  ctx.totalCostUsd += fixResult.costUsd;
-                  ctx.totalTokensUsed += fixResult.tokensUsed;
-
-                  const fixStep = fixResult.plan.find(
-                    (s) => (s.action === "create_file" || s.action === "modify_file") && s.filePath === step.filePath
-                  );
-                  if (fixStep?.content) {
-                    fileContent = fixStep.content;
-                  } else {
-                    break;
-                  }
-                }
-              } else {
-                break;
-              }
-            }
-
-            allFiles.push({
-              path: step.filePath!,
-              content: fileContent,
-              action: step.action === "create_file" ? "create" : "modify",
-            });
-
-          } else if (step.action === "delete_file") {
-            await auditedStep(ctx, "file_deleted", { path: step.filePath }, () =>
-              sandbox.deleteFile({ sandboxId: sandboxId.id, path: step.filePath! })
-            );
-            allFiles.push({ path: step.filePath!, content: "", action: "delete" });
-          } else if (step.action === "run_command") {
-            await auditedStep(ctx, "command_executed", { command: step.command }, () =>
-              sandbox.runCommand({ sandboxId: sandboxId.id, command: step.command!, timeout: 60 })
-            );
-          }
-
-          // Record attempt
-          ctx.attemptHistory.push({
-            stepIndex: stepIdx,
-            action: step.action,
-            result: "success",
-            duration: Date.now() - attemptStart,
-            tokensUsed: 0,
-          });
+        // Collect files from build result
+        for (const file of buildResult.result.filesChanged) {
+          allFiles.push(file);
         }
 
-        // === STEP 7: Validate ===
-        await report(ctx, "Validerer kode (typesjekk, lint, tester)...", "working");
+        // Record attempt
+        ctx.attemptHistory.push({
+          stepIndex: 0,
+          action: "builder_complete",
+          result: buildResult.result.success ? "success" : "failure",
+          duration: Date.now() - attemptStart,
+          tokensUsed: buildResult.result.totalTokensUsed,
+        });
+
+        // === STEP 7: Validate (already done by builder integrate phase) ===
+        await report(ctx, "Validering fullført via Builder...", "working");
 
         const validation = await auditedStep(ctx, "validation_run", {
           attempt: ctx.totalAttempts,
           maxRetries: ctx.maxAttempts,
-        }, () => sandbox.validate({ sandboxId: sandboxId.id }));
+        }, () => sandboxBreaker.call(() => sandbox.validate({ sandboxId: sandboxId.id })));
 
         if (!validation.success) {
           lastError = validation.output;
@@ -653,10 +783,10 @@ async function executeTask(ctx: TaskContext): Promise<void> {
                 model: ctx.selectedModel,
               }, () => ai.planTask({
                 task: ctx.taskDescription,
-                projectStructure: projectTree.treeString,
+                projectStructure: treeString,
                 relevantFiles,
-                memoryContext: memories.results.map((r) => r.content),
-                docsContext: docsResults.docs.map((d) => `[${d.source}] ${d.content}`),
+                memoryContext: memoryStrings,
+                docsContext: docsStrings,
                 previousAttempt: planSummary,
                 errorMessage: validation.output,
                 model: ctx.selectedModel,
@@ -679,10 +809,10 @@ async function executeTask(ctx: TaskContext): Promise<void> {
                 extraMemories: moreMemories.results.length,
               }, () => ai.planTask({
                 task: ctx.taskDescription,
-                projectStructure: projectTree.treeString,
+                projectStructure: treeString,
                 relevantFiles,
                 memoryContext: moreMemories.results.map((r) => r.content),
-                docsContext: docsResults.docs.map((d) => `[${d.source}] ${d.content}`),
+                docsContext: docsStrings,
                 errorMessage: validation.output,
                 model: ctx.selectedModel,
               }));
@@ -761,14 +891,67 @@ async function executeTask(ctx: TaskContext): Promise<void> {
         action: f.action as "create" | "modify" | "delete",
       })),
       validationOutput: validationOutput.output,
-      memoryContext: memories.results.map((r) => r.content),
+      memoryContext: memoryStrings,
       model: ctx.selectedModel,
     }));
 
     ctx.totalCostUsd += review.costUsd;
     ctx.totalTokensUsed += review.tokensUsed;
 
-    // === STEP 9: Commit and create PR ===
+    // === STEP 8.5: Submit for review (unless skipReview) ===
+    if (!options?.skipReview) {
+      const aiReviewData: AIReviewData = {
+        documentation: review.documentation,
+        qualityScore: review.qualityScore,
+        concerns: review.concerns,
+        memoriesExtracted: review.memoriesExtracted,
+      };
+
+      const reviewResult = await submitReviewInternal({
+        conversationId: ctx.conversationId,
+        taskId: ctx.taskId,
+        sandboxId: sandboxId.id,
+        filesChanged: allFiles.map((f) => ({
+          path: f.path,
+          content: f.content,
+          action: f.action as "create" | "modify" | "delete",
+        })),
+        aiReview: aiReviewData,
+      });
+
+      await audit({
+        sessionId: ctx.conversationId,
+        actionType: "review_submitted",
+        details: {
+          reviewId: reviewResult.reviewId,
+          qualityScore: review.qualityScore,
+          filesChanged: allFiles.map((f) => f.path),
+        },
+        success: true,
+        taskId: ctx.taskId,
+        repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+        durationMs: Date.now() - taskStart,
+      });
+
+      // Update TheFold task status to in_review if applicable
+      if (ctx.thefoldTaskId) {
+        try {
+          await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "in_review", reviewId: reviewResult.reviewId });
+        } catch { /* non-critical */ }
+      }
+
+      // Return early — DO NOT create PR, DO NOT destroy sandbox
+      return {
+        success: true,
+        reviewId: reviewResult.reviewId,
+        status: 'pending_review',
+        filesChanged: allFiles.map((f) => f.path),
+        costUsd: ctx.totalCostUsd,
+        tokensUsed: ctx.totalTokensUsed,
+      };
+    }
+
+    // === STEP 9: Commit and create PR (skipReview path only) ===
     await report(ctx, "🚀 Oppretter branch og pull request...", "working");
 
     const branchName = `thefold/${ctx.taskId.toLowerCase().replace(/\s+/g, "-")}`;
@@ -780,7 +963,7 @@ async function executeTask(ctx: TaskContext): Promise<void> {
       owner: ctx.repoOwner,
       repo: ctx.repoName,
       branch: branchName,
-      title: `[TheFold] ${taskDetail.task.title}`,
+      title: `[TheFold] ${taskTitle}`,
       body: review.documentation,
       files: allFiles.map((f) => ({
         path: f.path,
@@ -789,15 +972,17 @@ async function executeTask(ctx: TaskContext): Promise<void> {
       })),
     }));
 
-    // === STEP 10: Update Linear ===
-    await auditedStep(ctx, "linear_updated", {
-      taskId: ctx.taskId,
-      newState: "in_review",
-    }, () => linear.updateTask({
-      taskId: ctx.taskId,
-      state: "in_review",
-      comment: `## TheFold har fullført denne oppgaven\n\n${review.documentation}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.qualityScore}/10\n\n${review.concerns.length > 0 ? "**Bekymringer:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : "Ingen bekymringer."}`,
-    }));
+    // === STEP 10: Update Linear (skip for orchestrator tasks) ===
+    if (!options?.skipLinear) {
+      await auditedStep(ctx, "linear_updated", {
+        taskId: ctx.taskId,
+        newState: "in_review",
+      }, () => linear.updateTask({
+        taskId: ctx.taskId,
+        state: "in_review",
+        comment: `## TheFold har fullført denne oppgaven\n\n${review.documentation}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.qualityScore}/10\n\n${review.concerns.length > 0 ? "**Bekymringer:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : "Ingen bekymringer."}`,
+      }));
+    }
 
     // === STEP 11: Store memories + error patterns ===
     for (const mem of review.memoriesExtracted) {
@@ -874,6 +1059,21 @@ async function executeTask(ctx: TaskContext): Promise<void> {
       "completed",
       { prUrl: pr.url, filesChanged: changedPaths }
     );
+
+    // Update TheFold task status if applicable
+    if (ctx.thefoldTaskId) {
+      try {
+        await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "done", prUrl: pr.url });
+      } catch { /* non-critical */ }
+    }
+
+    return {
+      success: true,
+      prUrl: pr.url,
+      filesChanged: changedPaths,
+      costUsd: ctx.totalCostUsd,
+      tokensUsed: ctx.totalTokensUsed,
+    };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
 
@@ -897,11 +1097,28 @@ async function executeTask(ctx: TaskContext): Promise<void> {
       "failed"
     );
 
-    // Update Linear
-    await linear.updateTask({
-      taskId: ctx.taskId,
-      comment: `TheFold feilet på denne oppgaven: ${errorMsg}`,
-    });
+    // Update Linear (skip for orchestrator tasks)
+    if (!options?.skipLinear) {
+      await linear.updateTask({
+        taskId: ctx.taskId,
+        comment: `TheFold feilet på denne oppgaven: ${errorMsg}`,
+      });
+    }
+
+    // Update TheFold task status if applicable
+    if (ctx.thefoldTaskId) {
+      try {
+        await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked" });
+      } catch { /* non-critical */ }
+    }
+
+    return {
+      success: false,
+      filesChanged: [],
+      costUsd: ctx.totalCostUsd,
+      tokensUsed: ctx.totalTokensUsed,
+      errorMessage: errorMsg,
+    };
   }
 }
 
@@ -913,12 +1130,16 @@ export const startTask = api(
   async (req: StartTaskRequest): Promise<StartTaskResponse> => {
     // Hent brukerens modellpreferanse
     let modelMode: ModelMode = "auto";
+    let subAgentsEnabled = false;
     if (req.userId) {
       try {
         const userInfo = await users.getUser({ userId: req.userId });
         const prefs = userInfo.preferences as Record<string, unknown>;
         if (prefs.modelMode && ["auto", "manual"].includes(prefs.modelMode as string)) {
           modelMode = prefs.modelMode as ModelMode;
+        }
+        if (prefs.subAgentsEnabled === true) {
+          subAgentsEnabled = true;
         }
       } catch {
         // Default til auto hvis oppslag feiler
@@ -935,6 +1156,7 @@ export const startTask = api(
       repoOwner: REPO_OWNER,
       repoName: REPO_NAME,
       branch: "main",
+      thefoldTaskId: req.thefoldTaskId,
       modelMode,
       modelOverride: req.modelOverride,
       selectedModel: "claude-sonnet-4-5-20250929", // default, oppdateres etter complexity assessment
@@ -947,6 +1169,8 @@ export const startTask = api(
       maxAttempts: MAX_RETRIES,
       planRevisions: 0,
       maxPlanRevisions: MAX_PLAN_REVISIONS,
+      // Sub-agents
+      subAgentsEnabled,
     };
 
     // Fire and forget — agent reports progress via pub/sub
@@ -1032,6 +1256,7 @@ interface ListAuditLogRequest {
   actionType?: string;
   taskId?: string;
   sessionId?: string;
+  repoName?: string;
   successOnly?: boolean;
   failedOnly?: boolean;
   limit?: number;
@@ -1099,6 +1324,23 @@ export const listAuditLog = api(
       }
       const countRow = await db.queryRow<{ count: number }>`
         SELECT COUNT(*)::int AS count FROM agent_audit_log WHERE session_id = ${req.sessionId}
+      `;
+      return { entries, total: countRow?.count || 0 };
+    }
+
+    if (req.repoName) {
+      const rows = db.query<AuditLogRow>`
+        SELECT id, session_id, timestamp, action_type, details, success, error_message, confidence_score, task_id, repo_name, duration_ms
+        FROM agent_audit_log
+        WHERE repo_name = ${req.repoName}
+        ORDER BY timestamp DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+      for await (const row of rows) {
+        entries.push(rowToAuditEntry(row));
+      }
+      const countRow = await db.queryRow<{ count: number }>`
+        SELECT COUNT(*)::int AS count FROM agent_audit_log WHERE repo_name = ${req.repoName}
       `;
       return { entries, total: countRow?.count || 0 };
     }

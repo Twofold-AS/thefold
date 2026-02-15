@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { getAssignedTasks, getTask, updateTask } from "./linear";
+import { getAssignedTasks, getTask, updateTask, STATUS_TO_LINEAR } from "./linear";
 
 describe("Linear service", () => {
   describe("getAssignedTasks", () => {
@@ -183,6 +183,28 @@ describe("Linear service", () => {
         }
       }
     );
+  });
+
+  describe("State mapping", () => {
+    it("maps all 6 TheFold statuses to Linear states", () => {
+      expect(STATUS_TO_LINEAR["backlog"]).toBe("Backlog");
+      expect(STATUS_TO_LINEAR["planned"]).toBe("Todo");
+      expect(STATUS_TO_LINEAR["in_progress"]).toBe("In Progress");
+      expect(STATUS_TO_LINEAR["in_review"]).toBe("In Review");
+      expect(STATUS_TO_LINEAR["done"]).toBe("Done");
+      expect(STATUS_TO_LINEAR["blocked"]).toBe("Cancelled");
+    });
+
+    it("covers exactly 6 statuses", () => {
+      expect(Object.keys(STATUS_TO_LINEAR).length).toBe(6);
+    });
+
+    it("all mapped Linear states are non-empty strings", () => {
+      for (const [key, value] of Object.entries(STATUS_TO_LINEAR)) {
+        expect(typeof value).toBe("string");
+        expect(value.length).toBeGreaterThan(0);
+      }
+    });
   });
 
   describe("Linear integration health", () => {

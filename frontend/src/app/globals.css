@@ -1,51 +1,38 @@
 /* ============================================
-   Custom Fonts — All font files registered
+   Custom Fonts
    ============================================ */
 
+/* Display — titler og overskrifter */
 @font-face {
-  font-family: "Suisse Intl";
-  src: url("/fonts/SuisseIntl-Regular-WebS.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Suisse Intl";
-  src: url("/fonts/SuisseIntl-RegularItalic-WebS.woff2") format("woff2");
-  font-weight: 400;
-  font-style: italic;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Suisse Intl";
-  src: url("/fonts/SuisseIntl-Medium-WebS.woff2") format("woff2");
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Suisse Intl";
-  src: url("/fonts/SuisseIntl-SemiBold-WebS.woff2") format("woff2");
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "Suisse Intl Mono";
-  src: url("/fonts/SuisseIntlMono-Regular-WebS.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: "TheFold Brand";
-  src: url("/fonts/thefold.woff2") format("woff2");
+  font-family: "ABC Diatype Plus";
+  src: url("/fonts/ABCDiatypePlusVariable_fixed-s.woff2") format("woff2");
   font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Brand — logo, hero text */
+@font-face {
+  font-family: "Ivar Text";
+  src: url("/fonts/IvarText_Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Inter — generell UI */
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter_18pt-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter_18pt-Medium.woff2") format("woff2");
+  font-weight: 500;
   font-style: normal;
   font-display: swap;
 }
@@ -76,49 +63,62 @@
   --code-border-blue: #3b82f6;
   --code-border-green: #22c55e;
   --code-border-purple: #8b5cf6;
-
-  /* Sidebar — ALWAYS dark */
-  --bg-sidebar: #171717;
-  --bg-sidebar-section: #1b1b1b;
-  --bg-sidebar-hover: #252528;
-  --bg-sidebar-active: #1b1b1b;
-  --sidebar-text: #a1a1a1;
-  --sidebar-text-active: #fafafa;
-  --sidebar-border: #27272a;
 }
 
 /* Dark theme (default) */
 [data-theme="dark"] {
-  --bg-page: #111111;
-  --bg-card: #171717;
-  --bg-card-secondary: #1b1b1b;
-  --bg-input: #141414;
-  --bg-code: #0d0d0d;
-  --bg-hover: #1b1b1b;
+  --bg-page: #070706;
+  --bg-card: transparent;
+  --bg-card-secondary: transparent;
+  --bg-input: #0e0e0d;
+  --bg-code: #0a0a09;
+  --bg-hover: #1e1e1c;
+
+  --bg-chat: #1e1e1c;
+  --text-chat: #787877;
 
   --text-primary: #fafaf9;
-  --text-secondary: #a1a1a1;
-  --text-muted: #52525b;
+  --text-secondary: #7b7a76;
+  --text-muted: #52524e;
 
-  --border: #27272a;
-  --border-hover: #3f3f46;
+  --border: #2a2a28;
+  --border-hover: #3f3f3b;
+
+  --bg-sidebar: #070706;
+  --bg-sidebar-section: transparent;
+  --bg-sidebar-hover: #1e1e1c;
+  --bg-sidebar-active: #1e1e1c;
+  --sidebar-text: #7b7a76;
+  --sidebar-text-active: #fafaf9;
+  --sidebar-border: #2a2a28;
 }
 
 /* Light theme */
 [data-theme="light"] {
   --bg-page: #faf9f6;
-  --bg-card: #ffffff;
-  --bg-card-secondary: #f8f8f6;
+  --bg-card: transparent;
+  --bg-card-secondary: transparent;
   --bg-input: #f4f3f0;
   --bg-code: #f0efec;
-  --bg-hover: #f0efec;
+  --bg-hover: #ededea;
 
-  --text-primary: #1a1a1a;
-  --text-secondary: #6b6b6b;
-  --text-muted: #9a9a9a;
+  --bg-chat: #f0efec;
+  --text-chat: #6b6b68;
 
-  --border: #e5e4e0;
+  --text-primary: #1a1a18;
+  --text-secondary: #7b7a76;
+  --text-muted: #9a9a96;
+
+  --border: #e0dfdb;
   --border-hover: #d4d3cf;
+
+  --bg-sidebar: #070706;
+  --bg-sidebar-section: transparent;
+  --bg-sidebar-hover: #1e1e1c;
+  --bg-sidebar-active: #1e1e1c;
+  --sidebar-text: #7b7a76;
+  --sidebar-text-active: #fafaf9;
+  --sidebar-border: #2a2a28;
 }
 
 /* ============================================
@@ -129,12 +129,11 @@
   body {
     background-color: var(--bg-page);
     color: var(--text-primary);
-    font-family: "Suisse Intl", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-family: "Inter", system-ui, sans-serif;
     font-size: 14px;
     font-weight: 400;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
   }
 
   ::selection {
@@ -165,94 +164,130 @@
    ============================================ */
 
 @layer components {
-  /* --- Buttons (rounded-lg) --- */
+  /* --- Buttons (flat, square, solid) --- */
 
   .btn-primary {
-    background: #fafafa;
-    color: #000;
+    background: var(--text-primary);
+    color: var(--bg-page);
+    font-family: "Inter", system-ui, sans-serif;
     font-weight: 500;
-    padding: 8px 16px;
-    border-radius: 8px;
+    padding: 8px 20px;
+    border-radius: 0;
+    border: 1px solid var(--text-primary);
     font-size: 14px;
-    transition: background 100ms;
+    transition: all 150ms ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
   }
-  .btn-primary:hover {
-    background: #e4e4e7;
+  .btn-primary:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+  .btn-primary:active:not(:disabled),
+  .btn-primary:focus:not(:disabled) {
+    opacity: 0.75;
+    outline: none;
   }
   .btn-primary:disabled {
-    opacity: 0.5;
+    opacity: 0.4;
     cursor: not-allowed;
   }
 
   .btn-secondary {
     background: transparent;
+    color: var(--text-secondary);
+    font-family: "Inter", system-ui, sans-serif;
+    font-weight: 400;
+    padding: 6px 16px;
+    border-radius: 0;
     border: 1px solid var(--border);
-    color: var(--text-primary);
-    font-weight: 500;
-    padding: 8px 16px;
-    border-radius: 8px;
-    font-size: 14px;
-    transition: border-color 100ms;
+    font-size: 13px;
+    transition: all 150ms ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
-  .btn-secondary:hover {
-    border-color: var(--border-hover);
+  .btn-secondary:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .btn-outline {
     background: transparent;
+    color: var(--text-secondary);
+    font-family: "Inter", system-ui, sans-serif;
+    font-weight: 400;
+    padding: 6px 16px;
+    border-radius: 0;
     border: 1px solid var(--border);
-    color: var(--text-primary);
-    font-weight: 500;
-    padding: 6px 14px;
-    border-radius: 8px;
     font-size: 13px;
-    transition: border-color 100ms;
+    transition: all 150ms ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
-  .btn-outline:hover {
-    border-color: var(--border-hover);
+  .btn-outline:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
-  /* --- Inputs (rounded-lg) --- */
+  .btn-danger {
+    background: transparent;
+    color: var(--error);
+    font-weight: 500;
+    padding: 8px 20px;
+    border-radius: 0;
+    border: 1px solid var(--error);
+    font-size: 14px;
+    transition: all 150ms ease;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.1);
+  }
+
+  /* --- Inputs (solid, square) --- */
 
   .input-field {
     width: 100%;
     background: var(--bg-input);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 8px 12px;
+    border-radius: 0;
+    padding: 10px 14px;
+    font-family: "Inter", system-ui, sans-serif;
     font-size: 14px;
     color: var(--text-primary);
-    transition: border-color 100ms;
+    transition: border-color 150ms ease;
   }
   .input-field::placeholder {
     color: var(--text-muted);
   }
   .input-field:focus {
     outline: none;
-    border-color: var(--border-hover);
+    border-color: var(--text-secondary);
+    border-style: solid;
   }
   .input-field:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
 
-  /* --- Cards (rounded-xl) --- */
+  /* --- Cards (solid, square, transparent) --- */
 
   .card {
-    background: var(--bg-card);
+    background: transparent;
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px;
+    border-radius: 0;
+    padding: 20px;
   }
 
   .card-secondary {
-    background: var(--bg-card-secondary);
+    background: transparent;
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px;
+    border-radius: 0;
+    padding: 20px;
   }
 
-  /* --- Badges --- */
+  /* --- Badges (square) --- */
 
   .badge-active {
     background: var(--badge-active-bg);
@@ -260,7 +295,7 @@
     font-size: 13px;
     font-weight: 500;
     padding: 2px 10px;
-    border-radius: 6px;
+    border-radius: 0;
     display: inline-block;
   }
 
@@ -269,7 +304,7 @@
     color: var(--badge-inactive-text);
     font-size: 13px;
     padding: 2px 10px;
-    border-radius: 6px;
+    border-radius: 0;
     display: inline-block;
   }
 
@@ -279,7 +314,7 @@
     font-size: 13px;
     font-weight: 500;
     padding: 2px 10px;
-    border-radius: 6px;
+    border-radius: 0;
     display: inline-block;
   }
 
@@ -348,6 +383,71 @@
     color: var(--text-muted);
   }
 
+  /* --- Tabs (square, solid) --- */
+
+  .tab {
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 0;
+    transition: all 150ms ease;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tab:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  .tab-active {
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--border);
+    border-bottom: 2px solid var(--text-primary);
+    border-radius: 0;
+    transition: all 150ms ease;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* --- Dropdown (square, solid) --- */
+
+  .dropdown-menu {
+    background: var(--bg-page);
+    border: 1px solid var(--border);
+    border-radius: 0;
+    overflow: hidden;
+  }
+
+  .dropdown-item {
+    width: 100%;
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 13px;
+    color: var(--text-primary);
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 100ms ease;
+  }
+  .dropdown-item:hover {
+    background: var(--bg-hover);
+  }
+  .dropdown-item:last-child {
+    border-bottom: none;
+  }
+
   /* --- Chat scrollbar (visible, styled) --- */
 
   .chat-scroll::-webkit-scrollbar {
@@ -385,4 +485,130 @@
   background: var(--text-muted);
   display: inline-block;
   animation: typing-pulse 1.4s infinite;
+}
+
+/* --- Agent status animations --- */
+
+@keyframes agent-pulse-kf {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.3); }
+}
+
+@keyframes agent-spinner-kf {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes agent-check-in-kf {
+  0% { opacity: 0; transform: scale(0.5); }
+  60% { opacity: 1; transform: scale(1.1); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes agent-typing-kf {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+@keyframes message-enter-kf {
+  0% { opacity: 0; transform: translateY(8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.agent-pulse {
+  animation: agent-pulse-kf 2s ease-in-out infinite;
+}
+
+.agent-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text-primary);
+  border-radius: 50%;
+  animation: agent-spinner-kf 0.8s linear infinite;
+}
+
+.agent-check-in {
+  animation: agent-check-in-kf 0.4s ease-out forwards;
+}
+
+.agent-typing {
+  animation: agent-typing-kf 1.5s ease-in-out infinite;
+}
+
+.message-enter {
+  animation: message-enter-kf 0.3s ease-out forwards;
+}
+
+/* --- Shimmer effect on active text --- */
+
+.agent-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--text-primary) 0%,
+    rgba(255,255,255,0.4) 50%,
+    var(--text-primary) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: agent-shimmer-kf 2s ease-in-out infinite;
+}
+@keyframes agent-shimmer-kf {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* --- Small spinner for steps --- */
+
+.agent-spinner-small {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.1);
+  border-top-color: var(--text-primary);
+  border-radius: 50%;
+  animation: agent-spinner-kf 0.7s linear infinite;
+  display: inline-block;
+}
+
+/* --- Step fade-in with delay --- */
+
+@keyframes agent-step-enter {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* --- TheFold brand shimmer (sidebar + chat avatar) --- */
+
+.brand-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--text-primary) 0%,
+    rgba(255,255,255,0.5) 40%,
+    var(--text-primary) 80%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: brand-shimmer-kf 3s ease-in-out infinite;
+}
+@keyframes brand-shimmer-kf {
+  0% { background-position: 300% 0; }
+  100% { background-position: -300% 0; }
+}
+
+/* --- Animated dots --- */
+
+.agent-dots .dot {
+  animation: agent-dot-bounce 1.4s ease-in-out infinite;
+  display: inline-block;
+  color: var(--text-muted);
+}
+.agent-dots .dot:nth-child(1) { animation-delay: 0s; }
+.agent-dots .dot:nth-child(2) { animation-delay: 0.2s; }
+.agent-dots .dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes agent-dot-bounce {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
 }

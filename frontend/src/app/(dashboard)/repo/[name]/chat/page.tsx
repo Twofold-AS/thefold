@@ -7,17 +7,20 @@ import {
   getChatHistory,
   getRepoConversations,
   repoConversationId,
+  deleteConversation,
+  cancelChatGeneration,
   listSkills,
   type Message,
   type ConversationSummary,
   type Skill,
 } from "@/lib/api";
-import { Monitor, Send, Plus, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Send, PanelLeftClose, PanelLeft } from "lucide-react";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SkillsSelector, MessageSkillBadges } from "@/components/SkillsSelector";
 import { ChatToolsMenu } from "@/components/ChatToolsMenu";
 import { InlineSkillForm } from "@/components/InlineSkillForm";
 import { LivePreview } from "@/components/LivePreview";
+import { AgentStatus, type AgentStep } from "@/components/AgentStatus";
 import { usePreferences, useUser } from "@/contexts/UserPreferencesContext";
 import Image from "next/image";
 
@@ -40,11 +43,11 @@ export default function RepoChatPage() {
   const [showSkillForm, setShowSkillForm] = useState(false);
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
+  const [pollMode, setPollMode] = useState<"idle" | "waiting" | "cooldown">("idle");
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isNearBottomRef = useRef(true);
 
   const autoResize = useCallback(() => {
@@ -64,7 +67,9 @@ export default function RepoChatPage() {
 
   const scrollToBottom = useCallback(() => {
     if (isNearBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 100);
     }
   }, []);
 
@@ -93,17 +98,38 @@ export default function RepoChatPage() {
       });
   }, [params.name, searchParams]);
 
-  // Load and poll history
+  // Load history once when conversation changes (no constant polling)
   useEffect(() => {
     if (!activeConvId) return;
     loadHistory();
-
-    pollRef.current = setInterval(loadHistory, 3000);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConvId]);
+
+  // Smart polling: only when AI is working
+  useEffect(() => {
+    if (pollMode === "idle" || !activeConvId) return;
+
+    const interval = pollMode === "waiting" ? 2000 : 1000;
+
+    const timer = setInterval(async () => {
+      try {
+        const res = await getChatHistory(activeConvId, 100);
+        setMessages(res.messages);
+
+        const lastMsg = res.messages[res.messages.length - 1];
+        if (lastMsg && lastMsg.role === "assistant" && lastMsg.messageType !== "agent_status") {
+          if (pollMode === "waiting") {
+            setPollMode("cooldown");
+          } else {
+            setPollMode("idle");
+          }
+        }
+      } catch {
+        // Silent
+      }
+    }, interval);
+
+    return () => clearInterval(timer);
+  }, [pollMode, activeConvId]);
 
   useEffect(() => {
     scrollToBottom();
@@ -129,6 +155,18 @@ export default function RepoChatPage() {
     setMessages([]);
   }
 
+  async function handleDeleteConversation(convId: string) {
+    try {
+      await deleteConversation(convId);
+      setConversations((prev) => prev.filter((c) => c.id !== convId));
+      if (activeConvId === convId) {
+        handleNewConversation();
+      }
+    } catch {
+      // Silent
+    }
+  }
+
   function handleSuggestedQuestion(q: string) {
     setInput(q);
     textareaRef.current?.focus();
@@ -151,8 +189,20 @@ export default function RepoChatPage() {
       ]);
     }
 
+    // Optimistic: show user message immediately
+    const optimisticMsg: Message = {
+      id: "temp-" + Date.now(),
+      conversationId: convId,
+      role: "user",
+      content: text,
+      messageType: "chat",
+      createdAt: new Date().toISOString(),
+      metadata: null,
+    };
+    setMessages((prev) => [...prev, optimisticMsg]);
     setInput("");
     setSending(true);
+    setPollMode("waiting");
     try {
       await sendMessage(convId, text, {
         modelOverride: selectedModel,
@@ -192,102 +242,125 @@ export default function RepoChatPage() {
     return d.toLocaleDateString("nb-NO", { day: "numeric", month: "short" });
   }
 
+  // Parse agent_status messages for AgentStatus rendering
+  function tryParseAgentStatus(msg: Message): { phase: string; subPhase?: string; steps: AgentStep[]; progress?: number } | null {
+    if (msg.messageType !== "agent_status") return null;
+    try {
+      const data = JSON.parse(msg.content);
+      if (data.type === "agent_status" && data.steps) return data;
+    } catch {
+      // Not JSON agent_status
+    }
+    return null;
+  }
+
+  // Check if AI is still thinking
+  const lastMsg = messages[messages.length - 1];
+  const isWaitingForAI = pollMode === "waiting" && (!lastMsg || lastMsg.role === "user" || lastMsg.messageType === "agent_status");
+
   return (
-    <div className="flex flex-col" style={{ height: "calc(100vh - 64px)" }}>
-      {/* Header — full width across both panels */}
-      <div
-        className="flex items-center justify-between pb-3 mb-3 flex-shrink-0"
-        style={{ borderBottom: "1px solid var(--border)" }}
-      >
-        <div className="flex items-center gap-3">
-          <h1 className="font-heading text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
+    <div className="flex flex-col" style={{ height: "100vh" }}>
+      {/* Chat header — custom, not PageHeaderBar */}
+      <div className="flex items-stretch flex-shrink-0" style={{ borderBottom: "1px solid var(--border)", minHeight: "80px" }}>
+        {/* Tittel — LIKE BRED SOM SAMTALE-PANELET */}
+        <div
+          className="flex items-center px-5 shrink-0"
+          style={{ borderRight: "1px solid var(--border)", width: "280px" }}
+        >
+          <h1 className="font-display text-xl" style={{ color: "var(--text-primary)" }}>
             {params.name}
           </h1>
-          <ModelSelector value={selectedModel} onChange={setSelectedModel} mode={modelMode} />
+        </div>
+
+        {/* AI-modell — cellen ER knappen */}
+        <div
+          className="relative shrink-0"
+          style={{ borderRight: "1px solid var(--border)", minWidth: "200px", overflow: "visible" }}
+        >
+          <ModelSelector value={selectedModel} onChange={setSelectedModel} mode={modelMode === "manual" ? "manual" : "auto"} />
+        </div>
+
+        {/* Skills — cellen ER knappen */}
+        <div
+          className="relative shrink-0"
+          style={{ borderRight: "1px solid var(--border)", minWidth: "160px", overflow: "visible" }}
+        >
           <SkillsSelector selectedIds={activeSkillIds} onChange={setActiveSkillIds} />
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowPreview(!showPreview)}
-            className="btn-outline text-xs px-3 py-1.5"
-            style={{ display: "flex", alignItems: "center", gap: "6px" }}
-          >
-            <Monitor size={16} />
-            {showPreview ? "Skjul Preview" : "Vis Preview"}
-          </button>
+
+        {/* Spacer */}
+        <div className="flex-1" />
+
+        {/* Ny samtale */}
+        <div
+          className="flex items-center px-5 cursor-pointer hover:bg-white/5 transition-colors shrink-0"
+          style={{ borderLeft: "1px solid var(--border)" }}
+          onClick={handleNewConversation}
+        >
+          <span className="text-sm" style={{ color: "var(--text-secondary)" }}>+ Ny samtale</span>
+        </div>
+
+        {/* Slett */}
+        <div
+          className="flex items-center px-5 cursor-pointer hover:bg-white/5 transition-colors shrink-0"
+          style={{ borderLeft: "1px solid var(--border)" }}
+          onClick={() => activeConvId && messages.length > 0 && handleDeleteConversation(activeConvId)}
+        >
+          <span className="text-sm" style={{ color: "var(--text-muted)" }}>Slett</span>
         </div>
       </div>
 
       {/* Content area */}
-      <div className="flex flex-1 min-h-0">
-        {/* Conversation list toggle */}
-        <button
-          onClick={() => setShowConvList(!showConvList)}
-          className="hidden lg:flex items-center justify-center flex-shrink-0 transition-colors"
-          style={{
-            width: "24px",
-            color: "var(--text-muted)",
-            background: "transparent",
-            border: "none",
-            cursor: "pointer",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
-          onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
-          title={showConvList ? "Skjul samtaler" : "Vis samtaler"}
-        >
-          {showConvList ? <PanelLeftClose size={14} /> : <PanelLeft size={14} />}
-        </button>
-
-        {/* Conversation list */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Samtale-panel — fast bredde, koblet med tittel-cellen */}
         {showConvList && (
           <div
-            className="hidden lg:flex flex-col flex-shrink-0 overflow-hidden"
-            style={{ width: "220px", borderRight: "1px solid var(--border)" }}
+            className="hidden lg:flex flex-col shrink-0 overflow-y-auto"
+            style={{ width: "280px", borderRight: "1px solid var(--border)" }}
           >
-            <button
-              onClick={handleNewConversation}
-              className="flex items-center gap-2 mx-2 mb-1 px-2 py-1.5 text-xs transition-colors"
-              style={{ border: "1px solid var(--border)", color: "var(--text-secondary)", background: "transparent", borderRadius: "4px" }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
-              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-            >
-              <Plus size={14} />
-              Ny samtale
-            </button>
-
-            <div className="flex-1 overflow-y-auto">
-              {conversations.length === 0 ? (
-                <p className="text-xs px-2" style={{ color: "var(--text-muted)" }}>
+            {conversations.length === 0 ? (
+              <div className="px-4 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
+                <span className="text-xs" style={{ color: "var(--text-muted)" }}>
                   Ingen samtaler ennå
-                </p>
-              ) : (
-                conversations.map((c) => (
-                  <button
-                    key={c.id}
-                    onClick={() => setActiveConvId(c.id)}
-                    className="w-full text-left px-2 py-1.5 transition-colors duration-100"
-                    style={{
-                      color: c.id === activeConvId ? "var(--text-primary)" : "var(--text-secondary)",
-                      background: c.id === activeConvId ? "var(--bg-hover)" : "transparent",
-                    }}
-                    onMouseEnter={(e) => { if (c.id !== activeConvId) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { if (c.id !== activeConvId) e.currentTarget.style.background = "transparent"; }}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-sm">{c.title}</span>
-                      <span className="text-[10px] flex-shrink-0" style={{ color: "var(--text-muted)" }}>
-                        {formatDate(c.lastActivity)}
-                      </span>
-                    </div>
-                  </button>
-                ))
-              )}
-            </div>
+                </span>
+              </div>
+            ) : (
+              conversations.map((c) => (
+                <div
+                  key={c.id}
+                  onClick={() => setActiveConvId(c.id)}
+                  className="px-4 py-3 cursor-pointer hover:bg-white/5 transition-colors"
+                  style={{
+                    borderBottom: "1px solid var(--border)",
+                    background: c.id === activeConvId ? "rgba(255,255,255,0.06)" : "transparent",
+                  }}
+                >
+                  <span className="text-sm block truncate" style={{
+                    color: c.id === activeConvId ? "var(--text-primary)" : "var(--text-secondary)",
+                  }}>
+                    {c.title || "Ny samtale"}
+                  </span>
+                  <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                    {formatDate(c.lastActivity)}
+                  </span>
+                </div>
+              ))
+            )}
           </div>
         )}
 
         {/* Chat + Preview */}
-        <div className="flex flex-1 min-h-0">
+        <div className="flex flex-1 overflow-hidden relative">
+          {/* Toggle samtale-liste knapp — INNE I chat-area */}
+          <button
+            onClick={() => setShowConvList(!showConvList)}
+            className="hidden lg:flex absolute left-0 top-1/2 -translate-y-1/2 z-10 p-1 hover:bg-white/5"
+            style={{ color: "var(--text-muted)" }}
+            title={showConvList ? "Skjul samtaler" : "Vis samtaler"}
+          >
+            {showConvList ? <PanelLeftClose size={14} /> : <PanelLeft size={14} />}
+          </button>
+
           {/* Messages area */}
           <div
             className="flex flex-col min-h-0"
@@ -310,7 +383,7 @@ export default function RepoChatPage() {
                         <button
                           key={q}
                           onClick={() => handleSuggestedQuestion(q)}
-                          className="text-xs px-3 py-1.5 rounded-full transition-colors"
+                          className="text-xs px-3 py-1.5 transition-colors"
                           style={{
                             border: "1px solid var(--border)",
                             color: "var(--text-secondary)",
@@ -332,10 +405,26 @@ export default function RepoChatPage() {
                     const isAgentReport = msg.messageType === "agent_report";
                     const isContextTransfer = msg.messageType === "context_transfer";
 
+                    // Agent status message — render as AgentStatus panel
+                    const agentData = tryParseAgentStatus(msg);
+                    if (agentData) {
+                      return (
+                        <div key={msg.id} className="message-enter">
+                          <AgentStatus
+                            currentPhase={agentData.phase}
+                            subPhase={agentData.subPhase}
+                            steps={agentData.steps}
+                            progress={agentData.progress}
+                            isComplete={agentData.steps.every((s) => s.status === "done")}
+                          />
+                        </div>
+                      );
+                    }
+
                     return (
                       <div
                         key={msg.id}
-                        className={`flex gap-2.5 ${isUser ? "flex-row-reverse" : ""}`}
+                        className={`flex gap-2.5 message-enter ${isUser ? "flex-row-reverse" : ""}`}
                       >
                         <div
                           className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0 mt-0.5"
@@ -360,7 +449,7 @@ export default function RepoChatPage() {
                         >
                           {isAgentReport && (
                             <span
-                              className="inline-block text-[10px] px-1.5 py-0.5 rounded mb-1 font-medium"
+                              className="inline-block text-[10px] px-1.5 py-0.5 mb-1 font-medium"
                               style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8" }}
                             >
                               Agent Report
@@ -368,7 +457,7 @@ export default function RepoChatPage() {
                           )}
                           {isContextTransfer && (
                             <span
-                              className="inline-block text-[10px] px-1.5 py-0.5 rounded mb-1 font-medium"
+                              className="inline-block text-[10px] px-1.5 py-0.5 mb-1 font-medium"
                               style={{ background: "rgba(34,197,94,0.15)", color: "#4ade80" }}
                             >
                               Context-overføring
@@ -378,7 +467,7 @@ export default function RepoChatPage() {
                           <div
                             className="text-sm whitespace-pre-wrap leading-relaxed rounded-xl px-3.5 py-2.5 inline-block"
                             style={{
-                              background: isUser ? "var(--bg-card)" : "transparent",
+                              background: isUser ? "var(--bg-card)" : "var(--bg-chat)",
                               color: "var(--text-primary)",
                               border: isUser ? "1px solid var(--border)" : "none",
                               textAlign: "left",
@@ -404,8 +493,53 @@ export default function RepoChatPage() {
                     );
                   })}
 
-                  {sending && (
-                    <div className="flex gap-2.5">
+                  {/* "TheFold tenker..." indicator while waiting for AI */}
+                  {isWaitingForAI && (
+                    <div className="flex items-start gap-3 py-3 message-enter">
+                      <div className="w-8 h-8 flex items-center justify-center shrink-0" style={{ border: "1px solid var(--border)" }}>
+                        <span className="font-brand text-xs brand-shimmer">TF</span>
+                      </div>
+                      <div className="flex flex-col gap-1 py-1">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="agent-pulse"
+                            style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--success)", display: "inline-block" }}
+                          />
+                          <span className="text-sm agent-shimmer" style={{ color: "var(--text-muted)" }}>TheFold tenker</span>
+                          <span className="agent-dots">
+                            <span className="dot">.</span>
+                            <span className="dot">.</span>
+                            <span className="dot">.</span>
+                          </span>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            if (activeConvId) {
+                              await cancelChatGeneration(activeConvId);
+                              setPollMode("idle");
+                            }
+                          }}
+                          className="text-xs mt-1 transition-colors"
+                          style={{
+                            color: "var(--text-muted)",
+                            background: "transparent",
+                            border: "1px solid var(--border)",
+                            padding: "4px 12px",
+                            cursor: "pointer",
+                            width: "fit-content",
+                          }}
+                          onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--text-secondary)")}
+                          onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
+                        >
+                          Stopp generering
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Typing dots while sending (brief, before polling picks up) */}
+                  {sending && !isWaitingForAI && (
+                    <div className="flex gap-2.5 message-enter">
                       <div
                         className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0"
                         style={{ background: "var(--bg-card)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
@@ -440,7 +574,7 @@ export default function RepoChatPage() {
                     style={{
                       background: "var(--bg-card)",
                       border: "1px solid var(--border)",
-                      borderRadius: "8px",
+                      borderRadius: "0",
                       padding: "16px",
                       marginBottom: "8px",
                     }}
@@ -471,19 +605,19 @@ export default function RepoChatPage() {
                   onKeyDown={handleKeyDown}
                   placeholder={`Melding om ${params.name}...`}
                   className="input-field flex-1 resize-none"
-                  style={{ minHeight: "44px", maxHeight: "200px", borderRadius: "22px", paddingLeft: "16px", paddingRight: "16px" }}
+                  style={{ minHeight: "44px", maxHeight: "200px", paddingLeft: "16px", paddingRight: "16px" }}
                   rows={1}
                   disabled={sending}
                 />
                 <button
                   type="submit"
                   disabled={sending || !input.trim()}
-                  className="flex items-center justify-center rounded-full transition-colors"
+                  className="flex items-center justify-center transition-colors"
                   style={{
                     width: "44px",
                     height: "44px",
-                    background: input.trim() ? "#fafafa" : "var(--bg-card)",
-                    color: input.trim() ? "#000" : "var(--text-muted)",
+                    background: "transparent",
+                    color: "var(--text-primary)",
                     border: "1px solid var(--border)",
                     flexShrink: 0,
                   }}

@@ -1,58 +1,58 @@
 # TheFold Frontend Design Guide
 
-## Estetisk retning: Encore-klon
-Match Encore.dev sitt dashboard så nøyaktig som mulig. Encore har to modi — mørkt og lyst. Vi starter med mørkt tema som default men bygger for begge.
-
-## Nøkkelobservasjoner fra Encore sitt design:
-1. Sidebar er ALLTID mørk (selv i lyst tema)
-2. Lyst tema: varm off-white bakgrunn (#faf9f6), IKKE kald hvit
-3. Badges er avrundet med gul-grønn farge (som "Active")
-4. Kodeblokker har venstre farge-border (oransje, blå, etc.)
-5. Knapper er firkantet (rounded-sm eller rounded-none), IKKE avrundet
-6. Monospace font brukes for titler og kode
-7. Veldig generøs spacing og whitespace
-8. Minimalt med farger — nesten monokromt med grønn aksent
+## Estetisk retning: Dashed, transparent, typografisk
+TheFold bruker et minimalistisk design med dashed borders, transparente kort, og en tydelig typografisk hierarki. Merk og lys modus. Sidebar er alltid mørk.
 
 ## Fargepalett
 
 ### Mørkt tema (default)
 ```css
 [data-theme="dark"] {
-  --bg-page: #111110;
-  --bg-sidebar: #18181a;
-  --bg-sidebar-hover: #252528;
-  --bg-sidebar-active: #2a2a2d;
-  --bg-card: #1a1a1c;
-  --bg-input: #141414;
-  --bg-code: #0d0d0d;
-  --bg-hover: #222224;
-  
+  --bg-page: #070706;
+  --bg-card: transparent;
+  --bg-card-secondary: transparent;
+  --bg-input: #0e0e0d;
+  --bg-code: #0a0a09;
+  --bg-hover: #1e1e1c;
+
+  --bg-chat: #1e1e1c;
+  --text-chat: #787877;
+
   --text-primary: #fafaf9;
-  --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
-  
-  --border: #27272a;
-  --border-hover: #3f3f46;
+  --text-secondary: #7b7a76;
+  --text-muted: #52524e;
+
+  --border: #2a2a28;
+  --border-hover: #3f3f3b;
+
+  --bg-sidebar: #070706;
+  --bg-sidebar-section: transparent;
+  --bg-sidebar-hover: #1e1e1c;
+  --bg-sidebar-active: #1e1e1c;
+  --sidebar-text: #7b7a76;
+  --sidebar-text-active: #fafaf9;
+  --sidebar-border: #2a2a28;
 }
 ```
 
 ### Lyst tema
 ```css
 [data-theme="light"] {
-  --bg-page: #faf9f6;          /* Varm off-white, IKKE #fff */
-  --bg-sidebar: #1c1c1e;       /* Sidebar er ALLTID mørk */
-  --bg-sidebar-hover: #2a2a2d;
-  --bg-sidebar-active: #333336;
-  --bg-card: #ffffff;
+  --bg-page: #faf9f6;
+  --bg-card: transparent;
+  --bg-card-secondary: transparent;
   --bg-input: #f4f3f0;
   --bg-code: #f0efec;
-  --bg-hover: #f0efec;
-  
-  --text-primary: #1a1a1a;
-  --text-secondary: #6b6b6b;
-  --text-muted: #9a9a9a;
-  
-  --border: #e5e4e0;
+  --bg-hover: #ededea;
+
+  --bg-chat: #f0efec;
+  --text-chat: #6b6b68;
+
+  --text-primary: #1a1a18;
+  --text-secondary: #7b7a76;
+  --text-muted: #9a9a96;
+
+  --border: #e0dfdb;
   --border-hover: #d4d3cf;
 }
 ```
@@ -60,24 +60,16 @@ Match Encore.dev sitt dashboard så nøyaktig som mulig. Encore har to modi — 
 ### Felles farger (begge temaer)
 ```css
 :root {
-  /* Aksent — Encore sin grønne */
-  --accent: #22c55e;
-  --accent-hover: #16a34a;
-  --accent-muted: rgba(34, 197, 94, 0.15);
-  
-  /* Badges — Encore bruker gul-grønn for "Active" */
   --badge-active-bg: #d5e8a0;
   --badge-active-text: #3d5a00;
   --badge-inactive-bg: #e8e8e4;
   --badge-inactive-text: #6b6b6b;
-  
-  /* Status */
+
   --success: #22c55e;
   --warning: #eab308;
   --error: #ef4444;
   --info: #3b82f6;
-  
-  /* Kodeblokk venstre-border farger */
+
   --code-border-orange: #f59e0b;
   --code-border-blue: #3b82f6;
   --code-border-green: #22c55e;
@@ -86,206 +78,172 @@ Match Encore.dev sitt dashboard så nøyaktig som mulig. Encore har to modi — 
 ```
 
 ## Typografi
-Encore bruker monospace for headings og systemfont for body:
 
-```css
---font-heading: "GT America Mono", "SF Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, monospace;
---font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
---font-code: "SF Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, monospace;
+### Fontfiler (`frontend/public/fonts/`)
+```
+VariantNeueDisplay-400.woff2       → Titler, overskrifter (h1, h2)
+VariantNeueDisplay-400Italic.woff2 → "TheFold" branding, italic accenter
+VariantNeueText-400.woff2          → Lengre tekst, beskrivelser, paragrafer
+Inter_18pt-Regular.woff2           → Generell UI: labels, knapper, meny, sidebar, input
+Inter_18pt-Medium.woff2            → Vektlagt UI: aktive tabs, viktige labels
 ```
 
-- **Sideoverskrifter:** Monospace, 32-40px, font-medium (som "Cron Jobs" i screenshottet)
-- **Korttitler:** Monospace, 18-20px, font-medium
-- **Body:** System sans-serif, 14-15px
-- **Labels:** System sans-serif, 12-13px, text-secondary
-- **Kode:** Monospace, 13-14px
+### Font-bruk
+| Hvor | Font | Tailwind-klasse | Stil |
+|------|------|-----------------|------|
+| Body default | Inter | `font-sans` (automatisk) | Regular 400 |
+| Sidebar tekst | Inter | `font-sans` | Regular 400 |
+| Knapper, labels | Inter | `font-sans` | Regular/Medium |
+| Aktive tabs | Inter Medium | `font-sans font-medium` | Medium 500 |
+| Sideoverskrifter (h1) | Variant Neue Display | `font-display` | Regular 400 |
+| Seksjonsoverskrifter (h2) | Variant Neue Display | `font-display` | Regular 400 |
+| "TheFold" branding | Variant Neue Display Italic | `font-brand italic` | Italic 400 |
+| Beskrivelser, paragrafer | Variant Neue Text | `font-text` | Regular 400 |
+| Kode, filnavn | Courier New | `font-mono` | Regular |
+
+### Tailwind config
+```typescript
+fontFamily: {
+  display: ['"Variant Neue Display"', 'system-ui', 'sans-serif'],
+  brand: ['"Variant Neue Display"', 'system-ui', 'sans-serif'],
+  text: ['"Variant Neue Text"', 'system-ui', 'sans-serif'],
+  sans: ['"Inter"', 'system-ui', 'sans-serif'],
+  mono: ['"Courier New"', 'monospace'],
+}
+```
+
+## Dashed Border-filosofi
+
+**Alle strukturelle borders bruker `dashed`:**
+- Kort (`.card`) — `1px dashed var(--border)`
+- Knapper — `1px dashed var(--border)`
+- Input-felter — `1px dashed var(--border)` (solid ved `:focus`)
+- Sidebar borderRight — `1px dashed var(--sidebar-border)`
+- Tabell-headere/celler — `1px dashed var(--border)`
+- Separatorer (borderTop/borderBottom) — `1px dashed var(--border)`
+
+**Unntak — behold SOLID:**
+- Feilmeldinger (rød borderLeft: `3px solid var(--error)`)
+- Kodeblokker (fargede venstre-borders)
+- Input `:focus` state (border-style: solid)
+- Status-dots, progress bars, badges
+- Interaktive aksent-borders (f.eks. aktiv tab)
+- Suksess/feil-indikator borders
 
 ## Komponenter
 
-### Sidebar (ALLTID mørk bakgrunn)
-```
-Bredde: 240px
-Bakgrunn: #1c1c1e (alltid, uavhengig av tema)
-Tekst: #a1a1aa (inaktiv), #fafafa (aktiv/hover)
-
-Struktur:
-┌──────────────────────┐
-│ T  thefold-aoti  MK ▾│  ← App-navn + avatar
-│                      │
-│ ⌂ Home               │  ← Navigasjonslenker
-│ ☰ Overview           │
-│ ⚙ Settings           │
-│                      │
-│ ─── staging ───      │  ← Environment-gruppe
-│   Dev Environment    │
-│                      │
-│ 📊 Oversikt          │
-│ 💬 Chat              │
-│ 📋 Tasks             │
-│ 📁 Repoer            │
-│ 🧠 Memory            │
-│ ⚙ Settings           │
-│                      │
-│ ─── Observability ── │  ← Seksjons-label (uppercase, muted)
-│ $ Forbruk            │
-│                      │
-│                      │
-│ 🔍 Search            │  ← Nederst
-│ ❓ Help              │
-└──────────────────────┘
-```
-
-- Lenker: py-1.5 px-3, text-sm, rounded-none eller rounded-sm
-- Aktiv: bg-sidebar-active, text-primary, font-medium
-- Ikon: 18px, inline med tekst
-- Seksjonslabels: uppercase, text-[11px], tracking-wider, text-muted, mt-6 mb-2
-
-### Knapper (FIRKANTET — dette er viktig)
+### Knapper (pill, dashed, transparent)
 ```css
-/* Encore bruker nesten ingen avrunding */
 .btn-primary {
-  background: var(--accent);
-  color: #000;
+  background: transparent;
+  color: var(--text-primary);
   font-weight: 500;
-  padding: 8px 16px;
-  border-radius: 2px;        /* Nesten firkantet! */
-  font-size: 14px;
+  padding: 8px 20px;
+  border-radius: 9999px;
+  border: 1px dashed var(--border);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-hover);
 }
 
 .btn-secondary {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-primary);
-  padding: 8px 16px;
-  border-radius: 2px;
-  font-size: 14px;
+  /* Samme som primary, men font-weight 400 og text-secondary farge */
 }
 
-/* "View all", "View details" stil */
-.btn-outline {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-primary);
-  padding: 6px 14px;
-  border-radius: 2px;
-  font-size: 13px;
-  font-weight: 500;
+.btn-danger {
+  color: var(--error);
+  border: 1px dashed var(--error);
 }
 ```
 
-### Badges (som Encore sin "Active" og "Inactive")
-```css
-.badge-active {
-  background: #d5e8a0;       /* Gul-grønn */
-  color: #3d5a00;
-  font-family: monospace;
-  font-size: 13px;
-  padding: 2px 10px;
-  border-radius: 4px;
-  font-weight: 500;
-}
-
-.badge-inactive {
-  background: #e8e8e4;
-  color: #6b6b6b;
-  font-family: monospace;
-  font-size: 13px;
-  padding: 2px 10px;
-  border-radius: 4px;
-}
-```
-
-### Kort
+### Kort (transparent, dashed)
 ```css
 .card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 24px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 20px;
 }
-/* Ingen box-shadow */
-/* Hover: border-color → var(--border-hover) */
 ```
 
-### Kodeblokker (med farget venstre-border som Encore)
+### Input-felter (dashed, solid ved fokus)
+```css
+.input-field {
+  background: var(--bg-input);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+.input-field:focus {
+  border-color: var(--text-secondary);
+  border-style: solid;
+}
+```
+
+### Kodeblokker (solid farge-border)
 ```css
 .code-block {
   background: var(--bg-code);
-  border-left: 3px solid var(--code-border-orange);  /* Farge varierer */
-  border-radius: 0;          /* Ingen avrunding */
-  padding: 12px 16px;
-  font-family: var(--font-code);
-  font-size: 14px;
+  border-left: 3px solid var(--code-border-orange);
+  border-radius: 0;
 }
 ```
 
-### Stat-blokker (som "0 Requests", "0 Errors")
+### Chat-bobler
+- TheFold-meldinger: `background: var(--bg-chat)`, tekst `var(--text-chat)`
+- Bruker-meldinger: transparent bg, hvit tekst
+- Meldingsinnhold: `font-text`
+- Tidsstempler/metadata: `font-sans`
+
+## Sidebar (alltid mørk)
 ```
-┌─────────────────┐
-│ ↕ 0 Requests    │  ← Ikon + tall + label på en linje
-│   Last 24 hours │  ← Undertekst i text-muted
-└─────────────────┘
+Bredde: 240px (w-60)
+borderRight: 1px dashed var(--sidebar-border)
+background: var(--bg-sidebar)
+
+Struktur:
+┌──────────────────────┐
+│ Logo  TheFold    [MK] │  ← font-brand italic
+│                       │
+│ Home                  │
+│ Environments          │
+│ Chat                  │
+│ Reviews               │
+│ Tools                 │
+│                       │
+│ ┌─ [repo-name] ▾ ──┐ │  ← dashed border selector
+│ │ Oversikt          │ │
+│ │ Chat              │ │
+│ │ Oppgaver          │ │
+│ │ Reviews           │ │
+│ │ Aktivitet         │ │
+│ └───────────────────┘ │
+│                       │
+│ ┌─ CONFIG ──────────┐ │
+│ │ Settings          │ │
+│ │ Skills            │ │
+│ └───────────────────┘ │
+│                       │
+│ ● System online       │
+└───────────────────────┘
 ```
-- Ikon (16px) + tall (16px font-semibold) + label (16px) på en linje
-- Undertekst: text-sm text-muted
 
-### Input-felt
-```css
-.input {
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: 2px;        /* Firkantet som knappene */
-  padding: 8px 12px;
-  font-size: 14px;
-  color: var(--text-primary);
-}
-.input:focus {
-  border-color: var(--accent);
-  outline: none;
-}
-```
-
-### Tabeller
-- Ingen synlige vertikale borders
-- Header: text-muted, text-xs, uppercase, tracking-wider, border-b
-- Rader: py-3 px-4, border-b border-border
-- Hover: bg-hover
-
-## Sidespesifikke retningslinjer
-
-### Oversikt
-- "Welcome [navn]" i monospace, 32px
-- Undertittel i text-secondary
-- Stat-kort i horizontal row (ikke grid)
-- To-kolonne: Aktive tasks (venstre, bred), System status (høyre, smal)
-
-### Chat
-- Full-height layout
-- TheFold-meldinger: bg-card med venstre border-l-3 border-accent
-- Bruker-meldinger: høyre-justert, bg-sidebar-active (mørk)
-- Agent-rapporter: bg-card med border-l-3 border-code-border-orange
-- Input: festet til bunn, full bredde, firkantet
-
-### Tasks
-- Tabell-layout (ikke kort)
-- Status-dot (8px sirkel) med farge
-- Monospace for task-ID (FOLD-42)
-- Ekspanderbar rad for detaljer
-
-### Repoer
-- Liste (ikke grid) — som Encore sin Environments-visning
-- Hvert repo: navn (monospace, bold), URL (text-muted), stats
-
-### Settings
-- Seksjon-layout med tydelige overskrifter (monospace)
-- Maskerte API-nøkler med toggle
+## Login-side (split-view)
+- Venstre: Bilde-placeholder (brukeren legger inn bilde selv)
+- Høyre: Login-form
+- "Logg inn på" → `font-display`, farge `var(--text-secondary)`
+- "TheFold" → `font-brand italic`, farge `var(--text-primary)`
+- OTP-basert innlogging (e-post → 6-siffer kode)
+- Footer: "Twofold AS · © 2025"
 
 ## Anti-patterns
-- ALDRI runde knapper (rounded-lg, rounded-full på knapper)
-- ALDRI hvit #ffffff som bakgrunn — bruk varm off-white #faf9f6
+- ALDRI `background: #fafafa` eller `background: #fff` på knapper — bruk transparent
+- ALDRI `border: solid` på strukturelle elementer (kort, knapper, separatorer)
 - ALDRI box-shadow på kort
 - ALDRI fargerike gradienter
-- ALDRI mer enn 2px border-radius på knapper/inputs
-- ALDRI emojis som ikoner i produksjon — bruk SVG
-- ALDRI transitions over 150ms
+- ALDRI font-heading (fjernet) — bruk `font-display`
+- ALDRI font-general (fjernet) — bruk `font-sans`
+- ALDRI Suisse Intl, TheFold Brand, Suisse Intl Mono — fjernet
 - ALDRI sidebar i lys farge — den er ALLTID mørk
+- ALDRI transitions over 150ms

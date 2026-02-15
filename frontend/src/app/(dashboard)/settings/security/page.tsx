@@ -7,6 +7,7 @@ import {
   getAuditStats,
   type AuditLogEntry,
 } from "@/lib/api";
+import { PageHeaderBar } from "@/components/PageHeaderBar";
 
 const ACTION_LABELS: Record<string, string> = {
   task_read: "Les oppgave",
@@ -102,29 +103,8 @@ export default function SecurityPage() {
 
   return (
     <div>
-      <div className="flex items-center gap-2 mb-6">
-        <Link
-          href="/settings"
-          className="text-sm hover:underline"
-          style={{ color: "var(--text-muted)" }}
-        >
-          Settings
-        </Link>
-        <span style={{ color: "var(--text-muted)" }}>/</span>
-        <span className="text-sm" style={{ color: "var(--text-primary)" }}>
-          Security & Audit
-        </span>
-      </div>
-
-      <h1
-        className="font-heading text-[32px] font-semibold leading-tight"
-        style={{ color: "var(--text-primary)" }}
-      >
-        Security & Audit Log
-      </h1>
-      <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-        Full oversikt over alle agent-operasjoner
-      </p>
+      <PageHeaderBar title="Security" />
+      <div className="p-6">
 
       {/* Stats */}
       {stats && (
@@ -182,7 +162,7 @@ export default function SecurityPage() {
         </div>
       ) : entries.length === 0 ? (
         <div
-          className="text-center py-12 rounded-xl"
+          className="text-center py-12"
           style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
         >
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>
@@ -224,13 +204,14 @@ export default function SecurityPage() {
         </>
       )}
     </div>
+    </div>
   );
 }
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
     <div
-      className="rounded-xl p-4"
+      className="p-4"
       style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
     >
       <div className="text-xs" style={{ color: "var(--text-muted)" }}>{label}</div>
@@ -259,7 +240,7 @@ function AuditRow({ entry }: { entry: AuditLogEntry }) {
 
   return (
     <div
-      className="rounded-lg px-4 py-2.5 cursor-pointer transition-colors"
+      className="px-4 py-2.5 cursor-pointer transition-colors"
       style={{
         background: "var(--bg-card)",
         border: `1px solid ${expanded ? "var(--accent)" : "var(--border)"}`,
@@ -281,7 +262,7 @@ function AuditRow({ entry }: { entry: AuditLogEntry }) {
         {/* Task ID */}
         {entry.taskId && (
           <span
-            className="text-[10px] px-2 py-0.5 rounded-full"
+            className="text-[10px] px-2 py-0.5"
             style={{ background: "var(--bg-sidebar)", color: "var(--text-muted)" }}
           >
             {entry.taskId.substring(0, 8)}
@@ -320,7 +301,7 @@ function AuditRow({ entry }: { entry: AuditLogEntry }) {
       {/* Expanded details */}
       {expanded && (
         <div
-          className="mt-3 p-3 rounded-lg text-xs font-mono overflow-auto max-h-[300px]"
+          className="mt-3 p-3 text-xs font-mono overflow-auto max-h-[300px]"
           style={{ background: "var(--bg-sidebar)", color: "var(--text-secondary)" }}
         >
           {entry.errorMessage && (

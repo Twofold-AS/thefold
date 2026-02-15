@@ -98,23 +98,20 @@ export function SkillsSelector({ selectedIds, onChange }: SkillsSelectorProps) {
   const totalTokens = activeSkills.reduce((sum, s) => sum + (s.tokenEstimate || 0), 0);
 
   return (
-    <div ref={ref} style={{ position: "relative" }}>
+    <div ref={ref} className="w-full h-full" style={{ position: "relative" }}>
       <button
         onClick={() => setOpen(!open)}
-        className="text-xs px-2 py-1 transition-colors flex items-center gap-1"
+        className="w-full h-full flex items-center gap-2 px-4 text-sm transition-colors cursor-pointer hover:bg-white/5"
         style={{
-          border: "1px solid var(--border)",
-          borderRadius: "4px",
-          background: activeCount > 0 ? "rgba(99,102,241,0.1)" : "transparent",
-          color: activeCount > 0 ? "#818cf8" : "var(--text-muted)",
+          border: "none",
+          background: "transparent",
+          color: activeCount > 0 ? "var(--text-primary)" : "var(--text-muted)",
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.background = activeCount > 0 ? "rgba(99,102,241,0.15)" : "var(--bg-hover)")}
-        onMouseLeave={(e) => (e.currentTarget.style.background = activeCount > 0 ? "rgba(99,102,241,0.1)" : "transparent")}
       >
-        <Sparkles size={12} />
-        Skills{activeCount > 0 ? ` (${activeCount})` : ""}
+        <Sparkles size={14} />
+        <span>Skills{activeCount > 0 ? ` (${activeCount})` : ""}</span>
         {totalTokens > 0 && (
-          <span style={{ color: "var(--text-muted)", fontSize: "9px", marginLeft: "2px" }}>
+          <span style={{ color: "var(--text-muted)", fontSize: "10px" }}>
             ~{totalTokens}t
           </span>
         )}
@@ -129,10 +126,8 @@ export function SkillsSelector({ selectedIds, onChange }: SkillsSelectorProps) {
             left: 0,
             zIndex: 50,
             minWidth: "300px",
-            background: "var(--bg-primary)",
+            background: "var(--bg-page)",
             border: "1px solid var(--border)",
-            borderRadius: "8px",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
             overflow: "hidden",
           }}
         >

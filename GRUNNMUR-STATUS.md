@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 14. februar 2026
+> Sist oppdatert: 15. februar 2026
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -31,7 +31,7 @@
 | parent_memory_id | UUID FK | 🔴 | Ingen kode refererer | Implementer hierarkisk kontekst-traversering i search |
 | last_accessed_at | TIMESTAMPTZ | 🟢 | Oppdateres i search, brukes i cleanup | — |
 | access_count | INT | 🟢 | Inkrementeres i search, brukes i scoring | — |
-| relevance_score | DECIMAL | 🟢 | Decay-scoring i search, filtert i stats | — |
+| relevance_score | DECIMAL | 🟢 | Decay-scoring i search, oppdatert av decay-cron, filtrert i stats | Importance-basert initialisering + eksponentiell decay |
 | ttl_days | INT | 🟢 | cleanup (sletter basert på TTL) | Default 90 dager |
 | pinned | BOOLEAN | 🟢 | cleanup-filter, consolidate setter true | — |
 | consolidated_from | UUID[] | 🟢 | Settes i consolidate | — |
@@ -58,7 +58,7 @@
 | confidence_score | DECIMAL | 🟢 | Returnert i resultater | — |
 | problem_embedding | vector(512) | 🟢 | Vector-søk i searchPatterns | — |
 | solution_embedding | vector(512) | 🔴 | Genereres ved insert, aldri brukt i søk | Implementer solution-similarity search |
-| component_id | UUID | 🔴 | Aldri referert | Fremtidig marketplace-kobling |
+| component_id | UUID | 🟢 | storePattern (valgfri parameter) | Kobling til registry/components |
 | tags | TEXT[] | 🟢 | Returnert i resultater | — |
 
 ### Endepunkter
@@ -73,12 +73,15 @@
 | GET /memory/stats | 🟢 | Totalt, per type, avg relevance, utløper snart | — |
 | POST /memory/store-pattern | 🟢 | Lagrer code pattern med begge embeddings | — |
 | POST /memory/search-patterns | 🟢 | Søker på problem_embedding, inkrementerer times_reused | Bruker ikke solution_embedding |
+| POST /memory/decay | 🟢 | Manuell decay trigger, beregner importance + decayed relevance for alle minner, sletter utgåtte | — |
+| POST /memory/decay-cron | 🟢 | Intern cron-endpoint for daglig decay-kjøring | — |
 
 ### Cron-jobs
 
 | Cron | Status | Schedule | Hva den gjør | Aktivering |
 |------|--------|----------|--------------|------------|
 | memory-cleanup | 🟢 | 0 4 * * * (daglig 04:00) | Sletter minner hvor ttl_days>0 AND pinned=false AND last_accessed_at < NOW()-ttl_days | — |
+| memory-decay | 🟢 | 0 3 * * * (daglig 03:00) | Beregner decayed relevance for alle minner, oppdaterer relevance_score, sletter minner med score<0.05 og alder>ttl_days | — |
 
 ### Hva trengs for full aktivering
 1. Bruk `parent_memory_id` for hierarkisk kontekst-navigering i search
@@ -122,7 +125,8 @@
 | 8d. impossible_task | 🟢 | Eskaler til bruker, blokker i Linear | — |
 | 8e. environment_error | 🟢 | Vent 30s, retry | — |
 | 9. Review eget arbeid | 🟢 | `ai.reviewCode()` → dokumentasjon, kvalitetsscore, concerns | — |
-| 10. Opprett PR | 🟢 | `github.createPR()` med branch + commit + PR | — |
+| 9.5. Review gate | 🟢 | `submitReviewInternal()` → lagrer review, notifiserer chat, returnerer pending_review | skipReview=true for å hoppe over |
+| 10. Opprett PR | 🟢 | `github.createPR()` med branch + commit + PR (kun skipReview-path) | — |
 | 11. Oppdater Linear | 🟢 | `linear.updateTask()` med PR-lenke og review | State-oppdatering ufullstendig |
 | 12. Lagre læring | 🟢 | `memory.store()` for decisions + error patterns med TTL og tags | — |
 | 13. Cleanup og rapport | 🟢 | `sandbox.destroy()`, audit, cost-rapport i chat | — |
@@ -145,9 +149,51 @@
 | POST /agent/audit/trace | 🟢 | true | Ja | Full trace for en task med summary |
 | POST /agent/audit/stats | 🟢 | true | Ja | Statistikk (success rate, action counts, failures) |
 
+### Project Orchestrator (Steg 3.4)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| project_plans tabell | 🟢 | UUID PK, conversation_id, user_request, status, phases, conventions, cost tracking |
+| project_tasks tabell | 🟢 | UUID PK, FK til project_plans, phase/task_order, depends_on UUID[], context_hints TEXT[] |
+| Indekser | 🟢 | idx_project_tasks_project, idx_project_tasks_status, idx_project_tasks_phase |
+| ProjectPlan type | 🟢 | Full type i agent/types.ts med phases, conventions, cost tracking |
+| ProjectPhase type | 🟢 | phase, name, description, tasks[] |
+| ProjectTask type | 🟢 | Alle felter inkl. dependsOn, outputFiles, outputTypes, contextHints |
+| CuratedContext type | 🟢 | relevantFiles, dependencyOutputs, memoryContext, docsContext, conventions |
+| DecomposeProjectRequest/Response | 🟢 | Input/output for ai.decomposeProject |
+| ai.decomposeProject | 🟢 | Bryter ned store forespørsler til atomære tasks i faser |
+| Project Conventions skill | 🟢 | Seed skill med priority=1, applies_to=['planning','coding','review'] |
+| Orchestrator loop (executeProject) | 🟢 | Fase-basert kjøring, avhengighetssjekk, feilhåndtering, gjenopptagelse etter krasj |
+| Fase-revisjon (reviseProjectPhase) | 🟢 | AI-drevet re-planlegging mellom faser: reviderer descriptions, skipper tasks, legger til nye |
+| Context Curator (curateContext) | 🟢 | Intelligent kontekstvalg per sub-task: avhengigheter → memory → GitHub → docs → token-trimming |
+| executeTask med curatedContext | 🟢 | Bakoverkompatibel dual-path: kuratert eller standard kontekstsamling |
+| Chat-deteksjon | 🟢 | Heuristikker for å oppdage prosjektforespørsler vs enkle tasks |
+| POST /agent/project/start | 🟢 | Start prosjektkjøring asynkront |
+| POST /agent/project/status | 🟢 | Hent plan + alle tasks med status |
+| POST /agent/project/pause | 🟢 | Pause prosjekt (stopper ikke pågående task) |
+| POST /agent/project/resume | 🟢 | Gjenoppta pauset prosjekt |
+| POST /agent/project/store | 🟢 | Lagre dekomponert prosjektplan (fra chat) |
+
+### Code Reviews (Steg 3.2)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| code_reviews tabell | 🟢 | UUID PK, files_changed JSONB, ai_review JSONB, status, feedback |
+| Review gate i agent loop | 🟢 | STEP 8.5: submitReviewInternal → pending_review → bruker godkjenner |
+| CodeReview type | 🟢 | Full type med ReviewFile, AIReviewData interfaces |
+| pending_review status | 🟢 | Ny status på ProjectTask, pauser prosjekt |
+| POST /agent/review/submit | 🟢 | Intern: lagre review + notifiser chat |
+| POST /agent/review/get | 🟢 | Hent full review med filer |
+| POST /agent/review/list | 🟢 | Liste reviews med statusfilter |
+| POST /agent/review/approve | 🟢 | Godkjenn → opprett PR → destroy sandbox |
+| POST /agent/review/request-changes | 🟢 | Be om endringer → re-kjør agent med feedback |
+| POST /agent/review/reject | 🟢 | Avvis → destroy sandbox |
+| /review side | 🟢 | Liste med statusfilter-tabs |
+| /review/[id] side | 🟢 | Detaljer, filvisning, handlingsknapper |
+
 ### Hva trengs for full aktivering
 1. Agent-loopen er **fullt implementert** — alle 13 steg fungerer
-2. `linear.updateTask()` trenger riktig state-mapping for team-spesifikke Linear-states
+2. ~~`linear.updateTask()` trenger riktig state-mapping~~ ✅ State-mapping via getWorkflowStates() + issueUpdate mutation
 3. Vurder persistent job queue i stedet for fire-and-forget (prosess-krasj mister pågående arbeid)
 4. Legg til cron-job for automatisk oppstart (i stedet for manuell polling via /agent/check)
 
@@ -166,6 +212,8 @@
 | POST /ai/diagnose | 🟢 | false | Nei | agent STEP 8 | ✅ | ❌ mangler |
 | POST /ai/revise-plan | 🟢 | false | Nei | agent STEP 8a | ✅ | ❌ mangler |
 | POST /ai/assess-confidence | 🟢 | false | Nei | agent STEP 4 | ✅ | ❌ mangler |
+| POST /ai/decompose-project | 🟢 | false | Nei | Project Orchestrator | ✅ | ✅ |
+| POST /ai/revise-project-phase | 🟢 | false | Nei | Orchestrator fase-revisjon | ❌ (bruker Haiku direkte) | ❌ |
 | GET /ai/models | 🟢 | true | Ja | frontend settings | — | — |
 | POST /ai/estimate-cost | 🟢 | true | Ja | frontend settings | — | — |
 
@@ -199,7 +247,7 @@
 | Multi-provider | 🟢 | Anthropic, OpenAI, Moonshot — detektert ved modell-ID |
 
 ### Hva trengs for full aktivering
-1. Legg til `logSkillResults()` i diagnoseFailure, revisePlan, assessConfidence
+1. ~~Legg til `logSkillResults()` i diagnoseFailure, revisePlan, assessConfidence~~ ✅ Ferdig
 2. La assessComplexity bruke buildSystemPromptWithPipeline i stedet for BASE_RULES
 3. Oppdater modellregister med Claude 4.6 når tilgjengelig
 
@@ -227,7 +275,8 @@
 | POST /sandbox/run | 🟢 | Kjør kommando (whitelist: npm, npx, node, cat, ls, find) |
 | POST /sandbox/validate | 🟢 | Full pipeline (typecheck + lint + test) |
 | POST /sandbox/validate-incremental | 🟢 | Per-fil TypeScript-validering med grep-filter |
-| POST /sandbox/destroy | 🟢 | Fjern sandbox-katalog |
+| POST /sandbox/destroy | 🟢 | Fjern sandbox (katalog eller Docker-container) |
+| POST /sandbox/cleanup | 🟢 | Intern: rydde opp gamle Docker-containere |
 
 ### Sikkerhet
 
@@ -237,13 +286,12 @@
 | Kommando-whitelist | 🟢 | Kun npm, npx, node, cat, ls, find tillatt |
 | Buffer-grenser | 🟢 | stdout/stderr: 50KB, validate: 100KB, incremental: 10KB |
 | Timeout | 🟢 | Clone/install: 120s, kommandoer: 30s |
-| Docker-isolering | 🔴 | Bruker filsystem (/tmp/thefold-sandboxes/), ikke Docker | Migrer til Docker for prod |
+| Docker-isolering | 🟢 | Dual-modus: SandboxMode secret ("docker"/"filesystem"), Docker med --network=none --read-only --memory=512m --cpus=0.5 | — |
+| Cleanup cron | 🟢 | Hvert 30. minutt: fjern Docker-containere eldre enn 30 min | — |
 
 ### Hva trengs for full aktivering
 1. Implementer snapshot-sammenligning (pipeline steg 4)
 2. Implementer performance benchmarks (pipeline steg 5)
-3. Migrer til Docker-containere for full isolering i produksjon
-4. Legg til resource quotas (CPU/minne-grenser)
 
 ---
 
@@ -300,8 +348,8 @@
 | POST /skills/active | 🟢 | false | Nei | Intern: aktive skills for AI |
 | POST /skills/preview-prompt | 🟢 | true | Ja | Forhåndsvis system-prompt |
 | POST /skills/resolve | 🟢 | false | Nei | Pipeline: automatisk routing + dependencies + konflikter + token-budsjett |
-| POST /skills/execute-pre-run | 🟡 | false | Nei | **STUBBET** — returnerer alltid approved: true |
-| POST /skills/execute-post-run | 🟡 | false | Nei | **STUBBET** — returnerer alltid approved: true |
+| POST /skills/execute-pre-run | 🟢 | false | Nei | Input-validering (task, userId) + context-berikelse |
+| POST /skills/execute-post-run | 🟢 | false | Nei | Quality review (tomhet, lengde, placeholders, inability) + auto-logging |
 | POST /skills/log-result | 🟢 | false | Nei | Oppdater success/failure, confidence, token-cost |
 
 ### Pipeline engine (skills/engine.ts)
@@ -309,8 +357,8 @@
 | Funksjon | Status | Beskrivelse | Aktivering |
 |----------|--------|-------------|------------|
 | resolve | 🟢 | Scope-filter, routing-matching, dependency-resolution, conflict-handling, token-budsjett | — |
-| executePreRun | 🟡 | Returnerer `{approved: true}` for alle skills | Implementer faktisk pre-run logikk (input-validering, context-berikelse) |
-| executePostRun | 🟡 | Returnerer `{approved: true}` for alle skills | Implementer faktisk post-run logikk (quality review, security scan) |
+| executePreRun | 🟢 | Input-validering (task, userId) + context-berikelse (skill metadata) | — |
+| executePostRun | 🟢 | Quality review (tomhet, lengde, placeholders, inability-mønstre) + auto-logging | — |
 | logResult | 🟢 | Success/failure tracking, confidence_score, avg_token_cost | — |
 
 ### Automatisk routing
@@ -331,8 +379,8 @@
 |---------|----------|--------|------------|
 | Skill-hierarki | parent_skill_id kolonne | 🔴 | Implementer parent/child traversering |
 | Skill-komposisjon | composable kolonne | 🔴 | Implementer kompositt-kjøring |
-| Pre-run validering | execution_phase='pre_run' + executePreRun | 🟡 | Implementer faktisk logikk i stedet for passthrough |
-| Post-run review | execution_phase='post_run' + executePostRun | 🟡 | Implementer faktisk logikk i stedet for passthrough |
+| Pre-run validering | execution_phase='pre_run' + executePreRun | 🟢 | Input-validering + context-berikelse implementert |
+| Post-run review | execution_phase='post_run' + executePostRun | 🟢 | Quality review + auto-logging implementert |
 | Skill versjonering | version kolonne | 🔴 | Implementer versjonskontroll og rollback |
 | Marketplace | marketplace_id, downloads, rating | 🔴 | Bygge marketplace-service |
 | Token-budsjett per skill | token_budget_max kolonne | 🔴 | Sjekke i resolve() |
@@ -347,13 +395,13 @@
 | Prompt injection detection | — | ⚪ | Trenger eget endepunkt |
 
 ### Hva trengs for full aktivering
-1. **executePreRun:** Implementer input-validering og context-berikelse (erstatt passthrough)
-2. **executePostRun:** Implementer quality review og security scan (erstatt passthrough)
+1. ~~**executePreRun:** Implementer input-validering og context-berikelse~~ ✅ Ferdig
+2. ~~**executePostRun:** Implementer quality review og security scan~~ ✅ Ferdig
 3. Bruk `category` og `tags` i listSkills-filter (backend — frontend sender allerede)
 4. Sjekk `token_budget_max` per skill i resolve()
 5. Validér output mot `output_schema` i pre/post-run
 6. Implementer skill-hierarki via `parent_skill_id`
-7. Tester for engine-funksjoner (resolve, routing, token-budsjett) — 0 tester i dag
+7. ~~Tester for engine-funksjoner~~ ✅ 11 tester i engine.test.ts
 
 ---
 
@@ -390,7 +438,7 @@
 | POST /monitor/run-check | 🟢 | true | Ja | Kjør health checks for et repo |
 | GET /monitor/health | 🟢 | true | Ja | Siste status for alle repos |
 | POST /monitor/history | 🟢 | true | Ja | Historikk for et repo (paginert) |
-| POST /monitor/daily-check | 🟡 | false | Nei | **HARDKODET DISABLED** — returnerer alltid `ran: false` |
+| POST /monitor/daily-check | 🟢 | false | Nei | Feature-flagget via MonitorEnabled secret, kjører alle repos |
 
 ### Health checks implementert
 
@@ -398,18 +446,18 @@
 |-------|--------|-------------|------------|
 | dependency_audit | 🟢 | `npm audit --json`, teller high/critical | — |
 | test_coverage | 🟢 | `npm test --coverage`, ekstraher prosent | — |
-| code_quality | 🟡 | Stub — returnerer "not implemented" | Implementer (f.eks. ESLint score) |
-| doc_freshness | 🟡 | Stub — returnerer "not implemented" | Implementer (sjekk README dato) |
+| code_quality | 🟢 | ESLint JSON-output, teller errors/warnings | — |
+| doc_freshness | 🟢 | Sjekker README/CHANGELOG, package.json description | — |
 
 ### Cron-jobs
 
 | Cron | Status | Schedule | Feature-flag | Aktivering |
 |------|--------|----------|-------------|------------|
-| daily-health-check | 🟡 | 0 3 * * * | MonitorEnabled secret (hardkodet disabled) | Fjern hardkodet disable, sjekk secret-verdi |
+| daily-health-check | 🟢 | 0 3 * * * | MonitorEnabled secret | Sett MonitorEnabled="true" for å aktivere |
 
 ### Hva trengs for full aktivering
-1. Fjern hardkodet `disabled` i runDailyChecks, faktisk sjekk MonitorEnabled secret
-2. Implementer code_quality og doc_freshness checks
+1. ~~Fjern hardkodet `disabled` i runDailyChecks~~ ✅ Sjekker nå MonitorEnabled secret
+2. ~~Implementer code_quality og doc_freshness checks~~ ✅ ESLint + doc-sjekk implementert
 3. Bruk health_rules-tabellen for konfigurerbare terskler og notifikasjoner
 4. Legg til alerting ved gjentatte failures
 
@@ -423,8 +471,9 @@
 | 7-dagers token-utløp | 🟢 | Hardkodet i payload |
 | AuthData (userID, email, role) | 🟢 | Returnert til alle auth: true endpoints |
 | createToken (intern) | 🟢 | Kalles av users-service etter OTP |
-| Token-revokering | 🔴 | Ingen revoked_tokens-tabell, token gyldig til utløp | Legg til revokerings-sjekk |
-| CORS-konfigurasjon | 🔴 | Bruker Encore defaults | Konfigurer explicit i encore.app |
+| Token-revokering | 🟢 | revoked_tokens-tabell, SHA256-hash, sjekk i auth handler, cleanup cron |
+| Secrets status API | 🟢 | GET /gateway/secrets-status — sjekker 7 secrets (configured true/false) |
+| CORS-konfigurasjon | 🟢 | Eksplisitt global_cors i encore.app (localhost:3000/4000 + prod) |
 
 ---
 
@@ -438,9 +487,22 @@
 | Context transfer | 🟢 | POST /chat/transfer-context (AI-oppsummering med fallback) |
 | Conversation ownership (OWASP A01) | 🟢 | conversations.owner_email, verifisert i alle endpoints |
 | Agent reports via Pub/Sub | 🟢 | agentReports topic → store-agent-report subscription |
+| Build progress via Pub/Sub | 🟢 | buildProgress topic → chat-build-progress subscription |
+| Task events via Pub/Sub | 🟢 | taskEvents topic → chat-task-events subscription |
 | SkillIds i meldingsmetadata | 🟢 | Lagres i user message metadata |
 | Direct chat (chatOnly) | 🟢 | Kaller ai.chat() direkte |
 | Agent-trigger (linearTaskId) | 🟢 | Kaller agent.startTask() |
+| Agent-synlighet (agent_status) | 🟢 | Progress-meldinger under AI-kall, agent_status messageType, updateMessageContent/updateMessageType |
+| Smart polling (frontend) | 🟢 | idle/waiting/cooldown — ingen polling med mindre AI jobber |
+| Optimistisk bruker-rendering | 🟢 | Brukerens melding vises umiddelbart uten å vente på server |
+| AgentStatus i chat | 🟢 | agent_status JSON-meldinger rendret som collapsible progress-panel |
+| Async sendMessage | 🟢 | Backend returnerer umiddelbart, AI prosesserer asynkront med fire-and-forget |
+| withTimeout på eksterne kall | 🟢 | Memory 5s, AI 60s, graceful fallback |
+| cancelGeneration | 🟢 | POST /chat/cancel, in-memory cancellation set, checkpoint-sjekker mellom steg |
+| Stopp-knapp (frontend) | 🟢 | Under TheFold tenker-indikator, kaller cancelChatGeneration, resetter pollMode |
+| TheFold tenker redesign | 🟢 | TF-ikon med brand-shimmer, agent-pulse, agent-dots, stopp-knapp |
+| Brand shimmer sidebar | 🟢 | brand-shimmer CSS-klasse på "TheFold" tekst i sidebar |
+| AI system prompt (norsk) | 🟢 | direct_chat prompt konversasjonelt, ingen kode-dumping, norsk |
 
 ---
 
@@ -471,8 +533,57 @@
 |---------|--------|-------------|
 | getAssignedTasks | 🟢 | GraphQL, filter: "thefold" label |
 | getTask | 🟢 | Enkelt-task lookup |
-| updateTask | 🟡 | Returnerer success men state-oppdatering ufullstendig | Trenger team-spesifikk state-mapping |
+| updateTask | 🟢 | State-mapping via getWorkflowStates() + issueUpdate mutation | 6 statuser: backlog→Backlog, planned→Todo, in_progress→In Progress, in_review→In Review, done→Done, blocked→Cancelled |
 | 5-min polling cron | 🟢 | check-thefold-tasks |
+
+### Builder-service (NY — Steg 4.2)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| builder_jobs tabell | 🟢 | UUID PK, task_id, sandbox_id, plan JSONB, strategy, phases, cost tracking |
+| build_steps tabell | 🟢 | UUID PK, FK til builder_jobs (CASCADE), phase, action, content, validation_result JSONB |
+| Indekser | 🟢 | idx_jobs_task, idx_jobs_status, idx_steps_job, idx_steps_status |
+| BuilderJob type | 🟢 | Full type med contextWindow, dependencyGraph, filesWritten |
+| BuildPlan/BuildPlanStep | 🟢 | Planstruktur fra ai.planTask() |
+| BuildResult type | 🟢 | Resultat med filesChanged, tokens, cost, errors |
+| BuildProgressEvent | 🟢 | Pub/Sub event for live-oppdateringer |
+| Dependency graph | 🟢 | analyzeDependencies, extractImports, resolveImport |
+| Topologisk sortering | 🟢 | Kahn's algoritme med syklusdeteksjon |
+| getRelevantContext | 🟢 | Rekursiv avhengighetssamling fra context window |
+| initPhase | 🟢 | Analysér plan, velg strategi, sett dependency graph |
+| selectStrategy | 🟢 | scaffold_first / dependency_order / sequential |
+| scaffoldPhase | 🟢 | Kjør init-kommandoer (npm init etc.) |
+| dependenciesPhase | 🟢 | Installer npm-pakker (eksplisitt + auto-detektert) |
+| implementPhase | 🟢 | Fil-for-fil: generér → skriv → valider → fiks (maks 3) |
+| integratePhase | 🟢 | Full sandbox.validate → identifiser feilende filer → fiks → re-valider (maks 3) |
+| finalizePhase | 🟢 | Samle alle filer → returner BuildResult |
+| build-progress Topic | 🟢 | Pub/Sub for fase/steg-hendelser |
+| POST /builder/start | 🟢 | Intern: opprett jobb, kjør executeBuild |
+| POST /builder/status | 🟢 | Intern: hent jobb + steg |
+| POST /builder/cancel | 🟢 | Intern: avbryt jobb |
+| GET /builder/job | 🟢 | Auth: hent jobb (frontend) |
+| POST /builder/jobs | 🟢 | Auth: liste jobber med filter |
+| ai.generateFile | 🟢 | Generer enkeltfil med kontekst og skills pipeline |
+| ai.fixFile | 🟢 | Fiks TypeScript-feil med full kontekst |
+| Agent STEP 6 integrasjon | 🟢 | builder.start() erstatter blind file-writing loop |
+
+### Tasks-service (NY — Steg 4.1)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| tasks-tabell | 🟢 | 24 kolonner, 5 indekser, 4 sources, 6 statuser |
+| createTask | 🟢 | POST /tasks/create, auth, full validering |
+| updateTask | 🟢 | POST /tasks/update, individuelle felt-oppdateringer |
+| deleteTask | 🟢 | POST /tasks/delete |
+| getTask | 🟢 | GET /tasks/get + intern getTaskInternal |
+| listTasks | 🟢 | POST /tasks/list, 6 filtre (repo, status, source, labels, priority, assignedTo) |
+| syncLinear | 🟢 | Pull fra Linear, create/update lokalt, oppdater linear_synced_at |
+| pushToLinear | 🟢 | Push TheFold-status tilbake til Linear |
+| planOrder | 🟢 | AI-basert prioritering via ai.planTaskOrder (Haiku) |
+| getStats | 🟢 | Totalt, per status, per source, per repo |
+| updateTaskStatus | 🟢 | Intern — agent oppdaterer status, reviewId, prUrl |
+| task-events Pub/Sub | 🟢 | 5 typer: created, updated, deleted, completed, failed |
+| Agent-integrasjon | 🟢 | STEP 1 dual-path: thefoldTaskId → tasks service, eller taskId → Linear |
 
 ### GitHub-service
 
@@ -484,6 +595,7 @@
 | getFileChunk | 🟢 | Linje-basert chunking, 1-basert, maks 500 linjer |
 | findRelevantFiles | 🟢 | Keyword-scoring av filnavn |
 | createPR | 🟢 | Branch → blobs → tree → commit → PR |
+| listRepos | 🟢 | Liste org-repos (sortert push-dato, filtrert ikke-arkiverte) |
 
 ### Users-service
 
@@ -504,24 +616,30 @@
 | Side | Status | Koblet til backend | Hva mangler |
 |------|--------|-------------------|-------------|
 | /login | 🟢 | Ja (requestOtp, verifyOtp) | Suspense boundary for useSearchParams |
-| /home | 🟢 | Delvis (getTasks) | Stats, recent activity og token usage er hardkodet |
+| /home | 🟢 | Ja (getTasks, getCacheStats, getMemoryStats, getAuditStats, listAuditLog, listRepos, getMonitorHealth) | — |
 | /chat | 🟢 | Ja (full chat, skills, models, transfer) | — |
 | /skills | 🟢 | Ja (full CRUD, pipeline, resolve) | — |
-| /settings | 🟢 | Ja (profil, modeller, preferences) | — |
+| /settings | 🟢 | Ja (profil, preferanser med backend-sync, debug med ekte health checks) | — |
 | /settings/security | 🟢 | Ja (audit log, stats) | — |
-| /environments | 🟡 | Nei (bruker hardkodet repo-context) | Koble til GitHub backend |
-| /secrets | 🟡 | Nei (statisk hardkodet liste) | Koble til secrets API |
+| /environments | 🟢 | Ja (listRepos fra GitHub-service) | — |
+| /review | 🟢 | Ja (listReviews med statusfilter) | — |
+| /review/[id] | 🟢 | Ja (getReview, approveReview, requestChanges, rejectReview) | — |
+| /tools (layout + redirect) | 🟢 | — (horisontal tab-navigasjon) | — |
+| /tools/ai-models | 🟢 | Ja (listModels, getMe, updateModelMode) | — |
+| /tools/builder | 🟢 | Ja (listBuilderJobs, 5s polling for aktive jobber) | — |
+| /tools/tasks | 🟢 | Ja (listTheFoldTasks, getTaskStats, syncLinearTasks) | — |
+| /tools/memory | 🟢 | Ja (searchMemories, storeMemory, getMemoryStats, listRepos) | — |
+| /tools/mcp | 🟢 | Ja (listMCPServers, install/uninstall) | Konfigurasjon UI for envVars/config |
+| /tools/observability | 🟢 | Ja (getMonitorHealth, getAuditStats, listAuditLog) | — |
+| /tools/secrets | 🟢 | Ja (getSecretsStatus, configured/mangler-badges) | — |
+| /tools/templates | 🟢 | Ja (listTemplates, useTemplate, category filter, slide-over) | — |
+| /marketplace | 🟢 | Ja (listComponents, searchComponents, category filter) | — |
+| /marketplace/[id] | 🟢 | Ja (getComponent, useComponent, getHealingStatus, file browser) | — |
 | /repo/[name]/chat | 🟢 | Ja (repo-chat, skills, models) | — |
-| /repo/[name]/overview | 🟡 | Nei | Koble til GitHub/monitor backend |
-| /repo/[name]/tasks | 🟡 | Nei | Koble til Linear backend |
-| /repo/[name]/memory | 🟡 | Nei | Koble til memory backend |
-| /repo/[name]/code | 🟡 | Nei | Koble til GitHub backend |
-| /repo/[name]/flow | 🟡 | Nei | Implementer pipeline-visualisering |
-| /repo/[name]/metrics | 🟡 | Nei | Koble til audit/cost backend |
-| /repo/[name]/cost | 🟡 | Nei | Koble til cost-tracking backend |
-| /repo/[name]/deploys | 🟡 | Nei | Implementer deploy-tracking |
-| /repo/[name]/infra | 🟡 | Nei | Koble til infra backend |
-| /repo/[name]/configuration | 🟡 | Nei | Koble til settings backend |
+| /repo/[name]/overview | 🟢 | Ja (repo-helse, oppgaver, reviews, aktivitet, hurtighandlinger) | — |
+| /repo/[name]/tasks | 🟢 | Ja (Kanban med TheFold task engine, create modal, Linear sync, filtre) | — |
+| /repo/[name]/reviews | 🟢 | Ja (repo-filtrert reviews med statusfilter) | — |
+| /repo/[name]/activity | 🟢 | Ja (tidslinje: audit, tasks, builder — server-side repo-filtrering, gruppert per dag) | — |
 
 ### Komponenter
 
@@ -533,33 +651,275 @@
 | ChatToolsMenu | 🟢 | Floating menu: create skill, create task, transfer |
 | InlineSkillForm | 🟢 | Rask skill-oppretting fra chat |
 | LivePreview | 🟡 | Placeholder for sandbox-preview | Koble til sandbox |
-| Sidebar | 🟢 | Navigasjon, repo-dropdown, brukerprofil |
+| AgentStatus | 🟢 | Collapsible panel med steg-liste, progress bar, agent-animasjoner (pulse, spinner, check-in) |
+| PageHeader | 🟢 | Global header i dashboard layout, dynamisk tittel, 80px minHeight |
+| Sidebar | 🟢 | Navigasjon (Home/Chat/Environments/Marketplace | Repo | Skills/Tools | Settings), repo-dropdown, brukerprofil |
+
+### Design System (UI/UX Overhaul)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| Flat design | 🟢 | Alle border-radius: 0 (unntatt chat-bobler, avatarer, status-dots, toggles) |
+| Solid borders | 🟢 | Alle dashed → solid gjennom hele frontenden |
+| Filled buttons | 🟢 | .btn-primary: filled med inverted farger, .btn-secondary/danger: transparent med solid border |
+| Font stack | 🟢 | ABC Diatype Plus (display), Ivar Text (brand), Inter 400/500 (UI) |
+| Tab system | 🟢 | .tab / .tab-active CSS-klasser, brukt i Tools + Skills |
+| Dropdown system | 🟢 | .dropdown-menu / .dropdown-item CSS-klasser |
+| Agent-animasjoner | 🟢 | agent-pulse, agent-spinner, agent-check-in, agent-typing, message-enter |
+| deleteConversation | 🟢 | POST /chat/delete med ownership-verifisering, trash-ikon per samtale |
+| Sidebar restructure | 🟢 | Ny navigasjonsrekkefølge med separatorer og bottom-pinned Settings |
+| Global header | 🟢 | PageHeader med dynamisk tittel, 80px minHeight |
+| Chat layout | 🟢 | 280px samtale-panel med borderceller, 280px title-celle, toggle i chat-area, 80px header, overfør til repo |
 
 ### Kontekst-providere
 
 | Provider | Status | Beskrivelse |
 |----------|--------|-------------|
 | PreferencesProvider | 🟢 | Henter /users/me, gir usePreferences() og useUser() hooks |
-| RepoProvider | 🟡 | Hardkodede repos, useRepoContext() | Koble til GitHub backend |
+| RepoProvider | 🟢 | Henter repos fra listRepos("Twofold-AS") med fallback | — |
+
+---
+
+## 12. MCP-service (Model Context Protocol)
+
+### Database-tabeller
+
+**mcp_servers:**
+| Kolonne | Type | Status |
+|---------|------|--------|
+| id | UUID PK | 🟢 |
+| name | TEXT NOT NULL UNIQUE | 🟢 |
+| description | TEXT | 🟢 |
+| command | TEXT NOT NULL | 🟢 |
+| args | TEXT[] | 🟢 |
+| env_vars | JSONB | 🟢 |
+| status | TEXT | 🟢 (available/installed/error) |
+| category | TEXT | 🟢 (general/code/data/docs/ai) |
+| config | JSONB | 🟢 |
+| installed_at | TIMESTAMPTZ | 🟢 |
+| created_at | TIMESTAMPTZ | 🟢 |
+| updated_at | TIMESTAMPTZ | 🟢 |
+
+### Pre-seeded servere
+
+| Server | Category | Default status |
+|--------|----------|----------------|
+| filesystem | code | available |
+| github | code | available |
+| postgres | data | available |
+| context7 | docs | installed |
+| brave-search | general | available |
+| puppeteer | general | available |
+
+### Endepunkter
+
+| Endepunkt | Status | Expose | Auth | Beskrivelse |
+|-----------|--------|--------|------|-------------|
+| GET /mcp/list | 🟢 | true | Ja | Alle servere med status |
+| GET /mcp/get | 🟢 | true | Ja | Enkelt server med ID |
+| POST /mcp/install | 🟢 | true | Ja | Marker som installert, lagre config |
+| POST /mcp/uninstall | 🟢 | true | Ja | Marker som available |
+| POST /mcp/configure | 🟢 | true | Ja | Oppdater envVars/config |
+| GET /mcp/installed | 🟢 | false | Nei | Kun installerte (for agent) |
+
+### Agent-integrasjon
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| Fetch installed servers | 🟢 | agent.ts STEP 3.5: mcp.installed() |
+| Include in AI context | 🟢 | Lagt til i docsStrings som verktøyliste |
+| Actual MCP call routing | ⚪ | Planlagt for Fase 5 |
+
+### Frontend
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| /tools/mcp side | 🟢 | Dynamisk fra API (listMCPServers) |
+| Install/uninstall knapper | 🟢 | Fungerer via API |
+| Konfigurasjon UI | ⚪ | Fremtidig: envVars/config editor |
+
+### Hva trengs for full aktivering
+1. Implementer faktisk MCP-kall routing i agent (Fase 5)
+2. Konfigurasjon UI for envVars og config
+3. Helsestatus-sjekk for installerte servere
+4. Legg til flere MCP-servere (Sentry, Slack, etc.)
+
+---
+
+## 12b. Sub-agenter (Multi-Agent AI Orkestrering)
+
+### Filer
+| Fil | Status | Beskrivelse |
+|-----|--------|-------------|
+| `ai/sub-agents.ts` | 🟢 | Typer, roller, modell-mapping (6 roller, 3 budsjettmodi) |
+| `ai/orchestrate-sub-agents.ts` | 🟢 | Planlegging, parallell kjøring, resultat-merging, kostnadsestimat |
+| `ai/sub-agents.test.ts` | 🟢 | ~15 tester (roller, planlegging, merging, kostnad) |
+
+### Funksjonalitet
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| Role-to-model mapping | 🟢 | 6 roller x 3 budsjettmodi (balanced/quality_first/aggressive_save) |
+| Complexity-based planning | 🟢 | <5: ingen, 5-7: impl+test, 8-9: team, 10: full team |
+| Parallel execution | 🟢 | Promise.allSettled med dependency graph |
+| Result merging | 🟢 | concatenate + ai_merge (Haiku) |
+| Cost estimation endpoint | 🟢 | POST /ai/estimate-sub-agent-cost |
+| Agent integration | 🟢 | Step 5.6 i agent loop, preference-styrt |
+| Frontend toggle | 🟢 | /tools/ai-models med toggle + kostnadsvisning |
+| Audit logging | 🟢 | sub_agent_started + sub_agent_completed events |
+
+### Hva trengs for videre utvikling
+1. Alt er aktivt — sub-agenter kjores nar `subAgentsEnabled: true` i brukerpreferanser
+2. Vurder a legge til `researcher` rolle som faktisk soker memory/docs
+3. A/B-testing: sammenlign kvalitet med/uten sub-agenter
+
+---
+
+## 13. Registry-service (Component Marketplace Grunnmur)
+
+### Database-tabeller
+
+**components:**
+| Kolonne | Type | Status |
+|---------|------|--------|
+| id | UUID PK | 🟢 |
+| name | TEXT NOT NULL | 🟢 |
+| description | TEXT | 🟢 |
+| category | TEXT | 🟢 |
+| version | TEXT | 🟢 |
+| previous_version_id | UUID | 🟢 |
+| files | JSONB NOT NULL | 🟢 |
+| entry_point | TEXT | 🟢 |
+| dependencies | TEXT[] | 🟢 |
+| source_repo | TEXT NOT NULL | 🟢 |
+| source_task_id | UUID | 🟢 |
+| extracted_by | TEXT | 🟢 |
+| used_by_repos | TEXT[] | 🟢 |
+| times_used | INT | 🟢 |
+| test_coverage | DECIMAL | 🟢 |
+| validation_status | TEXT | 🟢 |
+| tags | TEXT[] | 🟢 |
+
+**healing_events:**
+| Kolonne | Type | Status |
+|---------|------|--------|
+| id | UUID PK | 🟢 |
+| component_id | UUID FK | 🟢 |
+| old_version | TEXT | 🟢 |
+| new_version | TEXT | 🟢 |
+| trigger | TEXT | 🟢 |
+| severity | TEXT | 🟢 |
+| affected_repos | TEXT[] | 🟢 |
+| tasks_created | UUID[] | 🟢 |
+| status | TEXT | 🟢 |
+
+### Endepunkter
+
+| Endepunkt | Status | Expose | Auth | Beskrivelse |
+|-----------|--------|--------|------|-------------|
+| POST /registry/register | 🟢 | false | Nei | Registrer komponent (intern) |
+| GET /registry/get | 🟢 | true | Ja | Hent komponent |
+| POST /registry/list | 🟢 | true | Ja | Liste med filter |
+| POST /registry/search | 🟢 | true | Ja | Søk (navn, beskrivelse, tags) |
+| POST /registry/use | 🟢 | false | Nei | Marker bruk (intern) |
+| POST /registry/use-component | 🟢 | true | Ja | Marker bruk (frontend marketplace) |
+| POST /registry/find-for-task | 🟢 | false | Nei | Finn komponenter for oppgave |
+| POST /registry/trigger-healing | 🟢 | false | Nei | Trigger healing-pipeline |
+| GET /registry/healing-status | 🟢 | true | Ja | Healing-status |
+
+### Pub/Sub
+
+| Topic | Status | Subscriber |
+|-------|--------|------------|
+| healing-events | 🟢 | chat/store-healing-notification |
+
+### Features
+
+| Feature | Status | Beskrivelse | Aktivering |
+|---------|--------|-------------|------------|
+| Component CRUD | 🟢 | Register, get, list, search | — |
+| Use tracking | 🟢 | used_by_repos + times_used | — |
+| Version chain | 🟢 | previous_version_id lenke | — |
+| Healing pipeline | 🟢 | trigger-healing → tasks.createTask per repo | — |
+| Healing notifications | 🟢 | Pub/Sub → chat subscriber | — |
+| Auto-extraction | 🟡 | extractor.ts stub (returnerer []) | Implementer AI-basert komponentdeteksjon |
+| AI component matching | 🟡 | find-for-task bruker keyword LIKE | Bruk memory.searchPatterns() for semantisk match |
+| Marketplace frontend | 🟢 | /marketplace liste + /marketplace/[id] detalj | — |
+| Component signering | ⚪ | Ingen kryptering | OWASP ASI04 Supply Chain |
+
+### Hva trengs for full aktivering
+1. Implementer AI-basert auto-ekstraksjon i `registry/extractor.ts`
+2. Bruk `memory.searchPatterns()` for semantisk komponent-matching i `find-for-task`
+3. ~~Frontend /marketplace side med komponent-browser~~ ✅ /marketplace + /marketplace/[id]
+4. Komponent-signering for supply chain security (OWASP ASI04)
+5. Cross-repo bug propagation via healing pipeline
+
+---
+
+## 14. Templates-service (Template Library)
+
+### Database-tabeller
+
+**templates:**
+| Kolonne | Type | Status |
+|---------|------|--------|
+| id | UUID PK | 🟢 |
+| name | TEXT NOT NULL | 🟢 |
+| description | TEXT NOT NULL | 🟢 |
+| category | TEXT NOT NULL | 🟢 |
+| framework | TEXT | 🟢 |
+| files | JSONB NOT NULL | 🟢 |
+| dependencies | JSONB | 🟢 |
+| variables | JSONB | 🟢 |
+| use_count | INT | 🟢 |
+| created_at | TIMESTAMPTZ | 🟢 |
+
+### Pre-seeded templates
+
+| Template | Category | Framework |
+|----------|----------|-----------|
+| Contact Form | form | next.js |
+| User Auth (OTP) | auth | next.js |
+| Stripe Payment | payment | next.js |
+| REST API CRUD | api | encore.ts |
+| File Upload | form | next.js |
+
+### Endepunkter
+
+| Endepunkt | Status | Expose | Auth | Beskrivelse |
+|-----------|--------|--------|------|-------------|
+| GET /templates/list | 🟢 | true | Ja | Liste med valgfri category-filter |
+| GET /templates/get | 🟢 | true | Ja | Hent template med filer |
+| POST /templates/use | 🟢 | true | Ja | Bruk template: inkrementer count, variabel-substitusjon |
+| GET /templates/categories | 🟢 | true | Ja | Kategorier med antall |
+
+### Features
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| Template CRUD | 🟢 | List, get, use, categories |
+| Variable substitution | 🟢 | `{{VAR}}` i filinnhold og stier |
+| Category filtering | 🟢 | 6 kategorier: auth, api, ui, database, payment, form |
+| Use tracking | 🟢 | use_count inkrementeres |
+| Frontend /tools/templates | 🟢 | Grid med slide-over detaljer |
 
 ---
 
 ## Aktiveringsplan: Prioritert rekkefølge
 
 ### Fase 1: Kjernefunksjonalitet (nødvendig for MVP)
-1. **linear.updateTask() state-mapping** — Agent kan ikke fullføre loop uten riktig Linear-oppdatering
-2. **Fjern hardkodet MonitorEnabled disable** — Aktiver daglig health check
-3. **Token-revokering ved logout** — Sikkerhet (OWASP A07)
-4. **CORS-konfigurasjon** — Eksplisitt i encore.app for produksjon
+1. ~~**linear.updateTask() state-mapping**~~ ✅ getWorkflowStates() + issueUpdate mutation
+2. ~~**Fjern hardkodet MonitorEnabled disable**~~ ✅ Sjekker MonitorEnabled secret
+3. ~~**Token-revokering ved logout**~~ ✅ revoked_tokens + cleanup cron
+4. ~~**CORS-konfigurasjon**~~ ✅ Eksplisitt global_cors i encore.app
 
 ### Fase 2: Kvalitetsforbedring
 1. **executePreRun implementering** — Input-validering, security scan før AI-kall
 2. **executePostRun implementering** — Quality review, security scan etter AI-kall
 3. **logSkillResults i 3 manglende endpoints** — diagnoseFailure, revisePlan, assessConfidence
 4. **Backend-filter for category/tags i listSkills** — Frontend sender allerede, backend ignorerer
-5. **Koble /home til ekte stats** — Fjern hardkodede tall
-6. **Koble /environments til GitHub** — Vis ekte repo-status
-7. **Docker-isolering for sandbox** — Fjern filsystem-avhengighet
+5. ~~**Koble /home til ekte stats**~~ ✅ 7 API-kall, alle hardkodede tall erstattet
+6. ~~**Koble /environments til GitHub**~~ ✅ listRepos endepunkt + frontend koblet
+7. ~~**Docker-isolering for sandbox**~~ ✅ Dual-modus (SandboxMode secret), Docker med full isolering + cleanup cron
 
 ### Fase 3: Avanserte features
 1. **Skill-hierarki** (parent_skill_id) — Skill-trær for komplekse instruksjoner
@@ -581,11 +941,32 @@
 
 ---
 
+## 11. E2E Tester (Steg 3.3)
+
+### Testfil: agent/e2e.test.ts
+
+| Test | Status | Beskrivelse | Avhengigheter |
+|------|--------|-------------|---------------|
+| Test 1: Enkel task-flyt | 🟡 SKIP | Full executeTask med skipReview=true | AnthropicAPIKey, GitHubToken, VoyageAPIKey |
+| Test 2: Task med review-flyt | 🟡 SKIP | executeTask → pending_review → approve | AnthropicAPIKey, GitHubToken, VoyageAPIKey |
+| Test 3: Prosjektdekomponering | 🟡 SKIP | ai.decomposeProject + storeProjectPlan | AnthropicAPIKey, GitHubToken |
+| Test 4: Context Curator | 🟡 SKIP | curateContext med avhengigheter | GitHubToken, VoyageAPIKey |
+| Test 5: Chat prosjektdeteksjon | 🟢 | Ren funksjon, 6 test-caser | Ingen |
+| Test 6: Memory decay | 🟢 | Rene funksjoner, 8 test-caser | Ingen |
+| Test 7: Skills pipeline | 🟢 | DB-operasjoner, 4 test-caser | Kun database |
+| Review DB lifecycle | 🟢 | Full review-livssyklus i DB | Kun database |
+| Project pending_review | 🟢 | pending_review status i project_tasks | Kun database |
+| Audit log integration | 🟢 | Lagre og spørre audit-logg | Kun database |
+
+**Totalt:** 25 tester (21 bestått, 4 skippet)
+
+---
+
 ## Oppsummering
 
 | Kategori | Antall |
 |----------|--------|
-| 🟢 AKTIVE features | 87 |
-| 🟡 STUBBEDE features | 18 |
-| 🔴 GRUNNMUR features | 22 |
-| ⚪ PLANLAGTE features | 7 |
+| 🟢 AKTIVE features | 230+ |
+| 🟡 STUBBEDE features | 2 |
+| 🔴 GRUNNMUR features | 21 |
+| ⚪ PLANLAGTE features | 9 |

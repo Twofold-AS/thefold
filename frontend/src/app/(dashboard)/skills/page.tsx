@@ -10,6 +10,7 @@ import {
   previewPrompt,
   type Skill,
 } from "@/lib/api";
+import { PageHeaderBar } from "@/components/PageHeaderBar";
 
 const CONTEXTS = ["coding", "review", "planning", "chat"] as const;
 const CATEGORIES = ["security", "quality", "style", "framework", "language", "general"] as const;
@@ -128,19 +129,13 @@ export default function SkillsPage() {
 
   return (
     <div className="relative">
+      <PageHeaderBar title="Skills" />
+      <div className="p-6">
       {/* Header */}
       <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1
-            className="font-heading text-[32px] font-semibold leading-tight"
-            style={{ color: "var(--text-primary)" }}
-          >
-            Skills
-          </h1>
-          <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-            {enabledCount} av {skills.length} aktive &middot; Administrer AI-instruksjoner og pipeline
-          </p>
-        </div>
+        <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+          {enabledCount} av {skills.length} aktive &middot; Administrer AI-instruksjoner og pipeline
+        </p>
         <button onClick={() => setShowCreate(true)} className="btn-primary text-sm">
           + Ny skill
         </button>
@@ -148,7 +143,7 @@ export default function SkillsPage() {
 
       {error && (
         <div
-          className="mb-4 px-4 py-3 rounded-lg text-sm"
+          className="mb-4 px-4 py-3 text-sm"
           style={{ background: "rgba(239,68,68,0.1)", color: "var(--error)" }}
         >
           {error}
@@ -156,16 +151,12 @@ export default function SkillsPage() {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 mb-6 p-1 rounded-lg" style={{ background: "var(--bg-card)" }}>
+      <div className="flex gap-1.5 mb-6">
         {(["grid", "pipeline"] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            className="px-4 py-2 text-sm rounded-md transition-colors"
-            style={{
-              background: activeTab === tab ? "var(--accent)" : "transparent",
-              color: activeTab === tab ? "#fff" : "var(--text-secondary)",
-            }}
+            className={activeTab === tab ? "tab tab-active" : "tab"}
           >
             {tab === "grid" ? "Oversikt" : "Pipeline"}
           </button>
@@ -220,7 +211,7 @@ export default function SkillsPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {filtered.length === 0 ? (
               <div
-                className="col-span-full text-center py-12 rounded-xl"
+                className="col-span-full text-center py-12"
                 style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
               >
                 <p className="text-sm" style={{ color: "var(--text-muted)" }}>
@@ -242,6 +233,8 @@ export default function SkillsPage() {
       ) : (
         <PipelineView skills={skills} />
       )}
+
+      </div>
 
       {/* Slide-over: Create */}
       {showCreate && (
@@ -289,7 +282,7 @@ function SkillCard({
   return (
     <div
       onClick={onClick}
-      className="rounded-xl p-4 cursor-pointer transition-all hover:-translate-y-0.5"
+      className="p-4 cursor-pointer transition-all hover:-translate-y-0.5"
       style={{
         background: "var(--bg-card)",
         border: skill.enabled ? "1px solid var(--border)" : "1px solid transparent",
@@ -322,13 +315,13 @@ function SkillCard({
       {/* Badges */}
       <div className="flex gap-1.5 mt-3 flex-wrap">
         <span
-          className="px-2 py-0.5 text-[10px] rounded-full font-medium"
+          className="px-2 py-0.5 text-[10px] font-medium"
           style={{ background: `${CATEGORY_COLORS[category]}20`, color: CATEGORY_COLORS[category] }}
         >
           {category}
         </span>
         <span
-          className="px-2 py-0.5 text-[10px] rounded-full font-medium"
+          className="px-2 py-0.5 text-[10px] font-medium"
           style={{ background: `${PHASE_COLORS[phase]}20`, color: PHASE_COLORS[phase] }}
         >
           {PHASE_LABELS[phase]}
@@ -336,7 +329,7 @@ function SkillCard({
         {skill.appliesTo.map((ctx) => (
           <span
             key={ctx}
-            className="px-2 py-0.5 text-[10px] rounded-full"
+            className="px-2 py-0.5 text-[10px]"
             style={{ background: "var(--bg-sidebar)", color: "var(--text-muted)" }}
           >
             {ctx}
@@ -397,7 +390,7 @@ function SlideOver({
             </h2>
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg hover:opacity-80"
+              className="p-1.5 hover:opacity-80"
               style={{ color: "var(--text-muted)" }}
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -509,7 +502,7 @@ function SkillForm({
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
       {error && (
-        <p className="text-sm px-3 py-2 rounded-lg" style={{ background: "rgba(239,68,68,0.1)", color: "var(--error)" }}>
+        <p className="text-sm px-3 py-2" style={{ background: "rgba(239,68,68,0.1)", color: "var(--error)" }}>
           {error}
         </p>
       )}
@@ -574,7 +567,7 @@ function SkillForm({
               key={ctx}
               type="button"
               onClick={() => toggleContext(ctx)}
-              className="px-3 py-1.5 text-sm rounded-lg transition-colors"
+              className="px-3 py-1.5 text-sm transition-colors"
               style={{
                 background: appliesTo.includes(ctx) ? "var(--accent)" : "var(--bg-sidebar)",
                 color: appliesTo.includes(ctx) ? "#fff" : "var(--text-muted)",
@@ -619,7 +612,7 @@ function SkillForm({
         </button>
         {previewContent && (
           <div
-            className="mt-2 rounded-lg p-3 text-[11px] font-mono overflow-auto max-h-[200px]"
+            className="mt-2 p-3 text-[11px] font-mono overflow-auto max-h-[200px]"
             style={{ background: "var(--bg-sidebar)", border: "1px solid var(--border)", color: "var(--text-muted)" }}
           >
             {previewLoading ? "Laster..." : <pre className="whitespace-pre-wrap">{previewContent}</pre>}
@@ -660,7 +653,7 @@ function SkillDetail({
       <div>
         <Label>Prompt-fragment</Label>
         <div
-          className="rounded-lg p-4 text-xs font-mono overflow-auto max-h-[300px]"
+          className="p-4 text-xs font-mono overflow-auto max-h-[300px]"
           style={{ background: "var(--bg-sidebar)", border: "1px solid var(--border)", color: "var(--text-secondary)" }}
         >
           <pre className="whitespace-pre-wrap">{skill.promptFragment}</pre>
@@ -682,7 +675,7 @@ function SkillDetail({
         <Label>Gjelder for</Label>
         <div className="flex gap-1.5 flex-wrap">
           {skill.appliesTo.map((ctx) => (
-            <span key={ctx} className="px-2 py-0.5 text-xs rounded-full" style={{ background: "var(--bg-sidebar)", color: "var(--text-secondary)" }}>
+            <span key={ctx} className="px-2 py-0.5 text-xs" style={{ background: "var(--bg-sidebar)", color: "var(--text-secondary)" }}>
               {ctx}
             </span>
           ))}
@@ -717,7 +710,7 @@ function SkillDetail({
       {skill.routingRules && Object.keys(skill.routingRules).length > 0 && (
         <div>
           <Label>Routing-regler</Label>
-          <div className="text-xs font-mono p-3 rounded-lg" style={{ background: "var(--bg-sidebar)", color: "var(--text-muted)" }}>
+          <div className="text-xs font-mono p-3" style={{ background: "var(--bg-sidebar)", color: "var(--text-muted)" }}>
             <pre className="whitespace-pre-wrap">{JSON.stringify(skill.routingRules, null, 2)}</pre>
           </div>
         </div>
@@ -752,7 +745,7 @@ function PipelineView({ skills }: { skills: Skill[] }) {
     <div className="space-y-6">
       {/* Token budget bar */}
       <div
-        className="rounded-xl p-4"
+        className="p-4"
         style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
       >
         <div className="flex justify-between items-center mb-2">
@@ -781,8 +774,8 @@ function PipelineView({ skills }: { skills: Skill[] }) {
         <PipelinePhase title="Inject" color="#3b82f6" skills={inject} />
         <Arrow />
         <div
-          className="flex-1 rounded-xl p-4 flex items-center justify-center"
-          style={{ background: "var(--bg-card)", border: "2px dashed var(--border)" }}
+          className="flex-1 p-4 flex items-center justify-center"
+          style={{ background: "var(--bg-card)", border: "2px solid var(--border)" }}
         >
           <span className="text-sm font-medium" style={{ color: "var(--text-secondary)" }}>
             AI-kall
@@ -798,7 +791,7 @@ function PipelineView({ skills }: { skills: Skill[] }) {
 function PipelinePhase({ title, color, skills }: { title: string; color: string; skills: Skill[] }) {
   return (
     <div
-      className="flex-1 rounded-xl p-4"
+      className="flex-1 p-4"
       style={{ background: "var(--bg-card)", borderTop: `3px solid ${color}` }}
     >
       <h3 className="text-sm font-semibold mb-3" style={{ color }}>
@@ -811,7 +804,7 @@ function PipelinePhase({ title, color, skills }: { title: string; color: string;
           {skills.map((s) => (
             <div
               key={s.id}
-              className="px-2 py-1.5 rounded-lg text-xs"
+              className="px-2 py-1.5 text-xs"
               style={{ background: "var(--bg-sidebar)", color: "var(--text-secondary)" }}
             >
               <span className="font-medium">{s.name}</span>
@@ -857,7 +850,7 @@ function Label({ children }: { children: React.ReactNode }) {
 
 function MetaItem({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
-    <div className="rounded-lg p-2.5" style={{ background: "var(--bg-sidebar)" }}>
+    <div className="p-2.5" style={{ background: "var(--bg-sidebar)" }}>
       <div className="text-[10px] mb-0.5" style={{ color: "var(--text-muted)" }}>{label}</div>
       <div className="text-sm font-medium" style={{ color: color || "var(--text-primary)" }}>{value}</div>
     </div>
@@ -866,7 +859,7 @@ function MetaItem({ label, value, color }: { label: string; value: string; color
 
 function StatBox({ label, value, color }: { label: string; value: number | string; color?: string }) {
   return (
-    <div className="rounded-lg p-2.5 text-center" style={{ background: "var(--bg-sidebar)" }}>
+    <div className="p-2.5 text-center" style={{ background: "var(--bg-sidebar)" }}>
       <div className="text-lg font-semibold" style={{ color: color || "var(--text-primary)" }}>{value}</div>
       <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>{label}</div>
     </div>

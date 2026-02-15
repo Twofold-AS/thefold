@@ -1,128 +1,439 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
-import { getTasksByLabel, checkPendingTasks, type LinearTask } from "@/lib/api";
+import { useEffect, useState, useCallback } from "react";
+import { useParams, usePathname } from "next/navigation";
+import {
+  listTheFoldTasks,
+  createTask,
+  syncLinearTasks,
+  type TheFoldTask,
+} from "@/lib/api";
+import { PageHeaderBar } from "@/components/PageHeaderBar";
 
-type StatusFilter = "all" | "active" | "done";
+/* ── Status columns ── */
+
+const COLUMNS = [
+  { key: "backlog", label: "Backlog", color: "var(--text-muted)" },
+  { key: "planned", label: "Planlagt", color: "#a855f7" },
+  { key: "in_progress", label: "P\u00e5g\u00e5r", color: "#3b82f6" },
+  { key: "in_review", label: "Review", color: "#f97316" },
+  { key: "done", label: "Ferdig", color: "#22c55e" },
+  { key: "blocked", label: "Blokkert", color: "#ef4444" },
+] as const;
+
+type ColumnKey = (typeof COLUMNS)[number]["key"];
+
+const PRIORITY_LABELS: Record<number, string> = { 1: "Haster", 2: "H\u00f8y", 3: "Normal", 4: "Lav" };
+const PRIORITY_COLORS: Record<number, string> = { 1: "#ef4444", 2: "#f97316", 3: "#eab308", 4: "var(--text-muted)" };
+const SOURCE_ICONS: Record<string, string> = { manual: "\uD83D\uDC64", linear: "\uD83D\uDD04", agent: "\uD83E\uDE79" };
+
+/* ── Helpers ── */
+
+function classifyStatus(status: string): ColumnKey {
+  const s = status.toLowerCase();
+  if (s === "in_progress" || s.includes("progress") || s.includes("started")) return "in_progress";
+  if (s === "in_review" || s === "pending_review") return "in_review";
+  if (s === "done" || s.includes("complete")) return "done";
+  if (s === "blocked") return "blocked";
+  if (s === "planned" || s === "todo") return "planned";
+  return "backlog";
+}
+
+/* ── Main Page ── */
 
 export default function RepoTasksPage() {
   const params = useParams<{ name: string }>();
-  const [tasks, setTasks] = useState<LinearTask[]>([]);
+  const pathname = usePathname();
+  const [tasks, setTasks] = useState<TheFoldTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const [filter, setFilter] = useState<StatusFilter>("all");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [syncResult, setSyncResult] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadTasks();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.name]);
+  // Filters
+  const [filterStatus, setFilterStatus] = useState<string>("");
+  const [filterPriority, setFilterPriority] = useState<string>("");
 
-  async function loadTasks() {
+  const loadTasks = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getTasksByLabel(params.name);
+      const res = await listTheFoldTasks({
+        repo: params.name,
+        status: filterStatus || undefined,
+        limit: 200,
+      });
       setTasks(res.tasks);
     } catch {
-      // Silent
+      // silent
     } finally {
       setLoading(false);
     }
-  }
+  }, [params.name, filterStatus]);
+
+  useEffect(() => {
+    loadTasks();
+  }, [loadTasks]);
 
   async function handleSync() {
     setSyncing(true);
+    setSyncResult(null);
     try {
-      await checkPendingTasks();
+      const res = await syncLinearTasks();
+      setSyncResult(`${res.created} nye, ${res.updated} oppdatert`);
       await loadTasks();
     } catch {
-      // Silent
+      setSyncResult("Synkronisering feilet");
     } finally {
       setSyncing(false);
     }
   }
 
-  const filtered = tasks.filter((t) => {
-    if (filter === "active") return t.state !== "Done" && t.state !== "Canceled";
-    if (filter === "done") return t.state === "Done";
-    return true;
-  });
+  // Group tasks by column
+  const grouped = new Map<ColumnKey, TheFoldTask[]>();
+  for (const col of COLUMNS) grouped.set(col.key, []);
+  for (const t of tasks) {
+    const col = classifyStatus(t.status);
+    grouped.get(col)!.push(t);
+  }
+
+  // Apply priority filter client-side
+  const filteredGrouped = new Map<ColumnKey, TheFoldTask[]>();
+  for (const [key, items] of grouped) {
+    filteredGrouped.set(
+      key,
+      filterPriority ? items.filter((t) => String(t.priority) === filterPriority) : items,
+    );
+  }
 
   return (
     <div>
-      <div className="flex items-center justify-between">
+      <PageHeaderBar
+        title={params.name}
+        cells={[
+          { label: "Oversikt", href: `/repo/${params.name}/overview`, active: pathname.includes("/overview") },
+          { label: "Chat", href: `/repo/${params.name}/chat`, active: pathname.includes("/chat") },
+          { label: "Oppgaver", href: `/repo/${params.name}/tasks`, active: pathname.includes("/tasks") },
+          { label: "Reviews", href: `/repo/${params.name}/reviews`, active: pathname.includes("/reviews") },
+          { label: "Aktivitet", href: `/repo/${params.name}/activity`, active: pathname.includes("/activity") },
+        ]}
+      />
+
+      <div className="p-6">
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
-          <h1 className="font-heading text-[32px] font-medium leading-tight" style={{ color: "var(--text-primary)" }}>
-            Tasks
-          </h1>
-          <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
-            Linear tasks labeled &quot;{params.name}&quot;
+          <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+            {tasks.length} oppgaver
           </p>
         </div>
-        <button onClick={handleSync} disabled={syncing} className="btn-primary flex items-center gap-2">
-          {syncing ? (
-            <>
-              <div className="w-4 h-4 border-2 rounded-full animate-spin" style={{ borderColor: "rgba(0,0,0,0.2)", borderTopColor: "#000" }} />
-              Syncing...
-            </>
-          ) : "Sync from Linear"}
-        </button>
-      </div>
 
-      <div className="flex gap-1 mt-6 mb-4">
-        {(["all", "active", "done"] as StatusFilter[]).map((f) => (
-          <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className="px-3 py-1.5 text-sm transition-colors duration-100"
-            style={{
-              borderRadius: "2px",
-              background: filter === f ? "var(--bg-hover)" : "transparent",
-              color: filter === f ? "var(--text-primary)" : "var(--text-secondary)",
-              border: filter === f ? "1px solid var(--border)" : "1px solid transparent",
-            }}
-          >
-            {f === "all" ? "All" : f === "active" ? "Active" : "Done"}
+        <div className="flex items-center gap-2 flex-wrap">
+          {syncResult && (
+            <span className="text-xs px-2 py-1 rounded" style={{ background: "var(--bg-card)", color: "var(--text-secondary)" }}>
+              {syncResult}
+            </span>
+          )}
+          <button onClick={() => setShowCreate(true)} className="btn-primary text-sm">
+            + Ny oppgave
           </button>
-        ))}
-        <span className="text-sm ml-auto self-center" style={{ color: "var(--text-muted)" }}>
-          {filtered.length} tasks
-        </span>
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            className="btn-secondary text-sm flex items-center gap-1.5"
+          >
+            {syncing ? (
+              <>
+                <span className="w-3 h-3 border-2 rounded-full animate-spin inline-block" style={{ borderColor: "rgba(255,255,255,0.2)", borderTopColor: "var(--text-primary)" }} />
+                Synkroniserer...
+              </>
+            ) : (
+              "Synk fra Linear"
+            )}
+          </button>
+
+          {/* Filters */}
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+            className="input-field text-xs py-1.5 px-2"
+            style={{ minWidth: 100 }}
+          >
+            <option value="">Alle statuser</option>
+            {COLUMNS.map((c) => (
+              <option key={c.key} value={c.key}>{c.label}</option>
+            ))}
+          </select>
+          <select
+            value={filterPriority}
+            onChange={(e) => setFilterPriority(e.target.value)}
+            className="input-field text-xs py-1.5 px-2"
+            style={{ minWidth: 100 }}
+          >
+            <option value="">Alle prioriteter</option>
+            <option value="1">Haster</option>
+            <option value="2">H&oslash;y</option>
+            <option value="3">Normal</option>
+            <option value="4">Lav</option>
+          </select>
+        </div>
       </div>
 
+      {/* Kanban */}
       {loading ? (
-        <p className="text-sm py-8" style={{ color: "var(--text-muted)" }}>Loading tasks...</p>
-      ) : filtered.length === 0 ? (
-        <div className="card text-center py-12">
-          <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-            No tasks found. Create tasks in Linear with label &quot;{params.name}&quot;.
-          </p>
+        <div className="flex items-center justify-center py-20">
+          <div
+            className="w-6 h-6 border-2 rounded-full animate-spin"
+            style={{ borderColor: "var(--border)", borderTopColor: "var(--text-secondary)" }}
+          />
         </div>
       ) : (
-        <table className="w-full">
-          <thead>
-            <tr>
-              <th className="table-header">ID</th>
-              <th className="table-header">Title</th>
-              <th className="table-header">Status</th>
-              <th className="table-header">Priority</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((task) => (
-              <tr key={task.id} className="table-row cursor-pointer" onClick={() => setExpandedId(expandedId === task.id ? null : task.id)}>
-                <td className="table-cell font-mono text-sm" style={{ color: "var(--text-secondary)" }}>{task.identifier}</td>
-                <td className="table-cell">{task.title}</td>
-                <td className="table-cell"><span className="badge-active">{task.state}</span></td>
-                <td className="table-cell text-sm" style={{ color: "var(--text-muted)" }}>
-                  {["None", "Urgent", "High", "Medium", "Low"][task.priority] || "None"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-6">
+          {COLUMNS.map((col) => {
+            const items = filteredGrouped.get(col.key)!;
+            return (
+              <div
+                key={col.key}
+                className="p-3"
+                style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
+              >
+                {/* Column header */}
+                <div className="flex items-center gap-2 mb-3 pb-2" style={{ borderBottom: "1px solid var(--border)" }}>
+                  <span className="w-2 h-2 rounded-full" style={{ background: col.color }} />
+                  <span className="text-xs font-medium" style={{ color: col.color }}>
+                    {col.label}
+                  </span>
+                  <span
+                    className="text-[10px] px-1.5 py-0.5 ml-auto"
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-muted)" }}
+                  >
+                    {items.length}
+                  </span>
+                </div>
+
+                {/* Cards */}
+                <div className="space-y-2">
+                  {items.length === 0 ? (
+                    <p className="text-[11px] text-center py-4" style={{ color: "var(--text-muted)" }}>
+                      Ingen oppgaver
+                    </p>
+                  ) : (
+                    items.map((task) => (
+                      <TaskCard
+                        key={task.id}
+                        task={task}
+                        expanded={expanded === task.id}
+                        onToggle={() => setExpanded(expanded === task.id ? null : task.id)}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
+
+      {/* Create modal */}
+      {showCreate && (
+        <CreateTaskModal
+          repo={params.name}
+          onClose={() => setShowCreate(false)}
+          onCreated={() => {
+            setShowCreate(false);
+            loadTasks();
+          }}
+        />
+      )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Task Card ── */
+
+function TaskCard({
+  task,
+  expanded,
+  onToggle,
+}: {
+  task: TheFoldTask;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div
+      className="rounded-md p-2.5 cursor-pointer transition-colors"
+      style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
+      onClick={onToggle}
+    >
+      <div className="flex items-start gap-2">
+        <span
+          className="w-2 h-2 rounded-full flex-shrink-0 mt-1.5"
+          style={{ background: PRIORITY_COLORS[task.priority] || "var(--text-muted)" }}
+          title={PRIORITY_LABELS[task.priority] || "Normal"}
+        />
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-medium truncate" style={{ color: "var(--text-primary)" }}>
+            {task.title}
+          </p>
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+              {SOURCE_ICONS[task.source] || "\uD83D\uDC64"} {task.source}
+            </span>
+            {task.labels.length > 0 && (
+              <div className="flex gap-1">
+                {task.labels.slice(0, 2).map((l) => (
+                  <span
+                    key={l}
+                    className="text-[9px] px-1 py-0.5 rounded"
+                    style={{ background: "var(--bg-hover)", color: "var(--text-muted)" }}
+                  >
+                    {l}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Expanded details */}
+      {expanded && (
+        <div className="mt-3 pt-2 space-y-2" style={{ borderTop: "1px solid var(--border)" }}>
+          {task.description && (
+            <p className="text-[11px] whitespace-pre-wrap" style={{ color: "var(--text-secondary)" }}>
+              {task.description}
+            </p>
+          )}
+          <div className="flex items-center gap-3 text-[10px]" style={{ color: "var(--text-muted)" }}>
+            <span>Prioritet: {PRIORITY_LABELS[task.priority] || "Normal"}</span>
+            <span>Status: {task.status}</span>
+            <span>Opprettet: {new Date(task.createdAt).toLocaleDateString("nb-NO")}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Create Task Modal ── */
+
+function CreateTaskModal({
+  repo,
+  onClose,
+  onCreated,
+}: {
+  repo: string;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [priority, setPriority] = useState(3);
+  const [labels, setLabels] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!title.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await createTask({
+        title: title.trim(),
+        description: description.trim(),
+        repo,
+        priority,
+        labels: labels
+          .split(",")
+          .map((l) => l.trim())
+          .filter(Boolean),
+      });
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Kunne ikke opprette oppgave");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0" style={{ background: "rgba(0,0,0,0.6)" }} onClick={onClose} />
+      <div
+        className="relative w-full max-w-lg p-6 z-10"
+        style={{ background: "var(--bg-primary)", border: "1px solid var(--border)" }}
+      >
+        <h2 className="text-lg font-medium mb-4" style={{ color: "var(--text-primary)" }}>
+          Ny oppgave
+        </h2>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="section-label block mb-1.5">Tittel</label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="input-field w-full"
+              placeholder="Oppgavetittel..."
+              autoFocus
+            />
+          </div>
+
+          <div>
+            <label className="section-label block mb-1.5">Beskrivelse</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              className="input-field w-full"
+              rows={4}
+              placeholder="Beskriv oppgaven..."
+            />
+          </div>
+
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <label className="section-label block mb-1.5">Prioritet</label>
+              <select
+                value={priority}
+                onChange={(e) => setPriority(Number(e.target.value))}
+                className="input-field w-full"
+              >
+                <option value={1}>Haster</option>
+                <option value={2}>H&oslash;y</option>
+                <option value={3}>Normal</option>
+                <option value={4}>Lav</option>
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="section-label block mb-1.5">Labels (kommaseparert)</label>
+              <input
+                type="text"
+                value={labels}
+                onChange={(e) => setLabels(e.target.value)}
+                className="input-field w-full"
+                placeholder="f.eks. auth, frontend"
+              />
+            </div>
+          </div>
+
+          {error && (
+            <p className="text-xs" style={{ color: "var(--error)" }}>{error}</p>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <button type="button" onClick={onClose} className="btn-secondary text-sm">
+              Avbryt
+            </button>
+            <button type="submit" disabled={saving || !title.trim()} className="btn-primary text-sm">
+              {saving ? "Oppretter..." : "Opprett"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

@@ -100,8 +100,8 @@ describe("Sandbox service", () => {
         expect(result.output.length).toBeGreaterThan(0);
         expect(Array.isArray(result.errors)).toBe(true);
 
-        // Validation output should mention TypeScript
-        expect(result.output.toLowerCase()).toContain("typescript");
+        // Validation output should mention typecheck step
+        expect(result.output.toLowerCase()).toContain("typecheck");
       }
     );
 
