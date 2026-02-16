@@ -9,126 +9,154 @@ export interface AgentStep {
   detail?: string;
 }
 
-interface AgentStatusProps {
+export interface AgentStatusData {
+  phase: string;
+  title: string;
   steps: AgentStep[];
-  currentPhase: string;
-  subPhase?: string;
-  progress?: { current: number; total: number } | number;
-  isComplete?: boolean;
+  error?: string;
 }
 
-const ICON_MAP: Record<string, string> = {
-  search: "\u{1F50D}",
-  sparkle: "\u2728",
-  code: "\u{1F4BB}",
-  file: "\u{1F4C4}",
-  test: "\u{1F9EA}",
-  deploy: "\u{1F680}",
-  error: "\u26A1",
-  check: "\u2713",
-  service: "\u{1F517}",
-  chart: "\u{1F4CA}",
-};
+/** Phase-specific icon for the tab */
+function PhaseIcon({ phase }: { phase: string }) {
+  if (phase === "Ferdig") return <span className="text-green-500 text-sm">{"\u2713"}</span>;
+  if (phase === "Feilet") return <span className="text-red-500 text-sm">{"\u2715"}</span>;
 
-export function AgentStatus({ steps, currentPhase, subPhase, progress, isComplete }: AgentStatusProps) {
+  if (phase === "Forbereder") {
+    return (
+      <div className="grid grid-cols-2 gap-0.5 w-3.5 h-3.5">
+        <div className="w-1.5 h-1.5 agent-grid-blink-1" style={{ background: "var(--text-primary)" }} />
+        <div className="w-1.5 h-1.5 agent-grid-blink-2" style={{ background: "var(--text-primary)" }} />
+        <div className="w-1.5 h-1.5 agent-grid-blink-3" style={{ background: "var(--text-primary)" }} />
+        <div className="w-1.5 h-1.5 agent-grid-blink-4" style={{ background: "var(--text-primary)" }} />
+      </div>
+    );
+  }
+
+  if (phase === "Analyserer") {
+    return (
+      <svg className="w-3.5 h-3.5 agent-phase-pulse" viewBox="0 0 20 20" fill="currentColor" style={{ color: "var(--text-primary)" }}>
+        <path fillRule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" />
+      </svg>
+    );
+  }
+
+  if (phase === "Planlegger") {
+    return (
+      <svg className="w-3.5 h-3.5 agent-phase-pulse" viewBox="0 0 20 20" fill="currentColor" style={{ color: "var(--text-primary)" }}>
+        <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
+        <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" />
+      </svg>
+    );
+  }
+
+  if (phase === "Bygger") {
+    return (
+      <svg className="w-3.5 h-3.5 agent-build-swing" viewBox="0 0 20 20" fill="currentColor" style={{ color: "var(--text-primary)" }}>
+        <path fillRule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" />
+      </svg>
+    );
+  }
+
+  if (phase === "Reviewer") {
+    return (
+      <svg className="w-3.5 h-3.5 agent-phase-pulse" viewBox="0 0 20 20" fill="currentColor" style={{ color: "var(--text-primary)" }}>
+        <path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
+        <path fillRule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" />
+      </svg>
+    );
+  }
+
+  if (phase === "Utfører") {
+    return (
+      <svg className="w-3.5 h-3.5 agent-spin-slow" viewBox="0 0 20 20" fill="currentColor" style={{ color: "var(--text-primary)" }}>
+        <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" />
+      </svg>
+    );
+  }
+
+  // Default: Tenker, Genererer, etc.
+  return <span className="inline-block agent-spinner-small" />;
+}
+
+export function AgentStatus({ data }: { data: AgentStatusData }) {
   const [collapsed, setCollapsed] = useState(false);
-
-  const progressObj = typeof progress === "number"
-    ? null
-    : progress;
+  const isFailed = data.phase === "Feilet";
+  const isComplete = data.phase === "Ferdig";
 
   return (
-    <div className="my-3 max-w-md message-enter">
-      {/* Header with TF icon + animated phase text */}
+    <div className="my-3 max-w-lg message-enter">
+      {/* TAB — fase-indikator */}
       <div
-        className="flex items-center gap-3 px-4 py-3 cursor-pointer"
-        style={{ border: "1px solid var(--border)", borderBottom: collapsed ? "1px solid var(--border)" : "none" }}
+        className="inline-flex items-center gap-2 px-4 py-2 cursor-pointer"
+        style={{
+          border: "1px solid var(--border)",
+          borderBottom: collapsed ? "1px solid var(--border)" : "none",
+          background: isFailed ? "rgba(239,68,68,0.08)" : "transparent",
+        }}
         onClick={() => setCollapsed(!collapsed)}
       >
-        {/* TF icon with pulse */}
-        <div className="relative shrink-0">
-          <div className="w-8 h-8 flex items-center justify-center" style={{ border: "1px solid var(--border)" }}>
-            <span className="font-brand text-xs" style={{ color: "var(--text-primary)" }}>TF</span>
-          </div>
-          {!isComplete && <div className="absolute -top-1 -right-1 agent-pulse" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--success)" }} />}
-        </div>
-
-        {/* Phase text with shimmer */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span
-              className={`text-sm font-medium ${!isComplete ? "agent-shimmer" : ""}`}
-              style={{ color: "var(--text-primary)" }}
-            >
-              {currentPhase}
-            </span>
-            {progressObj && (
-              <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                ({progressObj.current}/{progressObj.total})
-              </span>
-            )}
-          </div>
-          {subPhase && (
-            <span className="text-xs block truncate agent-typing" style={{ color: "var(--text-muted)" }}>
-              {subPhase}
-            </span>
-          )}
-        </div>
-
-        {/* Collapse chevron */}
-        <svg
-          className={`w-4 h-4 shrink-0 transition-transform duration-200 ${collapsed ? "-rotate-90" : ""}`}
-          style={{ color: "var(--text-muted)" }}
-          viewBox="0 0 20 20" fill="currentColor"
+        <PhaseIcon phase={data.phase} />
+        <span
+          className={`text-sm font-medium ${!isComplete && !isFailed ? "agent-shimmer" : ""}`}
+          style={{ color: isFailed ? "#ef4444" : "var(--text-primary)" }}
         >
-          <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
-        </svg>
+          {data.phase}
+        </span>
       </div>
 
-      {/* Steps list */}
-      {!collapsed && steps.length > 0 && (
-        <div style={{ border: "1px solid var(--border)", borderTop: "none" }}>
-          {steps.map((step, i) => (
+      {/* BOKS — innhold */}
+      {!collapsed && (
+        <div style={{ border: "1px solid var(--border)" }}>
+          {/* Tittel */}
+          <div
+            className="px-4 py-3"
+            style={{ borderBottom: data.steps.length > 0 || data.error ? "1px solid rgba(255,255,255,0.06)" : "none" }}
+          >
+            <span className="text-sm" style={{ color: "var(--text-primary)" }}>
+              {data.title}
+            </span>
+          </div>
+
+          {/* Feilmelding */}
+          {data.error && (
+            <div className="px-4 py-3" style={{ background: "rgba(239,68,68,0.05)" }}>
+              <span className="text-sm" style={{ color: "#ef4444" }}>{data.error}</span>
+            </div>
+          )}
+
+          {/* Steg-liste */}
+          {data.steps.map((step, i) => (
             <div
               key={i}
-              className="flex items-center gap-3 px-4 py-2.5"
+              className="flex items-center gap-3 px-4 py-2"
               style={{
-                borderBottom: i < steps.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none",
+                borderBottom: i < data.steps.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none",
                 animation: step.status === "active" ? "none" : `agent-step-enter 0.3s ease-out ${i * 0.08}s both`,
               }}
             >
-              {/* Icon */}
+              {/* Status-ikon */}
               <span className="w-5 text-center shrink-0">
-                {step.status === "active" ? (
-                  <span className="inline-block agent-spinner-small" />
-                ) : step.status === "done" ? (
-                  <span className="text-green-500 text-sm agent-check-in">{"\u2713"}</span>
-                ) : step.status === "error" ? (
-                  <span className="text-red-500 text-sm">{"\u2715"}</span>
-                ) : (
-                  <span className="text-sm opacity-30">{ICON_MAP[step.icon || ""] || "\u25CB"}</span>
-                )}
+                {step.status === "done" && <span className="text-green-500 text-sm agent-check-in">{"\u2713"}</span>}
+                {step.status === "active" && <span className="inline-block agent-spinner-small" />}
+                {step.status === "error" && <span className="text-red-500 text-sm">{"\u2715"}</span>}
+                {step.status === "pending" && <span style={{ color: "rgba(255,255,255,0.2)" }}>{"\u25CB"}</span>}
               </span>
 
-              {/* Label with shimmer when active */}
+              {/* Label */}
               <span
-                className={`text-sm flex-1 ${step.status === "active" ? "agent-shimmer" : ""}`}
+                className={`text-sm ${step.status === "active" ? "agent-shimmer" : ""}`}
                 style={{
                   color: step.status === "done" ? "var(--text-muted)"
                     : step.status === "active" ? "var(--text-primary)"
+                    : step.status === "error" ? "#ef4444"
                     : "rgba(255,255,255,0.25)",
-                  textDecoration: step.status === "done" ? "line-through" : "none",
-                  textDecorationColor: "rgba(255,255,255,0.15)",
                 }}
               >
                 {step.label}
               </span>
 
-              {/* Detail */}
               {step.detail && (
-                <span className="text-xs shrink-0" style={{ color: "var(--text-muted)" }}>
-                  {step.detail}
-                </span>
+                <span className="text-xs ml-auto" style={{ color: "var(--text-muted)" }}>{step.detail}</span>
               )}
             </div>
           ))}
@@ -138,8 +166,8 @@ export function AgentStatus({ steps, currentPhase, subPhase, progress, isComplet
   );
 }
 
-/** Parse builder progress messages into AgentStep format */
-export function parseAgentMessage(content: string): AgentStep[] | null {
+/** Parse builder progress messages into AgentStatusData format */
+export function parseAgentMessage(content: string): AgentStatusData | null {
   if (!content.startsWith("Builder:")) return null;
 
   const phases = ["init", "scaffold", "dependencies", "implement", "integrate", "finalize"];
@@ -149,7 +177,7 @@ export function parseAgentMessage(content: string): AgentStep[] | null {
   const currentPhase = match[1];
   const status = match[4];
 
-  return phases.map((phase) => {
+  const steps: AgentStep[] = phases.map((phase) => {
     const phaseIdx = phases.indexOf(phase);
     const currentIdx = phases.indexOf(currentPhase);
 
@@ -164,4 +192,10 @@ export function parseAgentMessage(content: string): AgentStep[] | null {
       status: stepStatus,
     };
   });
+
+  return {
+    phase: "Bygger",
+    title: `Fase: ${currentPhase}`,
+    steps,
+  };
 }

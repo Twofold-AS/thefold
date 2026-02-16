@@ -1,8 +1,8 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.0 - Grunnmur-oppgradering fullført
-> **Sist oppdatert:** 14. februar 2026
-> **Status:** Fase 1-3 ferdig (KOMPLETT). Se GRUNNMUR-STATUS.md for detaljert feature-status.
+> **Versjon:** 3.2 - Kostnads-dashboard + Skills-forenkling + Repo-header redesign
+> **Sist oppdatert:** 16. februar 2026
+> **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
 ---
 
@@ -46,9 +46,9 @@
 ## Nåværende Status
 
 ### ✅ Ferdig og Testet — Backend Services (83+ tester)
-- **chat-service:** CRUD, JSONB metadata, paginering, context transfer, Pub/Sub subscribers (agent reports, build progress, task events, healing events)
+- **chat-service:** CRUD, JSONB metadata, paginering, context transfer, Pub/Sub subscribers (agent reports, build progress, task events, healing events), file upload (500KB), source tracking
 - **memory-service:** pgvector embeddings, cosine similarity søk, cache-integrasjon
-- **ai-service:** Claude API, multi-provider (Claude/GPT/Moonshot), JSON parsing, model routing, generateFile, fixFile
+- **ai-service:** Claude API, multi-provider (Claude/GPT/Moonshot), JSON parsing, model routing, generateFile, fixFile, tool-use (5 tools, function calling)
 - **github-service:** tree (med cache), file, findRelevantFiles, createPR, getFileChunk, getFileMetadata
 - **sandbox-service:** create, writeFile, validate, validateIncremental, destroy, sikkerhetstester
 - **linear-service:** getAssignedTasks, getTask, updateTask
@@ -59,6 +59,7 @@
 - **tasks-service:** CRUD, Linear sync, AI planning, Pub/Sub, statistikk (32 tester)
 - **builder-service:** 6 faser, dependency graph, topologisk sortering, fix-loop, Pub/Sub (43 tester)
 - **gateway:** HMAC auth handler, createToken (intern)
+- **integrations-service:** CRUD config, Slack webhook, Discord webhook
 
 ### ✅ Ferdig — Fase 1 (Foundation + Auth)
 - **Steg 1.1 — Users + OTP Auth:** E-post OTP via Resend, rate limiting, audit logging, HMAC token med 7-dagers utløp, frontend OTP-flyt
@@ -113,9 +114,9 @@ Mange features har grunnmur (database-felter, interfaces, stub-implementeringer)
 **Nøkkeltall:**
 | Status | Antall |
 |--------|--------|
-| 🟢 AKTIVE | 195 |
-| 🟡 STUBBEDE (kode finnes, passthrough) | 5 |
-| 🔴 GRUNNMUR (DB-felter/interfaces) | 22 |
+| 🟢 AKTIVE | 260+ |
+| 🟡 STUBBEDE (kode finnes, passthrough) | 2 |
+| 🔴 GRUNNMUR (DB-felter/interfaces) | 19 |
 | ⚪ PLANLAGTE (ingen kode) | 9 |
 
 **Nylig aktiverte features (fra stubb til aktiv):**
@@ -130,7 +131,7 @@ Mange features har grunnmur (database-felter, interfaces, stub-implementeringer)
 - Sandbox `snapshot` / `performance` steg — pipeline-plass finnes, `enabled: false`
 - ~~Linear `updateTask` — kall fungerer men state-mapping er ufullstendig~~ ✅ State-mapping implementert
 - 1 frontend-side uten full backend: LivePreview
-- /tools/secrets — API finnes (GET /gateway/secrets-status), frontend ikke koblet ennå
+- ~~/tools/secrets — API finnes (GET /gateway/secrets-status), frontend ikke koblet ennå~~ ✅ Koblet
 
 **Viktigste grunnmur-felter klare for implementering:**
 - `memories.parent_memory_id` — hierarkisk minne-traversering
@@ -170,27 +171,28 @@ Mange features har grunnmur (database-felter, interfaces, stub-implementeringer)
 
 ## Arkitektur
 
-### Backend: Encore.ts (13 mikrotjenester)
+### Backend: Encore.ts (16 mikrotjenester)
 
 ```
 thefold/
-├── gateway/     → Auth (Bearer token med HMAC-signatur)
-├── users/       → OTP-basert auth, profiler, preferences
-├── chat/        → Meldingshistorikk (PostgreSQL), healing-notifications
-├── ai/          → Multi-AI orkestering (Claude, GPT-4o, Moonshot)
-├── agent/       → Den autonome hjernen - koordinerer hele flyten
-├── github/      → Leser/skriver kode via GitHub API
-├── sandbox/     → Isolert kodevalidering med sikkerhet
-├── linear/      → Task-henting og statusoppdatering
-├── tasks/       → TheFold task engine: CRUD, Linear sync, AI planning
-├── builder/     → Fil-for-fil kodebygging med avhengighetsanalyse
-├── memory/      → pgvector semantic search, code patterns
-├── docs/        → Context7 MCP for oppdatert dokumentasjon
-├── cache/       → PostgreSQL caching for embeddings, repo struktur, AI svar
-├── skills/      → Dynamiske instruksjoner for AI
-├── mcp/         → MCP server registry: install/uninstall/configure
-├── monitor/     → Health checks, dependency audit
-└── registry/    → Component marketplace grunnmur + healing pipeline
+├── gateway/      → Auth (Bearer token med HMAC-signatur)
+├── users/        → OTP-basert auth, profiler, preferences
+├── chat/         → Meldingshistorikk (PostgreSQL), healing-notifications, fil-opplasting
+├── ai/           → Multi-AI orkestering (Claude, GPT-4o, Moonshot), tool-use
+├── agent/        → Den autonome hjernen - koordinerer hele flyten
+├── github/       → Leser/skriver kode via GitHub API
+├── sandbox/      → Isolert kodevalidering med sikkerhet
+├── linear/       → Task-henting og statusoppdatering
+├── tasks/        → TheFold task engine: CRUD, Linear sync, AI planning
+├── builder/      → Fil-for-fil kodebygging med avhengighetsanalyse
+├── memory/       → pgvector semantic search, code patterns
+├── docs/         → Context7 MCP for oppdatert dokumentasjon
+├── cache/        → PostgreSQL caching for embeddings, repo struktur, AI svar
+├── skills/       → Dynamiske instruksjoner for AI
+├── mcp/          → MCP server registry: install/uninstall/configure
+├── integrations/ → Eksterne webhooks (Slack, Discord), CRUD config
+├── monitor/      → Health checks, dependency audit
+└── registry/     → Component marketplace grunnmur + healing pipeline
 ```
 
 ### Frontend: Next.js 15 Dashboard
@@ -201,9 +203,8 @@ Sider:
 ├── /home                     → Oversikt, stats, recent activity
 ├── /chat                     → Hovedchat (cross-repo)
 ├── /environments             → Alle repoer
-├── /integrations             → [NY] MCP App Store
-├── /marketplace              → [FREMTIDIG] Component marketplace
-├── /templates                → [NY] Pre-built templates
+├── /marketplace              → Component marketplace (browse + search)
+├── /templates                → Pre-built templates
 ├── /skills                   → [NY] Skills management
 ├── /settings
 │   ├── /preferences          → [NY] Vibe sliders
@@ -725,12 +726,59 @@ Sider:
 6. ✅ API-lag: 9 nye funksjoner (listComponents, searchComponents, getComponent, useComponent, getHealingStatus, listTemplates, getTemplate, useTemplate, getTemplateCategories)
 7. ✅ Tester: ~10 template-tester + 4 marketplace-tester
 
+**✅ Chat Tool-Use / Function Calling (DEL 1):**
+1. ✅ 5 tools i ai/ai.ts: create_task, start_task, list_tasks, read_file, search_code
+2. ✅ executeToolCall dispatcher til ekte services (tasks, github)
+3. ✅ callAnthropicWithTools two-call flow (tool_use → execute → final response)
+4. ✅ System prompt oppdatert med verktoy-instruksjoner
+5. ✅ Dynamic AgentStatus: processAIResponse bygger steg basert pa intent-deteksjon
+6. ✅ Animated PhaseIcons: per-fase SVG-ikoner med CSS-animasjoner (grid-blink, pulse, clipboard, lightning, eye, gear)
+
+**✅ Integrations Service (DEL 2):**
+1. ✅ `integrations/` Encore.ts service med PostgreSQL database (integration_configs tabell)
+2. ✅ CRUD endepunkter: list, save, delete
+3. ✅ Slack webhook endpoint
+4. ✅ Discord webhook endpoint
+5. ✅ Frontend /tools/integrations med Slack + Discord config-skjemaer
+
+**✅ File Upload/Download (DEL 3):**
+1. ✅ chat_files tabell (migrasjon 4)
+2. ✅ POST /chat/upload endpoint (500KB grense)
+3. ✅ Frontend fil-velger via + meny
+4. ✅ CodeBlock nedlastingsknapp for navngitte kodeblokker
+
+**✅ Chat Source Field (DEL 4):**
+1. ✅ source-kolonne i messages-tabell
+2. ✅ SendRequest.source param ("web"|"slack"|"discord"|"api")
+
 **Gjenstår:**
 1. AI-basert auto-ekstraksjon (aktivér registry/extractor.ts)
 2. Semantisk komponent-matching via memory.searchPatterns()
 3. Cross-project bug propagation via healing pipeline
 4. Komponent-signering (OWASP ASI04 Supply Chain)
 5. Koble skills.marketplace_id til registry components
+
+**✅ Kostnads-dashboard + Skills-forenkling + Repo-header redesign (prompt.md):**
+
+*DEL 1 — Kostnads-dashboard:*
+1. ✅ `GET /chat/costs` endepunkt i chat/chat.ts — aggregerer today/week/month/perModel/dailyTrend fra messages metadata
+2. ✅ `/settings/costs` frontend side — 3 kostnadskort, per-modell-tabell, 14-dagers CSS-bar-chart
+3. ✅ Budget alert i processAIResponse — $5/dag terskel, console.warn ved overskridelse
+4. ✅ `getCostSummary` + cost types lagt til i api.ts
+5. ✅ "Kostnader" lenke i settings-siden
+
+*DEL 2 — Skills-forenkling:*
+1. ✅ `resolve()` i skills/engine.ts forenklet — fjernet depends_on, conflicts_with, fase-gruppering — nå: scope filter → routing match → token budget → build prompt
+2. ✅ skills/page.tsx forenklet — fjernet pipeline viz, categories, phases, confidence bars — beholdt: grid + toggle + slide-over + create/edit
+3. ✅ Dynamic scope dropdown populert fra listRepos("Twofold-AS") API
+4. ✅ Migration 6: deaktiverer 3 generiske seeded skills (Norwegian Docs, Test Coverage, Project Conventions)
+
+*DEL 3 — Repo-header redesign:*
+1. ✅ PageHeaderBar.tsx forenklet — fjernet cells/tabs prop, lagt til subtitle prop
+2. ✅ Alle 5 repo-sider bruker per-page headers (title="Oversikt"/"Oppgaver"/"Reviews"/"Aktivitet", subtitle=repo name)
+3. ✅ Tasks-side: "Ny oppgave" + "Synk fra Linear" knapper flyttet til PageHeaderBar actions
+4. ✅ Overview-side: helse-indikator i header actions, shortcuts-kort (2x2 grid: Chat/Oppgaver/Aktivitet/Reviews)
+5. ✅ Tab-navigasjon fjernet fra alle repo-sider
 
 **✅ Sub-agenter (Multi-Agent AI Orkestrering):**
 1. ✅ `ai/sub-agents.ts` — 6 roller (planner, implementer, tester, reviewer, documenter, researcher), 3 budsjettmodi
@@ -742,6 +790,23 @@ Sider:
 7. ✅ Frontend: toggle + kostnadsvisning i /tools/ai-models
 8. ✅ `ai/sub-agents.test.ts` — ~15 tester (roller, planlegging, merging, kostnad)
 9. ✅ Audit: sub_agent_started + sub_agent_completed events
+
+**✅ Token-sporing og Truncation Handling:**
+1. ✅ `ai/ai.ts` — ChatResponse type med `usage: { inputTokens, outputTokens, totalTokens }`, `truncated: boolean`
+2. ✅ Alle AI-providere (Anthropic, OpenAI, Moonshot) propagerer usage data gjennom chat endpoint
+3. ✅ `chat/chat.ts` — processAIResponse håndterer truncation (oppdager stop_reason="max_tokens"), appender melding til bruker
+4. ✅ Token-metadata (model, tokens, cost, stopReason, truncated, toolsUsed) lagret i messages.metadata JSONB
+5. ✅ Frontend viser token-info (model, tokens, kostnad) under AI-meldinger i begge chat-sider
+6. ✅ max_tokens allerede satt til 8192 (ingen endring nødvendig)
+7. ✅ PRICING allerede i router.ts MODEL_REGISTRY (ingen endring nødvendig)
+
+**✅ Repo Activity Logging:**
+1. ✅ Ny `repo_activity` tabell (chat/migrations/5_add_repo_activity.up.sql)
+2. ✅ `logRepoActivity()` helper logger chat, tool_use, ai_response events
+3. ✅ `GET /chat/activity/:repoName` endpoint returnerer aktiviteter
+4. ✅ Activity-siden (/repo/[name]/activity) henter repo_activity events sammen med eksisterende audit/task/builder events
+5. ✅ `getRepoActivity()` lagt til frontend api.ts
+6. ✅ Server-side repo-filtrering for ytelse
 
 ---
 
@@ -942,22 +1007,48 @@ Basert på gjennomgang av `OWASP-2025-2026-Report.md` (OWASP Top 10:2025, ASVS 5
 
 ## 🚀 Status per februar 2026
 
-**Fase 1-4 er KOMPLETT. Fase 5 Del 1 er ferdig.** Totalt 310+ tester, 230+ aktive features, 15 Encore.ts-tjenester.
+**Fase 1-4 er KOMPLETT. Fase 5 Del 1 er ferdig.** Totalt 310+ tester, 260+ aktive features, 16 Encore.ts-tjenester.
 
 - **Fase 1** (Foundation + Auth): OTP login, PostgreSQL cache, confidence scoring
 - **Fase 2** (Core Intelligence): Skills pipeline, audit logging, context windowing, incremental validation, multi-model routing, memory decay
 - **Fase 3** (Integration & Polish): Frontend (12 sider koblet), review system (6 API-endepunkter, /review sider), project orchestrator (curateContext, executeProject, chat-deteksjon), E2E-tester (25 tester, 21 bestått, 4 skip)
 - **Fase 4** (Omstrukturering): Task Engine, Builder Service, Tools Frontend, Settings Redesign, Repo-sidebar Redesign, Registry/Marketplace Grunnmur (8 endepunkter, healing pipeline, Pub/Sub, 15 tester)
 - **Fase 5 Del 1** (Marketplace + Templates): Marketplace frontend (/marketplace + detalj), Templates service (4 endepunkter, 5 pre-seeded maler), exposed useComponent, sidebar/tools nav, 9 nye API-funksjoner, ~14 nye tester
+- **Fase 5 Del 1-4** (Chat + Integrations): Chat tool-use (5 tools, function calling), dynamic AgentStatus med animated phase icons, integrations/ service (Slack+Discord webhooks), file upload/download, chat source field, token tracking + truncation handling, repo activity logging
 
 Alle OWASP-tiltak implementert: token-revokering, CORS, exponential backoff, sanitisering, circuit breaker.
-Backend integrasjon: Linear state-mapping, secrets status API, Pub/Sub subscribers (build progress + task events), aktivitet-tidslinje med server-side repo-filtrering.
+Backend integrasjon: Linear state-mapping, secrets status API, Pub/Sub subscribers (build progress + task events), aktivitet-tidslinje med server-side repo-filtrering, token usage tracking, repo activity logging.
 
 MCP Backend: mcp/ service, 6 endepunkter, pre-seeded 6 servere, agent-integrasjon (STEP 3.5), frontend koblet.
+
+Chat tool-use: 5 tools (create_task, start_task, list_tasks, read_file, search_code), callAnthropicWithTools two-call flow, executeToolCall dispatcher, dynamic AgentStatus med animated phase icons.
+Integrations: integrations/ service med integration_configs tabell, CRUD, Slack+Discord webhooks, frontend /tools/integrations.
+File upload: chat_files tabell, POST /chat/upload (500KB), frontend fil-velger, CodeBlock download.
+Chat source: source-kolonne i messages, SendRequest.source ("web"|"slack"|"discord"|"api").
 
 Bug-fiks runde 2: Agent-synlighet i chat (progress-meldinger, agent_status messageType, smart polling idle/waiting/cooldown), custom chat header med ekte ModelSelector + SkillsSelector, optimistisk bruker-rendering, font-mono cleanup, PageHeaderBar 56px + subtil aktiv tab.
 
 Chat timeout-fiks + agent-synlighet: Backend async sendMessage (fire-and-forget), withTimeout på alle eksterne kall (memory 5s, AI 60s), cancelGeneration endpoint, frontend stopp-knapp, redesignet "TheFold tenker" (TF-ikon + brand-shimmer + agent-dots + stopp), brand-shimmer i sidebar, AI system prompt norsk/konversasjonelt, 6 nye CSS-animasjoner (agent-shimmer, agent-spinner-small, agent-step-enter, brand-shimmer, agent-dots, agent-check-in).
+
+DB-fiks + Heartbeat + Agent-boks: Migrasjon 3 (agent_status CHECK + updated_at), heartbeat hvert 10s i processAIResponse, try/catch per steg (skills/memory/AI), detectMessageIntent med 4 intent-typer og ulike steg, AgentStatus redesignet til tab+boks med tittel+feilmelding, send-knapp → stopp-sirkel (som Claude), heartbeat-lost UI (30s timeout), TF-ikon fjernet, updated_at i alle queries og frontend Message type.
+
+Chat-polish: Samtale-tittel bruker første USER-melding (filtrerer bort agent_status JSON fra tittel/preview), "TheFold tenker..." deduplisert (kun vist før første agent_status ankomst), fase-spesifikke ikoner i AgentStatus tab (forstørrelsesglass for Analyserer, wrench for Bygger, spinner for Tenker/Genererer, check/X for Ferdig/Feilet), ny agent-phase-pulse CSS-animasjon.
+
+Chat-rendering + emoji-forbud: Emoji-forbud i direct_chat system prompt (ai/ai.ts), ny CodeBlock-komponent (collapsible, filnavn, språk-badge, kopier, linjenumre), ny ChatMessage markdown-parser (kodeblokker→CodeBlock, overskrifter, lister, bold/italic/inline-kode), integrert i begge chat-sider (assistant-meldinger rendres med ChatMessage).
+
+System prompt + repo-kontekst: Fullstendig overhaul av direct_chat system prompt — AI vet at den ER TheFold, kjenner alle 17 services, frontend-stack, regler (norsk, ingen emojier, konsis). repoName-pipeline: repo-chat sender params.name → SendRequest.repoName → processAIResponse → ai.chat → system prompt ("Du ser på repoet: X"). Hoved-chat sender IKKE repoName — AI svarer generelt.
+
+GitHub fil-kontekst i chat: processAIResponse henter nå FAKTISK repo-innhold fra GitHub. Steg 4.5: getTree → findRelevantFiles → getFile (topp 5, 200 linjer per fil). repoContext injiseres i ai.chat system prompt med anti-hallusinering ("basér KUN på faktisk kode"). Fallback til nøkkelfiler (package.json, README, encore.app). Agent status-oppdateringer for hvert GitHub-steg.
+
+Chat UI forbedringer: Input-boks — + ikon (borderless, 32px), textarea, send-knapp i horisontal rad med flex gap-2 items-end. Textarea: minHeight 56px, maxHeight 150px. Meldinger bredere — container max-w-4xl, bruker-meldinger 70%, AI-meldinger 85%. Scrollbar-padding px-4. Begge chat-sider (hoved + repo) oppdatert identisk.
+
+Robusthet-fikser: (1) Tomt repo → AI får eksplisitt "repoet er TOMT" melding, ingen hallusinering. (2) Memory-prioritering — system prompt sier minner er hint, fil-kontekst er sannhet. (3) Skills UUID[] fix — depends_on::text[] cast i resolve() fikser Encore "unsupported type: UuidArray". (4) Debug console.logs fjernet.
+
+Token-sporing + Repo Activity: ChatResponse propagerer usage data (inputTokens, outputTokens, totalTokens) fra alle AI-providere. processAIResponse detekterer truncation (stop_reason="max_tokens") og appender melding til bruker. Token-metadata (model, tokens, kostnad, stopReason, truncated, toolsUsed) lagres i messages.metadata JSONB. Frontend viser token-info under AI-meldinger. Repo activity logging via ny repo_activity tabell — logRepoActivity() helper logger chat, tool_use, ai_response events. GET /chat/activity/:repoName endpoint returnerer repo-spesifikke aktiviteter. Activity-siden koblet til både audit, tasks, builder og nye repo_activity events med server-side filtrering.
+
+Kostnads-dashboard: GET /chat/costs endpoint, /settings/costs frontend (3 kort, per-modell-tabell, 14-dagers bar-chart), budget alert ($5/dag).
+Skills-forenkling: resolve() forenklet (fjernet depends_on/conflicts_with/fase-gruppering), frontend forenklet (fjernet pipeline viz/categories/phases/confidence bars), dynamic scope dropdown, migration 6 (deaktiverer 3 generiske skills).
+Repo-header redesign: PageHeaderBar forenklet (subtitle prop), per-page headers i alle 5 repo-sider, tab-navigasjon fjernet, overview shortcuts-kort (2x2 grid).
 
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.
 

@@ -1,15 +1,16 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Plus, Sparkles, ListTodo, ArrowRight, X } from "lucide-react";
+import { Plus, Sparkles, ListTodo, ArrowRight, Upload, X } from "lucide-react";
 
 interface ChatToolsMenuProps {
   onCreateSkill: () => void;
   onCreateTask: () => void;
+  onUploadFile?: () => void;
   onTransfer?: () => void;
 }
 
-export function ChatToolsMenu({ onCreateSkill, onCreateTask, onTransfer }: ChatToolsMenuProps) {
+export function ChatToolsMenu({ onCreateSkill, onCreateTask, onUploadFile, onTransfer }: ChatToolsMenuProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -24,6 +25,7 @@ export function ChatToolsMenu({ onCreateSkill, onCreateTask, onTransfer }: ChatT
   }, [open]);
 
   const items = [
+    ...(onUploadFile ? [{ icon: Upload, label: "Last opp fil", action: onUploadFile }] : []),
     { icon: Sparkles, label: "Opprett ny skill", action: onCreateSkill },
     { icon: ListTodo, label: "Opprett task", action: onCreateTask },
     ...(onTransfer ? [{ icon: ArrowRight, label: "Overfor til repo", action: onTransfer }] : []),
@@ -35,11 +37,11 @@ export function ChatToolsMenu({ onCreateSkill, onCreateTask, onTransfer }: ChatT
         onClick={() => setOpen(!open)}
         className="flex items-center justify-center transition-colors"
         style={{
-          width: "44px",
-          height: "44px",
+          width: "32px",
+          height: "32px",
           background: "transparent",
           color: open ? "var(--text-primary)" : "var(--text-muted)",
-          border: "1px solid var(--border)",
+          border: "none",
           flexShrink: 0,
           cursor: "pointer",
         }}

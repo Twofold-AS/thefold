@@ -9,6 +9,7 @@ const TABS = [
   { label: "Oppgaver", href: "/tools/tasks" },
   { label: "Minne", href: "/tools/memory" },
   { label: "MCP", href: "/tools/mcp" },
+  { label: "Integrasjoner", href: "/tools/integrations" },
   { label: "Observability", href: "/tools/observability" },
   { label: "Secrets", href: "/tools/secrets" },
   { label: "Templates", href: "/tools/templates" },

@@ -1,14 +1,16 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, usePathname } from "next/navigation";
+import { useParams } from "next/navigation";
 import {
   listAuditLog,
   listTheFoldTasks,
   listBuilderJobs,
+  getRepoActivity,
   type AuditLogEntry,
   type TheFoldTask,
   type BuilderJobSummary,
+  type RepoActivityEvent,
 } from "@/lib/api";
 import { PageHeaderBar } from "@/components/PageHeaderBar";
 
@@ -88,6 +90,36 @@ function builderToEvent(job: BuilderJobSummary): TimelineEvent {
   };
 }
 
+function repoActivityToEvent(a: RepoActivityEvent): TimelineEvent {
+  const typeMap: Record<string, string> = {
+    chat: "chat",
+    ai_response: "agent",
+    tool_use: "builder",
+    task_created: "task",
+    file_uploaded: "builder",
+  };
+  const cat = typeMap[a.eventType] || "agent";
+  const style = CATEGORY_STYLE[cat] || CATEGORY_STYLE.agent;
+  let detail = a.description || undefined;
+  if (a.metadata) {
+    try {
+      const meta = typeof a.metadata === "string" ? JSON.parse(a.metadata) : a.metadata;
+      if (meta.model) detail = `${meta.model}`;
+      if (meta.tokens) detail = (detail ? detail + " " : "") + `${meta.tokens} tokens`;
+      if (meta.cost) detail = (detail ? detail + " " : "") + `$${Number(meta.cost).toFixed(4)}`;
+    } catch { /* ignore */ }
+  }
+  return {
+    id: `activity-${a.id}`,
+    time: new Date(a.createdAt),
+    icon: style.icon,
+    category: cat,
+    title: a.title,
+    detail,
+    color: style.color,
+  };
+}
+
 function formatTime(date: Date): string {
   return date.toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
 }
@@ -110,7 +142,6 @@ function groupByDate(events: TimelineEvent[]): Map<string, TimelineEvent[]> {
 
 export default function RepoActivityPage() {
   const params = useParams<{ name: string }>();
-  const pathname = usePathname();
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -118,16 +149,18 @@ export default function RepoActivityPage() {
     async function load() {
       setLoading(true);
       try {
-        const [auditRes, tasksRes, builderRes] = await Promise.all([
+        const [auditRes, tasksRes, builderRes, activityRes] = await Promise.all([
           listAuditLog({ repoName: params.name, limit: 50 }).catch(() => ({ entries: [], total: 0 })),
           listTheFoldTasks({ repo: params.name, limit: 30 }).catch(() => ({ tasks: [], total: 0 })),
           listBuilderJobs({ repo: params.name, limit: 20 }).catch(() => ({ jobs: [], total: 0 })),
+          getRepoActivity(params.name).catch(() => ({ activities: [] })),
         ]);
 
         const allEvents: TimelineEvent[] = [
           ...auditRes.entries.map(auditToEvent),
           ...tasksRes.tasks.map(taskToEvent),
           ...builderRes.jobs.map(builderToEvent),
+          ...activityRes.activities.map(repoActivityToEvent),
         ];
 
         // Sort by time, newest first
@@ -147,14 +180,8 @@ export default function RepoActivityPage() {
   return (
     <div>
       <PageHeaderBar
-        title={params.name}
-        cells={[
-          { label: "Oversikt", href: `/repo/${params.name}/overview`, active: pathname.includes("/overview") },
-          { label: "Chat", href: `/repo/${params.name}/chat`, active: pathname.includes("/chat") },
-          { label: "Oppgaver", href: `/repo/${params.name}/tasks`, active: pathname.includes("/tasks") },
-          { label: "Reviews", href: `/repo/${params.name}/reviews`, active: pathname.includes("/reviews") },
-          { label: "Aktivitet", href: `/repo/${params.name}/activity`, active: pathname.includes("/activity") },
-        ]}
+        title="Aktivitet"
+        subtitle={params.name}
       />
 
       <div className="p-6">

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, usePathname } from "next/navigation";
+import { useParams } from "next/navigation";
 import Link from "next/link";
 import { listReviews, type ReviewSummary } from "@/lib/api";
 import { PageHeaderBar } from "@/components/PageHeaderBar";
@@ -40,7 +40,6 @@ function StatusBadge({ status }: { status: string }) {
 
 export default function RepoReviewsPage() {
   const params = useParams<{ name: string }>();
-  const pathname = usePathname();
   const [reviews, setReviews] = useState<ReviewSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -70,14 +69,8 @@ export default function RepoReviewsPage() {
   return (
     <div>
       <PageHeaderBar
-        title={params.name}
-        cells={[
-          { label: "Oversikt", href: `/repo/${params.name}/overview`, active: pathname.includes("/overview") },
-          { label: "Chat", href: `/repo/${params.name}/chat`, active: pathname.includes("/chat") },
-          { label: "Oppgaver", href: `/repo/${params.name}/tasks`, active: pathname.includes("/tasks") },
-          { label: "Reviews", href: `/repo/${params.name}/reviews`, active: pathname.includes("/reviews") },
-          { label: "Aktivitet", href: `/repo/${params.name}/activity`, active: pathname.includes("/activity") },
-        ]}
+        title="Reviews"
+        subtitle={params.name}
       />
 
       <div className="p-6">

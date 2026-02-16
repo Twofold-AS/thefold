@@ -31,6 +31,9 @@ export interface ChatRequest {
   memoryContext: string[];
   systemContext: "direct_chat" | "agent_planning" | "agent_coding" | "agent_review";
   model?: string; // Optional - uses DefaultAIModel if not set
+  repoName?: string; // Which repo the user is chatting about (from repo-chat)
+  repoContext?: string; // Actual file content from the repo (tree + relevant files)
+  conversationId?: string; // For tool-use (e.g. start_task needs conversation reference)
 }
 
 export interface ChatResponse {
@@ -39,6 +42,13 @@ export interface ChatResponse {
   stopReason: string;
   modelUsed: string;
   costUsd: number;
+  toolsUsed?: string[];
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
+  truncated: boolean;
 }
 
 // Structured agent call — returns JSON for the agent to parse
@@ -389,18 +399,40 @@ const BASE_RULES = `You are TheFold, an autonomous internal fullstack developer.
 - Test coverage for critical paths`;
 
 const CONTEXT_PROMPTS: Record<string, string> = {
-  direct_chat: `${BASE_RULES}
+  direct_chat: `Du er TheFold — en autonom AI-utviklingsagent bygget med Encore.ts og Next.js. Du ER selve produktet. Når brukeren snakker om "repoet" eller "prosjektet", refererer de til kodebasen du opererer i.
 
-Du er TheFold, en AI-utviklingsagent. I chatten svarer du konversasjonelt og kort.
+TheFold sine backend-services: gateway (auth), users (OTP login), chat (samtaler), ai (multi-model routing), agent (autonom task-kjøring), github (repo-operasjoner), sandbox (kodevalidering), linear (task-sync), memory (pgvector søk), skills (prompt-pipeline), monitor (health checks), cache (PostgreSQL cache), builder (kode-generering), tasks (oppgavestyring), mcp (server-integrasjoner), templates (scaffolding), registry (komponent-marketplace).
+
+Frontend: Next.js 15 dashboard med chat, tools, skills, marketplace, repo-oversikt, settings.
+
+${BASE_RULES}
 
 Regler:
-- IKKE generer kode med mindre brukeren eksplisitt ber om det
-- IKKE lag lange planer med mindre brukeren ber om det
+- Svar ALLTID på norsk
+- Bruk ALDRI emojier — ingen emojier overhodet. Ren tekst. Bruk markdown for struktur (overskrifter, lister, kodeblokker) men ALDRI emojier.
+- Vær konsis og direkte — korte svar, ikke lange utredninger
+- Ikke generer kode med mindre brukeren ber om det
+- Ikke lag lister med emojier
+- Når du analyserer et repo, beskriv det du faktisk finner — ikke gjett
 - For spørsmål som "se over repoet": gi en kort oppsummering (3-5 setninger) av hva du finner
 - For spørsmål som "hva bør vi endre": gi 3-5 konkrete forslag som korte punkter
-- Bruk norsk
-- Vær direkte og konsis
-- Hvis brukeren vil at du GJØR endringer (ikke bare snakker om dem), forklar at de kan starte en task`,
+- Hvis brukeren vil at du GJØR endringer (ikke bare snakker om dem), forklar at de kan starte en task
+- Hvis du har repo-kontekst (filstruktur og kode), basér svaret ditt KUN på den faktiske koden du ser. ALDRI dikt opp filer, funksjoner, eller kode som ikke finnes i konteksten.
+- Hvis du IKKE har repo-kontekst, si det ærlig: "Jeg har ikke tilgang til filene i dette repoet akkurat nå." — ALDRI hallusinér innhold.
+- Du har tilgang til minner fra tidligere samtaler. Minner kan komme fra ANDRE repoer. Hvis repo-konteksten (faktiske filer) og minner er motstridende, STOL PÅ FIL-KONTEKSTEN — den er sannheten. Minner er hint, ikke fakta.
+
+Du har tilgang til verktøy for å gjøre handlinger:
+- create_task: Opprett en utviklingsoppgave
+- start_task: Start en task — agenten begynner å jobbe
+- list_tasks: Se status på tasks
+- read_file: Les en fil fra repoet
+- search_code: Søk i kodebasen
+
+NÅR BRUKEREN BER DEG GJØRE NOE: Bruk verktøyene. Ikke bare forklar — GJØR det.
+- "Lag en plan for X" → bruk create_task for hvert steg
+- "Fiks denne buggen" → bruk create_task + start_task
+- "Hva er status?" → bruk list_tasks
+- "Se på filen X" → bruk read_file`,
 
   agent_planning: `${BASE_RULES}
 
@@ -651,6 +683,248 @@ async function logSkillResults(skillIds: string[], success: boolean, tokensUsed:
   }
 }
 
+// --- Chat Tool-Use (Function Calling) ---
+
+const CHAT_TOOLS: Array<{
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}> = [
+  {
+    name: "create_task",
+    description: "Opprett en ny utviklingsoppgave. Bruk dette når brukeren ber deg lage, bygge, fikse, eller endre noe i kodebasen.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Kort tittel for oppgaven" },
+        description: { type: "string", description: "Detaljert beskrivelse av hva som skal gjøres" },
+        priority: { type: "number", enum: [1, 2, 3, 4], description: "1=Urgent, 2=High, 3=Normal, 4=Low" },
+        repoName: { type: "string", description: "Hvilket repo oppgaven gjelder" },
+      },
+      required: ["title", "description"],
+    },
+  },
+  {
+    name: "start_task",
+    description: "Start en eksisterende oppgave — agenten begynner å jobbe. Bruk dette når brukeren sier 'start', 'kjør', 'begynn'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        taskId: { type: "string", description: "Task ID som skal startes" },
+      },
+      required: ["taskId"],
+    },
+  },
+  {
+    name: "list_tasks",
+    description: "List oppgaver for et repo. Bruk dette når brukeren spør om status, hva som gjenstår, osv.",
+    input_schema: {
+      type: "object",
+      properties: {
+        repoName: { type: "string" },
+        status: { type: "string", enum: ["backlog", "planned", "in_progress", "in_review", "done", "blocked"] },
+      },
+    },
+  },
+  {
+    name: "read_file",
+    description: "Les en spesifikk fil fra repoet. Bruk dette når brukeren ber deg se på en fil, eller du trenger mer kontekst.",
+    input_schema: {
+      type: "object",
+      properties: {
+        repoName: { type: "string" },
+        path: { type: "string", description: "Filsti i repoet" },
+      },
+      required: ["repoName", "path"],
+    },
+  },
+  {
+    name: "search_code",
+    description: "Søk etter relevante filer i repoet basert på en beskrivelse.",
+    input_schema: {
+      type: "object",
+      properties: {
+        repoName: { type: "string" },
+        query: { type: "string" },
+      },
+      required: ["repoName", "query"],
+    },
+  },
+];
+
+async function executeToolCall(
+  name: string,
+  input: Record<string, unknown>,
+  repoName?: string,
+  conversationId?: string,
+): Promise<Record<string, unknown>> {
+  const owner = "Twofold-AS";
+
+  switch (name) {
+    case "create_task": {
+      const { tasks: tasksClient } = await import("~encore/clients");
+      const result = await tasksClient.createTask({
+        title: input.title as string,
+        description: (input.description as string) || "",
+        priority: (input.priority as number) || 3,
+        repo: (input.repoName as string) || repoName || undefined,
+        source: "manual",
+      });
+      return { success: true, taskId: result.task.id, message: `Task "${input.title}" opprettet` };
+    }
+
+    case "start_task": {
+      const { agent: agentClient } = await import("~encore/clients");
+      agentClient.startTask({
+        conversationId: conversationId || "tool-" + Date.now(),
+        taskId: input.taskId as string,
+        userMessage: "Startet via chat tool-use",
+        thefoldTaskId: input.taskId as string,
+      }).catch((e: Error) => log.error("Task execution failed:", { error: e.message }));
+      return { success: true, message: `Task ${input.taskId} startet — agenten jobber nå` };
+    }
+
+    case "list_tasks": {
+      const { tasks: tasksClient } = await import("~encore/clients");
+      const result = await tasksClient.listTasks({
+        repo: (input.repoName as string) || repoName || undefined,
+        status: input.status as string | undefined,
+      });
+      return { tasks: result.tasks.map((t: { id: string; title: string; status: string; priority: number }) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority })), total: result.total };
+    }
+
+    case "read_file": {
+      const { github: ghClient } = await import("~encore/clients");
+      try {
+        const file = await ghClient.getFile({
+          owner,
+          repo: (input.repoName as string) || repoName || "",
+          path: input.path as string,
+        });
+        return { path: input.path, content: file.content?.substring(0, 5000) };
+      } catch {
+        return { error: `Kunne ikke lese ${input.path}` };
+      }
+    }
+
+    case "search_code": {
+      const { github: ghClient } = await import("~encore/clients");
+      try {
+        const repo = (input.repoName as string) || repoName || "";
+        const tree = await ghClient.getTree({ owner, repo });
+        const relevant = await ghClient.findRelevantFiles({
+          owner,
+          repo,
+          taskDescription: input.query as string,
+          tree: tree.tree,
+        });
+        return { matchingFiles: relevant.paths };
+      } catch {
+        return { error: "Kunne ikke søke i repoet" };
+      }
+    }
+
+    default:
+      return { error: `Ukjent tool: ${name}` };
+  }
+}
+
+async function callAnthropicWithTools(options: AICallOptions & {
+  tools: typeof CHAT_TOOLS;
+  repoName?: string;
+  conversationId?: string;
+}): Promise<AICallResponse & { toolsUsed: string[] }> {
+  const client = new Anthropic({ apiKey: anthropicKey() });
+
+  const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
+    { type: "text", text: options.system, cache_control: { type: "ephemeral" } },
+  ];
+
+  const response = await client.messages.create({
+    model: options.model,
+    max_tokens: options.maxTokens,
+    system: systemBlocks,
+    messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
+    tools: options.tools,
+  });
+
+  const toolsUsed: string[] = [];
+  let textContent = "";
+  const toolUseBlocks: Array<{ type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
+
+  for (const block of response.content) {
+    if (block.type === "text") {
+      textContent += block.text;
+    } else if (block.type === "tool_use") {
+      toolUseBlocks.push(block as { type: "tool_use"; id: string; name: string; input: Record<string, unknown> });
+    }
+  }
+
+  let totalInputTokens = response.usage.input_tokens;
+  let totalOutputTokens = response.usage.output_tokens;
+
+  // If tools were called, execute them and send results back
+  if (toolUseBlocks.length > 0) {
+    const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string }> = [];
+
+    for (const block of toolUseBlocks) {
+      const result = await executeToolCall(block.name, block.input, options.repoName, options.conversationId);
+      toolsUsed.push(block.name);
+      toolResults.push({
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: JSON.stringify(result),
+      });
+    }
+
+    // Send tool results back to AI for final response
+    const followUp = await client.messages.create({
+      model: options.model,
+      max_tokens: options.maxTokens,
+      system: systemBlocks,
+      messages: [
+        ...options.messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+        { role: "assistant" as const, content: response.content },
+        { role: "user" as const, content: toolResults },
+      ],
+      tools: options.tools,
+    });
+
+    textContent = followUp.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+
+    totalInputTokens += followUp.usage.input_tokens;
+    totalOutputTokens += followUp.usage.output_tokens;
+  }
+
+  const cacheReadTokens = (response.usage as Record<string, number>).cache_read_input_tokens ?? 0;
+  const cacheCreationTokens = (response.usage as Record<string, number>).cache_creation_input_tokens ?? 0;
+
+  logTokenUsage({
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    model: options.model,
+    endpoint: "anthropic-tools",
+  });
+
+  return {
+    content: textContent,
+    tokensUsed: totalInputTokens + totalOutputTokens,
+    stopReason: response.stop_reason || "end_turn",
+    modelUsed: options.model,
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
+    toolsUsed,
+  };
+}
+
 // --- Endpoints ---
 
 // Direct chat
@@ -671,11 +945,52 @@ export const chat = api(
     });
 
     let system = pipeline.systemPrompt;
+
+    // Inject repo context if chatting from a specific repo
+    if (req.repoName) {
+      system += `\n\nDu ser på repoet: ${req.repoName}. Når brukeren refererer til "repoet", "prosjektet", eller "koden", mener de dette spesifikke repoet.`;
+    }
+
+    // Inject actual repo file content
+    if (req.repoContext) {
+      system += `\n\n--- REPO-KONTEKST ---\nDette er FAKTISK innhold fra repoet. Basér svaret ditt KUN på dette — ALDRI dikt opp filer eller kode som ikke er her.\n${req.repoContext}`;
+    }
+
     if (req.memoryContext.length > 0) {
       system += "\n\n## Relevant Context from Memory\n";
       req.memoryContext.forEach((m, i) => {
         system += `${i + 1}. ${m}\n`;
       });
+    }
+
+    // Use tool-use when in repo-chat (AI can create tasks, read files, etc.)
+    if (req.repoName) {
+      const toolResponse = await callAnthropicWithTools({
+        model,
+        system,
+        messages: req.messages,
+        maxTokens: 8192,
+        tools: CHAT_TOOLS,
+        repoName: req.repoName,
+        conversationId: req.conversationId,
+      });
+
+      await logSkillResults(pipeline.skillIds, true, toolResponse.tokensUsed);
+
+      return {
+        content: toolResponse.content,
+        tokensUsed: toolResponse.tokensUsed,
+        stopReason: toolResponse.stopReason,
+        modelUsed: toolResponse.modelUsed,
+        costUsd: toolResponse.costEstimate.totalCost,
+        toolsUsed: toolResponse.toolsUsed.length > 0 ? toolResponse.toolsUsed : undefined,
+        usage: {
+          inputTokens: toolResponse.inputTokens,
+          outputTokens: toolResponse.outputTokens,
+          totalTokens: toolResponse.inputTokens + toolResponse.outputTokens,
+        },
+        truncated: toolResponse.stopReason === "max_tokens",
+      };
     }
 
     const response = await callAIWithFallback({
@@ -694,6 +1009,12 @@ export const chat = api(
       stopReason: response.stopReason,
       modelUsed: response.modelUsed,
       costUsd: response.costEstimate.totalCost,
+      usage: {
+        inputTokens: response.inputTokens,
+        outputTokens: response.outputTokens,
+        totalTokens: response.inputTokens + response.outputTokens,
+      },
+      truncated: response.stopReason === "max_tokens" || response.stopReason === "length",
     };
   }
 );

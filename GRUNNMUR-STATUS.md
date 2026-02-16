@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 15. februar 2026
+> Sist oppdatert: 16. februar 2026 (Kostnads-dashboard, Skills-forenkling, Repo-header redesign)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -217,6 +217,15 @@
 | GET /ai/models | 🟢 | true | Ja | frontend settings | — | — |
 | POST /ai/estimate-cost | 🟢 | true | Ja | frontend settings | — | — |
 
+### Tool-use / Function Calling
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| Tool definitions | 🟢 | 5 tools: create_task, start_task, list_tasks, read_file, search_code |
+| callAnthropicWithTools | 🟢 | Two-call flow: send med tools → handle tool_use → execute → final response |
+| executeToolCall | 🟢 | Dispatcher til ekte services (tasks, github) basert på tool-navn |
+| System prompt tool instructions | 🟢 | Oppdatert system prompt med verktoy-instruksjoner |
+
 ### Prompt caching
 
 | Feature | Status | Beskrivelse | Aktivering |
@@ -224,7 +233,8 @@
 | cache_control på system prompt | 🟢 | `cache_control: { type: "ephemeral" }` på system-blokk | Kun Anthropic |
 | cache_control på OpenAI | 🔴 | Ikke støttet av provider | Vent på OpenAI-støtte |
 | cache_control på Moonshot | 🔴 | Ikke støttet av provider | Vent på Moonshot-støtte |
-| Token tracking/logging | 🟢 | Logger cache_read og cache_creation tokens | — |
+| Token tracking/logging | 🟢 | ChatResponse returnerer usage { inputTokens, outputTokens, totalTokens }, logs cache_read/cache_creation | — |
+| Truncation detection | 🟢 | Oppdager stop_reason="max_tokens", appender info-melding til bruker | — |
 
 ### Modellregister (7 modeller)
 
@@ -356,7 +366,7 @@
 
 | Funksjon | Status | Beskrivelse | Aktivering |
 |----------|--------|-------------|------------|
-| resolve | 🟢 | Scope-filter, routing-matching, dependency-resolution, conflict-handling, token-budsjett | — |
+| resolve | 🟢 | Forenklet: scope-filter → routing-match → token-budsjett → bygg prompt (depends_on, conflicts_with, fase-gruppering fjernet) | — |
 | executePreRun | 🟢 | Input-validering (task, userId) + context-berikelse (skill metadata) | — |
 | executePostRun | 🟢 | Quality review (tomhet, lengde, placeholders, inability-mønstre) + auto-logging | — |
 | logResult | 🟢 | Success/failure tracking, confidence_score, avg_token_cost | — |
@@ -368,10 +378,21 @@
 | Keyword matching | 🟢 | Case-insensitive substring-match mot task | — |
 | File pattern matching | 🟢 | Glob-matching (*.ts, *.tsx) mot filnavn | — |
 | Label matching | 🟢 | Case-insensitive match mot task labels | — |
-| Dependency resolution | 🟢 | Inkluderer avhengige skills automatisk | — |
-| Conflict handling | 🟢 | Ekskluderer lavere-priority konflikter | — |
+| ~~Dependency resolution~~ | — | Fjernet i skills-forenkling (resolve forenklet) | — |
+| ~~Conflict handling~~ | — | Fjernet i skills-forenkling (resolve forenklet) | — |
 | Token budget (global) | 🟢 | Skipper skills som overskrider totalTokenBudget | — |
 | Token budget (per skill) | 🔴 | token_budget_max finnes men sjekkes aldri | Legg til i resolve |
+| Dynamic scope dropdown | 🟢 | Frontend scope-velger populert fra listRepos("Twofold-AS") API | — |
+| Migration 6: deaktiver generiske skills | 🟢 | Norwegian Docs, Test Coverage, Project Conventions disabled | — |
+
+### Skills-forenkling (prompt.md)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| resolve() forenklet | 🟢 | Fjernet depends_on, conflicts_with, fase-gruppering — nå: scope filter → routing match → token budget → build prompt |
+| skills/page.tsx forenklet | 🟢 | Fjernet pipeline viz, categories, phases, confidence bars — beholdt: grid + toggle + slide-over + create/edit |
+| Dynamic scope dropdown | 🟢 | Scope-velger populert fra listRepos("Twofold-AS") API |
+| Migration 6 | 🟢 | Deaktiverer 3 generiske seeded skills (Norwegian Docs, Test Coverage, Project Conventions) |
 
 ### Fremtidige features
 
@@ -503,6 +524,43 @@
 | TheFold tenker redesign | 🟢 | TF-ikon med brand-shimmer, agent-pulse, agent-dots, stopp-knapp |
 | Brand shimmer sidebar | 🟢 | brand-shimmer CSS-klasse på "TheFold" tekst i sidebar |
 | AI system prompt (norsk) | 🟢 | direct_chat prompt konversasjonelt, ingen kode-dumping, norsk |
+| DB: agent_status + updated_at | 🟢 | Migrasjon 3: agent_status i CHECK, updated_at kolonne for heartbeat |
+| Heartbeat-system | 🟢 | processAIResponse oppdaterer updated_at hvert 10s, frontend sjekker 30s timeout |
+| Try/catch per steg | 🟢 | Skills, memory, AI har egne try/catch — aldri evig "Tenker" |
+| Intent-baserte steg | 🟢 | detectMessageIntent(): repo_review/task_request/question/general → ulike steg |
+| AgentStatus tab+boks | 🟢 | Tab (fase) + boks (tittel + steg), Feilet/Ferdig states, error-melding |
+| Send→Stopp sirkel | 🟢 | Rund knapp: pil opp (send) ↔ firkant (stopp) basert på isWaitingForAI |
+| Heartbeat-lost UI | 🟢 | "Mistet kontakt med TheFold" etter 30s uten heartbeat |
+| TF-ikon fjernet | 🟢 | Ingen TF-boks i AgentStatus eller tenker-indikator |
+| Samtale-tittel fra bruker | 🟢 | Første USER-melding som tittel, filtrerer bort agent_status JSON |
+| Tenker-indikator deduplisert | 🟢 | "TheFold tenker..." kun vist før første agent_status — ingen dobbel visning |
+| Fase-ikoner i AgentStatus | 🟢 | Spinner (default), forstørrelsesglass (Analyserer), wrench (Bygger), check/X (Ferdig/Feilet) |
+| Emoji-forbud i AI-svar | 🟢 | direct_chat system prompt forbyr alle emojier, kun ren tekst + markdown |
+| ChatMessage markdown-parser | 🟢 | Kodeblokker, overskrifter, lister, bold/italic/inline-kode i assistant-meldinger |
+| CodeBlock komponent | 🟢 | Collapsible kodeblokker med filnavn, språk-badge, kopier-knapp, linjenumre |
+| TheFold identitet i system prompt | 🟢 | AI vet at den ER TheFold, kjenner alle 17 services, svarer på norsk, ingen emojier |
+| Repo-kontekst i chat | 🟢 | repoName sendes fra repo-chat frontend → chat backend → ai.chat system prompt. AI vet hvilket repo den ser på |
+| GitHub fil-kontekst i chat | 🟢 | processAIResponse henter filtre (getTree), relevante filer (findRelevantFiles), innhold (getFile, topp 5 filer à 200 linjer). repoContext injiseres i system prompt med anti-hallusinering |
+| Chat input-boks restructurert | 🟢 | + ikon (borderless 32px), textarea, send-knapp — horisontal rad. minHeight 56px, maxHeight 150px |
+| Bredere chat-meldinger | 🟢 | Container max-w-4xl, bruker-meldinger max-w-[70%], AI-meldinger max-w-[85%], padding px-4 |
+| Tomt repo handling | 🟢 | Hvis repoContext er tom etter GitHub-kall, AI får eksplisitt beskjed om at repoet er tomt — ingen hallusinering |
+| Memory-prioritering over hallusinering | 🟢 | System prompt: minner kan komme fra andre repoer, fil-kontekst er sannheten, minner er hint |
+| Skills UUID[] fix | 🟢 | depends_on::text[] og conflicts_with::text[] cast i resolve() — fikser "unsupported type: UuidArray" |
+| Tool-use / Function Calling | 🟢 | 5 tools (create_task, start_task, list_tasks, read_file, search_code) i ai/ai.ts, callAnthropicWithTools two-call flow, executeToolCall dispatcher |
+| Dynamic AgentStatus | 🟢 | processAIResponse bygger steg dynamisk basert på intent-deteksjon, conditional memory search, bedre fasenavn (Forbereder/Analyserer/Planlegger/Bygger/Reviewer/Utforer) |
+| Animated PhaseIcons | 🟢 | Per-fase SVG-ikoner med CSS-animasjoner (grid-blink, forstorrelsesglass-pulse, clipboard, lightning-swing, eye, gear-spin) |
+| File Upload | 🟢 | chat_files tabell (migrasjon 4), POST /chat/upload (500KB grense), frontend fil-velger via + meny |
+| File Download | 🟢 | CodeBlock nedlastingsknapp for navngitte kodeblokker |
+| Chat source field | 🟢 | source-kolonne i messages-tabell, SendRequest.source ("web"\|"slack"\|"discord"\|"api") |
+| Token usage tracking | 🟢 | ChatResponse returnerer usage { inputTokens, outputTokens, totalTokens }, metadata JSONB i messages |
+| Token metadata display | 🟢 | Frontend viser token info, modell, kostnad under AI-meldinger |
+| Truncation handling | 🟢 | processAIResponse oppdager truncation, appender melding til bruker |
+| Repo activity logging | 🟢 | repo_activity tabell (chat, tool_use, ai_response events), logRepoActivity() helper |
+| Repo activity endpoint | 🟢 | GET /chat/activity/:repoName — henter repo-spesifikke events |
+| Activity page integration | 🟢 | /repo/[name]/activity henter repo_activity events + audit + tasks + builder |
+| Kostnads-dashboard (backend) | 🟢 | GET /chat/costs — aggregerer today/week/month/perModel/dailyTrend fra messages metadata |
+| Kostnads-dashboard (frontend) | 🟢 | /settings/costs — 3 kostnadskort, per-modell-tabell, 14-dagers CSS-bar-chart |
+| Budget alert | 🟢 | processAIResponse: $5/dag terskel, console.warn ved overskridelse |
 
 ---
 
@@ -615,6 +673,7 @@
 
 | Side | Status | Koblet til backend | Hva mangler |
 |------|--------|-------------------|-------------|
+| /settings/costs | 🟢 | Ja (getCostSummary) — 3 kostnadskort, per-modell-tabell, 14-dagers CSS-bar-chart | — |
 | /login | 🟢 | Ja (requestOtp, verifyOtp) | Suspense boundary for useSearchParams |
 | /home | 🟢 | Ja (getTasks, getCacheStats, getMemoryStats, getAuditStats, listAuditLog, listRepos, getMonitorHealth) | — |
 | /chat | 🟢 | Ja (full chat, skills, models, transfer) | — |
@@ -635,9 +694,10 @@
 | /tools/templates | 🟢 | Ja (listTemplates, useTemplate, category filter, slide-over) | — |
 | /marketplace | 🟢 | Ja (listComponents, searchComponents, category filter) | — |
 | /marketplace/[id] | 🟢 | Ja (getComponent, useComponent, getHealingStatus, file browser) | — |
+| /tools/integrations | 🟢 | Ja (listIntegrations, saveIntegration, deleteIntegration) | — |
 | /repo/[name]/chat | 🟢 | Ja (repo-chat, skills, models) | — |
-| /repo/[name]/overview | 🟢 | Ja (repo-helse, oppgaver, reviews, aktivitet, hurtighandlinger) | — |
-| /repo/[name]/tasks | 🟢 | Ja (Kanban med TheFold task engine, create modal, Linear sync, filtre) | — |
+| /repo/[name]/overview | 🟢 | Ja (per-page header "Oversikt" med helse-indikator, shortcuts-kort 2x2 grid: Chat/Oppgaver/Aktivitet/Reviews) | — |
+| /repo/[name]/tasks | 🟢 | Ja (per-page header "Oppgaver" med "Ny oppgave"/"Synk fra Linear" actions, Kanban med TheFold task engine) | — |
 | /repo/[name]/reviews | 🟢 | Ja (repo-filtrert reviews med statusfilter) | — |
 | /repo/[name]/activity | 🟢 | Ja (tidslinje: audit, tasks, builder — server-side repo-filtrering, gruppert per dag) | — |
 
@@ -651,8 +711,10 @@
 | ChatToolsMenu | 🟢 | Floating menu: create skill, create task, transfer |
 | InlineSkillForm | 🟢 | Rask skill-oppretting fra chat |
 | LivePreview | 🟡 | Placeholder for sandbox-preview | Koble til sandbox |
-| AgentStatus | 🟢 | Collapsible panel med steg-liste, progress bar, agent-animasjoner (pulse, spinner, check-in) |
-| PageHeader | 🟢 | Global header i dashboard layout, dynamisk tittel, 80px minHeight |
+| AgentStatus | 🟢 | Collapsible tab+boks, fase-spesifikke ikoner (spinner/forstørrelsesglass/wrench/check/X), agent-animasjoner |
+| CodeBlock | 🟢 | Collapsible kodeblokk, filnavn-header, språk-badge, kopier-knapp, linjenumre, firkantede kanter |
+| ChatMessage | 🟢 | Markdown-parser for assistant-meldinger: kodeblokker, overskrifter, lister, bold/italic/inline-kode |
+| PageHeaderBar | 🟢 | Forenklet: fjernet cells/tabs prop, lagt til subtitle prop — brukes av alle repo-sider med per-page titler og actions |
 | Sidebar | 🟢 | Navigasjon (Home/Chat/Environments/Marketplace | Repo | Skills/Tools | Settings), repo-dropdown, brukerprofil |
 
 ### Design System (UI/UX Overhaul)
@@ -743,6 +805,39 @@
 2. Konfigurasjon UI for envVars og config
 3. Helsestatus-sjekk for installerte servere
 4. Legg til flere MCP-servere (Sentry, Slack, etc.)
+
+---
+
+## 12c. Integrations-service (External Webhooks)
+
+### Database-tabeller
+
+**integration_configs:**
+| Kolonne | Type | Status |
+|---------|------|--------|
+| id | UUID PK | 🟢 |
+| service | TEXT NOT NULL | 🟢 |
+| config | JSONB NOT NULL | 🟢 |
+| enabled | BOOLEAN | 🟢 |
+| created_at | TIMESTAMPTZ | 🟢 |
+| updated_at | TIMESTAMPTZ | 🟢 |
+
+### Endepunkter
+
+| Endepunkt | Status | Expose | Auth | Beskrivelse |
+|-----------|--------|--------|------|-------------|
+| GET /integrations/list | 🟢 | true | Ja | Liste alle konfigurasjoner |
+| POST /integrations/save | 🟢 | true | Ja | Lagre/oppdater konfigurasjon |
+| POST /integrations/delete | 🟢 | true | Ja | Slett konfigurasjon |
+| POST /integrations/slack-webhook | 🟢 | true | Nei | Motta Slack-webhook |
+| POST /integrations/discord-webhook | 🟢 | true | Nei | Motta Discord-webhook |
+
+### Frontend
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| /tools/integrations side | 🟢 | Slack + Discord config-skjemaer |
+| Webhook URL-konfigurasjon | 🟢 | Lagre/slette webhook-URL per tjeneste |
 
 ---
 
@@ -966,7 +1061,7 @@
 
 | Kategori | Antall |
 |----------|--------|
-| 🟢 AKTIVE features | 230+ |
+| 🟢 AKTIVE features | 260+ |
 | 🟡 STUBBEDE features | 2 |
-| 🔴 GRUNNMUR features | 21 |
+| 🔴 GRUNNMUR features | 19 |
 | ⚪ PLANLAGTE features | 9 |

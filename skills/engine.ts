@@ -57,7 +57,7 @@ export const resolve = api(
   async (req: ResolveRequest): Promise<ResolveResponse> => {
     const ctx = req.context;
 
-    // 1. Fetch all enabled skills
+    // 1. Fetch all enabled skills matching scope
     const rows = await db.query<{
       id: string;
       name: string;
@@ -67,18 +67,14 @@ export const resolve = api(
       token_estimate: number;
       routing_rules: Record<string, unknown>;
       scope: string;
-      applies_to: string[];
-      depends_on: string[];
-      conflicts_with: string[];
     }>`
       SELECT id, name, prompt_fragment, execution_phase, priority,
              COALESCE(token_estimate, 0) as token_estimate,
              COALESCE(routing_rules, '{}'::jsonb) as routing_rules,
-             scope, applies_to,
-             COALESCE(depends_on, '{}') as depends_on,
-             COALESCE(conflicts_with, '{}') as conflicts_with
+             scope
       FROM skills
       WHERE enabled = TRUE
+      AND (scope = 'global' OR scope = ${`repo:${ctx.repo || ""}`} OR scope = ${`user:${ctx.userId}`})
       ORDER BY priority ASC
     `;
 
@@ -90,10 +86,6 @@ export const resolve = api(
       priority: number;
       tokenEstimate: number;
       routingRules: Record<string, unknown>;
-      scope: string;
-      appliesTo: string[];
-      dependsOn: string[];
-      conflictsWith: string[];
     }> = [];
 
     for await (const row of rows) {
@@ -101,92 +93,36 @@ export const resolve = api(
         id: row.id,
         name: row.name,
         promptFragment: row.prompt_fragment,
-        phase: row.execution_phase as ExecutionPhase,
+        phase: (row.execution_phase as ExecutionPhase) || "inject",
         priority: row.priority ?? 100,
         tokenEstimate: row.token_estimate ?? 0,
         routingRules: row.routing_rules ?? {},
-        scope: row.scope,
-        appliesTo: row.applies_to ?? [],
-        dependsOn: row.depends_on ?? [],
-        conflictsWith: row.conflicts_with ?? [],
       });
     }
 
-    // 2. Filter by scope (global + repo-specific)
-    const filtered = allSkills.filter((s) => {
-      if (s.scope === "global") return true;
-      if (ctx.repo && s.scope === `repo:${ctx.repo}`) return true;
-      if (s.scope === `user:${ctx.userId}`) return true;
-      return false;
-    });
+    // 2. Filter on routing rules (keywords, file patterns, labels)
+    const matched = allSkills.filter((s) => matchesRoutingRules(s.routingRules, ctx));
 
-    // 3. Automatic routing: match routing_rules against task context
-    const matched = filtered.filter((s) => matchesRoutingRules(s.routingRules, ctx));
-
-    // 4. Handle dependencies: if skill A depends_on B, include B
-    const matchedIds = new Set(matched.map((s) => s.id));
-    for (const skill of matched) {
-      for (const depId of skill.dependsOn) {
-        if (!matchedIds.has(depId)) {
-          const dep = allSkills.find((s) => s.id === depId);
-          if (dep) {
-            matched.push(dep);
-            matchedIds.add(depId);
-          }
-        }
-      }
-    }
-
-    // 5. Handle conflicts: if A conflicts_with B, keep higher priority (lower number)
-    const conflictResolved: typeof matched = [];
-    const excluded = new Set<string>();
-
-    for (const skill of matched) {
-      if (excluded.has(skill.id)) continue;
-
-      // Check if this skill conflicts with any already-included skill
-      let dominated = false;
-      for (const conflictId of skill.conflictsWith) {
-        const existing = conflictResolved.find((s) => s.id === conflictId);
-        if (existing) {
-          // existing already included, skip this skill (existing has higher priority since sorted)
-          dominated = true;
-          break;
-        }
-      }
-
-      if (!dominated) {
-        conflictResolved.push(skill);
-        // Mark conflicting skills as excluded
-        for (const conflictId of skill.conflictsWith) {
-          excluded.add(conflictId);
-        }
-      }
-    }
-
-    // 6. Token budget: include skills until budget is exhausted
+    // 3. Token budget: include skills until budget exhausted
+    const tokenBudget = ctx.totalTokenBudget || 4000;
     let tokensUsed = 0;
-    const budgeted: typeof conflictResolved = [];
+    const selected: typeof matched = [];
 
-    for (const skill of conflictResolved) {
-      if (ctx.totalTokenBudget > 0 && tokensUsed + skill.tokenEstimate > ctx.totalTokenBudget) {
-        continue; // Skip, over budget
-      }
-      budgeted.push(skill);
-      tokensUsed += skill.tokenEstimate;
+    for (const skill of matched) {
+      const estimate = skill.tokenEstimate || 200;
+      if (tokensUsed + estimate > tokenBudget) break;
+      tokensUsed += estimate;
+      selected.push(skill);
     }
 
-    // 7. Group by phase
-    const preRun = budgeted.filter((s) => s.phase === "pre_run");
-    const inject = budgeted.filter((s) => s.phase === "inject");
-    const postRun = budgeted.filter((s) => s.phase === "post_run");
-
-    // Build injected prompt
+    // 4. Build injected prompt from inject-phase skills
+    const inject = selected.filter((s) => s.phase === "inject");
+    const postRun = selected.filter((s) => s.phase === "post_run");
     const injectedPrompt = inject.map((s) => s.promptFragment).join("\n\n");
 
     return {
       result: {
-        preRunResults: [], // Will be populated by executePreRun
+        preRunResults: [],
         injectedPrompt,
         injectedSkillIds: inject.map((s) => s.id),
         tokensUsed,

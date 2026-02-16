@@ -571,6 +571,17 @@
   display: inline-block;
 }
 
+/* --- Phase icon pulse for AgentStatus tab --- */
+
+.agent-spinner-small-icon {
+  animation: agent-phase-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes agent-phase-pulse {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
 /* --- Step fade-in with delay --- */
 
 @keyframes agent-step-enter {
@@ -611,4 +622,37 @@
 @keyframes agent-dot-bounce {
   0%, 80%, 100% { opacity: 0.3; }
   40% { opacity: 1; }
+}
+
+/* --- Grid blink for "Forbereder" phase --- */
+
+.agent-grid-blink-1 { animation: agent-grid-blink 1.6s ease-in-out infinite 0s; }
+.agent-grid-blink-2 { animation: agent-grid-blink 1.6s ease-in-out infinite 0.2s; }
+.agent-grid-blink-3 { animation: agent-grid-blink 1.6s ease-in-out infinite 0.4s; }
+.agent-grid-blink-4 { animation: agent-grid-blink 1.6s ease-in-out infinite 0.6s; }
+@keyframes agent-grid-blink {
+  0%, 100% { opacity: 0.2; }
+  25% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
+
+/* --- Build swing for "Bygger" phase --- */
+
+.agent-build-swing {
+  animation: agent-swing 0.8s ease-in-out infinite alternate;
+  transform-origin: bottom right;
+}
+@keyframes agent-swing {
+  from { transform: rotate(-10deg); }
+  to { transform: rotate(10deg); }
+}
+
+/* --- Slow spin for "Utfører" phase (gear icon) --- */
+
+.agent-spin-slow {
+  animation: agent-spin 3s linear infinite;
+}
+@keyframes agent-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }

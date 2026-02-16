@@ -3,25 +3,26 @@
 ## What is TheFold?
 An autonomous fullstack development agent. It reads tasks from Linear, reads/writes code via GitHub, validates in a sandbox, and delivers PRs with documentation.
 
-## Architecture (15 Encore.ts services)
+## Architecture (16 Encore.ts services)
 ```
-gateway    → Auth (Bearer token with HMAC, OTP via Resend, token revocation)
-chat       → Communication channel (user ↔ TheFold), PostgreSQL, OWASP ownership
-ai         → Claude API orchestration, multi-model routing, prompt caching, diagnosis
-agent      → The brain: autonomous task execution loop with meta-reasoning
-tasks      → TheFold's task engine: CRUD, Linear sync, AI planning, Pub/Sub events
-builder    → TheFold's hands: file-by-file code building with dependency analysis
-github     → Read/write repos via GitHub API, context windowing
-sandbox    → Isolated code execution, validation pipeline (tsc + lint + tests), Docker isolation
-linear     → Task management, cron sync, status updates
-memory     → pgvector semantic search, temporal decay, code patterns, consolidation
-skills     → Modular prompt system with categories, marketplace future-proofing
-registry   → Component marketplace + healing pipeline, exposed use-component endpoint
-templates  → Template library: pre-seeded scaffolds, variable substitution, category browsing
-mcp        → MCP server registry: install/uninstall/configure, agent tool awareness
-monitor    → Repository health checks, dependency audits (feature-flagged cron)
-docs       → Context7 MCP for up-to-date library documentation
-cache      → PostgreSQL-based key-value cache (until Encore CacheCluster supports TS)
+gateway      → Auth (Bearer token with HMAC, OTP via Resend, token revocation)
+chat         → Communication channel (user ↔ TheFold), PostgreSQL, OWASP ownership, file uploads
+ai           → Claude API orchestration, multi-model routing, prompt caching, diagnosis, tool-use
+agent        → The brain: autonomous task execution loop with meta-reasoning
+tasks        → TheFold's task engine: CRUD, Linear sync, AI planning, Pub/Sub events
+builder      → TheFold's hands: file-by-file code building with dependency analysis
+github       → Read/write repos via GitHub API, context windowing
+sandbox      → Isolated code execution, validation pipeline (tsc + lint + tests), Docker isolation
+linear       → Task management, cron sync, status updates
+memory       → pgvector semantic search, temporal decay, code patterns, consolidation
+skills       → Modular prompt system with categories, marketplace future-proofing
+registry     → Component marketplace + healing pipeline, exposed use-component endpoint
+templates    → Template library: pre-seeded scaffolds, variable substitution, category browsing
+mcp          → MCP server registry: install/uninstall/configure, agent tool awareness
+integrations → External service webhooks (Slack, Discord), CRUD config, frontend /tools/integrations
+monitor      → Repository health checks, dependency audits (feature-flagged cron)
+docs         → Context7 MCP for up-to-date library documentation
+cache        → PostgreSQL-based key-value cache (until Encore CacheCluster supports TS)
 ```
 
 ## Templates Service
@@ -100,8 +101,32 @@ Key files:
 Endpoints: `/builder/start` (internal), `/builder/status` (internal), `/builder/cancel` (internal), `/builder/job` (auth), `/builder/jobs` (auth)
 Database: `builder_jobs` + `build_steps` tables
 
+## Chat Tool-Use (Function Calling)
+Chat is connected to the agent system via Claude tool-use. When users ask for actions in chat, the AI can invoke tools directly:
+- **5 tools:** `create_task`, `start_task`, `list_tasks`, `read_file`, `search_code`
+- **Two-call flow:** `callAnthropicWithTools()` sends messages with tool definitions, handles tool_use responses, executes via `executeToolCall()`, returns final response
+- **Dynamic AgentStatus:** `processAIResponse` builds steps dynamically based on intent detection with phase names (Forbereder/Analyserer/Planlegger/Bygger/Reviewer/Utforer)
+- **Animated PhaseIcons:** Per-phase SVG icons with CSS animations (grid-blink, magnifying glass pulse, clipboard, lightning swing, eye, gear spin)
+
+Key files: `ai/ai.ts` (tool definitions, callAnthropicWithTools, executeToolCall), `frontend/src/components/AgentStatus.tsx` (animated phase icons)
+
+## Integrations Service
+External service webhook integrations (Slack, Discord) with configuration management.
+
+Key concepts:
+- **Configs:** `integration_configs` table stores per-service credentials (webhook URLs, tokens)
+- **Webhooks:** Slack and Discord webhook endpoints for receiving external messages
+- **CRUD:** list, save, delete integration configs
+
+Endpoints: `/integrations/list` (auth), `/integrations/save` (auth), `/integrations/delete` (auth), `/integrations/slack-webhook`, `/integrations/discord-webhook`
+Database: `integration_configs` table
+
+Key files:
+- `integrations/integrations.ts` — CRUD + webhook endpoints
+- `integrations/db.ts` — SQLDatabase reference
+
 ## Agent Flow (with meta-reasoning)
-1. Task picked up (from tasks service via thefoldTaskId, or Linear via taskId, or user request via chat)
+1. Task picked up (from tasks service via thefoldTaskId, or Linear via taskId, or user request via chat — including chat tool-use dispatch)
 2. GitHub: read project tree + relevant files (with context windowing)
 3. Memory: search for relevant context (with temporal decay scoring)
 4. Memory: search for similar error patterns from previous tasks
@@ -276,8 +301,8 @@ Connected to: `code_patterns.component_id` in memory service, `tasks.createTask(
 
 ## Grunnmur-awareness
 Når du jobber med TheFold, vær klar over at mange features har grunnmur på plass
-men er ikke aktivert ennå. Se **GRUNNMUR-STATUS.md** for full oversikt (210+ features,
-210+ aktive, 3 stubbede, 20+ grunnmur, 11 planlagte). Når du implementerer en feature
+men er ikke aktivert ennå. Se **GRUNNMUR-STATUS.md** for full oversikt (250+ features,
+240+ aktive, 2 stubbede, 21 grunnmur, 9 planlagte). Når du implementerer en feature
 som berører noe som allerede er stubbet, **AKTIVER den eksisterende grunnmuren**
 i stedet for å bygge noe nytt.
 
@@ -307,7 +332,7 @@ encore run              # all services + local infra
 - `ai/sub-agents.ts` — Sub-agent types, role-to-model mapping (6 roles, 3 budget modes)
 - `ai/orchestrate-sub-agents.ts` — Sub-agent planning, parallel execution, result merging, cost estimation
 - `ai/sanitize.ts` — OWASP A03 input sanitization for AI calls (null bytes, control chars, max length)
-- `chat/chat.ts` — Chat service with project detection integration
+- `chat/chat.ts` — Chat service with project detection integration, file uploads, source tracking
 - `chat/detection.ts` — detectProjectRequest heuristics
 - `sandbox/sandbox.ts` — Validation pipeline, dual-mode (filesystem/Docker) switching
 - `sandbox/docker.ts` — Docker container sandbox: create, exec, write, delete, destroy, cleanup
@@ -322,5 +347,6 @@ encore run              # all services + local infra
 - `templates/templates.ts` — Template library: list, get, useTemplate, categories
 - `templates/types.ts` — Template, TemplateFile, TemplateVariable types
 - `mcp/mcp.ts` — MCP server registry: list, get, install, uninstall, configure, installed
+- `integrations/integrations.ts` — External service webhooks (Slack, Discord), CRUD config
 - `agent/e2e.test.ts` — End-to-end integration tests (25 tests across 10 groups)
 - `ARKITEKTUR.md` — Full architecture documentation with all schemas and endpoints

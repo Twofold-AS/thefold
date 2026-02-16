@@ -49,9 +49,10 @@ export interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start" | "context_transfer";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status";
   metadata: string | null;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface ConversationSummary {
@@ -87,6 +88,7 @@ export async function sendMessage(conversationId: string, message: string, optio
   chatOnly?: boolean;
   modelOverride?: string | null;
   skillIds?: string[];
+  repoName?: string;
 }) {
   return apiFetch<{
     message: Message;
@@ -656,6 +658,21 @@ export async function cancelChatGeneration(conversationId: string) {
   });
 }
 
+// --- File upload ---
+
+export async function uploadChatFile(
+  conversationId: string,
+  filename: string,
+  contentType: string,
+  content: string,
+  sizeBytes: number,
+) {
+  return apiFetch<{ fileId: string; filename: string }>("/chat/upload", {
+    method: "POST",
+    body: { conversationId, filename, contentType, content, sizeBytes },
+  });
+}
+
 // --- Builder ---
 
 export interface BuilderJobSummary {
@@ -980,4 +997,95 @@ export async function estimateSubAgentCost(complexity: number, budgetMode?: stri
     method: "POST",
     body: { complexity, budgetMode },
   });
+}
+
+// --- Integrations ---
+
+export interface IntegrationConfig {
+  id: string;
+  userId: string;
+  platform: "slack" | "discord";
+  webhookUrl: string | null;
+  channelId: string | null;
+  teamId: string | null;
+  defaultRepo: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listIntegrations() {
+  return apiFetch<{ configs: IntegrationConfig[] }>("/integrations/list");
+}
+
+export async function saveIntegration(req: {
+  platform: "slack" | "discord";
+  webhookUrl?: string;
+  botToken?: string;
+  channelId?: string;
+  teamId?: string;
+  defaultRepo?: string;
+  enabled?: boolean;
+}) {
+  return apiFetch<{ config: IntegrationConfig }>("/integrations/save", {
+    method: "POST",
+    body: req,
+  });
+}
+
+export async function deleteIntegration(platform: string) {
+  return apiFetch<{ success: boolean }>("/integrations/delete", {
+    method: "POST",
+    body: { platform },
+  });
+}
+
+// --- Cost Summary ---
+
+export interface CostPeriod {
+  total: number;
+  tokens: number;
+  count: number;
+}
+
+export interface ModelCost {
+  model: string;
+  total: number;
+  tokens: number;
+  count: number;
+}
+
+export interface DailyTrend {
+  date: string;
+  total: number;
+  tokens: number;
+}
+
+export interface CostSummary {
+  today: CostPeriod;
+  thisWeek: CostPeriod;
+  thisMonth: CostPeriod;
+  perModel: ModelCost[];
+  dailyTrend: DailyTrend[];
+}
+
+export async function getCostSummary() {
+  return apiFetch<CostSummary>("/chat/costs");
+}
+
+// --- Repo Activity ---
+
+export interface RepoActivityEvent {
+  id: string;
+  repoName: string;
+  eventType: string;
+  title: string;
+  description: string | null;
+  userId: string | null;
+  metadata: string | null;
+  createdAt: string;
+}
+
+export async function getRepoActivity(repoName: string) {
+  return apiFetch<{ activities: RepoActivityEvent[] }>(`/chat/activity/${repoName}`);
 }

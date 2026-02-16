@@ -10,17 +10,19 @@ import {
   transferContext,
   deleteConversation,
   cancelChatGeneration,
+  uploadChatFile,
   listSkills,
   type Message,
   type ConversationSummary,
   type Skill,
 } from "@/lib/api";
-import { Send, MessageSquare, PanelLeftClose, PanelLeft } from "lucide-react";
+import { MessageSquare, PanelLeftClose, PanelLeft } from "lucide-react";
 import { ModelSelector } from "@/components/ModelSelector";
 import { SkillsSelector, MessageSkillBadges } from "@/components/SkillsSelector";
 import { ChatToolsMenu } from "@/components/ChatToolsMenu";
 import { InlineSkillForm } from "@/components/InlineSkillForm";
-import { AgentStatus, type AgentStep } from "@/components/AgentStatus";
+import { AgentStatus, type AgentStatusData } from "@/components/AgentStatus";
+import { ChatMessage } from "@/components/ChatMessage";
 import { usePreferences, useUser } from "@/contexts/UserPreferencesContext";
 import { useRepoContext } from "@/lib/repo-context";
 import Image from "next/image";
@@ -47,17 +49,19 @@ export default function ChatPage() {
   const [showTaskForm, setShowTaskForm] = useState(false);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [pollMode, setPollMode] = useState<"idle" | "waiting" | "cooldown">("idle");
+  const [heartbeatLost, setHeartbeatLost] = useState(false);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const isNearBottomRef = useRef(true);
 
   const autoResize = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.style.height = "44px";
-    el.style.height = Math.min(el.scrollHeight, 200) + "px";
+    el.style.height = "56px";
+    el.style.height = Math.min(el.scrollHeight, 150) + "px";
   }, []);
 
   // Check if user is near bottom
@@ -107,14 +111,24 @@ export default function ChatPage() {
         const res = await getChatHistory(activeConvId, 100);
         setMessages(res.messages);
 
-        // Check if AI is done (last message is assistant and not agent_status)
         const lastMsg = res.messages[res.messages.length - 1];
+
+        // AI is done
         if (lastMsg && lastMsg.role === "assistant" && lastMsg.messageType !== "agent_status") {
           if (pollMode === "waiting") {
             setPollMode("cooldown");
           } else {
             setPollMode("idle");
           }
+          setHeartbeatLost(false);
+          return;
+        }
+
+        // Heartbeat check — if agent_status not updated in 30s, backend may be dead
+        if (lastMsg?.messageType === "agent_status" && lastMsg.updatedAt) {
+          const lastUpdate = new Date(lastMsg.updatedAt).getTime();
+          const now = Date.now();
+          setHeartbeatLost(now - lastUpdate > 30000);
         }
       } catch {
         // Silent
@@ -215,6 +229,28 @@ export default function ChatPage() {
     textareaRef.current?.focus();
   }
 
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const convId = activeConvId || mainConversationId();
+    if (!activeConvId) setActiveConvId(convId);
+
+    try {
+      const content = await file.text();
+      await uploadChatFile(convId, file.name, file.type || "text/plain", content, file.size);
+
+      // Send as a message with file content (truncated for large files)
+      const preview = content.length > 10000 ? content.substring(0, 10000) + "\n\n... (avkortet)" : content;
+      setInput(`[Fil: ${file.name}]\n\n${preview}`);
+      textareaRef.current?.focus();
+    } catch {
+      // Silent
+    }
+    // Reset file input
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
   async function handleDeleteConversation(convId: string) {
     try {
       await deleteConversation(convId);
@@ -256,11 +292,18 @@ export default function ChatPage() {
   const isReadOnly = !!transferred;
 
   // Parse agent_status messages for AgentStatus rendering
-  function tryParseAgentStatus(msg: Message): { phase: string; subPhase?: string; steps: AgentStep[]; progress?: number } | null {
+  function tryParseAgentStatus(msg: Message): AgentStatusData | null {
     if (msg.messageType !== "agent_status") return null;
     try {
       const data = JSON.parse(msg.content);
-      if (data.type === "agent_status" && data.steps) return data;
+      if (data.type === "agent_status" && data.phase) {
+        return {
+          phase: data.phase,
+          title: data.title || data.phase,
+          steps: data.steps || [],
+          error: data.error,
+        };
+      }
     } catch {
       // Not JSON agent_status
     }
@@ -270,6 +313,7 @@ export default function ChatPage() {
   // Check if AI is still thinking (last message is agent_status or we're sending)
   const lastMsg = messages[messages.length - 1];
   const isWaitingForAI = pollMode === "waiting" && (!lastMsg || lastMsg.role === "user" || lastMsg.messageType === "agent_status");
+  const hasAgentStatus = messages.some(m => m.messageType === "agent_status");
 
   return (
     <div className="flex flex-col" style={{ height: "100vh" }}>
@@ -395,7 +439,7 @@ export default function ChatPage() {
           <div
             ref={messagesContainerRef}
             onScroll={checkNearBottom}
-            className="flex-1 overflow-y-auto chat-scroll pb-4 px-2"
+            className="flex-1 overflow-y-auto chat-scroll pb-4 px-4"
           >
             {messages.length === 0 ? (
               /* Empty state */
@@ -426,7 +470,7 @@ export default function ChatPage() {
                 </div>
               </div>
             ) : (
-              <div className="space-y-4 max-w-2xl mx-auto pt-4">
+              <div className="space-y-4 max-w-4xl mx-auto pt-4">
                 {messages.map((msg) => {
                   const isUser = msg.role === "user";
                   const isAgentReport = msg.messageType === "agent_report";
@@ -437,13 +481,7 @@ export default function ChatPage() {
                   if (agentData) {
                     return (
                       <div key={msg.id} className="message-enter">
-                        <AgentStatus
-                          currentPhase={agentData.phase}
-                          subPhase={agentData.subPhase}
-                          steps={agentData.steps}
-                          progress={agentData.progress}
-                          isComplete={agentData.steps.every((s) => s.status === "done")}
-                        />
+                        <AgentStatus data={agentData} />
                       </div>
                     );
                   }
@@ -467,7 +505,7 @@ export default function ChatPage() {
 
                       {/* Bubble */}
                       <div
-                        className={`max-w-[80%] ${isUser ? "text-right" : ""}`}
+                        className={`${isUser ? "max-w-[70%] text-right" : "max-w-[85%]"}`}
                         style={{
                           ...(isAgentReport
                             ? { borderLeft: "2px solid #6366f1", paddingLeft: "12px" }
@@ -495,26 +533,51 @@ export default function ChatPage() {
                         )}
 
                         <div
-                          className="text-sm whitespace-pre-wrap leading-relaxed rounded-xl px-3.5 py-2.5 inline-block"
+                          className={`text-sm leading-relaxed rounded-xl px-3.5 py-2.5 inline-block ${isUser ? "whitespace-pre-wrap" : ""}`}
                           style={{
                             background: isUser ? "transparent" : "var(--bg-chat)",
                             color: isUser ? "#fff" : "var(--text-chat)",
                             textAlign: "left",
                           }}
                         >
-                          {msg.content}
+                          {isUser ? (
+                            <span>{msg.content}</span>
+                          ) : (
+                            <ChatMessage content={msg.content} role="assistant" />
+                          )}
                         </div>
 
-                        {/* Timestamp + Skills */}
+                        {/* Timestamp + Token info + Skills */}
                         <div
-                          className="text-[10px] mt-1 px-1"
+                          className="text-[10px] mt-1 px-1 flex items-center gap-2 flex-wrap"
                           style={{ color: "var(--text-muted)" }}
                         >
-                          {formatTime(msg.createdAt)}
+                          <span>{formatTime(msg.createdAt)}</span>
+                          {!isUser && msg.metadata && (() => {
+                            try {
+                              const meta = typeof msg.metadata === "string" ? JSON.parse(msg.metadata) : msg.metadata;
+                              if (meta.model) {
+                                return (
+                                  <>
+                                    <span>{meta.model}</span>
+                                    {meta.tokens?.totalTokens != null && <span>{meta.tokens.totalTokens} tokens</span>}
+                                    {meta.cost != null && <span>${meta.cost.toFixed(4)}</span>}
+                                    {meta.truncated && (
+                                      <span style={{ color: "#ef4444" }}>Avbrutt (maks tokens)</span>
+                                    )}
+                                    {meta.toolsUsed?.length > 0 && (
+                                      <span>{meta.toolsUsed.length} verktoy brukt</span>
+                                    )}
+                                  </>
+                                );
+                              }
+                            } catch { /* ignore */ }
+                            return null;
+                          })()}
                         </div>
                         {msg.metadata && (() => {
                           try {
-                            const meta = JSON.parse(msg.metadata);
+                            const meta = typeof msg.metadata === "string" ? JSON.parse(msg.metadata) : msg.metadata;
                             if (meta.skillIds?.length > 0) {
                               return <div className="px-1"><MessageSkillBadges skillIds={meta.skillIds} allSkills={allSkills} /></div>;
                             }
@@ -526,47 +589,35 @@ export default function ChatPage() {
                   );
                 })}
 
-                {/* "TheFold tenker..." indicator while waiting for AI */}
-                {isWaitingForAI && (
-                  <div className="flex items-start gap-3 py-3 message-enter">
-                    <div className="w-8 h-8 flex items-center justify-center shrink-0" style={{ border: "1px solid var(--border)" }}>
-                      <span className="font-brand text-xs brand-shimmer">TF</span>
-                    </div>
-                    <div className="flex flex-col gap-1 py-1">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className="agent-pulse"
-                          style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--success)", display: "inline-block" }}
-                        />
-                        <span className="text-sm agent-shimmer" style={{ color: "var(--text-muted)" }}>TheFold tenker</span>
-                        <span className="agent-dots">
-                          <span className="dot">.</span>
-                          <span className="dot">.</span>
-                          <span className="dot">.</span>
-                        </span>
-                      </div>
-                      <button
-                        onClick={async () => {
-                          if (activeConvId) {
-                            await cancelChatGeneration(activeConvId);
-                            setPollMode("idle");
-                          }
-                        }}
-                        className="text-xs mt-1 transition-colors"
-                        style={{
-                          color: "var(--text-muted)",
-                          background: "transparent",
-                          border: "1px solid var(--border)",
-                          padding: "4px 12px",
-                          cursor: "pointer",
-                          width: "fit-content",
-                        }}
-                        onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--text-secondary)")}
-                        onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
-                      >
-                        Stopp generering
-                      </button>
-                    </div>
+                {/* "TheFold tenker..." indicator — only before first agent_status arrives */}
+                {isWaitingForAI && !hasAgentStatus && (
+                  <div className="flex items-center gap-2 py-3 pl-4 message-enter">
+                    <span
+                      className="agent-pulse"
+                      style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--success)", display: "inline-block" }}
+                    />
+                    <span className="text-sm agent-shimmer" style={{ color: "var(--text-muted)" }}>TheFold tenker</span>
+                    <span className="agent-dots">
+                      <span className="dot">.</span>
+                      <span className="dot">.</span>
+                      <span className="dot">.</span>
+                    </span>
+                  </div>
+                )}
+
+                {/* Heartbeat lost — backend stopped responding */}
+                {heartbeatLost && (
+                  <div className="px-4 py-3 message-enter" style={{ border: "1px solid #ef4444" }}>
+                    <span className="text-sm" style={{ color: "#ef4444" }}>
+                      Mistet kontakt med TheFold.
+                    </span>
+                    <button
+                      onClick={() => { setPollMode("idle"); setHeartbeatLost(false); }}
+                      className="text-sm ml-2 underline"
+                      style={{ color: "var(--text-secondary)", background: "none", border: "none", cursor: "pointer" }}
+                    >
+                      Avbryt
+                    </button>
                   </div>
                 )}
 
@@ -596,7 +647,7 @@ export default function ChatPage() {
           {!isReadOnly && (
             <div className="flex-shrink-0 px-2 pb-2 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
               {/* Inline forms */}
-              <div className="max-w-2xl mx-auto">
+              <div className="max-w-4xl mx-auto">
                 {showSkillForm && (
                   <InlineSkillForm
                     onClose={() => setShowSkillForm(false)}
@@ -626,10 +677,18 @@ export default function ChatPage() {
                 )}
               </div>
 
-              <form onSubmit={handleSend} className="flex gap-2 items-end max-w-2xl mx-auto">
+              <input
+                type="file"
+                ref={fileInputRef}
+                className="hidden"
+                accept=".md,.txt,.json,.ts,.tsx,.js,.jsx,.py,.yaml,.yml,.csv,.html,.css,.sql,.sh,.toml"
+                onChange={handleFileUpload}
+              />
+              <form onSubmit={handleSend} className="flex gap-2 items-end max-w-4xl mx-auto">
                 <ChatToolsMenu
                   onCreateSkill={() => setShowSkillForm(true)}
                   onCreateTask={() => setShowTaskForm(true)}
+                  onUploadFile={() => fileInputRef.current?.click()}
                   onTransfer={messages.length > 0 ? () => setShowRepoSelector(true) : undefined}
                 />
                 <textarea
@@ -639,25 +698,46 @@ export default function ChatPage() {
                   onKeyDown={handleKeyDown}
                   placeholder="Skriv en melding..."
                   className="input-field flex-1 resize-none"
-                  style={{ minHeight: "44px", maxHeight: "200px", paddingLeft: "16px", paddingRight: "16px" }}
+                  style={{ minHeight: "56px", maxHeight: "150px" }}
                   rows={1}
                   disabled={sending}
                 />
-                <button
-                  type="submit"
-                  disabled={sending || !input.trim()}
-                  className="flex items-center justify-center transition-colors"
-                  style={{
-                    width: "44px",
-                    height: "44px",
-                    background: "transparent",
-                    color: "var(--text-primary)",
-                    border: "1px solid var(--border)",
-                    flexShrink: 0,
-                  }}
-                >
-                  <Send size={18} />
-                </button>
+                {isWaitingForAI ? (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (activeConvId) {
+                        await cancelChatGeneration(activeConvId);
+                        setPollMode("idle");
+                        setHeartbeatLost(false);
+                      }
+                    }}
+                    className="flex items-center justify-center hover:bg-white/10 transition-colors"
+                    style={{ width: "32px", height: "32px", border: "1px solid var(--border)", borderRadius: "50%", background: "transparent", flexShrink: 0 }}
+                    title="Stopp generering"
+                  >
+                    <div className="w-2.5 h-2.5" style={{ background: "var(--text-primary)" }} />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={sending || !input.trim()}
+                    className="flex items-center justify-center hover:bg-white/10 transition-colors"
+                    style={{
+                      width: "32px",
+                      height: "32px",
+                      border: "1px solid var(--border)",
+                      borderRadius: "50%",
+                      background: "transparent",
+                      flexShrink: 0,
+                      opacity: !input.trim() && !sending ? 0.3 : 1,
+                    }}
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor" style={{ color: "var(--text-primary)" }}>
+                      <path fillRule="evenodd" d="M3.293 9.707a1 1 0 010-1.414l6-6a1 1 0 011.414 0l6 6a1 1 0 01-1.414 1.414L11 5.414V17a1 1 0 11-2 0V5.414L4.707 9.707a1 1 0 01-1.414 0z" />
+                    </svg>
+                  </button>
+                )}
               </form>
             </div>
           )}

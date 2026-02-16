@@ -158,6 +158,7 @@ interface Message {
   messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status";
   metadata: string | null;
   createdAt: string;
+  updatedAt: string;
 }
 
 // --- Helper: update message content in-place (for progress tracking) ---
@@ -171,21 +172,17 @@ async function updateMessageType(messageId: string, messageType: string) {
 }
 
 async function updateAgentStatus(messageId: string, status: object) {
-  await db.exec`UPDATE messages SET content = ${JSON.stringify({ type: "agent_status", ...status })} WHERE id = ${messageId}::uuid`;
+  await db.exec`UPDATE messages SET content = ${JSON.stringify({ type: "agent_status", ...status })}, updated_at = NOW() WHERE id = ${messageId}::uuid`;
 }
 
-// --- Timeout helper ---
+// --- Intent detection ---
 
-async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-  const timeout = new Promise<T>((_, reject) =>
-    setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
-  );
-  try {
-    return await Promise.race([promise, timeout]);
-  } catch {
-    console.error(`Call timed out after ${ms}ms, using fallback`);
-    return fallback;
-  }
+function detectMessageIntent(content: string): "repo_review" | "task_request" | "question" | "general" {
+  const lower = content.toLowerCase();
+  if (lower.includes("se over") || lower.includes("analyser") || lower.includes("gjennomgå") || lower.includes("strukturen")) return "repo_review";
+  if (lower.includes("endre") || lower.includes("fiks") || lower.includes("implementer") || lower.includes("legg til") || lower.includes("lag en")) return "task_request";
+  if (lower.includes("hva") || lower.includes("hvorfor") || lower.includes("hvordan") || lower.includes("?")) return "question";
+  return "general";
 }
 
 // --- Cancel generation (in-memory set) ---
@@ -211,6 +208,10 @@ interface SendRequest {
   modelOverride?: string | null;
   // Skills aktive for denne samtalen
   skillIds?: string[];
+  // Hvilket repo brukeren chatter om (fra repo-chat)
+  repoName?: string;
+  // Where the message originated
+  source?: "web" | "slack" | "discord" | "api";
 }
 
 interface SendResponse {
@@ -300,10 +301,11 @@ export const send = api(
       : null;
 
     const msg = await db.queryRow<Message>`
-      INSERT INTO messages (conversation_id, role, content, message_type, metadata)
-      VALUES (${req.conversationId}, 'user', ${req.message}, 'chat', ${userMetadata})
+      INSERT INTO messages (conversation_id, role, content, message_type, metadata, source)
+      VALUES (${req.conversationId}, 'user', ${req.message}, 'chat', ${userMetadata}, ${req.source || "web"})
       RETURNING id, conversation_id as "conversationId", role, content,
-                message_type as "messageType", metadata, created_at as "createdAt"
+                message_type as "messageType", metadata, created_at as "createdAt",
+                updated_at as "updatedAt"
     `;
 
     if (!msg) throw APIError.internal("failed to store message");
@@ -425,6 +427,7 @@ export const send = api(
         placeholderMsg.id,
         { email: getAuthData()!.email, userID: getAuthData()!.userID },
         req.skillIds,
+        req.repoName,
       ).catch((err) => {
         console.error("AI processing failed:", err);
         updateMessageContent(placeholderMsg.id, "Beklager, noe gikk galt. Prøv igjen.").catch(() => {});
@@ -445,89 +448,342 @@ async function processAIResponse(
   placeholderId: string,
   auth: { email: string; userID: string },
   skillIds?: string[],
+  repoName?: string,
 ) {
-  const { ai } = await import("~encore/clients");
-  const { memory } = await import("~encore/clients");
+  // Start heartbeat — updates updated_at every 10s so frontend knows we're alive
+  const heartbeat = setInterval(async () => {
+    try {
+      await db.exec`UPDATE messages SET updated_at = NOW() WHERE id = ${placeholderId}::uuid`;
+    } catch {}
+  }, 10000);
 
-  // Step 1: Update status — understanding request
-  await updateAgentStatus(placeholderId, {
-    phase: "Forbereder",
-    steps: [
+  try {
+    const { ai } = await import("~encore/clients");
+    const { memory } = await import("~encore/clients");
+
+    // Detect intent for richer steps
+    const intent = detectMessageIntent(userContent);
+
+    // Build dynamic steps based on what we'll actually do
+    const initialPhase = intent === "repo_review" ? "Forbereder" : intent === "task_request" ? "Planlegger" : "Tenker";
+    const initialTitle = intent === "repo_review" ? `Samler kontekst for ${repoName || "repoet"}` : intent === "task_request" ? "Forstår forespørselen" : "Forbereder svar";
+
+    const dynamicSteps: Array<{ label: string; icon: string; status: "active" | "pending" | "done" }> = [];
+    dynamicSteps.push({ label: "Forstår forespørselen", icon: "search", status: "active" });
+    if (repoName) {
+      dynamicSteps.push({ label: `Henter filer fra ${repoName}`, icon: "service", status: "pending" });
+    }
+    if (intent === "task_request" || intent === "repo_review" || userContent.length > 100) {
+      dynamicSteps.push({ label: "Søker i tidligere erfaringer", icon: "memory", status: "pending" });
+    }
+    if (intent === "task_request") {
+      dynamicSteps.push({ label: "Planlegger oppgave", icon: "plan", status: "pending" });
+    } else if (intent === "repo_review") {
+      dynamicSteps.push({ label: "Skriver analyse", icon: "write", status: "pending" });
+    } else {
+      dynamicSteps.push({ label: "Formulerer svar", icon: "write", status: "pending" });
+    }
+
+    await updateAgentStatus(placeholderId, {
+      phase: initialPhase,
+      title: initialTitle,
+      steps: dynamicSteps,
+    });
+
+    if (isCancelled(conversationId)) return;
+
+    // Step 2: Get conversation history
+    const historyRows = await db.query<Message>`
+      SELECT id, conversation_id as "conversationId", role, content,
+             message_type as "messageType", metadata, created_at as "createdAt",
+             updated_at as "updatedAt"
+      FROM messages
+      WHERE conversation_id = ${conversationId} AND message_type != 'agent_status'
+      ORDER BY created_at DESC LIMIT 30
+    `;
+    const history: Message[] = [];
+    for await (const row of historyRows) history.push(row);
+    history.reverse();
+
+    // Step 3: Resolve skills (try/catch — don't crash on failure)
+    let resolvedSkills = { skills: [] as { promptFragment: string }[] };
+    try {
+      const { skills } = await import("~encore/clients");
+      resolvedSkills = await skills.resolve({ task: userContent, context: "chat" });
+    } catch (e) {
+      console.error("Skills resolve failed:", e);
+    }
+
+    // Mark first step done, advance to next
+    const postSkillsSteps = dynamicSteps.map((s, i) => {
+      if (i === 0) return { ...s, status: "done" as const };
+      if (i === 1) return { ...s, status: "active" as const };
+      return s;
+    });
+    if (resolvedSkills.skills?.length > 0) {
+      postSkillsSteps.splice(1, 0, { label: `${resolvedSkills.skills.length} skills aktive`, icon: "sparkle", status: "done" });
+    }
+
+    await updateAgentStatus(placeholderId, {
+      phase: initialPhase,
+      title: initialTitle,
+      steps: postSkillsSteps,
+    });
+
+    if (isCancelled(conversationId)) return;
+
+    // Step 4: Search memories — only for complex queries (saves tokens and time)
+    let memories = { results: [] as { content: string }[], totalFound: 0 };
+    if (intent === "task_request" || intent === "repo_review" || userContent.length > 100) {
+      try {
+        memories = await memory.search({ query: userContent, limit: 5 });
+      } catch (e) {
+        console.error("Memory search failed:", e);
+      }
+    }
+
+    // Step 4.5: Fetch GitHub context if in repo-chat
+    let repoContext = "";
+
+    if (repoName) {
+      await updateAgentStatus(placeholderId, {
+        phase: "Analyserer",
+        title: `Ser over ${repoName}`,
+        steps: [
+          { label: "Analyserer meldingen", icon: "search", status: "done" },
+          { label: `${resolvedSkills.skills?.length || 0} skills funnet`, icon: "sparkle", status: "done" },
+          { label: `${memories.results?.length || 0} relevante minner`, icon: "search", status: "done" },
+          { label: "Henter filstruktur fra GitHub", icon: "service", status: "active" },
+          { label: "Genererer svar", icon: "code", status: "pending" },
+        ],
+      });
+
+      if (isCancelled(conversationId)) return;
+
+      try {
+        const { github } = await import("~encore/clients");
+
+        // Fetch file tree
+        const tree = await github.getTree({ owner: "Twofold-AS", repo: repoName });
+        if (tree?.tree?.length > 0) {
+          repoContext += `\nFilstruktur for ${repoName} (${tree.tree.length} filer):\n${tree.treeString}`;
+        }
+
+        await updateAgentStatus(placeholderId, {
+          phase: "Analyserer",
+          title: `Ser over ${repoName}`,
+          steps: [
+            { label: "Analyserer meldingen", icon: "search", status: "done" },
+            { label: `${resolvedSkills.skills?.length || 0} skills funnet`, icon: "sparkle", status: "done" },
+            { label: `${memories.results?.length || 0} relevante minner`, icon: "search", status: "done" },
+            { label: `Filstruktur hentet (${tree.tree?.length || 0} filer)`, icon: "service", status: "done" },
+            { label: "Henter relevante filer", icon: "code", status: "active" },
+            { label: "Genererer svar", icon: "code", status: "pending" },
+          ],
+        });
+
+        // Find relevant files based on the user's message
+        try {
+          const relevant = await github.findRelevantFiles({
+            owner: "Twofold-AS",
+            repo: repoName,
+            taskDescription: userContent,
+            tree: tree.tree,
+          });
+
+          // Fetch content for top 5 relevant files
+          const filesToFetch = (relevant.paths || []).slice(0, 5);
+          for (const filePath of filesToFetch) {
+            try {
+              const file = await github.getFile({ owner: "Twofold-AS", repo: repoName, path: filePath });
+              if (file?.content) {
+                const trimmed = file.content.split("\n").slice(0, 200).join("\n");
+                repoContext += `\n\n--- ${filePath} ---\n${trimmed}`;
+              }
+            } catch {
+              // Skip files that fail to load
+            }
+          }
+        } catch {
+          // Fallback: fetch key files
+          for (const keyFile of ["package.json", "README.md", "encore.app"]) {
+            try {
+              const file = await github.getFile({ owner: "Twofold-AS", repo: repoName, path: keyFile });
+              if (file?.content) {
+                repoContext += `\n\n--- ${keyFile} ---\n${file.content.slice(0, 3000)}`;
+              }
+            } catch {
+              // Skip
+            }
+          }
+        }
+      } catch (e) {
+        console.error("GitHub context fetch failed:", e);
+      }
+
+      // If repoContext is still empty after all attempts, tell AI the repo is empty
+      if (!repoContext || repoContext.length === 0) {
+        repoContext = "\n\nDette repoet er TOMT — det har ingen filer. GitHub returnerte at repoet er tomt. Du MÅ informere brukeren om at repoet er tomt. IKKE dikt opp filer.";
+      }
+    }
+
+    // Update status — all prep done, now generating
+    const preAiPhase = intent === "repo_review" ? "Analyserer" : intent === "task_request" ? "Utfører" : "Genererer";
+    const preAiTitle = intent === "repo_review" ? "Gjennomgår kodebasen" : intent === "task_request" ? "Gjennomfører handlinger" : "Skriver svar";
+    const preAiSteps: Array<{ label: string; icon: string; status: "done" | "active" }> = [
       { label: "Forstår forespørselen", icon: "search", status: "done" },
-      { label: "Henter relevante skills", icon: "sparkle", status: "active" },
-      { label: "Søker i minne", icon: "search", status: "pending" },
-      { label: "Genererer svar", icon: "code", status: "pending" },
-    ],
-  });
+    ];
+    if (resolvedSkills.skills?.length > 0) {
+      preAiSteps.push({ label: `${resolvedSkills.skills.length} skills aktive`, icon: "sparkle", status: "done" });
+    }
+    if (memories.results?.length > 0) {
+      preAiSteps.push({ label: `${memories.results.length} relevante minner`, icon: "memory", status: "done" });
+    }
+    if (repoName) {
+      preAiSteps.push({ label: "Repo-kontekst hentet", icon: "service", status: "done" });
+    }
+    preAiSteps.push({
+      label: intent === "task_request" ? "Planlegger oppgave" : intent === "repo_review" ? "Skriver analyse" : "Formulerer svar",
+      icon: "write",
+      status: "active",
+    });
 
-  if (isCancelled(conversationId)) return;
+    await updateAgentStatus(placeholderId, {
+      phase: preAiPhase,
+      title: preAiTitle,
+      steps: preAiSteps,
+    });
 
-  // Step 2: Get conversation history
-  const historyRows = await db.query<Message>`
-    SELECT id, conversation_id as "conversationId", role, content,
-           message_type as "messageType", metadata, created_at as "createdAt"
-    FROM messages
-    WHERE conversation_id = ${conversationId} AND message_type != 'agent_status'
-    ORDER BY created_at DESC LIMIT 30
-  `;
-  const history: Message[] = [];
-  for await (const row of historyRows) history.push(row);
-  history.reverse();
+    if (isCancelled(conversationId)) return;
 
-  // Step 3: Search memories with timeout
-  await updateAgentStatus(placeholderId, {
-    phase: "Forbereder",
-    steps: [
-      { label: "Forstår forespørselen", icon: "search", status: "done" },
-      { label: "Skills klar", icon: "sparkle", status: "done" },
-      { label: "Søker i minne", icon: "search", status: "active" },
-      { label: "Genererer svar", icon: "code", status: "pending" },
-    ],
-  });
+    // Step 5: Call AI (try/catch — graceful error message on failure)
+    let aiResponse;
+    try {
+      aiResponse = await ai.chat({
+        messages: history.map((m) => ({ role: m.role, content: m.content })),
+        memoryContext: (memories.results || []).map((r) => r.content),
+        systemContext: "direct_chat",
+        repoName,
+        repoContext: repoContext || undefined,
+        conversationId,
+      });
+    } catch (e) {
+      console.error("AI call failed:", e);
+      aiResponse = {
+        content: "Beklager, jeg klarte ikke å generere et svar. Feilmelding: " + (e instanceof Error ? e.message : "Ukjent feil"),
+        tokensUsed: 0,
+        stopReason: "error",
+        modelUsed: "none",
+        costUsd: 0,
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+        truncated: false,
+      };
+    }
 
-  if (isCancelled(conversationId)) return;
+    // Handle truncated responses
+    if (aiResponse.truncated) {
+      aiResponse.content += "\n\n---\nSvaret ble avbrutt fordi maks antall tokens ble nådd. Prøv et mer spesifikt spørsmål, eller be om at svaret deles opp.";
+    }
 
-  const memories = await withTimeout(
-    memory.search({ query: userContent, limit: 5 }),
-    5000,
-    { results: [], totalFound: 0 }
-  );
+    console.log(`AI Response: ${aiResponse.usage.totalTokens} tokens (${aiResponse.usage.inputTokens} inn, ${aiResponse.usage.outputTokens} ut), kostnad: $${aiResponse.costUsd.toFixed(4)}, stop: ${aiResponse.stopReason}`);
 
-  // Step 4: Call AI with timeout
-  await updateAgentStatus(placeholderId, {
-    phase: "Genererer svar",
-    steps: [
-      { label: "Forstår forespørselen", icon: "search", status: "done" },
-      { label: "Skills klar", icon: "sparkle", status: "done" },
-      { label: `${memories.results?.length || 0} minner funnet`, icon: "search", status: "done" },
-      { label: "Genererer svar...", icon: "code", status: "active" },
-    ],
-  });
+    if (isCancelled(conversationId)) return;
 
-  if (isCancelled(conversationId)) return;
+    // Show tool usage if any
+    if (aiResponse.toolsUsed && aiResponse.toolsUsed.length > 0) {
+      const toolLabels: Record<string, string> = {
+        create_task: "Opprettet ny task",
+        start_task: "Startet agent på task",
+        list_tasks: "Hentet task-oversikt",
+        read_file: "Leste fil fra repo",
+        search_code: "Søkte i kodebasen",
+      };
+      const toolSteps = aiResponse.toolsUsed.map((t: string) => ({
+        label: toolLabels[t] || t,
+        icon: "service",
+        status: "done" as const,
+      }));
 
-  const aiResponse = await withTimeout(
-    ai.chat({
-      messages: history.map((m) => ({ role: m.role, content: m.content })),
-      memoryContext: (memories.results || []).map((r: { content: string }) => r.content),
-      systemContext: "direct_chat",
-    }),
-    60000,
-    { content: "Beklager, AI-kallet tok for lang tid. Prøv igjen med en enklere melding.", tokensUsed: 0, stopReason: "timeout", modelUsed: "none", costUsd: 0 }
-  );
+      await updateAgentStatus(placeholderId, {
+        phase: "Utfører",
+        title: "Gjennomfører handlinger",
+        steps: [
+          ...preAiSteps.map((s) => ({ ...s, status: "done" as const })),
+          ...toolSteps,
+          { label: "Skriver svar", icon: "write", status: "active" },
+        ],
+      });
+    }
 
-  if (isCancelled(conversationId)) return;
+    // Step 6: Replace placeholder with actual response + metadata
+    await updateMessageContent(placeholderId, aiResponse.content);
+    await updateMessageType(placeholderId, "chat");
 
-  // Step 5: Replace placeholder with actual response
-  await updateMessageContent(placeholderId, aiResponse.content);
-  await updateMessageType(placeholderId, "chat");
+    // Save token/cost metadata on the AI message
+    await db.exec`UPDATE messages SET metadata = ${JSON.stringify({
+      model: aiResponse.modelUsed,
+      tokens: aiResponse.usage,
+      cost: aiResponse.costUsd,
+      stopReason: aiResponse.stopReason,
+      truncated: aiResponse.truncated,
+      toolsUsed: aiResponse.toolsUsed || [],
+    })}::jsonb WHERE id = ${placeholderId}::uuid`;
 
-  // Extract memories (fire-and-forget)
-  memory.extract({
-    conversationId,
-    content: `User: ${userContent}\nAssistant: ${aiResponse.content}`,
-    category: "conversation",
-  }).catch(() => {});
+    // Log repo activity (fire-and-forget)
+    if (repoName) {
+      logRepoActivity(repoName, "chat", "Melding sendt", userContent.substring(0, 100), auth.userID);
+      if (aiResponse.toolsUsed && aiResponse.toolsUsed.length > 0) {
+        for (const tool of aiResponse.toolsUsed) {
+          logRepoActivity(repoName, "tool_use", `Verktoy: ${tool}`, null, undefined, { tool });
+        }
+      }
+      logRepoActivity(repoName, "ai_response", "TheFold svarte", aiResponse.content.substring(0, 100), undefined, {
+        model: aiResponse.modelUsed,
+        tokens: aiResponse.usage?.totalTokens,
+        cost: aiResponse.costUsd,
+      });
+    }
+
+    // Budget alert: check daily cost
+    try {
+      const dailyCost = await db.queryRow<{ total: number }>`
+        SELECT COALESCE(SUM((metadata->>'cost')::numeric), 0) as total
+        FROM messages WHERE role = 'assistant' AND metadata->>'cost' IS NOT NULL
+        AND created_at >= CURRENT_DATE
+      `;
+      if (dailyCost && dailyCost.total > 5.0) {
+        console.warn(`BUDGET ALERT: Daily cost $${dailyCost.total.toFixed(2)} exceeds $5.00`);
+      }
+    } catch {
+      // Non-critical
+    }
+
+    // Extract memories (fire-and-forget)
+    memory.extract({
+      conversationId,
+      content: `User: ${userContent}\nAssistant: ${aiResponse.content}`,
+      category: "conversation",
+    }).catch(() => {});
+
+  } catch (e) {
+    // CATCH ALL — never leave user stuck in "Tenker..."
+    console.error("processAIResponse crashed:", e);
+    try {
+      await updateAgentStatus(placeholderId, {
+        phase: "Feilet",
+        title: "Noe gikk galt",
+        steps: [],
+        error: (e instanceof Error ? e.message : "Ukjent feil") + "\n\nPrøv igjen.",
+      });
+      await updateMessageContent(placeholderId,
+        "Noe gikk galt under prosessering. Feil: " + (e instanceof Error ? e.message : "Ukjent feil") + "\n\nPrøv igjen."
+      );
+      await updateMessageType(placeholderId, "chat");
+    } catch {}
+  } finally {
+    // ALWAYS stop heartbeat
+    clearInterval(heartbeat);
+  }
 }
 
 // Cancel ongoing AI generation
@@ -559,14 +815,16 @@ export const history = api(
     const rows = req.before
       ? await db.query<Message>`
           SELECT id, conversation_id as "conversationId", role, content,
-                 message_type as "messageType", metadata, created_at as "createdAt"
+                 message_type as "messageType", metadata, created_at as "createdAt",
+                 updated_at as "updatedAt"
           FROM messages
           WHERE conversation_id = ${req.conversationId} AND created_at < ${req.before}
           ORDER BY created_at DESC LIMIT ${limit + 1}
         `
       : await db.query<Message>`
           SELECT id, conversation_id as "conversationId", role, content,
-                 message_type as "messageType", metadata, created_at as "createdAt"
+                 message_type as "messageType", metadata, created_at as "createdAt",
+                 updated_at as "updatedAt"
           FROM messages
           WHERE conversation_id = ${req.conversationId}
           ORDER BY created_at DESC LIMIT ${limit + 1}
@@ -591,15 +849,21 @@ export const conversations = api(
     if (!auth) throw APIError.unauthenticated("not authenticated");
 
     // Ownership-filtered query (OWASP A01 — only show user's own conversations)
+    // Exclude agent_status from "last message" and use first USER message as title
     const rows = await db.query`
       SELECT
         m.conversation_id as id,
         m.content as "lastMessage",
-        m.created_at as "lastActivity"
+        m.created_at as "lastActivity",
+        (SELECT content FROM messages
+         WHERE conversation_id = m.conversation_id AND role = 'user'
+         ORDER BY created_at ASC LIMIT 1) as "firstUserMessage"
       FROM messages m
       INNER JOIN (
         SELECT conversation_id, MAX(created_at) as max_created
-        FROM messages GROUP BY conversation_id
+        FROM messages
+        WHERE message_type != 'agent_status'
+        GROUP BY conversation_id
       ) latest ON m.conversation_id = latest.conversation_id
                 AND m.created_at = latest.max_created
       LEFT JOIN conversations c ON c.id = m.conversation_id
@@ -610,16 +874,178 @@ export const conversations = api(
 
     const convList: ConversationSummary[] = [];
     for await (const row of rows) {
+      const titleSource = (row.firstUserMessage as string) || (row.lastMessage as string);
       const lastMsg = row.lastMessage as string;
       convList.push({
         id: row.id as string,
-        title: lastMsg.substring(0, 80) + (lastMsg.length > 80 ? "..." : ""),
+        title: titleSource.substring(0, 80) + (titleSource.length > 80 ? "..." : ""),
         lastMessage: lastMsg,
         lastActivity: row.lastActivity as string,
       });
     }
 
     return { conversations: convList };
+  }
+);
+
+// --- Repo Activity ---
+
+interface RepoActivity {
+  id: string;
+  repoName: string;
+  eventType: string;
+  title: string;
+  description: string | null;
+  userId: string | null;
+  metadata: string | null;
+  createdAt: string;
+}
+
+async function logRepoActivity(
+  repoName: string,
+  eventType: string,
+  title: string,
+  description?: string,
+  userId?: string,
+  metadata?: Record<string, unknown>
+) {
+  try {
+    await db.exec`
+      INSERT INTO repo_activity (repo_name, event_type, title, description, user_id, metadata)
+      VALUES (${repoName}, ${eventType}, ${title}, ${description || null}, ${userId || null}, ${JSON.stringify(metadata || {})}::jsonb)
+    `;
+  } catch (e) {
+    console.error("Failed to log activity:", e);
+  }
+}
+
+export const getRepoActivity = api(
+  { method: "GET", path: "/chat/activity/:repoName", expose: true, auth: true },
+  async (req: { repoName: string }): Promise<{ activities: RepoActivity[] }> => {
+    const rows = db.query<RepoActivity>`
+      SELECT id, repo_name as "repoName", event_type as "eventType", title, description,
+             user_id as "userId", metadata, created_at as "createdAt"
+      FROM repo_activity
+      WHERE repo_name = ${req.repoName}
+      ORDER BY created_at DESC
+      LIMIT 50
+    `;
+    const activities: RepoActivity[] = [];
+    for await (const row of rows) activities.push(row);
+    return { activities };
+  }
+);
+
+// --- Cost Summary ---
+
+interface CostPeriod {
+  total: number;
+  tokens: number;
+  count: number;
+}
+
+interface ModelCost {
+  model: string;
+  total: number;
+  tokens: number;
+  count: number;
+}
+
+interface DailyTrend {
+  date: string;
+  total: number;
+  tokens: number;
+}
+
+interface CostSummary {
+  today: CostPeriod;
+  thisWeek: CostPeriod;
+  thisMonth: CostPeriod;
+  perModel: ModelCost[];
+  dailyTrend: DailyTrend[];
+}
+
+export const getCostSummary = api(
+  { method: "GET", path: "/chat/costs", expose: true, auth: true },
+  async (): Promise<CostSummary> => {
+    const today = await db.queryRow<CostPeriod>`
+      SELECT
+        COALESCE(SUM((metadata->>'cost')::numeric), 0) as total,
+        COALESCE(SUM((metadata->'tokens'->>'totalTokens')::integer), 0) as tokens,
+        COUNT(*)::integer as count
+      FROM messages
+      WHERE role = 'assistant'
+      AND metadata IS NOT NULL
+      AND metadata->>'cost' IS NOT NULL
+      AND created_at >= CURRENT_DATE
+    `;
+
+    const thisWeek = await db.queryRow<CostPeriod>`
+      SELECT
+        COALESCE(SUM((metadata->>'cost')::numeric), 0) as total,
+        COALESCE(SUM((metadata->'tokens'->>'totalTokens')::integer), 0) as tokens,
+        COUNT(*)::integer as count
+      FROM messages
+      WHERE role = 'assistant'
+      AND metadata IS NOT NULL
+      AND metadata->>'cost' IS NOT NULL
+      AND created_at >= date_trunc('week', CURRENT_DATE)
+    `;
+
+    const thisMonth = await db.queryRow<CostPeriod>`
+      SELECT
+        COALESCE(SUM((metadata->>'cost')::numeric), 0) as total,
+        COALESCE(SUM((metadata->'tokens'->>'totalTokens')::integer), 0) as tokens,
+        COUNT(*)::integer as count
+      FROM messages
+      WHERE role = 'assistant'
+      AND metadata IS NOT NULL
+      AND metadata->>'cost' IS NOT NULL
+      AND created_at >= date_trunc('month', CURRENT_DATE)
+    `;
+
+    // Per-model breakdown
+    const perModelRows = await db.query<ModelCost>`
+      SELECT
+        metadata->>'model' as model,
+        COALESCE(SUM((metadata->>'cost')::numeric), 0) as total,
+        COALESCE(SUM((metadata->'tokens'->>'totalTokens')::integer), 0) as tokens,
+        COUNT(*)::integer as count
+      FROM messages
+      WHERE role = 'assistant'
+      AND metadata IS NOT NULL
+      AND metadata->>'model' IS NOT NULL
+      AND created_at >= date_trunc('month', CURRENT_DATE)
+      GROUP BY metadata->>'model'
+      ORDER BY total DESC
+    `;
+    const perModel: ModelCost[] = [];
+    for await (const row of perModelRows) perModel.push(row);
+
+    // Daily trend last 14 days
+    const dailyRows = await db.query<DailyTrend>`
+      SELECT
+        created_at::date::text as date,
+        COALESCE(SUM((metadata->>'cost')::numeric), 0) as total,
+        COALESCE(SUM((metadata->'tokens'->>'totalTokens')::integer), 0) as tokens
+      FROM messages
+      WHERE role = 'assistant'
+      AND metadata IS NOT NULL
+      AND metadata->>'cost' IS NOT NULL
+      AND created_at >= CURRENT_DATE - INTERVAL '14 days'
+      GROUP BY created_at::date
+      ORDER BY date ASC
+    `;
+    const dailyTrend: DailyTrend[] = [];
+    for await (const row of dailyRows) dailyTrend.push(row);
+
+    return {
+      today: today || { total: 0, tokens: 0, count: 0 },
+      thisWeek: thisWeek || { total: 0, tokens: 0, count: 0 },
+      thisMonth: thisMonth || { total: 0, tokens: 0, count: 0 },
+      perModel,
+      dailyTrend,
+    };
   }
 );
 
@@ -646,7 +1072,8 @@ export const transferContext = api(
     // 1. Hent alle meldinger fra source conversation
     const sourceRows = await db.query<Message>`
       SELECT id, conversation_id as "conversationId", role, content,
-             message_type as "messageType", metadata, created_at as "createdAt"
+             message_type as "messageType", metadata, created_at as "createdAt",
+             updated_at as "updatedAt"
       FROM messages
       WHERE conversation_id = ${req.sourceConversationId}
       ORDER BY created_at ASC
@@ -724,6 +1151,43 @@ Ekstraher nødvendig context som skal sendes til utviklings-teamet:`,
   }
 );
 
+// --- File upload ---
+
+interface UploadFileRequest {
+  conversationId: string;
+  filename: string;
+  contentType: string;
+  content: string;
+  sizeBytes: number;
+}
+
+interface UploadFileResponse {
+  fileId: string;
+  filename: string;
+}
+
+export const uploadFile = api(
+  { method: "POST", path: "/chat/upload", expose: true, auth: true },
+  async (req: UploadFileRequest): Promise<UploadFileResponse> => {
+    await ensureConversationOwner(req.conversationId);
+
+    // Limit: 500KB max
+    if (req.sizeBytes > 500_000) {
+      throw APIError.invalidArgument("Fil for stor — maks 500KB");
+    }
+
+    const file = await db.queryRow<{ id: string }>`
+      INSERT INTO chat_files (conversation_id, filename, content_type, content, size_bytes)
+      VALUES (${req.conversationId}, ${req.filename}, ${req.contentType}, ${req.content}, ${req.sizeBytes})
+      RETURNING id
+    `;
+
+    if (!file) throw APIError.internal("failed to store file");
+
+    return { fileId: file.id, filename: req.filename };
+  }
+);
+
 // Delete a conversation and all its messages
 export const deleteConversation = api(
   { method: "POST", path: "/chat/delete", expose: true, auth: true },
@@ -740,7 +1204,8 @@ export const deleteConversation = api(
       throw APIError.permissionDenied("du har ikke tilgang til denne samtalen");
     }
 
-    // Delete messages first, then conversation record
+    // Delete files, messages, then conversation record
+    await db.exec`DELETE FROM chat_files WHERE conversation_id = ${req.conversationId}`;
     await db.exec`DELETE FROM messages WHERE conversation_id = ${req.conversationId}`;
     await db.exec`DELETE FROM conversations WHERE id = ${req.conversationId}`;
 

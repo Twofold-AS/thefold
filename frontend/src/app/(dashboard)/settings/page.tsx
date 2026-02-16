@@ -18,7 +18,7 @@ import {
   listMCPServers,
   type AuditLogEntry,
 } from "@/lib/api";
-import { Check, LogOut, Shield } from "lucide-react";
+import { Check, DollarSign, LogOut, Shield } from "lucide-react";
 import { useUser } from "@/contexts/UserPreferencesContext";
 import { isDebugEnabled, setDebugEnabled } from "@/lib/debug";
 import { getStoredTheme, setStoredTheme, type Theme } from "@/lib/theme";
@@ -52,14 +52,24 @@ export default function SettingsPage() {
       <PageHeaderBar
         title="Settings"
         actions={
-          <Link
-            href="/settings/security"
-            className="inline-flex items-center gap-2 text-sm transition-colors"
-            style={{ color: "var(--text-secondary)" }}
-          >
-            <Shield size={14} />
-            Security & Audit
-          </Link>
+          <div className="flex items-center gap-4">
+            <Link
+              href="/settings/costs"
+              className="inline-flex items-center gap-2 text-sm transition-colors"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              <DollarSign size={14} />
+              Kostnader
+            </Link>
+            <Link
+              href="/settings/security"
+              className="inline-flex items-center gap-2 text-sm transition-colors"
+              style={{ color: "var(--text-secondary)" }}
+            >
+              <Shield size={14} />
+              Security & Audit
+            </Link>
+          </div>
         }
       />
       <div className="p-6">

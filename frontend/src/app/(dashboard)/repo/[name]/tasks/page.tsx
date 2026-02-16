@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams, usePathname } from "next/navigation";
+import { useParams } from "next/navigation";
 import {
   listTheFoldTasks,
   createTask,
@@ -43,7 +43,6 @@ function classifyStatus(status: string): ColumnKey {
 
 export default function RepoTasksPage() {
   const params = useParams<{ name: string }>();
-  const pathname = usePathname();
   const [tasks, setTasks] = useState<TheFoldTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -109,50 +108,43 @@ export default function RepoTasksPage() {
   return (
     <div>
       <PageHeaderBar
-        title={params.name}
-        cells={[
-          { label: "Oversikt", href: `/repo/${params.name}/overview`, active: pathname.includes("/overview") },
-          { label: "Chat", href: `/repo/${params.name}/chat`, active: pathname.includes("/chat") },
-          { label: "Oppgaver", href: `/repo/${params.name}/tasks`, active: pathname.includes("/tasks") },
-          { label: "Reviews", href: `/repo/${params.name}/reviews`, active: pathname.includes("/reviews") },
-          { label: "Aktivitet", href: `/repo/${params.name}/activity`, active: pathname.includes("/activity") },
-        ]}
+        title="Oppgaver"
+        subtitle={params.name}
+        actions={
+          <div className="flex items-center gap-2">
+            {syncResult && (
+              <span className="text-xs px-2 py-1" style={{ background: "var(--bg-card)", color: "var(--text-secondary)" }}>
+                {syncResult}
+              </span>
+            )}
+            <button onClick={() => setShowCreate(true)} className="btn-primary text-sm">
+              + Ny oppgave
+            </button>
+            <button
+              onClick={handleSync}
+              disabled={syncing}
+              className="btn-secondary text-sm flex items-center gap-1.5"
+            >
+              {syncing ? (
+                <>
+                  <span className="w-3 h-3 border-2 rounded-full animate-spin inline-block" style={{ borderColor: "rgba(255,255,255,0.2)", borderTopColor: "var(--text-primary)" }} />
+                  Synkroniserer...
+                </>
+              ) : (
+                "Synk fra Linear"
+              )}
+            </button>
+          </div>
+        }
       />
 
       <div className="p-6">
-      {/* Header */}
+      {/* Filters */}
       <div className="flex items-center justify-between flex-wrap gap-4">
-        <div>
-          <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-            {tasks.length} oppgaver
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2 flex-wrap">
-          {syncResult && (
-            <span className="text-xs px-2 py-1 rounded" style={{ background: "var(--bg-card)", color: "var(--text-secondary)" }}>
-              {syncResult}
-            </span>
-          )}
-          <button onClick={() => setShowCreate(true)} className="btn-primary text-sm">
-            + Ny oppgave
-          </button>
-          <button
-            onClick={handleSync}
-            disabled={syncing}
-            className="btn-secondary text-sm flex items-center gap-1.5"
-          >
-            {syncing ? (
-              <>
-                <span className="w-3 h-3 border-2 rounded-full animate-spin inline-block" style={{ borderColor: "rgba(255,255,255,0.2)", borderTopColor: "var(--text-primary)" }} />
-                Synkroniserer...
-              </>
-            ) : (
-              "Synk fra Linear"
-            )}
-          </button>
-
-          {/* Filters */}
+        <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+          {tasks.length} oppgaver
+        </p>
+        <div className="flex items-center gap-2">
           <select
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}
