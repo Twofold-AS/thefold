@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 16. februar 2026 (Prompt AA: Chat UX, Task Blocking, Voyage Rate Limit, JSON Rendering)
+> Sist oppdatert: 16. februar 2026 (Prompt AD v2: UX + Arkitektur-opprydding)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -28,16 +28,16 @@
 | embedding | vector(512) | 🟢 | search (cosine similarity) | — |
 | created_at | TIMESTAMPTZ | 🟢 | decay-beregning, cleanup, stats | — |
 | memory_type | TEXT | 🟢 | search-filter, stats, store | 6 typer: general, skill, task, session, error_pattern, decision |
-| parent_memory_id | UUID FK | 🔴 | Ingen kode refererer | Implementer hierarkisk kontekst-traversering i search |
+| ~~parent_memory_id~~ | ~~UUID FK~~ | ❌ FJERNET | Droppet i migrasjon 4 (Prompt AE) | — |
 | last_accessed_at | TIMESTAMPTZ | 🟢 | Oppdateres i search, brukes i cleanup | — |
 | access_count | INT | 🟢 | Inkrementeres i search, brukes i scoring | — |
 | relevance_score | DECIMAL | 🟢 | Decay-scoring i search, oppdatert av decay-cron, filtrert i stats | Importance-basert initialisering + eksponentiell decay |
-| ttl_days | INT | 🟢 | cleanup (sletter basert på TTL) | Default 90 dager |
+| ttl_days | INT | 🟢 | cleanup (sletter basert på TTL), decay | Default 90 dager |
 | pinned | BOOLEAN | 🟢 | cleanup-filter, consolidate setter true | — |
 | consolidated_from | UUID[] | 🟢 | Settes i consolidate | — |
 | superseded_by | UUID FK | 🟢 | Filtreres ut i de fleste queries | — |
 | source_repo | TEXT | 🟢 | search-filter, consolidate | — |
-| source_task_id | TEXT | 🔴 | Lagres i INSERT, aldri brukt i queries | Legg til filter i search |
+| ~~source_task_id~~ | ~~TEXT~~ | ❌ FJERNET | Droppet i migrasjon 4 (Prompt AE) | — |
 | tags | TEXT[] | 🟢 | search-filter (in-memory), consolidate | Flytt til SQL GIN-filter for ytelse |
 
 ### Database-felter — code_patterns
@@ -394,23 +394,23 @@
 | created_by | UUID | 🟢 | CRUD | — |
 | created_at | TIMESTAMPTZ | 🟢 | CRUD | — |
 | updated_at | TIMESTAMPTZ | 🟢 | CRUD | — |
-| version | TEXT | 🔴 | Seeded '1.0.0', aldri brukt i queries | Implementer versjonshåndtering |
-| marketplace_id | TEXT | 🔴 | Aldri referert | Fremtidig marketplace |
-| marketplace_downloads | INT | 🔴 | Aldri referert | Fremtidig marketplace |
-| marketplace_rating | DECIMAL | 🔴 | Aldri referert | Fremtidig marketplace |
-| author_id | UUID | 🔴 | Seeded, aldri brukt i queries | Koble til users-service |
+| ~~version~~ | ~~TEXT~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
+| ~~marketplace_id~~ | ~~TEXT~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
+| ~~marketplace_downloads~~ | ~~INT~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
+| ~~marketplace_rating~~ | ~~DECIMAL~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
+| ~~author_id~~ | ~~UUID~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
 | tags | TEXT[] | 🔴 | Seeded, aldri brukt i queries | Legg til filter i listSkills |
 | category | TEXT | 🔴 | Seeded, aldri brukt i queries | Legg til filter i listSkills |
-| depends_on | UUID[] | 🟢 | resolve: dependency resolution | — |
-| conflicts_with | UUID[] | 🟢 | resolve: conflict handling | — |
-| execution_phase | TEXT | 🟢 | resolve: fase-gruppering | pre_run, inject, post_run |
+| ~~depends_on~~ | ~~UUID[]~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
+| ~~conflicts_with~~ | ~~UUID[]~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
+| ~~execution_phase~~ | ~~TEXT~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
 | priority | INT | 🟢 | resolve: sortering | Lavere = kjøres først |
 | token_estimate | INT | 🟢 | resolve: token-budsjett | — |
-| token_budget_max | INT | 🔴 | Aldri sjekket i resolve | Implementer per-skill budsjettgrense |
+| ~~token_budget_max~~ | ~~INT~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
 | routing_rules | JSONB | 🟢 | resolve: matchesRoutingRules() | keywords, file_patterns, labels |
-| parent_skill_id | UUID FK | 🔴 | Aldri referert | Implementer skill-hierarki |
-| composable | BOOLEAN | 🔴 | Aldri referert | Implementer kompositt-skills |
-| output_schema | JSONB | 🔴 | Aldri referert | Validér pre/post-run output mot schema |
+| ~~parent_skill_id~~ | ~~UUID FK~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
+| ~~composable~~ | ~~BOOLEAN~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
+| ~~output_schema~~ | ~~JSONB~~ | ❌ FJERNET | Droppet i migrasjon 8 (Prompt AD v2) | — |
 | success_count | INT | 🟢 | logResult inkrementerer | — |
 | failure_count | INT | 🟢 | logResult inkrementerer | — |
 | avg_token_cost | DECIMAL | 🟢 | logResult beregner rullende snitt | — |

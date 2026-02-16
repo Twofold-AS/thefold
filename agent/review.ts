@@ -290,7 +290,6 @@ export const approveReview = api(
             linearTaskId: review.taskId,
             memoryType: "decision",
             sourceRepo: "Twofold-AS/thefold",
-            sourceTaskId: review.taskId,
           });
         } catch {
           // Memory storage is optional

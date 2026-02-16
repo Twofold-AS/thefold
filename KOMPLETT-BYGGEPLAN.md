@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.15 - Prompt AA (Chat UX, Task Blocking, Voyage Rate Limit, JSON Rendering)
+> **Versjon:** 3.17 - Prompt AE (Skills Column Crash + Memory Migration Fix)
 > **Sist oppdatert:** 16. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -156,6 +156,22 @@
 - **FIX 5 — Blokkerte tasks kan ikke startes (HOY):** start_task sjekker na status for blocked/done/in_progress og returnerer feilmelding. Blokkerte tasks viser ogsa errorMessage i feilmeldingen
 - **FIX 6 — Voyage 429 retry (KRITISK):** embed() i memory.ts har na eksponentiell backoff (1s, 2s, 4s) med 3 retries ved 429 Too Many Requests. Alle memory-kall i agent.ts allerede wrappet i try/catch
 - **FIX 7 — Task type med errorMessage (HOY):** errorMessage lagt til i Task (types.ts), TaskRow, parseTask, TheFoldTask (frontend api.ts), og alle SELECT-queries i tasks.ts
+
+### ✅ Ferdig — Prompt AE: Skills Column Crash + Memory Migration Fix (februar 2026)
+- **BUG 1 — Skills column crash:** skills/skills.ts hadde INGEN referanser til droppede kolonner — migrasjon 8 var allerede trygg
+- **BUG 1 — Memory migration fix (KRITISK):** Migrasjon 4 droppet 6 kolonner, men 4 var aktivt brukt (pinned, superseded_by, ttl_days, consolidated_from). Rewritten til kun å droppe parent_memory_id + source_task_id. Fjernet sourceTaskId fra StoreRequest + 3 callsites (agent.ts, review.ts). GRUNNMUR-STATUS korrigert
+- **BUG 2 — Tenker-indikator:** Verifisert i begge chat-sider — MagicIcon + aiName + phrase + timer fungerer
+- **BUG 3 — Blokkert task guard:** Allerede implementert i ai/ai.ts:848-857 (blocked/done/in_progress sjekk)
+
+### ✅ Ferdig — Prompt AD v2: UX + Arkitektur-opprydding (februar 2026)
+- **FIX 1 — Tenker-indikator (KRITISK):** `sending` brukes na korrekt for MagicIcon + aiName + frase + timer. Fjernet typing dots og header-indikator for enkle svar. Begge chat-sider oppdatert
+- **FIX 2 — Optimistisk brukermelding:** Allerede implementert i begge chat-sider (temp-melding vises umiddelbart)
+- **FIX 3 — getTree crash (KRITISK):** 4 getTree-kall wrappet med try/catch (agent.ts x2, orchestrator.ts x1, chat.ts allerede wrappet). memory.extract allerede wrappet med .catch()
+- **FIX 4 — Task-system konsolidering (KRITISK):** Orchestrator oppretter na tasks i tasks-service alongside project_tasks. Status synkes via mapProjectStatus(). thefoldTaskId settes pa AgentExecutionContext. "orchestrator" lagt til som TaskSource
+- **FIX 5 — TASK_SELECT_COLUMNS (VIKTIG):** Referansekonstant lagt til i tasks.ts. Manglende error_message i listDeleted fikset
+- **FIX 6 — Skills DB cleanup (VIKTIG):** Migrasjon 8: droppet 12 ubrukte kolonner (marketplace_id, marketplace_downloads, marketplace_rating, version, author_id, depends_on, conflicts_with, parent_skill_id, composable, output_schema, execution_phase, token_budget_max)
+- **FIX 7 — Memory DB cleanup (MEDIUM):** Migrasjon 4: droppet 6 ubrukte kolonner (parent_memory_id, consolidated_from, superseded_by, ttl_days, pinned, source_task_id)
+- **FIX 8 — Status-mapping (HOY):** TASK_STATUS konstant + mapProjectStatus() + mapToLinearState() lagt til i agent/types.ts. Brukes i orchestrator for status-synk
 
 ### ✅ Ferdig — Bugfiks Runde 11: Tool-use Robusthet (februar 2026)
 - **FIX 1 — Task ID hallusinering (BUG 1 KRITISK):** Claude sender feil UUID til start_task etter create_task. Fiks: `lastCreatedTaskId` tracking i `callAnthropicWithTools` — ved start_task overskrives input.taskId med siste opprettede task-ID. Start_task tool description oppdatert med eksplisitt instruks om å bruke ID fra create_task. Debug console.log fjernet, erstattet med structured `log.info`/`log.warn`

@@ -53,6 +53,16 @@ interface TaskRow {
   completed_at: Date | null;
 }
 
+// All SELECT queries use these columns — update here when adding new columns.
+// Encore template literals can't interpolate column lists, so this is a reference constant.
+// Usage: Copy this into each SELECT query. Search "TASK_SELECT_COLUMNS" to find all usages.
+// TASK_SELECT_COLUMNS:
+//   id, title, description, repo, status, priority, labels::text[] as labels, phase,
+//   depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at,
+//   healing_source_id, estimated_complexity, estimated_tokens, planned_order,
+//   assigned_to, build_job_id, pr_url, review_id, error_message,
+//   created_by, created_at, updated_at, completed_at
+
 function parseTask(row: TaskRow): Task {
   const labels = row.labels
     ? typeof row.labels === "string" ? JSON.parse(row.labels) : row.labels
@@ -485,7 +495,7 @@ export const listDeleted = api(
   async (req: { repoName: string }): Promise<{ tasks: Task[] }> => {
     const tasks: Task[] = [];
     const rows = db.query<TaskRow>`
-      SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at
+      SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, created_by, created_at, updated_at, completed_at
       FROM tasks WHERE repo = ${req.repoName} AND status = 'deleted'
       ORDER BY updated_at DESC
     `;

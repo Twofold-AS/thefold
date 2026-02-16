@@ -258,8 +258,13 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       ctx.taskDescription = options?.taskDescription || ctx.taskDescription;
       taskTitle = ctx.taskDescription.split("\n")[0].substring(0, 80);
 
-      // Still need tree for planning — fetch it
-      const projectTree = await github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName });
+      // Still need tree for planning — fetch it (try/catch for empty repos)
+      let projectTree = { tree: [] as Array<{ path: string; type: string; size?: number }>, treeString: "(Tomt repo)", packageJson: {} as Record<string, unknown> };
+      try {
+        projectTree = await github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName });
+      } catch (e) {
+        console.warn("getTree failed (empty repo?):", e);
+      }
       treeString = projectTree.treeString;
       treeArray = projectTree.tree;
       packageJson = projectTree.packageJson || {};
@@ -347,10 +352,15 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       // === STEP 2: Read the project ===
       await report(ctx, "Leser prosjektstruktur fra GitHub...", "working");
 
-      const projectTree = await auditedStep(ctx, "project_tree_read", {
-        owner: ctx.repoOwner,
-        repo: ctx.repoName,
-      }, () => githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName })));
+      let projectTree = { tree: [] as Array<{ path: string; type: string; size?: number }>, treeString: "(Tomt repo)", packageJson: {} as Record<string, unknown> };
+      try {
+        projectTree = await auditedStep(ctx, "project_tree_read", {
+          owner: ctx.repoOwner,
+          repo: ctx.repoName,
+        }, () => githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName })));
+      } catch (e) {
+        console.warn("getTree failed (empty repo?):", e);
+      }
 
       treeString = projectTree.treeString;
       treeArray = projectTree.tree;
@@ -1187,7 +1197,6 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           linearTaskId: ctx.taskId,
           memoryType: "decision",
           sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
-          sourceTaskId: ctx.taskId,
         }));
       } catch (e) {
         console.warn("Memory store failed (rate limited?):", e);
@@ -1203,7 +1212,6 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           category: "error_pattern",
           memoryType: "error_pattern",
           sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
-          sourceTaskId: ctx.taskId,
           tags: ["error_pattern", "auto_resolved"],
           ttlDays: 180,
         });

@@ -94,9 +94,7 @@ interface StoreRequest {
   conversationId?: string;
   linearTaskId?: string;
   memoryType?: MemoryType;
-  parentMemoryId?: string;
   sourceRepo?: string;
-  sourceTaskId?: string;
   tags?: string[];
   ttlDays?: number;
   pinned?: boolean;
@@ -253,15 +251,14 @@ export const store = api(
     const row = await db.queryRow`
       INSERT INTO memories (
         content, category, conversation_id, linear_task_id, embedding,
-        memory_type, parent_memory_id, source_repo, source_task_id,
+        memory_type, source_repo,
         tags, ttl_days, pinned, relevance_score
       )
       VALUES (
         ${content}, ${req.category},
         ${req.conversationId || null}, ${req.linearTaskId || null},
         ${vec}::vector,
-        ${memoryType}, ${req.parentMemoryId || null}::uuid,
-        ${req.sourceRepo || null}, ${req.sourceTaskId || null},
+        ${memoryType}, ${req.sourceRepo || null},
         ${tags}::text[], ${ttlDays}, ${pinned}, ${relevanceScore}
       )
       RETURNING id

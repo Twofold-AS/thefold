@@ -49,7 +49,6 @@ export default function RepoChatPage() {
   const [pollMode, setPollMode] = useState<"idle" | "waiting" | "cooldown">("idle");
   const [heartbeatLost, setHeartbeatLost] = useState(false);
   const [phraseIndex, setPhraseIndex] = useState(0);
-  const [thinkingStart, setThinkingStart] = useState<number | null>(null);
   const [thinkingSeconds, setThinkingSeconds] = useState(0);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -347,34 +346,26 @@ export default function RepoChatPage() {
   const isWaitingForAI = pollMode === "waiting" && (!lastMsg || lastMsg.role === "user" || lastMsg.messageType === "agent_status");
 
   useEffect(() => {
-    if (!isWaitingForAI) return;
+    if (!sending) return;
     const interval = setInterval(() => {
       setPhraseIndex((prev) => {
         let next: number;
-        do { next = Math.floor(Math.random() * magicPhrases.length); } while (next === prev);
+        do { next = Math.floor(Math.random() * magicPhrases.length); } while (next === prev && magicPhrases.length > 1);
         return next;
       });
     }, 3000);
     return () => clearInterval(interval);
-  }, [isWaitingForAI]);
-
-  // Thinking timer for simple mode header
-  useEffect(() => {
-    if (isWaitingForAI) {
-      setThinkingStart(Date.now());
-    } else {
-      setThinkingStart(null);
-      setThinkingSeconds(0);
-    }
-  }, [isWaitingForAI]);
+  }, [sending]);
 
   useEffect(() => {
-    if (!thinkingStart) return;
-    const timer = setInterval(() => {
-      setThinkingSeconds(Math.floor((Date.now() - thinkingStart) / 1000));
+    if (!sending) { setThinkingSeconds(0); return; }
+    const start = Date.now();
+    const interval = setInterval(() => {
+      setThinkingSeconds(Math.floor((Date.now() - start) / 1000));
     }, 1000);
-    return () => clearInterval(timer);
-  }, [thinkingStart]);
+    return () => clearInterval(interval);
+  }, [sending]);
+
 
   return (
     <div className="flex flex-col" style={{ height: "100vh" }}>
@@ -635,8 +626,8 @@ export default function RepoChatPage() {
                     </div>
                   )}
 
-                  {/* Thinking indicator — MagicIcon replaces AI avatar while generating */}
-                  {isWaitingForAI && !agentActive && (
+                  {/* Thinking indicator — MagicIcon + aiName + phrase + timer */}
+                  {sending && !agentActive && (
                     <div className="flex items-center gap-3 px-4 py-3">
                       <div className="w-8 h-8 flex-shrink-0 flex items-center justify-center"
                         style={{ color: "var(--text-muted)" }}>
@@ -669,23 +660,6 @@ export default function RepoChatPage() {
                       >
                         Avbryt
                       </button>
-                    </div>
-                  )}
-
-                  {/* Typing dots while sending (brief, before polling picks up) */}
-                  {sending && !isWaitingForAI && (
-                    <div className="flex gap-2.5 message-enter">
-                      <div
-                        className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0"
-                        style={{ background: "var(--bg-card)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
-                      >
-                        {aiInitials}
-                      </div>
-                      <div className="flex items-center gap-1 px-3 py-2">
-                        <span className="typing-dot" style={{ animationDelay: "0ms" }} />
-                        <span className="typing-dot" style={{ animationDelay: "150ms" }} />
-                        <span className="typing-dot" style={{ animationDelay: "300ms" }} />
-                      </div>
                     </div>
                   )}
 

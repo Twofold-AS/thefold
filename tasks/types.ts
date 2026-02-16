@@ -27,4 +27,4 @@ export interface Task {
 }
 
 export type TaskStatus = "backlog" | "planned" | "in_progress" | "in_review" | "done" | "blocked" | "deleted";
-export type TaskSource = "manual" | "linear" | "healing" | "marketplace" | "chat";
+export type TaskSource = "manual" | "linear" | "healing" | "marketplace" | "chat" | "orchestrator";

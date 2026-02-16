@@ -63,14 +63,13 @@ export const resolve = api(
       id: string;
       name: string;
       prompt_fragment: string;
-      execution_phase: string;
       task_phase: string;
       priority: number;
       token_estimate: number;
       routing_rules: Record<string, unknown>;
       scope: string;
     }>`
-      SELECT id, name, prompt_fragment, execution_phase, task_phase, priority,
+      SELECT id, name, prompt_fragment, task_phase, priority,
              COALESCE(token_estimate, 0) as token_estimate,
              COALESCE(routing_rules, '{}'::jsonb) as routing_rules,
              scope
@@ -96,7 +95,7 @@ export const resolve = api(
         id: row.id,
         name: row.name,
         promptFragment: row.prompt_fragment,
-        phase: (row.execution_phase as ExecutionPhase) || "inject",
+        phase: "inject" as ExecutionPhase,
         taskPhase: row.task_phase || "all",
         priority: row.priority ?? 100,
         tokenEstimate: row.token_estimate ?? 0,

@@ -1,3 +1,41 @@
+// === Status Constants & Mapping ===
+
+export const TASK_STATUS = {
+  BACKLOG: "backlog",
+  PLANNED: "planned",
+  IN_PROGRESS: "in_progress",
+  IN_REVIEW: "in_review",
+  DONE: "done",
+  BLOCKED: "blocked",
+  DELETED: "deleted",
+} as const;
+
+/** Map fra project_tasks status til tasks status */
+export function mapProjectStatus(projectStatus: string): string {
+  const map: Record<string, string> = {
+    pending: TASK_STATUS.BACKLOG,
+    running: TASK_STATUS.IN_PROGRESS,
+    completed: TASK_STATUS.DONE,
+    failed: TASK_STATUS.BLOCKED,
+    skipped: TASK_STATUS.BLOCKED,
+    pending_review: TASK_STATUS.IN_REVIEW,
+  };
+  return map[projectStatus] || TASK_STATUS.BACKLOG;
+}
+
+/** Map fra tasks status til Linear state */
+export function mapToLinearState(status: string): string {
+  const map: Record<string, string> = {
+    backlog: "Backlog",
+    planned: "Todo",
+    in_progress: "In Progress",
+    in_review: "In Review",
+    done: "Done",
+    blocked: "Blocked",
+  };
+  return map[status] || "Backlog";
+}
+
 // DEL 2A: Meta-reasoning types for the agent loop
 
 export interface DiagnosisResult {

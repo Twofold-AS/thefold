@@ -607,17 +607,17 @@ describe("Test 6: Memory decay i kontekst", () => {
 
 describe("Test 7: Skills pipeline i kontekst", () => {
   it("should create an inject-phase skill and resolve it", async () => {
-    // 1. Opprett en test-skill med execution_phase='inject'
+    // 1. Opprett en test-skill
     const skillRow = await skillsDb.queryRow<{ id: string }>`
       INSERT INTO skills (
         name, description, prompt_fragment,
-        execution_phase, priority, scope, enabled,
+        priority, scope, enabled,
         routing_rules, token_estimate, category
       ) VALUES (
         'E2E Test Skill',
         'Test skill for E2E pipeline verification',
         'Always use descriptive variable names. Never abbreviate.',
-        'inject', 1, 'global', TRUE,
+        1, 'global', TRUE,
         '{"keywords": ["e2e-test-keyword-unique-12345"]}'::jsonb,
         100, 'quality'
       )
@@ -630,16 +630,14 @@ describe("Test 7: Skills pipeline i kontekst", () => {
     // 2. Verify the skill was inserted correctly
     const fetched = await skillsDb.queryRow<{
       name: string;
-      execution_phase: string;
       enabled: boolean;
       routing_rules: string | Record<string, unknown>;
     }>`
-      SELECT name, execution_phase, enabled, routing_rules
+      SELECT name, enabled, routing_rules
       FROM skills WHERE id = ${skillRow!.id}::uuid
     `;
 
     expect(fetched!.name).toBe("E2E Test Skill");
-    expect(fetched!.execution_phase).toBe("inject");
     expect(fetched!.enabled).toBe(true);
 
     const rules = typeof fetched!.routing_rules === "string"
@@ -658,13 +656,13 @@ describe("Test 7: Skills pipeline i kontekst", () => {
     const skillRow = await skillsDb.queryRow<{ id: string }>`
       INSERT INTO skills (
         name, description, prompt_fragment,
-        execution_phase, priority, scope, enabled,
+        priority, scope, enabled,
         routing_rules, token_estimate, category
       ) VALUES (
         'Auth Skill E2E',
         'Security skill that activates for auth-related tasks',
         'Validate all user inputs. Use HMAC for tokens.',
-        'inject', 5, 'global', TRUE,
+        5, 'global', TRUE,
         '{"keywords": ["auth", "security", "token"]}'::jsonb,
         400, 'security'
       )
@@ -673,15 +671,13 @@ describe("Test 7: Skills pipeline i kontekst", () => {
 
     // Verify it exists in DB with correct properties
     const row = await skillsDb.queryRow<{
-      execution_phase: string;
       priority: number;
       routing_rules: string | Record<string, unknown>;
     }>`
-      SELECT execution_phase, priority, routing_rules
+      SELECT priority, routing_rules
       FROM skills WHERE id = ${skillRow!.id}::uuid
     `;
 
-    expect(row!.execution_phase).toBe("inject");
     expect(row!.priority).toBe(5);
 
     const rules = typeof row!.routing_rules === "string"
@@ -700,13 +696,13 @@ describe("Test 7: Skills pipeline i kontekst", () => {
     const skillRow = await skillsDb.queryRow<{ id: string }>`
       INSERT INTO skills (
         name, description, prompt_fragment,
-        execution_phase, priority, scope, enabled,
+        priority, scope, enabled,
         success_count, failure_count, confidence_score
       ) VALUES (
         'Scoring Test Skill',
         'Test skill for scoring verification',
         'Test prompt fragment',
-        'inject', 50, 'global', TRUE,
+        50, 'global', TRUE,
         0, 0, 0.5
       )
       RETURNING id
@@ -744,47 +740,49 @@ describe("Test 7: Skills pipeline i kontekst", () => {
     `;
   });
 
-  it("should handle multiple skill phases correctly", async () => {
-    // Insert skills of all three phases
-    const preRunSkill = await skillsDb.queryRow<{ id: string }>`
+  it("should handle multiple skills with different priorities", async () => {
+    // Insert skills with different priorities
+    const highPriority = await skillsDb.queryRow<{ id: string }>`
       INSERT INTO skills (
-        name, description, prompt_fragment, execution_phase, priority, scope, enabled
-      ) VALUES ('E2E PreRun', 'Pre-run test', 'Pre-run fragment', 'pre_run', 1, 'global', TRUE)
+        name, description, prompt_fragment, priority, scope, enabled
+      ) VALUES ('E2E High Priority', 'High priority test', 'High priority fragment', 1, 'global', TRUE)
       RETURNING id
     `;
-    const injectSkill = await skillsDb.queryRow<{ id: string }>`
+    const medPriority = await skillsDb.queryRow<{ id: string }>`
       INSERT INTO skills (
-        name, description, prompt_fragment, execution_phase, priority, scope, enabled
-      ) VALUES ('E2E Inject', 'Inject test', 'Inject fragment', 'inject', 2, 'global', TRUE)
+        name, description, prompt_fragment, priority, scope, enabled
+      ) VALUES ('E2E Med Priority', 'Med priority test', 'Med priority fragment', 50, 'global', TRUE)
       RETURNING id
     `;
-    const postRunSkill = await skillsDb.queryRow<{ id: string }>`
+    const lowPriority = await skillsDb.queryRow<{ id: string }>`
       INSERT INTO skills (
-        name, description, prompt_fragment, execution_phase, priority, scope, enabled
-      ) VALUES ('E2E PostRun', 'Post-run test', 'Post-run fragment', 'post_run', 3, 'global', TRUE)
+        name, description, prompt_fragment, priority, scope, enabled
+      ) VALUES ('E2E Low Priority', 'Low priority test', 'Low priority fragment', 100, 'global', TRUE)
       RETURNING id
     `;
 
-    // Query skills grouped by phase
-    const phases: Record<string, number> = {};
-    const phaseRows = await skillsDb.query<{ execution_phase: string; count: number }>`
-      SELECT execution_phase, COUNT(*)::int as count
+    // Query skills ordered by priority
+    const ids = [highPriority!.id, medPriority!.id, lowPriority!.id];
+    const results: Array<{ name: string; priority: number }> = [];
+    const rows = await skillsDb.query<{ name: string; priority: number }>`
+      SELECT name, priority
       FROM skills
-      WHERE id IN (${preRunSkill!.id}::uuid, ${injectSkill!.id}::uuid, ${postRunSkill!.id}::uuid)
-      GROUP BY execution_phase
+      WHERE id IN (${ids[0]}::uuid, ${ids[1]}::uuid, ${ids[2]}::uuid)
+      ORDER BY priority ASC
     `;
-    for await (const row of phaseRows) {
-      phases[row.execution_phase] = row.count;
+    for await (const row of rows) {
+      results.push(row);
     }
 
-    expect(phases["pre_run"]).toBe(1);
-    expect(phases["inject"]).toBe(1);
-    expect(phases["post_run"]).toBe(1);
+    expect(results).toHaveLength(3);
+    expect(results[0].priority).toBe(1);
+    expect(results[1].priority).toBe(50);
+    expect(results[2].priority).toBe(100);
 
     // Clean up
-    await skillsDb.exec`DELETE FROM skills WHERE id = ${preRunSkill!.id}::uuid`;
-    await skillsDb.exec`DELETE FROM skills WHERE id = ${injectSkill!.id}::uuid`;
-    await skillsDb.exec`DELETE FROM skills WHERE id = ${postRunSkill!.id}::uuid`;
+    await skillsDb.exec`DELETE FROM skills WHERE id = ${highPriority!.id}::uuid`;
+    await skillsDb.exec`DELETE FROM skills WHERE id = ${medPriority!.id}::uuid`;
+    await skillsDb.exec`DELETE FROM skills WHERE id = ${lowPriority!.id}::uuid`;
   });
 });
 

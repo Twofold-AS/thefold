@@ -1,5 +1,5 @@
 import { api, APIError } from "encore.dev/api";
-import { github, memory, docs, ai } from "~encore/clients";
+import { github, memory, docs, ai, tasks } from "~encore/clients";
 import log from "encore.dev/log";
 import { agentReports } from "../chat/chat";
 import { executeTask } from "./agent";
@@ -9,6 +9,7 @@ import type {
   CuratedContext,
   AgentExecutionContext,
 } from "./types";
+import { mapProjectStatus } from "./types";
 import type { ExecuteTaskOptions, ExecuteTaskResult } from "./agent";
 
 // --- Constants ---
@@ -94,7 +95,13 @@ export async function curateContext(
   // 3. Context hints → GitHub files
   if (task.contextHints.length > 0) {
     try {
-      const tree = await github.getTree({ owner: repoOwner, repo: repoName });
+      let tree = { tree: [] as Array<{ path: string; type: string; size?: number }>, treeString: "" };
+      try {
+        tree = await github.getTree({ owner: repoOwner, repo: repoName });
+      } catch (e) {
+        console.warn("getTree failed in curateContext (empty repo?):", e);
+      }
+      if (tree.tree.length === 0) throw new Error("empty tree — skip file search");
       const found = await github.findRelevantFiles({
         owner: repoOwner,
         repo: repoName,
@@ -296,6 +303,17 @@ export async function executeProject(
     });
   }
 
+  // Build title→thefoldTaskId map for status sync
+  const thefoldTaskMap = new Map<string, string>();
+  try {
+    const tasksList = await tasks.listTasks({ repo: repoName, source: "orchestrator", limit: 200 });
+    for (const t of tasksList.tasks) {
+      thefoldTaskMap.set(t.title, t.id);
+    }
+  } catch {
+    // Non-critical — status sync will be skipped
+  }
+
   // Determine phases
   const phases = [...new Set(allTasks.map((t) => t.phase))].sort((a, b) => a - b);
   let completedTasks = planRow.completed_tasks;
@@ -349,6 +367,15 @@ export async function executeProject(
             WHERE id = ${task.id}
           `;
           task.status = "skipped";
+
+          // Sync to tasks-service
+          const skipTaskId = thefoldTaskMap.get(task.title);
+          if (skipTaskId) {
+            try {
+              await tasks.updateTaskStatus({ id: skipTaskId, status: "blocked", errorMessage: "Avhengighet feilet" });
+            } catch { /* non-critical */ }
+          }
+
           await reportProject(
             conversationId,
             `⏭️ Hopper over "${task.title}" — avhengighet feilet`
@@ -371,6 +398,13 @@ export async function executeProject(
         WHERE id = ${task.id}
       `;
       task.status = "running";
+
+      // Sync to tasks-service
+      if (thefoldTaskId) {
+        try {
+          await tasks.updateTaskStatus({ id: thefoldTaskId, status: mapProjectStatus("running") as any });
+        } catch { /* non-critical */ }
+      }
 
       // Curate context for this task
       let curated: CuratedContext;
@@ -395,9 +429,11 @@ export async function executeProject(
       }
 
       // Build TaskContext for executeTask
+      const thefoldTaskId = thefoldTaskMap.get(task.title);
       const taskCtx: AgentExecutionContext = {
         conversationId,
         taskId: task.id,
+        thefoldTaskId,
         taskDescription: task.description,
         userMessage: task.description,
         repoOwner,
@@ -413,6 +449,7 @@ export async function executeProject(
         maxAttempts: 5,
         planRevisions: 0,
         maxPlanRevisions: 2,
+        subAgentsEnabled: false,
       };
 
       const taskOptions: ExecuteTaskOptions = {
@@ -523,6 +560,14 @@ export async function executeProject(
               WHERE id = ${otherTask.id}
             `;
             otherTask.status = "skipped";
+
+            // Sync to tasks-service
+            const downstreamTaskId = thefoldTaskMap.get(otherTask.title);
+            if (downstreamTaskId) {
+              try {
+                await tasks.updateTaskStatus({ id: downstreamTaskId, status: "blocked", errorMessage: "Blokkert av feilet avhengighet" });
+              } catch { /* non-critical */ }
+            }
           }
         }
 
@@ -958,6 +1003,24 @@ export const storeProjectPlan = api(
         `;
 
         taskIds.push(taskRow!.id);
+
+        // Also create in tasks-service (master task table)
+        try {
+          await tasks.createTask({
+            title: task.title,
+            description: task.description,
+            repo: REPO_NAME,
+            source: "orchestrator",
+            priority: 3,
+            phase: `phase-${phaseIdx}`,
+          });
+        } catch (e) {
+          log.warn("Failed to create task in tasks-service", {
+            projectTask: taskRow!.id,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+
         globalIdx++;
       }
     }
