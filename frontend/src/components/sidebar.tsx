@@ -254,6 +254,7 @@ function SidebarNavLink({ item, active, onNavigate }: { item: NavItem; active: b
   return (
     <Link
       href={item.href}
+      prefetch={true}
       onClick={onNavigate}
       className="flex items-center gap-2.5 px-3 py-1.5 text-sm transition-colors duration-75"
       style={{

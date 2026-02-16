@@ -7,7 +7,7 @@ An autonomous fullstack development agent. It reads tasks from Linear, reads/wri
 ```
 gateway      → Auth (Bearer token with HMAC, OTP via Resend, token revocation)
 chat         → Communication channel (user ↔ TheFold), PostgreSQL, OWASP ownership, file uploads
-ai           → Claude API orchestration, multi-model routing, prompt caching, diagnosis, tool-use
+ai           → Multi-AI orchestration, dynamic provider/model system (DB-backed), prompt caching, diagnosis, tool-use
 agent        → The brain: autonomous task execution loop with meta-reasoning
 tasks        → TheFold's task engine: CRUD, Linear sync, AI planning, Pub/Sub events
 builder      → TheFold's hands: file-by-file code building with dependency analysis
@@ -69,7 +69,7 @@ Database: `mcp_servers` table with JSONB env_vars and config
 
 ## Task Engine
 TheFold has its own task service (`tasks/`) as the central nervous system for all work:
-- **Sources:** manual (user-created), linear (synced from Linear), healing (auto-fix), marketplace (future)
+- **Sources:** manual (user-created), chat (created via chat tool-use), linear (synced from Linear), healing (auto-fix), marketplace (future)
 - **Statuses:** backlog → planned → in_progress → in_review → done (+ blocked)
 - **Linear sync:** Two-way — pull from Linear, push status back
 - **AI planning:** `ai.planTaskOrder` orders tasks by dependencies, complexity, priority
@@ -105,6 +105,8 @@ Database: `builder_jobs` + `build_steps` tables
 Chat is connected to the agent system via Claude tool-use. When users ask for actions in chat, the AI can invoke tools directly:
 - **5 tools:** `create_task`, `start_task`, `list_tasks`, `read_file`, `search_code`
 - **Two-call flow:** `callAnthropicWithTools()` sends messages with tool definitions, handles tool_use responses, executes via `executeToolCall()`, returns final response
+- **create_task enhancements:** Uses `source: "chat"` (not "manual"), fire-and-forget `enrichTaskWithAI()` estimates complexity + tokens after creation
+- **start_task enhancements:** Verifies task exists via `tasks.getTaskInternal()` before starting agent, updates status to `in_progress`, sets `blocked` on failure. Propagates `conversationId` to agent
 - **Dynamic AgentStatus:** `processAIResponse` builds steps dynamically based on intent detection with phase names (Forbereder/Analyserer/Planlegger/Bygger/Reviewer/Utforer)
 - **Animated PhaseIcons:** Per-phase SVG icons with CSS animations (grid-blink, magnifying glass pulse, clipboard, lightning swing, eye, gear spin)
 
@@ -125,8 +127,33 @@ Key files:
 - `integrations/integrations.ts` — CRUD + webhook endpoints
 - `integrations/db.ts` — SQLDatabase reference
 
+## Dynamic AI Provider & Model System
+DB-driven model registry with full CRUD. Replaces hardcoded MODEL_REGISTRY.
+
+Key concepts:
+- **Providers:** AI providers (Anthropic, OpenAI, Moonshot, Google) stored in `ai_providers` table
+- **Models:** Individual models with tier, costs, context window, tags stored in `ai_models` table (FK to provider)
+- **Cache:** 60-second TTL DB cache in router.ts for fast model lookups, fallback models for cold start
+- **Tag-based selection:** Models tagged (chat, coding, analysis, planning) for context-specific routing
+- **Tier-based upgrade:** Fallback logic prefers same provider when upgrading tier (haiku→sonnet→opus within Anthropic)
+- **Full CRUD:** Frontend `/settings/models` allows adding/editing/deleting providers and models
+
+Endpoints: `/ai/providers` (GET, lists providers with nested models array), `/ai/providers/save` (POST, upsert provider), `/ai/models/save` (POST, upsert model), `/ai/models/toggle` (POST, enable/disable), `/ai/models/delete` (POST, delete model)
+Database: `ai_providers` + `ai_models` tables
+
+Pre-seeded data:
+- **4 providers:** Anthropic, OpenAI, Moonshot, Google
+- **9 models:** moonshot-v1-32k, moonshot-v1-128k, gpt-4o-mini, gemini-2.0-flash (tier 1), claude-haiku-4-5 (tier 2), claude-sonnet-4-5, gpt-4o (tier 3), claude-opus-4-5, gemini-2.0-pro (tier 5)
+
+Key files:
+- `ai/db.ts` — SQLDatabase("ai") with providers + models tables
+- `ai/migrations/1_add_providers_and_models.up.sql` — DB schema + seed data
+- `ai/providers.ts` — 5 CRUD endpoints for providers and models
+- `ai/router.ts` — DB-backed cache, selectOptimalModel, getUpgradeModel, tag-based selection
+- `frontend/src/app/(dashboard)/settings/models/page.tsx` — Full CRUD UI (expand/collapse, modal forms)
+
 ## Agent Flow (with meta-reasoning)
-1. Task picked up (from tasks service via thefoldTaskId, or Linear via taskId, or user request via chat — including chat tool-use dispatch)
+1. Task picked up via **dual-source lookup**: tries tasks service first (`tasks.getTaskInternal()`), falls back to Linear (`linear.getTask()`). When found locally, sets `ctx.thefoldTaskId = ctx.taskId` and updates status to `in_progress`. Also triggered by user request via chat tool-use dispatch
 2. GitHub: read project tree + relevant files (with context windowing)
 3. Memory: search for relevant context (with temporal decay scoring)
 4. Memory: search for similar error patterns from previous tasks
@@ -329,6 +356,9 @@ encore run              # all services + local infra
 - `builder/phases.ts` — 6 build phases: init, scaffold, dependencies, implement, integrate, finalize
 - `builder/graph.ts` — Dependency analysis, topological sort, import extraction
 - `ai/ai.ts` — System prompts, multi-model routing, diagnosis, prompt caching, reviseProjectPhase, planTaskOrder, generateFile, fixFile
+- `ai/db.ts` — SQLDatabase("ai") for providers + models tables
+- `ai/providers.ts` — 5 CRUD endpoints for dynamic provider/model system
+- `ai/router.ts` — DB-backed model cache, selectOptimalModel, getUpgradeModel, tag-based selection, tier-based upgrade
 - `ai/sub-agents.ts` — Sub-agent types, role-to-model mapping (6 roles, 3 budget modes)
 - `ai/orchestrate-sub-agents.ts` — Sub-agent planning, parallel execution, result merging, cost estimation
 - `ai/sanitize.ts` — OWASP A03 input sanitization for AI calls (null bytes, control chars, max length)

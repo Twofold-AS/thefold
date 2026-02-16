@@ -14,12 +14,28 @@ export interface AgentStatusData {
   title: string;
   steps: AgentStep[];
   error?: string;
+  questions?: string[];
+}
+
+interface AgentStatusProps {
+  data: AgentStatusData;
+  onReply?: (answer: string) => void;
+  onRetry?: () => void;
+  onCancel?: () => void;
 }
 
 /** Phase-specific icon for the tab */
 function PhaseIcon({ phase }: { phase: string }) {
   if (phase === "Ferdig") return <span className="text-green-500 text-sm">{"\u2713"}</span>;
   if (phase === "Feilet") return <span className="text-red-500 text-sm">{"\u2715"}</span>;
+
+  if (phase === "Venter") {
+    return (
+      <svg className="w-4 h-4 agent-phase-pulse" viewBox="0 0 20 20" fill="currentColor" style={{ color: "#eab308" }}>
+        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" />
+      </svg>
+    );
+  }
 
   if (phase === "Forbereder") {
     return (
@@ -78,10 +94,12 @@ function PhaseIcon({ phase }: { phase: string }) {
   return <span className="inline-block agent-spinner-small" />;
 }
 
-export function AgentStatus({ data }: { data: AgentStatusData }) {
+export function AgentStatus({ data, onReply, onRetry, onCancel }: AgentStatusProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const [replyText, setReplyText] = useState("");
   const isFailed = data.phase === "Feilet";
   const isComplete = data.phase === "Ferdig";
+  const isWaiting = data.phase === "Venter";
 
   return (
     <div className="my-3 max-w-lg message-enter">
@@ -91,16 +109,16 @@ export function AgentStatus({ data }: { data: AgentStatusData }) {
         style={{
           border: "1px solid var(--border)",
           borderBottom: collapsed ? "1px solid var(--border)" : "none",
-          background: isFailed ? "rgba(239,68,68,0.08)" : "transparent",
+          background: isFailed ? "rgba(239,68,68,0.08)" : isWaiting ? "rgba(234,179,8,0.08)" : "transparent",
         }}
         onClick={() => setCollapsed(!collapsed)}
       >
         <PhaseIcon phase={data.phase} />
         <span
-          className={`text-sm font-medium ${!isComplete && !isFailed ? "agent-shimmer" : ""}`}
-          style={{ color: isFailed ? "#ef4444" : "var(--text-primary)" }}
+          className={`text-sm font-medium ${!isComplete && !isFailed && !isWaiting ? "agent-shimmer" : ""}`}
+          style={{ color: isFailed ? "#ef4444" : isWaiting ? "#eab308" : "var(--text-primary)" }}
         >
-          {data.phase}
+          {data.phase === "Venter" ? "Venter pa input" : data.phase}
         </span>
       </div>
 
@@ -110,7 +128,7 @@ export function AgentStatus({ data }: { data: AgentStatusData }) {
           {/* Tittel */}
           <div
             className="px-4 py-3"
-            style={{ borderBottom: data.steps.length > 0 || data.error ? "1px solid rgba(255,255,255,0.06)" : "none" }}
+            style={{ borderBottom: data.steps.length > 0 || data.error || data.questions?.length ? "1px solid rgba(255,255,255,0.06)" : "none" }}
           >
             <span className="text-sm" style={{ color: "var(--text-primary)" }}>
               {data.title}
@@ -160,6 +178,91 @@ export function AgentStatus({ data }: { data: AgentStatusData }) {
               )}
             </div>
           ))}
+
+          {/* Questions (Venter phase) */}
+          {isWaiting && data.questions && data.questions.length > 0 && (
+            <div className="px-4 py-3 space-y-2" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              {data.questions.map((q, i) => (
+                <div key={i} className="flex items-start gap-2">
+                  <span className="text-xs mt-0.5" style={{ color: "#eab308" }}>?</span>
+                  <span className="text-sm" style={{ color: "var(--text-secondary)" }}>{q}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Reply input (Venter phase) */}
+          {isWaiting && onReply && (
+            <div className="flex items-center gap-2 px-4 py-3" style={{ borderTop: "1px solid var(--border)" }}>
+              <input
+                type="text"
+                value={replyText}
+                onChange={(e) => setReplyText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && replyText.trim()) {
+                    onReply(replyText.trim());
+                    setReplyText("");
+                  }
+                }}
+                placeholder="Skriv svar her..."
+                className="flex-1 text-sm px-3 py-1.5"
+                style={{
+                  background: "var(--bg-secondary)",
+                  border: "1px solid var(--border)",
+                  color: "var(--text-primary)",
+                  outline: "none",
+                }}
+              />
+              <button
+                onClick={() => {
+                  if (replyText.trim()) {
+                    onReply(replyText.trim());
+                    setReplyText("");
+                  }
+                }}
+                className="text-xs px-3 py-1.5 font-medium"
+                style={{
+                  background: "var(--accent)",
+                  color: "#fff",
+                  border: "none",
+                }}
+              >
+                Send
+              </button>
+            </div>
+          )}
+
+          {/* Retry/Cancel buttons (Feilet phase) */}
+          {isFailed && (onRetry || onCancel) && (
+            <div className="flex items-center gap-2 px-4 py-3" style={{ borderTop: "1px solid var(--border)" }}>
+              {onRetry && (
+                <button
+                  onClick={onRetry}
+                  className="text-xs px-3 py-1.5 font-medium"
+                  style={{
+                    background: "var(--accent)",
+                    color: "#fff",
+                    border: "none",
+                  }}
+                >
+                  Prov igjen
+                </button>
+              )}
+              {onCancel && (
+                <button
+                  onClick={onCancel}
+                  className="text-xs px-3 py-1.5"
+                  style={{
+                    border: "1px solid var(--border)",
+                    color: "var(--text-muted)",
+                    background: "transparent",
+                  }}
+                >
+                  Avbryt
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

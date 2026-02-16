@@ -41,9 +41,29 @@ function repoInfoToRepo(info: RepoInfo): Repo {
   };
 }
 
+const STORAGE_KEY = "thefold-selected-repo";
+
+function getSavedRepoFullName(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(STORAGE_KEY);
+}
+
+function saveRepoFullName(fullName: string) {
+  if (typeof window !== "undefined") {
+    localStorage.setItem(STORAGE_KEY, fullName);
+  }
+}
+
 export function RepoProvider({ children }: { children: ReactNode }) {
   const [repos, setRepos] = useState<Repo[]>(FALLBACK_REPOS);
-  const [selectedRepo, setSelectedRepo] = useState<Repo | null>(FALLBACK_REPOS[0] ?? null);
+  const [selectedRepo, setSelectedRepo] = useState<Repo | null>(() => {
+    const saved = getSavedRepoFullName();
+    if (saved) {
+      const fallback = FALLBACK_REPOS.find((r) => r.fullName === saved);
+      if (fallback) return fallback;
+    }
+    return FALLBACK_REPOS[0] ?? null;
+  });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -56,6 +76,13 @@ export function RepoProvider({ children }: { children: ReactNode }) {
           if (mapped.length > 0) {
             setRepos(mapped);
             setSelectedRepo((prev) => {
+              // Keep the user's saved selection if it exists in the fetched repos
+              const saved = getSavedRepoFullName();
+              if (saved) {
+                const savedRepo = mapped.find((r) => r.fullName === saved);
+                if (savedRepo) return savedRepo;
+              }
+              // Keep current selection if it's still valid
               if (prev && mapped.some((r) => r.fullName === prev.fullName)) return prev;
               return mapped[0];
             });
@@ -70,7 +97,10 @@ export function RepoProvider({ children }: { children: ReactNode }) {
 
   const selectRepo = useCallback((fullName: string) => {
     const repo = repos.find((r) => r.fullName === fullName);
-    if (repo) setSelectedRepo(repo);
+    if (repo) {
+      setSelectedRepo(repo);
+      saveRepoFullName(fullName);
+    }
   }, [repos]);
 
   return (

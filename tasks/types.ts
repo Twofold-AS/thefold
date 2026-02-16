@@ -25,5 +25,5 @@ export interface Task {
   completedAt: string | null;
 }
 
-export type TaskStatus = "backlog" | "planned" | "in_progress" | "in_review" | "done" | "blocked";
-export type TaskSource = "manual" | "linear" | "healing" | "marketplace";
+export type TaskStatus = "backlog" | "planned" | "in_progress" | "in_review" | "done" | "blocked" | "deleted";
+export type TaskSource = "manual" | "linear" | "healing" | "marketplace" | "chat";

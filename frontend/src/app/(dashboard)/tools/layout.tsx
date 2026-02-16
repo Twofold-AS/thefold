@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { PageHeaderBar } from "@/components/PageHeaderBar";
 
@@ -27,9 +28,16 @@ export default function ToolsLayout({ children }: { children: React.ReactNode })
       <PageHeaderBar
         title="Tools"
         cells={TABS.map((tab) => ({
-          label: tab.label,
-          href: tab.href,
-          active: isActive(tab.href),
+          content: (
+            <Link
+              href={tab.href}
+              prefetch={true}
+              className="text-sm"
+              style={{ color: isActive(tab.href) ? "var(--text-primary)" : "var(--text-muted)" }}
+            >
+              {tab.label}
+            </Link>
+          ),
         }))}
       />
       <div className="p-6">

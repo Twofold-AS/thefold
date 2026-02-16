@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 16. februar 2026 (Kostnads-dashboard, Skills-forenkling, Repo-header redesign)
+> Sist oppdatert: 16. februar 2026 (Agent dual-source task lookup + tool-use forbedringer)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -107,7 +107,7 @@
 
 | Steg | Status | Beskrivelse | Hva mangler |
 |------|--------|-------------|-------------|
-| 1. Hent task fra Linear | 🟢 | `linear.getTask()` via auditedStep | — |
+| 1. Hent task (dual-source) | 🟢 | Prøver `tasks.getTaskInternal()` først, fallback til `linear.getTask()`. Lokal task → setter `ctx.thefoldTaskId`, oppdaterer status til `in_progress` | — |
 | 2. Les prosjekt-tre | 🟢 | `github.getTree()` + `findRelevantFiles()` | — |
 | 2.5. Smart fillesing | 🟢 | Context windowing: <100→full, 100-500→chunks, >500→start+slutt | — |
 | 3. Samle kontekst | 🟢 | `memory.search()` (10 resultater) + `docs.lookupForTask()` | — |
@@ -201,6 +201,32 @@
 
 ## 3. AI-service
 
+### Database-tabeller
+
+**ai_providers:**
+| Kolonne | Type | Status |
+|---------|------|--------|
+| id | UUID PK | 🟢 |
+| name | TEXT NOT NULL UNIQUE | 🟢 |
+| api_key_secret_name | TEXT | 🟢 |
+| enabled | BOOLEAN | 🟢 |
+| created_at | TIMESTAMPTZ | 🟢 |
+
+**ai_models:**
+| Kolonne | Type | Status |
+|---------|------|--------|
+| id | UUID PK | 🟢 |
+| provider_id | UUID FK | 🟢 |
+| model_id | TEXT NOT NULL UNIQUE | 🟢 |
+| display_name | TEXT | 🟢 |
+| tier | INT | 🟢 |
+| input_cost_per_million | DECIMAL | 🟢 |
+| output_cost_per_million | DECIMAL | 🟢 |
+| context_window | INT | 🟢 |
+| tags | TEXT[] | 🟢 |
+| enabled | BOOLEAN | 🟢 |
+| created_at | TIMESTAMPTZ | 🟢 |
+
 ### Endepunkter
 
 | Endepunkt | Status | Expose | Auth | Brukes av | Pipeline | logSkillResults |
@@ -214,7 +240,11 @@
 | POST /ai/assess-confidence | 🟢 | false | Nei | agent STEP 4 | ✅ | ❌ mangler |
 | POST /ai/decompose-project | 🟢 | false | Nei | Project Orchestrator | ✅ | ✅ |
 | POST /ai/revise-project-phase | 🟢 | false | Nei | Orchestrator fase-revisjon | ❌ (bruker Haiku direkte) | ❌ |
-| GET /ai/models | 🟢 | true | Ja | frontend settings | — | — |
+| GET /ai/providers | 🟢 | true | Ja | frontend settings/models | — | — |
+| POST /ai/providers/save | 🟢 | true | Ja | frontend settings/models | — | — |
+| POST /ai/models/save | 🟢 | true | Ja | frontend settings/models | — | — |
+| POST /ai/models/toggle | 🟢 | true | Ja | frontend settings/models | — | — |
+| POST /ai/models/delete | 🟢 | true | Ja | frontend settings/models | — | — |
 | POST /ai/estimate-cost | 🟢 | true | Ja | frontend settings | — | — |
 
 ### Tool-use / Function Calling
@@ -225,6 +255,10 @@
 | callAnthropicWithTools | 🟢 | Two-call flow: send med tools → handle tool_use → execute → final response |
 | executeToolCall | 🟢 | Dispatcher til ekte services (tasks, github) basert på tool-navn |
 | System prompt tool instructions | 🟢 | Oppdatert system prompt med verktoy-instruksjoner |
+| create_task source: "chat" | 🟢 | Tasks opprettet fra chat bruker `source: "chat"` i stedet for `"manual"` |
+| create_task AI-berikelse | 🟢 | `enrichTaskWithAI()` fire-and-forget: estimerer complexity + tokens etter opprettelse |
+| start_task verifisering | 🟢 | Verifiserer task eksisterer via `tasks.getTaskInternal()`, setter `in_progress`, `blocked` ved feil |
+| conversationId-propagering | 🟢 | `conversationId` flyter fra chat → start_task → agent |
 
 ### Prompt caching
 
@@ -236,17 +270,33 @@
 | Token tracking/logging | 🟢 | ChatResponse returnerer usage { inputTokens, outputTokens, totalTokens }, logs cache_read/cache_creation | — |
 | Truncation detection | 🟢 | Oppdager stop_reason="max_tokens", appender info-melding til bruker | — |
 
-### Modellregister (7 modeller)
+### Dynamic Provider & Model System (NY — 16. feb 2026)
 
-| Modell | Provider | Tier | Input $/1M | Output $/1M | Context |
-|--------|----------|------|------------|-------------|---------|
-| moonshot-v1-32k | Moonshot | 1 | $0.24 | $0.24 | 32K |
-| moonshot-v1-128k | Moonshot | 1 | $0.30 | $0.30 | 128K |
-| gpt-4o-mini | OpenAI | 1 | $0.15 | $0.60 | 128K |
-| claude-haiku-4-5 | Anthropic | 2 | $0.80 | $4.00 | 200K |
-| claude-sonnet-4-5 | Anthropic | 3 | $3.00 | $15.00 | 200K |
-| gpt-4o | OpenAI | 3 | $2.50 | $10.00 | 128K |
-| claude-opus-4-5 | Anthropic | 5 | $15.00 | $75.00 | 200K |
+**Konsept:** Modeller og providers er nå helt DB-drevet med full CRUD via frontend.
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| ai_providers tabell | 🟢 | 4 pre-seeded providers: Anthropic, OpenAI, Moonshot, Google |
+| ai_models tabell | 🟢 | 9 pre-seeded modeller med tier, kostnader, context, tags |
+| GET /ai/providers | 🟢 | Liste providers med nested models array |
+| POST /ai/providers/save | 🟢 | Opprett/oppdater provider |
+| POST /ai/models/save | 🟢 | Opprett/oppdater modell |
+| POST /ai/models/toggle | 🟢 | Aktiver/deaktiver modell |
+| POST /ai/models/delete | 🟢 | Slett modell |
+| Frontend /settings/models | 🟢 | Full CRUD for providers + modeller, expand/collapse, modal forms |
+| Frontend /tools/ai-models | 🟢 | Provider-grupperte modeller |
+| Frontend ModelSelector | 🟢 | Grupperte modeller per provider |
+| Router cache (60s TTL) | 🟢 | DB-backed cache med fallback-modeller ved cold start |
+| Tag-based selection | 🟢 | selectOptimalModel støtter tag-filtrering (chat, coding, analysis, planning) |
+| Tier-based upgrade | 🟢 | Fallback oppgraderer tier med provider affinity |
+
+**Pre-seeded data:**
+- **Providers (4):** Anthropic, OpenAI, Moonshot, Google
+- **Models (9):**
+  - Tier 1: moonshot-v1-32k, moonshot-v1-128k, gpt-4o-mini, gemini-2.0-flash
+  - Tier 2: claude-haiku-4-5
+  - Tier 3: claude-sonnet-4-5, gpt-4o
+  - Tier 5: claude-opus-4-5, gemini-2.0-pro
 
 ### callAIWithFallback
 
@@ -259,7 +309,7 @@
 ### Hva trengs for full aktivering
 1. ~~Legg til `logSkillResults()` i diagnoseFailure, revisePlan, assessConfidence~~ ✅ Ferdig
 2. La assessComplexity bruke buildSystemPromptWithPipeline i stedet for BASE_RULES
-3. Oppdater modellregister med Claude 4.6 når tilgjengelig
+3. ~~Dynamisk modellregister~~ ✅ DB-drevet med full CRUD frontend
 
 ---
 
@@ -307,7 +357,7 @@
 
 ## 5. Skills-service
 
-### Database-felter (37 kolonner totalt)
+### Database-felter (38 kolonner totalt)
 
 | Kolonne | Type | Status | Brukes av | Aktivering |
 |---------|------|--------|-----------|------------|
@@ -344,6 +394,7 @@
 | confidence_score | DECIMAL | 🟢 | logResult beregner success/(success+failure) | — |
 | last_used_at | TIMESTAMPTZ | 🟢 | logResult setter NOW() | — |
 | total_uses | INT | 🟢 | logResult inkrementerer | — |
+| task_phase | TEXT | 🟢 | resolve filter med taskType | all, planning, coding, debugging, reviewing |
 
 ### Endepunkter
 
@@ -366,7 +417,7 @@
 
 | Funksjon | Status | Beskrivelse | Aktivering |
 |----------|--------|-------------|------------|
-| resolve | 🟢 | Forenklet: scope-filter → routing-match → token-budsjett → bygg prompt (depends_on, conflicts_with, fase-gruppering fjernet) | — |
+| resolve | 🟢 | Forenklet: scope-filter → task_phase filter (når taskType spesifisert) → routing-match → token-budsjett → bygg prompt | — |
 | executePreRun | 🟢 | Input-validering (task, userId) + context-berikelse (skill metadata) | — |
 | executePostRun | 🟢 | Quality review (tomhet, lengde, placeholders, inability-mønstre) + auto-logging | — |
 | logResult | 🟢 | Success/failure tracking, confidence_score, avg_token_cost | — |
@@ -507,7 +558,7 @@
 | Samtaleliste | 🟢 | GET /chat/conversations |
 | Context transfer | 🟢 | POST /chat/transfer-context (AI-oppsummering med fallback) |
 | Conversation ownership (OWASP A01) | 🟢 | conversations.owner_email, verifisert i alle endpoints |
-| Agent reports via Pub/Sub | 🟢 | agentReports topic → store-agent-report subscription |
+| Agent reports via Pub/Sub | 🟢 | agentReports topic → store-agent-report subscription (agent_report/agent_status filtreres ut i frontend rendering) |
 | Build progress via Pub/Sub | 🟢 | buildProgress topic → chat-build-progress subscription |
 | Task events via Pub/Sub | 🟢 | taskEvents topic → chat-task-events subscription |
 | SkillIds i meldingsmetadata | 🟢 | Lagres i user message metadata |
@@ -536,6 +587,8 @@
 | Tenker-indikator deduplisert | 🟢 | "TheFold tenker..." kun vist før første agent_status — ingen dobbel visning |
 | Fase-ikoner i AgentStatus | 🟢 | Spinner (default), forstørrelsesglass (Analyserer), wrench (Bygger), check/X (Ferdig/Feilet) |
 | Emoji-forbud i AI-svar | 🟢 | direct_chat system prompt forbyr alle emojier, kun ren tekst + markdown |
+| AI name preference (backend) | 🟢 | aiName i preferences JSONB, leses i chat/chat.ts processAIResponse, sendes til ai.ts system prompt (default "Jørgen André") |
+| AI name i system prompt | 🟢 | getDirectChatPrompt aksepterer aiName parameter, AI identifiserer seg med konfigurerbart navn |
 | ChatMessage markdown-parser | 🟢 | Kodeblokker, overskrifter, lister, bold/italic/inline-kode i assistant-meldinger |
 | CodeBlock komponent | 🟢 | Collapsible kodeblokker med filnavn, språk-badge, kopier-knapp, linjenumre |
 | TheFold identitet i system prompt | 🟢 | AI vet at den ER TheFold, kjenner alle 17 services, svarer på norsk, ingen emojier |
@@ -546,7 +599,7 @@
 | Tomt repo handling | 🟢 | Hvis repoContext er tom etter GitHub-kall, AI får eksplisitt beskjed om at repoet er tomt — ingen hallusinering |
 | Memory-prioritering over hallusinering | 🟢 | System prompt: minner kan komme fra andre repoer, fil-kontekst er sannheten, minner er hint |
 | Skills UUID[] fix | 🟢 | depends_on::text[] og conflicts_with::text[] cast i resolve() — fikser "unsupported type: UuidArray" |
-| Tool-use / Function Calling | 🟢 | 5 tools (create_task, start_task, list_tasks, read_file, search_code) i ai/ai.ts, callAnthropicWithTools two-call flow, executeToolCall dispatcher |
+| Tool-use / Function Calling | 🟢 | 5 tools (create_task, start_task, list_tasks, read_file, search_code) i ai/ai.ts, callAnthropicWithTools two-call flow, executeToolCall dispatcher. create_task: source="chat" + AI-berikelse (complexity/tokens). start_task: verifiserer task, setter in_progress/blocked |
 | Dynamic AgentStatus | 🟢 | processAIResponse bygger steg dynamisk basert på intent-deteksjon, conditional memory search, bedre fasenavn (Forbereder/Analyserer/Planlegger/Bygger/Reviewer/Utforer) |
 | Animated PhaseIcons | 🟢 | Per-fase SVG-ikoner med CSS-animasjoner (grid-blink, forstorrelsesglass-pulse, clipboard, lightning-swing, eye, gear-spin) |
 | File Upload | 🟢 | chat_files tabell (migrasjon 4), POST /chat/upload (500KB grense), frontend fil-velger via + meny |
@@ -562,6 +615,47 @@
 | Kostnads-dashboard (frontend) | 🟢 | /settings/costs — 3 kostnadskort, per-modell-tabell, 14-dagers CSS-bar-chart |
 | Budget alert | 🟢 | processAIResponse: $5/dag terskel, console.warn ved overskridelse |
 
+### Sikkerhet & Bugfiks (februar 2026)
+
+#### FIX 1: Cost Safety (.toFixed() wrapping) 🟢
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| Number() wrapping for .toFixed() | 🟢 | Alle .toFixed() og .toLocaleString() kall i frontend/src/app/(dashboard)/settings/costs/page.tsx nå wrapped med Number() for å handtere null/string-verdier fra SQL |
+| SQL cost-datatyper sikker | 🟢 | costs.totalCostUsd, costs.avgCostPerMessage, costs.costByModel returner DECIMAL/safe-verdier |
+| Frontend type-sikkerhet | 🟢 | Prevents "toFixed is not a function" crashes når SQL returnerer null |
+
+#### FIX 2: Soft Delete for Tasks 🟢
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| POST /tasks/soft-delete | 🟢 | Ny backend-endepunkt — slett task med is_deleted=true, lagrer deleted_at timestamp |
+| POST /tasks/restore | 🟢 | Gjenopprett soft-deleted task — sett is_deleted=false |
+| POST /tasks/permanent-delete | 🟢 | Permanent sletting for archived tasks |
+| Frontend delete-knapp per task-kort | 🟢 | "Slett"-handling, bekreftelses-modal |
+| "Slettet"-seksjon i tasks-liste | 🟢 | Filter for is_deleted=true, viser tasks slettet <5 minutter |
+| Restore-knapp per slettet task | 🟢 | Gjenopprett slettede tasks |
+| Auto-permanent-delete cron | 🟢 | Task-slettet >5 minutter → permanent delete fra DB |
+| Backend queries filtrerer is_deleted | 🟢 | Alle listTasks queries utelater soft-deleted tasks som standard (WHERE is_deleted=false) |
+| "deleted" i TaskStatus union | 🟢 | Lagt til "deleted" i TaskStatus type, `AND status != 'deleted'` i alle 9 listTasks-grener, getStats filtrerer deleted |
+| GET /tasks/deleted/:repoName | 🟢 | Ny listDeleted endpoint for frontend — henter soft-deleted tasks per repo |
+| pushToLinear deleted mapping | 🟢 | `deleted: "Cancelled"` i statusToLinearState |
+| Frontend listDeletedTasks | 🟢 | Frontend henter deleted tasks via listDeletedTasks(repoName) ved sideinnlasting, full softDelete→listDeleted→restore→permanentDelete flyt verifisert |
+
+#### FIX 3: Agent Report duplikater i chat 🟢
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| agent_report/agent_status filtrering | 🟢 | `.filter(m => m.messageType !== "agent_report" && m.messageType !== "agent_status")` i begge chat-sider (chat/page.tsx + repo/[name]/chat/page.tsx) |
+| Dead code fjernet | 🟢 | tryParseAgentStatus funksjon, AgentStatus import, isAgentReport variabel fjernet fra begge chat-sider |
+| hasAgentStatus beholdt | 🟢 | Brukes fortsatt for "tenker..." spinner-logikk |
+
+#### FIX 4: Repo Persistence via localStorage 🟢
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| localStorage repo-lagring | 🟢 | Selected repo nå persistert i localStorage via repo-context.tsx |
+| RepoProvider oppdatert | 🟢 | Leser localStorage["selectedRepo"] på mount, fallback til første repo |
+| Navigation-opprettholding | 🟢 | Navigasjon til /settings, /home, /skills — repo-valg forblir samme når man returnerer til /repo/[name] |
+| getSelectedRepo() hook | 🟢 | Frontend hook returnerer persistert repo eller fallback |
+| Synk med backend | 🟢 | RepoProvider henter repos via listRepos API, synker valg med localStorage |
+
 ---
 
 ## 9. Andre tjenester
@@ -573,6 +667,7 @@
 | Embedding-cache (90d TTL) | 🟢 | `emb:{sha256}` → vector |
 | Repo-structure-cache (1h TTL) | 🟢 | `repo:{owner}/{repo}:{branch}` |
 | AI-plan-cache (24h TTL) | 🟢 | `plan:{sha256(task+repo)}` |
+| Skills-cache | 🔴 | Ingen skills caching — skills hentes direkte fra DB hver gang |
 | Statistikk | 🟢 | Hit rate, per-namespace counts |
 | Hourly cleanup cron | 🟢 | Sletter utløpte entries |
 | Invalidering | 🟢 | Per key eller namespace |
@@ -591,7 +686,7 @@
 |---------|--------|-------------|
 | getAssignedTasks | 🟢 | GraphQL, filter: "thefold" label |
 | getTask | 🟢 | Enkelt-task lookup |
-| updateTask | 🟢 | State-mapping via getWorkflowStates() + issueUpdate mutation | 6 statuser: backlog→Backlog, planned→Todo, in_progress→In Progress, in_review→In Review, done→Done, blocked→Cancelled |
+| updateTask | 🟢 | State-mapping via getWorkflowStates() + issueUpdate mutation | 7 statuser: backlog→Backlog, planned→Todo, in_progress→In Progress, in_review→In Review, done→Done, blocked→Cancelled, deleted→Cancelled |
 | 5-min polling cron | 🟢 | check-thefold-tasks |
 
 ### Builder-service (NY — Steg 4.2)
@@ -629,19 +724,22 @@
 
 | Feature | Status | Beskrivelse |
 |---------|--------|-------------|
-| tasks-tabell | 🟢 | 24 kolonner, 5 indekser, 4 sources, 6 statuser |
+| tasks-tabell | 🟢 | 24 kolonner, 5 indekser, 4 sources, 7 statuser (inkl. deleted) |
 | createTask | 🟢 | POST /tasks/create, auth, full validering |
 | updateTask | 🟢 | POST /tasks/update, individuelle felt-oppdateringer |
 | deleteTask | 🟢 | POST /tasks/delete |
 | getTask | 🟢 | GET /tasks/get + intern getTaskInternal |
-| listTasks | 🟢 | POST /tasks/list, 6 filtre (repo, status, source, labels, priority, assignedTo) |
+| listTasks | 🟢 | POST /tasks/list, 6 filtre (repo, status, source, labels, priority, assignedTo), filtrerer ut deleted tasks i alle 9 query-grener |
+| listDeleted | 🟢 | GET /tasks/deleted/:repoName — henter soft-deleted tasks for et repo |
 | syncLinear | 🟢 | Pull fra Linear, create/update lokalt, oppdater linear_synced_at |
-| pushToLinear | 🟢 | Push TheFold-status tilbake til Linear |
+| pushToLinear | 🟢 | Push TheFold-status tilbake til Linear (inkl. deleted→Cancelled mapping) |
 | planOrder | 🟢 | AI-basert prioritering via ai.planTaskOrder (Haiku) |
-| getStats | 🟢 | Totalt, per status, per source, per repo |
+| getStats | 🟢 | Totalt, per status, per source, per repo (filtrerer ut deleted tasks) |
 | updateTaskStatus | 🟢 | Intern — agent oppdaterer status, reviewId, prUrl |
+| cancelTask | 🟢 | POST /tasks/cancel (exposed, auth) — stopper pågående task, in-memory `cancelledTasks` Set |
+| isCancelled | 🟢 | Intern endpoint — agent poller denne mellom steg (4 sjekkpunkter) |
 | task-events Pub/Sub | 🟢 | 5 typer: created, updated, deleted, completed, failed |
-| Agent-integrasjon | 🟢 | STEP 1 dual-path: thefoldTaskId → tasks service, eller taskId → Linear |
+| Agent-integrasjon | 🟢 | STEP 1 dual-source: prøver tasks-service først (`getTaskInternal`), fallback til Linear. Lokal task → `thefoldTaskId` settes automatisk, status → `in_progress`. `checkCancelled()` helper poller `tasks.isCancelled()` mellom steg, destroyer sandbox ved cancel |
 
 ### GitHub-service
 
@@ -662,7 +760,7 @@
 | OTP request (rate limited) | 🟢 | 5/time, 6-sifret, SHA256 hash, 5 min utløp |
 | OTP verify | 🟢 | 3 forsøk, anti-enumerering |
 | Profil (me, updateProfile) | 🟢 | Navn, avatarfarge |
-| Preferences (JSONB) | 🟢 | modelMode, avatarColor |
+| Preferences (JSONB) | 🟢 | modelMode, avatarColor, aiName |
 | Login audit | 🟢 | email, success, user_agent |
 
 ---
@@ -691,7 +789,7 @@
 | /tools/mcp | 🟢 | Ja (listMCPServers, install/uninstall) | Konfigurasjon UI for envVars/config |
 | /tools/observability | 🟢 | Ja (getMonitorHealth, getAuditStats, listAuditLog) | — |
 | /tools/secrets | 🟢 | Ja (getSecretsStatus, configured/mangler-badges) | — |
-| /tools/templates | 🟢 | Ja (listTemplates, useTemplate, category filter, slide-over) | — |
+| /tools/templates | 🟢 | Ja (listTemplates, useTemplate, category filter, slide-over, InstallModal med repo-dropdown + variabel-inputs) | — |
 | /marketplace | 🟢 | Ja (listComponents, searchComponents, category filter) | — |
 | /marketplace/[id] | 🟢 | Ja (getComponent, useComponent, getHealingStatus, file browser) | — |
 | /tools/integrations | 🟢 | Ja (listIntegrations, saveIntegration, deleteIntegration) | — |
@@ -717,6 +815,31 @@
 | PageHeaderBar | 🟢 | Forenklet: fjernet cells/tabs prop, lagt til subtitle prop — brukes av alle repo-sider med per-page titler og actions |
 | Sidebar | 🟢 | Navigasjon (Home/Chat/Environments/Marketplace | Repo | Skills/Tools | Settings), repo-dropdown, brukerprofil |
 
+### Skeleton Loading System
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| .skeleton CSS-animasjon | 🟢 | Shimmer-animasjon i globals.css for loading-tilstander |
+| 17 loading.tsx filer | 🟢 | Next.js Suspense skeletons for alle dashboard-sider: home, chat, environments, marketplace, marketplace/[id], skills, settings, settings/costs, settings/security, review, review/[id], tools, repo/[name]/overview, repo/[name]/chat, repo/[name]/tasks, repo/[name]/reviews, repo/[name]/activity |
+| Sidebar prefetch | 🟢 | `prefetch={true}` på alle sidebar Link-komponenter for raskere navigasjon |
+| Tools tab prefetch | 🟢 | `prefetch={true}` på alle Tools layout tab-lenker |
+
+### Template Install Modal
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| InstallModal komponent | 🟢 | Dark backdrop (rgba(0,0,0,0.6)), repo-dropdown fra listRepos(), variabel-inputs, square corners |
+| Font-audit templates | 🟢 | Korrigert font-klasser gjennom hele templates-siden |
+
+### AI Name Preference (Frontend)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| Settings AI-assistent seksjon | 🟢 | Navn-input i Preferanser tab med auto-genererte initialer-preview |
+| UserPreferencesContext | 🟢 | Eksporterer aiName + aiInitials derivert fra preferences |
+| Chat aiName-integrasjon | 🟢 | Begge chat-sider bruker aiName/aiInitials fra context for avatar, "tenker"-indikator, heartbeat-lost melding |
+| Default AI-navn | 🟢 | Endret fra "TheFold"/"TF" til "Jørgen André"/"JA" |
+
 ### Design System (UI/UX Overhaul)
 
 | Feature | Status | Beskrivelse |
@@ -737,7 +860,7 @@
 
 | Provider | Status | Beskrivelse |
 |----------|--------|-------------|
-| PreferencesProvider | 🟢 | Henter /users/me, gir usePreferences() og useUser() hooks |
+| PreferencesProvider | 🟢 | Henter /users/me, gir usePreferences(), useUser(), aiName og aiInitials hooks |
 | RepoProvider | 🟢 | Henter repos fra listRepos("Twofold-AS") med fallback | — |
 
 ---
@@ -1061,7 +1184,23 @@
 
 | Kategori | Antall |
 |----------|--------|
-| 🟢 AKTIVE features | 260+ |
+| 🟢 AKTIVE features | 285+ |
 | 🟡 STUBBEDE features | 2 |
 | 🔴 GRUNNMUR features | 19 |
 | ⚪ PLANLAGTE features | 9 |
+
+**Nylig aktiverte (februar 2026):**
+- ✅ Dynamic AI Provider & Model System — DB-drevet med full CRUD, 4 providers, 9 modeller, tag-based selection, tier-based upgrade, frontend /settings/models
+- ✅ FIX 1: Cost safety — .toFixed() wrapping for NULL/string-håndtering
+- ✅ FIX 2: Soft delete for tasks — 3 nye endepunkter (softDelete, restore, permanentDelete), frontend delete-knapp, "Slettet"-seksjon, auto-cleanup cron
+- ✅ FIX 3: Repo persistence — localStorage repo-valg, RepoProvider oppdatert, navigation-opprettholding
+- ✅ FIX 4 (Bugfiks Runde 4): "deleted" status i TaskStatus + listTasks-filtrering + listDeleted endpoint + pushToLinear mapping + getStats-filtrering
+- ✅ FIX 5 (Bugfiks Runde 4): Slett-knapp på tasks — frontend listDeletedTasks koblet til backend, full softDelete→listDeleted→restore→permanentDelete flyt end-to-end
+- ✅ FIX 6 (Bugfiks Runde 4): Agent report duplikater — agent_report/agent_status filtrert ut i begge chat-sider, dead code fjernet
+- ✅ FIX 7 (Bugfiks Runde 5): AgentStatus box restaurert — agent_status meldinger nå synlige igjen, kun agent_report filtrert (chat rendering i begge sider)
+- ✅ FIX 8 (Bugfiks Runde 5): Deleted skill injeksjon — skills.resolve() fikset til korrekt schema `{ context: SkillPipelineContext }`, deaktiverte skills som "Hilsen Jørgen" filtreres nå ut
+- ✅ FIX 9 (Bugfiks Runde 5): Empty repo confidence — agent STEP 4 hopper over klaritetsspørsmål for tomme repoer (auto-setter confidence til 90)
+- ✅ FIX 10 (Bugfiks Runde 5): Agent stopp/vente UI — AgentStatus redesignet med "Venter"-fase (gul ikon, questions display, reply input), "Feilet"-fase (retry/cancel buttons), både chat-sider oppdatert med onReply/onRetry/onCancel callbacks
+- ✅ DEL 4 (Skills task_phase system): Ny task_phase kolonne (all/planning/coding/debugging/reviewing), migrasjon 7, skills/skills.ts + skills/engine.ts oppdatert med taskType→task_phase filtrering, ai.ts CONTEXT_TO_TASK_PHASE mapping, frontend redesign med fase-tabs + scope filter + badges
+- ✅ DEL 2 item 3 (Cache investigation): cache/cache.ts cacher KUN embeddings/repo/plans — INGEN skills caching (skills hentes alltid friskt fra DB)
+- ✅ DEL 3 completion (AgentStatus callbacks): Begge chat-sider wired med onReply/onRetry/onCancel callbacks, tryParseAgentStatus extraherer questions, handleAgentReply sender svar, handleAgentRetry re-sender siste melding, handleAgentCancel kaller cancelChatGeneration

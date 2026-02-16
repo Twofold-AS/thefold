@@ -25,11 +25,9 @@ export default function CostsPage() {
       <div>
         <PageHeaderBar
           title="Kostnader"
-          actions={
-            <Link href="/settings" className="text-sm" style={{ color: "var(--text-muted)" }}>
-              Tilbake til Settings
-            </Link>
-          }
+          rightCells={[{
+            content: <Link href="/settings" className="text-sm" style={{ color: "var(--text-muted)" }}>Tilbake til Settings</Link>,
+          }]}
         />
         <div className="flex items-center justify-center py-20">
           <div
@@ -52,17 +50,15 @@ export default function CostsPage() {
     );
   }
 
-  const maxDaily = Math.max(...data.dailyTrend.map((d) => d.total), 0.01);
+  const maxDaily = Math.max(...data.dailyTrend.map((d) => Number(d.total) || 0), 0.01);
 
   return (
     <div>
       <PageHeaderBar
         title="Kostnader"
-        actions={
-          <Link href="/settings" className="text-sm" style={{ color: "var(--text-muted)" }}>
-            Tilbake til Settings
-          </Link>
-        }
+        rightCells={[{
+          content: <Link href="/settings" className="text-sm" style={{ color: "var(--text-muted)" }}>Tilbake til Settings</Link>,
+        }]}
       />
 
       <div className="p-6 space-y-6">
@@ -95,8 +91,8 @@ export default function CostsPage() {
                   <tr key={m.model} style={{ borderBottom: "1px solid var(--border)" }}>
                     <td className="px-4 py-2 font-mono text-xs" style={{ color: "var(--text-primary)" }}>{m.model}</td>
                     <td className="px-4 py-2 text-right text-xs" style={{ color: "var(--text-secondary)" }}>{m.count}</td>
-                    <td className="px-4 py-2 text-right font-mono text-xs" style={{ color: "var(--text-secondary)" }}>{m.tokens.toLocaleString()}</td>
-                    <td className="px-4 py-2 text-right font-mono text-xs font-medium" style={{ color: "var(--text-primary)" }}>${m.total.toFixed(4)}</td>
+                    <td className="px-4 py-2 text-right font-mono text-xs" style={{ color: "var(--text-secondary)" }}>{Number(m.tokens || 0).toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right font-mono text-xs font-medium" style={{ color: "var(--text-primary)" }}>${(Number(m.total) || 0).toFixed(4)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -139,28 +135,29 @@ function CostCard({ label, cost, tokens, count }: { label: string; cost: number;
     <div className="p-4" style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}>
       <p className="text-[11px] mb-1" style={{ color: "var(--text-muted)" }}>{label}</p>
       <p className="text-2xl font-semibold font-mono" style={{ color: "var(--text-primary)" }}>
-        ${cost.toFixed(2)}
+        ${(Number(cost) || 0).toFixed(2)}
       </p>
       <div className="flex gap-3 mt-2 text-[10px]" style={{ color: "var(--text-muted)" }}>
-        <span>{tokens.toLocaleString()} tokens</span>
-        <span>{count} kall</span>
+        <span>{Number(tokens || 0).toLocaleString()} tokens</span>
+        <span>{Number(count || 0)} kall</span>
       </div>
     </div>
   );
 }
 
 function DailyBar({ day, maxValue }: { day: DailyTrend; maxValue: number }) {
-  const height = maxValue > 0 ? (day.total / maxValue) * 100 : 0;
+  const total = Number(day.total) || 0;
+  const height = maxValue > 0 ? (total / maxValue) * 100 : 0;
   return (
     <div className="flex-1 flex flex-col items-center justify-end" style={{ height: "100%" }}>
       <div
         className="w-full transition-all"
         style={{
           height: `${Math.max(height, 2)}%`,
-          background: day.total > 5 ? "#ef4444" : day.total > 1 ? "#eab308" : "var(--accent)",
+          background: total > 5 ? "#ef4444" : total > 1 ? "#eab308" : "var(--accent)",
           minHeight: "2px",
         }}
-        title={`${day.date}: $${day.total.toFixed(4)} (${day.tokens} tokens)`}
+        title={`${day.date}: $${(Number(day.total) || 0).toFixed(4)} (${Number(day.tokens || 0)} tokens)`}
       />
     </div>
   );

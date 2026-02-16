@@ -67,12 +67,16 @@ export default function RepoOverviewPage() {
       <PageHeaderBar
         title="Oversikt"
         subtitle={params.name}
-        actions={
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full" style={{ background: healthColor }} />
-            <span className="text-sm" style={{ color: healthColor }}>{healthLabel}</span>
-          </div>
-        }
+        rightCells={[
+          {
+            content: (
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full" style={{ background: healthColor }} />
+                <span className="text-sm" style={{ color: healthColor }}>{healthLabel}</span>
+              </div>
+            ),
+          },
+        ]}
       />
 
       <div className="p-6">

@@ -4,8 +4,13 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
 import {
   listTheFoldTasks,
+  listDeletedTasks,
   createTask,
   syncLinearTasks,
+  softDeleteTask,
+  restoreTask,
+  permanentDeleteTask,
+  cancelTask,
   type TheFoldTask,
 } from "@/lib/api";
 import { PageHeaderBar } from "@/components/PageHeaderBar";
@@ -49,6 +54,7 @@ export default function RepoTasksPage() {
   const [syncResult, setSyncResult] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [deletedTasks, setDeletedTasks] = useState<TheFoldTask[]>([]);
 
   // Filters
   const [filterStatus, setFilterStatus] = useState<string>("");
@@ -57,12 +63,16 @@ export default function RepoTasksPage() {
   const loadTasks = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await listTheFoldTasks({
-        repo: params.name,
-        status: filterStatus || undefined,
-        limit: 200,
-      });
+      const [res, deletedRes] = await Promise.all([
+        listTheFoldTasks({
+          repo: params.name,
+          status: filterStatus || undefined,
+          limit: 200,
+        }),
+        listDeletedTasks(params.name),
+      ]);
       setTasks(res.tasks);
+      setDeletedTasks(deletedRes.tasks);
     } catch {
       // silent
     } finally {
@@ -88,6 +98,49 @@ export default function RepoTasksPage() {
     }
   }
 
+  async function handleSoftDelete(taskId: string) {
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) return;
+
+    // 1. Fjern fra hovedlisten
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+
+    // 2. Legg til i deleted-listen UMIDDELBART
+    setDeletedTasks((prev) => [...prev, { ...task, status: "deleted" as const }]);
+
+    // 3. Kall API (fire and forget for UI-speed)
+    softDeleteTask(taskId).catch(() => {
+      // Rollback ved feil
+      setTasks((prev) => [...prev, task]);
+      setDeletedTasks((prev) => prev.filter((t) => t.id !== taskId));
+    });
+
+    // 4. IKKE kall loadTasks() her — optimistisk oppdatering er nok
+  }
+
+  async function handleCancel(taskId: string) {
+    // Optimistic: move from in_progress to backlog
+    setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: "backlog" } : t));
+    try {
+      await cancelTask(taskId);
+    } catch {
+      // Rollback
+      setTasks((prev) => prev.map((t) => t.id === taskId ? { ...t, status: "in_progress" } : t));
+    }
+  }
+
+  // Auto-permanent-delete after 5 minutes
+  useEffect(() => {
+    if (deletedTasks.length === 0) return;
+    const timer = setTimeout(async () => {
+      for (const task of deletedTasks) {
+        await permanentDeleteTask(task.id);
+      }
+      setDeletedTasks([]);
+    }, 5 * 60 * 1000);
+    return () => clearTimeout(timer);
+  }, [deletedTasks]);
+
   // Group tasks by column
   const grouped = new Map<ColumnKey, TheFoldTask[]>();
   for (const col of COLUMNS) grouped.set(col.key, []);
@@ -110,32 +163,40 @@ export default function RepoTasksPage() {
       <PageHeaderBar
         title="Oppgaver"
         subtitle={params.name}
-        actions={
-          <div className="flex items-center gap-2">
-            {syncResult && (
-              <span className="text-xs px-2 py-1" style={{ background: "var(--bg-card)", color: "var(--text-secondary)" }}>
+        cells={syncResult ? [
+          {
+            content: (
+              <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
                 {syncResult}
               </span>
-            )}
-            <button onClick={() => setShowCreate(true)} className="btn-primary text-sm">
-              + Ny oppgave
-            </button>
-            <button
-              onClick={handleSync}
-              disabled={syncing}
-              className="btn-secondary text-sm flex items-center gap-1.5"
-            >
-              {syncing ? (
-                <>
-                  <span className="w-3 h-3 border-2 rounded-full animate-spin inline-block" style={{ borderColor: "rgba(255,255,255,0.2)", borderTopColor: "var(--text-primary)" }} />
-                  Synkroniserer...
-                </>
-              ) : (
-                "Synk fra Linear"
-              )}
-            </button>
-          </div>
-        }
+            ),
+          },
+        ] : undefined}
+        rightCells={[
+          {
+            content: (
+              <button
+                onClick={handleSync}
+                disabled={syncing}
+                className="text-sm flex items-center gap-1.5"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                {syncing ? (
+                  <>
+                    <span className="w-3 h-3 border-2 rounded-full animate-spin inline-block" style={{ borderColor: "rgba(255,255,255,0.2)", borderTopColor: "var(--text-primary)" }} />
+                    Synkroniserer...
+                  </>
+                ) : (
+                  "Synk fra Linear"
+                )}
+              </button>
+            ),
+          },
+          {
+            content: <span className="text-sm" style={{ color: "var(--text-primary)" }}>+ Ny oppgave</span>,
+            onClick: () => setShowCreate(true),
+          },
+        ]}
       />
 
       <div className="p-6">
@@ -216,6 +277,8 @@ export default function RepoTasksPage() {
                         task={task}
                         expanded={expanded === task.id}
                         onToggle={() => setExpanded(expanded === task.id ? null : task.id)}
+                        onDelete={() => handleSoftDelete(task.id)}
+                        onCancel={() => handleCancel(task.id)}
                       />
                     ))
                   )}
@@ -223,6 +286,51 @@ export default function RepoTasksPage() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Deleted tasks */}
+      {deletedTasks.length > 0 && (
+        <div className="mt-6" style={{ border: "1px solid var(--border)" }}>
+          <div className="px-4 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
+            <span className="text-sm" style={{ color: "var(--text-muted)" }}>
+              Slettet ({deletedTasks.length}) — fjernes permanent om 5 minutter
+            </span>
+          </div>
+          {deletedTasks.map((task) => (
+            <div
+              key={task.id}
+              className="flex items-center justify-between px-4 py-3"
+              style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", opacity: 0.5 }}
+            >
+              <span className="text-sm line-through" style={{ color: "var(--text-muted)" }}>
+                {task.title}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    setDeletedTasks((prev) => prev.filter((t) => t.id !== task.id));
+                    setTasks((prev) => [...prev, { ...task, status: "backlog" }]);
+                    await restoreTask(task.id);
+                  }}
+                  className="text-xs px-2 py-1 hover:bg-white/5"
+                  style={{ border: "1px solid var(--border)", color: "var(--text-muted)" }}
+                >
+                  Gjenopprett
+                </button>
+                <button
+                  onClick={async () => {
+                    setDeletedTasks((prev) => prev.filter((t) => t.id !== task.id));
+                    await permanentDeleteTask(task.id);
+                  }}
+                  className="text-xs px-2 py-1 hover:bg-white/5"
+                  style={{ border: "1px solid var(--border)", color: "#ef4444" }}
+                >
+                  Slett permanent
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
@@ -248,14 +356,18 @@ function TaskCard({
   task,
   expanded,
   onToggle,
+  onDelete,
+  onCancel,
 }: {
   task: TheFoldTask;
   expanded: boolean;
   onToggle: () => void;
+  onDelete: () => void;
+  onCancel: () => void;
 }) {
   return (
     <div
-      className="rounded-md p-2.5 cursor-pointer transition-colors"
+      className="p-2.5 cursor-pointer transition-colors"
       style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)" }}
       onClick={onToggle}
     >
@@ -287,6 +399,27 @@ function TaskCard({
               </div>
             )}
           </div>
+        </div>
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {classifyStatus(task.status) === "in_progress" && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onCancel(); }}
+              className="text-xs px-2 py-1 hover:bg-white/5"
+              style={{ border: "1px solid var(--border)", color: "#ef4444" }}
+            >
+              Stopp
+            </button>
+          )}
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="w-6 h-6 flex items-center justify-center hover:bg-white/10 transition-colors"
+            title="Slett oppgave"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" />
+            </svg>
+          </button>
         </div>
       </div>
 

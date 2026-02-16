@@ -13,9 +13,16 @@ interface UserContextValue {
   refresh: () => Promise<void>;
   initial: string;
   avatarColor: string;
+  aiName: string;
+  aiInitials: string;
 }
 
 const DEFAULT_AVATAR_COLOR = "#6366f1";
+const DEFAULT_AI_NAME = "J\u00f8rgen Andr\u00e9";
+
+function getInitials(name: string): string {
+  return name.split(" ").map(w => w.charAt(0).toUpperCase()).slice(0, 2).join("");
+}
 
 const UserContext = createContext<UserContextValue>({
   user: null,
@@ -23,6 +30,8 @@ const UserContext = createContext<UserContextValue>({
   refresh: async () => {},
   initial: "?",
   avatarColor: DEFAULT_AVATAR_COLOR,
+  aiName: DEFAULT_AI_NAME,
+  aiInitials: getInitials(DEFAULT_AI_NAME),
 });
 
 export function PreferencesProvider({ children }: { children: React.ReactNode }) {
@@ -52,9 +61,11 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
     : "?";
 
   const avatarColor = (user?.preferences?.avatarColor as string) || DEFAULT_AVATAR_COLOR;
+  const aiName = (user?.preferences?.aiName as string) || DEFAULT_AI_NAME;
+  const aiInitials = getInitials(aiName);
 
   return (
-    <UserContext.Provider value={{ user, preferences, refresh, initial, avatarColor }}>
+    <UserContext.Provider value={{ user, preferences, refresh, initial, avatarColor, aiName, aiInitials }}>
       {children}
     </UserContext.Provider>
   );

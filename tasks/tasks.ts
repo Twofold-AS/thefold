@@ -277,6 +277,32 @@ export const deleteTask = api(
   }
 );
 
+// --- Soft Delete / Restore / Permanent Delete ---
+
+export const softDelete = api(
+  { method: "POST", path: "/tasks/soft-delete", expose: true, auth: true },
+  async (req: { taskId: string }): Promise<void> => {
+    if (!req.taskId) throw APIError.invalidArgument("taskId is required");
+    await db.exec`UPDATE tasks SET status = 'deleted', updated_at = NOW() WHERE id = ${req.taskId}::uuid`;
+  }
+);
+
+export const restore = api(
+  { method: "POST", path: "/tasks/restore", expose: true, auth: true },
+  async (req: { taskId: string }): Promise<void> => {
+    if (!req.taskId) throw APIError.invalidArgument("taskId is required");
+    await db.exec`UPDATE tasks SET status = 'backlog', updated_at = NOW() WHERE id = ${req.taskId}::uuid AND status = 'deleted'`;
+  }
+);
+
+export const permanentDelete = api(
+  { method: "POST", path: "/tasks/permanent-delete", expose: true, auth: true },
+  async (req: { taskId: string }): Promise<void> => {
+    if (!req.taskId) throw APIError.invalidArgument("taskId is required");
+    await db.exec`DELETE FROM tasks WHERE id = ${req.taskId}::uuid AND status = 'deleted'`;
+  }
+);
+
 interface GetTaskRequest {
   id: string;
 }
@@ -335,99 +361,99 @@ export const listTasks = api(
 
     if (req.repo && req.status && req.source) {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND source = ${req.source}
+        SELECT COUNT(*)::int AS count FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND source = ${req.source} AND status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND source = ${req.source}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND source = ${req.source} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));
     } else if (req.repo && req.status) {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks WHERE repo = ${req.repo} AND status = ${req.status}
+        SELECT COUNT(*)::int AS count FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status = ${req.status}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));
     } else if (req.repo && req.source) {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks WHERE repo = ${req.repo} AND source = ${req.source}
+        SELECT COUNT(*)::int AS count FROM tasks WHERE repo = ${req.repo} AND source = ${req.source} AND status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND source = ${req.source}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND source = ${req.source} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));
     } else if (req.status && req.source) {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks WHERE status = ${req.status} AND source = ${req.source}
+        SELECT COUNT(*)::int AS count FROM tasks WHERE status = ${req.status} AND source = ${req.source} AND status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE status = ${req.status} AND source = ${req.source}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE status = ${req.status} AND source = ${req.source} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));
     } else if (req.repo) {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks WHERE repo = ${req.repo}
+        SELECT COUNT(*)::int AS count FROM tasks WHERE repo = ${req.repo} AND status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));
     } else if (req.status) {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks WHERE status = ${req.status}
+        SELECT COUNT(*)::int AS count FROM tasks WHERE status = ${req.status} AND status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE status = ${req.status}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE status = ${req.status} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));
     } else if (req.source) {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks WHERE source = ${req.source}
+        SELECT COUNT(*)::int AS count FROM tasks WHERE source = ${req.source} AND status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE source = ${req.source}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE source = ${req.source} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));
     } else if (req.priority) {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks WHERE priority = ${req.priority}
+        SELECT COUNT(*)::int AS count FROM tasks WHERE priority = ${req.priority} AND status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE priority = ${req.priority}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE priority = ${req.priority} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));
     } else {
       const countRow = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM tasks
+        SELECT COUNT(*)::int AS count FROM tasks WHERE status != 'deleted'
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -447,6 +473,22 @@ export const listTasks = api(
     }
 
     return { tasks, total };
+  }
+);
+
+// --- List Deleted Tasks ---
+
+export const listDeleted = api(
+  { method: "GET", path: "/tasks/deleted/:repoName", expose: true, auth: true },
+  async (req: { repoName: string }): Promise<{ tasks: Task[] }> => {
+    const tasks: Task[] = [];
+    const rows = db.query<TaskRow>`
+      SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, created_by, created_at, updated_at, completed_at
+      FROM tasks WHERE repo = ${req.repoName} AND status = 'deleted'
+      ORDER BY updated_at DESC
+    `;
+    for await (const row of rows) tasks.push(parseTask(row));
+    return { tasks };
   }
 );
 
@@ -580,6 +622,7 @@ export const pushToLinear = api(
           in_review: "In Review",
           done: "Done",
           blocked: "Cancelled",
+          deleted: "Cancelled",
         };
 
         await linear.updateTask({
@@ -677,12 +720,12 @@ export const getStats = api(
   { method: "GET", path: "/tasks/stats", expose: true, auth: true },
   async (): Promise<StatsResponse> => {
     const totalRow = await db.queryRow<{ count: number }>`
-      SELECT COUNT(*)::int AS count FROM tasks
+      SELECT COUNT(*)::int AS count FROM tasks WHERE status != 'deleted'
     `;
 
     const byStatus: Record<string, number> = {};
     const statusRows = db.query<{ status: string; count: number }>`
-      SELECT status, COUNT(*)::int AS count FROM tasks GROUP BY status
+      SELECT status, COUNT(*)::int AS count FROM tasks WHERE status != 'deleted' GROUP BY status
     `;
     for await (const row of statusRows) {
       byStatus[row.status] = row.count;
@@ -690,7 +733,7 @@ export const getStats = api(
 
     const bySource: Record<string, number> = {};
     const sourceRows = db.query<{ source: string; count: number }>`
-      SELECT source, COUNT(*)::int AS count FROM tasks GROUP BY source
+      SELECT source, COUNT(*)::int AS count FROM tasks WHERE status != 'deleted' GROUP BY source
     `;
     for await (const row of sourceRows) {
       bySource[row.source] = row.count;
@@ -698,7 +741,7 @@ export const getStats = api(
 
     const byRepo: Record<string, number> = {};
     const repoRows = db.query<{ repo: string; count: number }>`
-      SELECT COALESCE(repo, 'unassigned') AS repo, COUNT(*)::int AS count FROM tasks GROUP BY repo
+      SELECT COALESCE(repo, 'unassigned') AS repo, COUNT(*)::int AS count FROM tasks WHERE status != 'deleted' GROUP BY repo
     `;
     for await (const row of repoRows) {
       byRepo[row.repo] = row.count;
@@ -710,6 +753,49 @@ export const getStats = api(
       bySource,
       byRepo,
     };
+  }
+);
+
+// --- Cancel Task ---
+
+// In-memory set for cancelled tasks (checked by agent between steps)
+export const cancelledTasks = new Set<string>();
+
+export const cancelTask = api(
+  { method: "POST", path: "/tasks/cancel", expose: true, auth: true },
+  async (req: { taskId: string }): Promise<{ cancelled: boolean }> => {
+    if (!req.taskId) throw APIError.invalidArgument("taskId is required");
+
+    // Set status back to backlog (only if currently in_progress)
+    await db.exec`
+      UPDATE tasks SET status = 'backlog', updated_at = NOW()
+      WHERE id = ${req.taskId}::uuid AND status = 'in_progress'
+    `;
+
+    // Signal agent to stop between steps
+    cancelledTasks.add(req.taskId);
+
+    await taskEvents.publish({
+      taskId: req.taskId,
+      action: "updated",
+      repo: null,
+      source: "manual",
+      timestamp: new Date().toISOString(),
+    });
+
+    return { cancelled: true };
+  }
+);
+
+// Internal: check if a task has been cancelled (used by agent)
+export const isCancelled = api(
+  { method: "POST", path: "/tasks/is-cancelled", expose: false },
+  async (req: { taskId: string }): Promise<{ cancelled: boolean }> => {
+    if (cancelledTasks.has(req.taskId)) {
+      cancelledTasks.delete(req.taskId);
+      return { cancelled: true };
+    }
+    return { cancelled: false };
   }
 );
 

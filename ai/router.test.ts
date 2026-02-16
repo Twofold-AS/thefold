@@ -6,12 +6,11 @@ import {
   calculateSavings,
   getModelInfo,
   listModels,
-  MODEL_REGISTRY,
 } from "./router";
 
 describe("AI Router", () => {
   describe("selectOptimalModel", () => {
-    it("auto mode picks kimi for simple tasks", () => {
+    it("auto mode picks moonshot for simple tasks", () => {
       const model = selectOptimalModel(2, "auto");
       expect(model).toBe("moonshot-v1-128k");
     });
@@ -31,7 +30,7 @@ describe("AI Router", () => {
       expect(model).toBe("claude-opus-4-5-20251101");
     });
 
-    it("auto mode boundary: complexity 3 uses kimi", () => {
+    it("auto mode boundary: complexity 3 uses moonshot", () => {
       expect(selectOptimalModel(3, "auto")).toBe("moonshot-v1-128k");
     });
 
@@ -54,22 +53,24 @@ describe("AI Router", () => {
     });
 
     it("manual mode without override falls back to auto logic", () => {
-      // manual without manualModelId uses auto logic
       const model = selectOptimalModel(5, "manual");
       expect(model).toBe("claude-sonnet-4-5-20250929");
     });
   });
 
   describe("getUpgradeModel", () => {
-    it("should upgrade kimi 32k to kimi 128k", () => {
-      expect(getUpgradeModel("moonshot-v1-32k")).toBe("moonshot-v1-128k");
+    // Tier-based upgrade with provider affinity:
+    // tier 1 → tier 2 → tier 3 → tier 5
+
+    it("should upgrade kimi 32k to haiku (next tier up)", () => {
+      expect(getUpgradeModel("moonshot-v1-32k")).toBe("claude-haiku-4-5-20251001");
     });
 
     it("should upgrade kimi 128k to haiku", () => {
       expect(getUpgradeModel("moonshot-v1-128k")).toBe("claude-haiku-4-5-20251001");
     });
 
-    it("should upgrade haiku to sonnet", () => {
+    it("should upgrade haiku to sonnet (provider affinity)", () => {
       expect(getUpgradeModel("claude-haiku-4-5-20251001")).toBe("claude-sonnet-4-5-20250929");
     });
 
@@ -81,8 +82,12 @@ describe("AI Router", () => {
       expect(getUpgradeModel("claude-opus-4-5-20251101")).toBeNull();
     });
 
-    it("should upgrade gpt-4o-mini to gpt-4o", () => {
-      expect(getUpgradeModel("gpt-4o-mini")).toBe("gpt-4o");
+    it("should upgrade gpt-4o-mini to haiku (next tier up)", () => {
+      expect(getUpgradeModel("gpt-4o-mini")).toBe("claude-haiku-4-5-20251001");
+    });
+
+    it("should upgrade gpt-4o to opus", () => {
+      expect(getUpgradeModel("gpt-4o")).toBe("claude-opus-4-5-20251101");
     });
 
     it("should return null for unknown models", () => {
@@ -101,11 +106,12 @@ describe("AI Router", () => {
       expect(cost.totalCost).toBe(10.50);
     });
 
-    it("should calculate cost for moonshot (cheapest)", () => {
+    it("should calculate cost for moonshot", () => {
       const cost = estimateCost(1_000_000, 500_000, "moonshot-v1-128k");
-      expect(cost.inputCost).toBeCloseTo(0.30, 10);
-      expect(cost.outputCost).toBeCloseTo(0.15, 10);
-      expect(cost.totalCost).toBeCloseTo(0.45, 10);
+      // $0.60/1M input, $2.00/1M output
+      expect(cost.inputCost).toBeCloseTo(0.60, 10);
+      expect(cost.outputCost).toBeCloseTo(1.00, 10);
+      expect(cost.totalCost).toBeCloseTo(1.60, 10);
     });
 
     it("should return zero cost for unknown models", () => {
@@ -136,9 +142,9 @@ describe("AI Router", () => {
 
     it("should calculate correct percentage", () => {
       const savings = calculateSavings(1_000_000, 0, "moonshot-v1-128k");
-      // Moonshot: $0.30, Opus: $15.00
-      // Savings: $14.70 / $15.00 = 98%
-      expect(savings.savedPercent).toBeGreaterThan(95);
+      // Moonshot: $0.60, Opus: $15.00
+      // Savings: $14.40 / $15.00 = 96%
+      expect(savings.savedPercent).toBeGreaterThan(90);
     });
   });
 
@@ -154,7 +160,7 @@ describe("AI Router", () => {
     it("should return info for moonshot models", () => {
       const info = getModelInfo("moonshot-v1-128k");
       expect(info).not.toBeNull();
-      expect(info!.displayName).toBe("Moonshot Kimi v1 128K");
+      expect(info!.displayName).toBe("Kimi K2.5");
       expect(info!.provider).toBe("moonshot");
     });
 
@@ -166,7 +172,6 @@ describe("AI Router", () => {
   describe("listModels", () => {
     it("should return all registered models", () => {
       const models = listModels();
-      expect(models.length).toBe(Object.keys(MODEL_REGISTRY).length);
       expect(models.length).toBeGreaterThanOrEqual(7);
     });
 

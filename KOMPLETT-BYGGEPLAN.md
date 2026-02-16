@@ -1,8 +1,8 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.2 - Kostnads-dashboard + Skills-forenkling + Repo-header redesign
+> **Versjon:** 3.9 - Agent dual-source task lookup + tool-use forbedringer
 > **Sist oppdatert:** 16. februar 2026
-> **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Se GRUNNMUR-STATUS.md for detaljert feature-status.
+> **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
 ---
 
@@ -53,7 +53,7 @@
 - **sandbox-service:** create, writeFile, validate, validateIncremental, destroy, sikkerhetstester
 - **linear-service:** getAssignedTasks, getTask, updateTask
 - **agent-service:** Integrationstest (sandbox → GitHub → AI → skriv → valider), confidence scoring, incremental validation, cost tracking
-- **users-service:** OTP auth, profil, preferences, avatar
+- **users-service:** OTP auth, profil, preferences (modelMode, avatarColor, aiName), avatar
 - **cache-service:** PostgreSQL-basert caching (embeddings, repo, AI plans)
 - **skills-service:** CRUD, GIN-index, prompt injection, preview
 - **tasks-service:** CRUD, Linear sync, AI planning, Pub/Sub, statistikk (32 tester)
@@ -73,6 +73,46 @@
 - **Steg 2.4 — Incremental Validation:** Per-fil tsc, MAX_FILE_FIX_RETRIES=2, 5 tester
 - **Steg 2.5 — Multi-Model Routing:** 5 modeller, selectOptimalModel, callAIWithFallback, budgetMode, 18 tester
 - **Steg 2.6 — Memory Decay:** Importance scoring, eksponentiell decay med type-baserte halvtider, decay cron, 17 tester
+
+### ✅ Ferdig — Dynamic AI Provider & Model System (16. feb 2026)
+- **Database:** `ai_providers` + `ai_models` tabeller med full relasjonell struktur (provider_id FK, tier, costs, tags)
+- **Backend:** 5 nye CRUD-endepunkter i `ai/providers.ts` (GET /ai/providers med nested models, POST /ai/providers/save, POST /ai/models/save, POST /ai/models/toggle, POST /ai/models/delete)
+- **Router:** `ai/router.ts` rewritten med DB-backed cache (60s TTL), fallback-modeller ved cold start, tag-based selection, tier-based upgrade med provider affinity
+- **Frontend:** `/settings/models` — full CRUD for providers og modeller (expand/collapse, add/edit/delete, toggle, modal forms)
+- **Frontend:** `/tools/ai-models` oppdatert til provider-gruppert visning, `ModelSelector` bruker provider-gruppert liste
+- **Pre-seeded:** 4 providers (Anthropic, OpenAI, Moonshot, Google), 9 modeller (tier 1-5)
+
+### ✅ Ferdig — Bugfiks Runde 3 (februar 2026)
+- **FIX 1 — Cost Safety:** Alle `.toFixed()` og `.toLocaleString()` kall i settings/costs/page.tsx nå wrapped med `Number()` for å handtere NULL/string-verdier fra SQL — forhindrer "toFixed is not a function" crashes
+- **FIX 2 — Soft Delete for Tasks:** 3 nye backend-endepunkter (softDelete, restore, permanentDelete) i tasks/tasks.ts. Frontend: delete-knapp per task-kort, "Slettet" seksjon med restore-knapp, auto-permanent-delete cron etter 5 minutter
+- **FIX 3 — Repo Persistence:** Selected repo nå persistert i localStorage via repo-context.tsx — gjenopprettes ved navigasjon til andre sider og tilbake
+
+### ✅ Ferdig — Bugfiks Runde 4 (februar 2026)
+- **FIX 1 — "deleted" status krasjer API (KRITISK):** Lagt til "deleted" i TaskStatus union type i tasks/types.ts. `AND status != 'deleted'` filter i alle 9 query-grener i listTasks. Nytt `listDeleted` endpoint (GET /tasks/deleted/:repoName) for å hente slettede tasks. pushToLinear `statusToLinearState` oppdatert med `deleted: "Cancelled"`. getStats queries filtrerer nå ut deleted tasks (total, byStatus, bySource, byRepo)
+- **FIX 2 — Slett-knapp på tasks fungerer ikke (KRITISK):** `listDeletedTasks` funksjon lagt til i frontend api.ts. Frontend tasks-side loadTasks oppdatert til å hente deleted tasks fra backend via `listDeletedTasks(repoName)` ved sideinnlasting (Promise.all). Full flyt verifisert: softDelete → listDeleted → restore → permanentDelete — alt koblet end-to-end
+- **FIX 3 — Agent Report duplikater i chat:** Lagt til `.filter(m => m.messageType !== "agent_report" && m.messageType !== "agent_status")` før `.map()` i begge chat-sider. Dead code fjernet: `tryParseAgentStatus` funksjon, `AgentStatus` import, `isAgentReport` variabel fra chat/page.tsx og repo/[name]/chat/page.tsx. `hasAgentStatus` beholdt (brukes for "tenker..." spinner-logikk)
+
+### ✅ Ferdig — Bugfiks Runde 5 (februar 2026)
+- **FIX 1 — AgentStatus box gjenoppretting (KRITISK):** Previous fix over-filtrerte `agent_status` meldinger. Nå kun `agent_report` filtrert. Begge chat-sider (main + repo) re-renderer AgentStatus panels korrekt med `.filter(m => m.messageType !== "agent_report")` i stedet for å filtrere både agent_report og agent_status
+- **FIX 2 — Deleted skill injeksjon (KRITISK):** `chat/chat.ts` skills.resolve() bruker nå korrekt schema `{ context: SkillPipelineContext }` i stedet for feil `{ task, context: "chat" }`. Alle resolvedSkills-referanser oppdatert. Deaktiverte skills som "Hilsen Jørgen" filtreres nå ut korrekt
+- **FIX 3 — Empty repo confidence:** `agent.ts` STEP 4 har nå `treeArray.length === 0` shortcut som auto-setter confidence til 90 for å hoppe over unødvendige klaritetsspørsmål når repoet er tomt
+- **FIX 4 — Agent stopp/vente UI (KRITISK):** `AgentStatus.tsx` redesignet med "Venter"-fase (gult ikon, questions display, reply input) og "Feilet"-fase (retry/cancel buttons). Begge chat-sider wired med `onReply`, `onRetry`, `onCancel` callbacks for full brukerinteraksjon
+
+### ✅ Ferdig — Skills task_phase System + Cache Investigation + AgentStatus Callbacks (februar 2026)
+- **DEL 4 — Skills task_phase system:** Ny `task_phase` kolonne (all/planning/coding/debugging/reviewing), migrasjon `7_add_task_phase.up.sql`, `skills/skills.ts` oppdatert med taskPhase i Skill/SkillRow/rowToSkill/createSkill/updateSkill, `skills/engine.ts` filtrerer skills basert på taskType → task_phase mapping, `ai/ai.ts` CONTEXT_TO_TASK_PHASE mapping (direct_chat→all, agent_planning→planning, agent_coding→coding, agent_review→reviewing). Frontend `/skills` redesign: fase-tabs med counts (Alle/Planlegging/Koding/Debug-Test/Review), repo scope filter (Alle/Globale/per-repo), SkillCard med fase+scope+keywords badges + gear icon for edit, SkillForm med taskPhase selector (2-col grid: Fase + Scope), SkillDetail 3-col metadata (Fase/Scope/Status), SlideOver background opak fix (`rgba(0,0,0,0.6)` + `var(--bg-primary)`)
+- **DEL 2 item 3 — Cache investigation:** `cache/cache.ts` cacher KUN embeddings, repo structures, AI plans — INGEN skills caching. Skills hentes alltid friskt fra DB uten cache invalidation-behov
+- **DEL 3 completion — AgentStatus callbacks:** Begge chat-sider (`chat/page.tsx` + `repo/[name]/chat/page.tsx`) wired med `onReply`/`onRetry`/`onCancel` callbacks til AgentStatus. `tryParseAgentStatus` extraherer `questions` field, `handleAgentReply` sender bruker-svar som chat-melding, `handleAgentRetry` re-sender siste brukermelding, `handleAgentCancel` kaller `cancelChatGeneration`
+
+### ✅ Ferdig — Bugfiks Runde 6: Agent & Task Integration (februar 2026)
+- **FIX 1 — Agent dual-source task lookup (KRITISK):** `agent/agent.ts` STEP 1 prøver nå `tasks.getTaskInternal()` først, faller tilbake til `linear.getTask()`. Når task finnes lokalt, settes `ctx.thefoldTaskId = ctx.taskId` slik at alle completion/failure/review-statusoppdateringer fungerer automatisk. Oppdaterer task-status til `in_progress` ved oppstart
+- **FIX 2 — Task enrichment at creation:** `ai/ai.ts` `create_task` tool bruker nå `source: "chat"` i stedet for `"manual"`. Ny `enrichTaskWithAI()` funksjon (fire-and-forget) estimerer `estimatedComplexity` og `estimatedTokens` etter opprettelse. "chat" lagt til `TaskSource` type i `tasks/types.ts`
+- **FIX 3 — start_task verification + status update:** `ai/ai.ts` `start_task` tool verifiserer nå at task eksisterer via `tasks.getTaskInternal()` før agent startes. Returnerer feil hvis task ikke finnes. Oppdaterer status til `in_progress` før start, `blocked` ved feil
+- **FIX 4 — conversationId propagation:** Verifisert at `conversationId` allerede flyter korrekt fra chat til agent via `start_task` — ingen endring nødvendig
+
+### ✅ Ferdig — Cancel/Stop Task Mechanism (februar 2026)
+- **Backend:** `POST /tasks/cancel` endpoint (exposed, auth) med in-memory `cancelledTasks` Set. `isCancelled` intern endpoint returnerer cancellation status for task
+- **Agent:** `checkCancelled()` helper funksjon poller `tasks.isCancelled()` mellom agent-steg (4 sjekkpunkter: after context, before planning, before builder, inside retry loop). Destroyer sandbox og returnerer ved cancellation
+- **Frontend:** `cancelTask` API-funksjon i api.ts. Stopp-knapp på in_progress tasks i `/repo/[name]/tasks` med optimistic UI (flytter task til backlog umiddelbart, rollback ved feil)
 
 ### ✅ Ferdig — Tilleggsarbeid (utover opprinnelig plan)
 - **Chat Redesign:** Meldingsbobler med bruker/TF-avatarer, dynamisk avatarfarge, tidsstempler, typing-indikator (3 pulserende prikker), smart auto-scroll, tomme-tilstander med foreslåtte spørsmål, agent report & context transfer badges
@@ -114,7 +154,7 @@ Mange features har grunnmur (database-felter, interfaces, stub-implementeringer)
 **Nøkkeltall:**
 | Status | Antall |
 |--------|--------|
-| 🟢 AKTIVE | 260+ |
+| 🟢 AKTIVE | 270+ |
 | 🟡 STUBBEDE (kode finnes, passthrough) | 2 |
 | 🔴 GRUNNMUR (DB-felter/interfaces) | 19 |
 | ⚪ PLANLAGTE (ingen kode) | 9 |
@@ -751,6 +791,29 @@ Sider:
 1. ✅ source-kolonne i messages-tabell
 2. ✅ SendRequest.source param ("web"|"slack"|"discord"|"api")
 
+**✅ Skeleton Loading + Template Modal + AI Name Preference (UX-polish):**
+
+*DEL 1 — Skeleton Loading System:*
+1. ✅ `.skeleton` shimmer CSS-animasjon i globals.css
+2. ✅ 17 `loading.tsx` filer for ALLE dashboard-sider (home, chat, environments, marketplace, marketplace/[id], skills, settings, settings/costs, settings/security, review, review/[id], tools, repo/[name]/overview, repo/[name]/chat, repo/[name]/tasks, repo/[name]/reviews, repo/[name]/activity)
+3. ✅ `prefetch={true}` på alle sidebar Link-komponenter
+
+*DEL 2 — Tools Tab Fix:*
+1. ✅ Tools layout tabs med `prefetch={true}` for raskere navigasjon
+2. ✅ Ingen hardkodet default-repo i tools-sider
+
+*DEL 3 — Template Install Modal:*
+1. ✅ InstallModal med dark backdrop (rgba(0,0,0,0.6)), repo-dropdown fra listRepos(), variabel-inputs, square corners
+2. ✅ Font-audit: korrigert font-klasser gjennom hele templates-siden
+
+*DEL 4 — AI Name Preference:*
+1. ✅ Backend: aiName i preferences JSONB (ingen skjemaendring), leses i chat/chat.ts processAIResponse, sendes til ai.ts system prompt
+2. ✅ ai/ai.ts: system prompt bruker konfigurerbart aiName (default "Jørgen André"), getDirectChatPrompt aksepterer aiName-parameter
+3. ✅ Frontend settings: AI-assistent seksjon i Preferanser tab med navn-input + auto-genererte initialer-preview
+4. ✅ UserPreferencesContext: eksporterer aiName + aiInitials derivert fra preferences
+5. ✅ Begge chat-sider: bruker aiName/aiInitials fra context for avatar, "tenker"-indikator, heartbeat-lost melding
+6. ✅ Default AI-navn endret fra "TheFold"/"TF" til "Jørgen André"/"JA"
+
 **Gjenstår:**
 1. AI-basert auto-ekstraksjon (aktivér registry/extractor.ts)
 2. Semantisk komponent-matching via memory.searchPatterns()
@@ -1007,7 +1070,40 @@ Basert på gjennomgang av `OWASP-2025-2026-Report.md` (OWASP Top 10:2025, ASVS 5
 
 ## 🚀 Status per februar 2026
 
-**Fase 1-4 er KOMPLETT. Fase 5 Del 1 er ferdig.** Totalt 310+ tester, 260+ aktive features, 16 Encore.ts-tjenester.
+**Fase 1-4 er KOMPLETT. Fase 5 Del 1 er ferdig.** Totalt 310+ tester, 285+ aktive features, 16 Encore.ts-tjenester.
+
+**Dynamic AI Provider & Model System (16. feb):**
+- ✅ DB-drevet modellregister: 2 nye tabeller (ai_providers, ai_models), 9 pre-seeded modeller
+- ✅ Full CRUD frontend: /settings/models med expand/collapse, add/edit/delete, toggle
+- ✅ Router oppdatert: DB-backed cache (60s TTL), tag-based selection, tier-based upgrade med provider affinity
+- ✅ 5 nye backend-endepunkter: GET /ai/providers, POST /ai/providers/save, POST /ai/models/save, POST /ai/models/toggle, POST /ai/models/delete
+
+**Bugfiks Runde 3 (16. feb):**
+- ✅ Cost safety: `.toFixed()` wrapping for NULL-håndtering
+- ✅ Soft delete tasks: 3 nye backend-endepunkter, frontend UI, auto-cleanup cron
+- ✅ Repo persistence: localStorage-integration via RepoProvider
+
+**Bugfiks Runde 4 (16. feb):**
+- ✅ "deleted" status krasjer API: TaskStatus union + listTasks-filtrering + listDeleted endpoint + pushToLinear mapping + getStats-filtrering
+- ✅ Slett-knapp på tasks: frontend listDeletedTasks koblet til backend, full end-to-end flyt
+- ✅ Agent report duplikater: agent_report/agent_status filtrert ut i chat rendering, dead code fjernet
+
+**Bugfiks Runde 5 (16. feb):**
+- ✅ AgentStatus box restaurert: Over-filtrering fikset — kun agent_report filtreres nå, agent_status vises korrekt i begge chat-sider
+- ✅ Deleted skill injeksjon stoppet: skills.resolve() bruker korrekt schema, deaktiverte skills filtreres ut
+- ✅ Empty repo confidence: Auto-setter confidence til 90 for tomme repoer, skipper unødvendige spørsmål
+- ✅ Agent stopp/vente UI: AgentStatus med "Venter"-fase (questions + reply input) og "Feilet"-fase (retry/cancel buttons), full callback-wiring i begge chat-sider
+
+**Skills task_phase System (16. feb):**
+- ✅ DEL 4 — task_phase backend + frontend: Migrasjon 7 (task_phase kolonne: all/planning/coding/debugging/reviewing), skills.ts oppdatert (taskPhase i alle typer/funksjoner), engine.ts filtrerer på taskType→task_phase mapping, ai.ts CONTEXT_TO_TASK_PHASE (direct_chat→all, agent_planning→planning, agent_coding→coding, agent_review→reviewing). Frontend redesign: fase-tabs (counts), repo scope filter, SkillCard badges+gear, SkillForm 2-col grid, SkillDetail 3-col metadata, SlideOver opak fix
+- ✅ DEL 2 item 3 — Cache investigation: Verifisert at cache.ts IKKE cacher skills — kun embeddings/repo/plans. Ingen cache invalidation nødvendig
+- ✅ DEL 3 — AgentStatus callbacks completion: Begge chat-sider wired med onReply/onRetry/onCancel, tryParseAgentStatus extraherer questions, handleAgentReply/Retry/Cancel implementert
+
+**Bugfiks Runde 6: Agent & Task Integration (16. feb):**
+- ✅ Agent dual-source task lookup: STEP 1 prøver tasks-service først, fallback til Linear. Lokal task → thefoldTaskId settes, status → in_progress
+- ✅ Task enrichment: create_task bruker source="chat", enrichTaskWithAI() estimerer complexity+tokens (fire-and-forget). "chat" lagt til TaskSource
+- ✅ start_task verifisering: Verifiserer task via getTaskInternal(), setter in_progress/blocked, returnerer feil hvis task ikke finnes
+- ✅ conversationId-propagering: Verifisert korrekt flyt fra chat → start_task → agent
 
 - **Fase 1** (Foundation + Auth): OTP login, PostgreSQL cache, confidence scoring
 - **Fase 2** (Core Intelligence): Skills pipeline, audit logging, context windowing, incremental validation, multi-model routing, memory decay
@@ -1049,6 +1145,10 @@ Token-sporing + Repo Activity: ChatResponse propagerer usage data (inputTokens, 
 Kostnads-dashboard: GET /chat/costs endpoint, /settings/costs frontend (3 kort, per-modell-tabell, 14-dagers bar-chart), budget alert ($5/dag).
 Skills-forenkling: resolve() forenklet (fjernet depends_on/conflicts_with/fase-gruppering), frontend forenklet (fjernet pipeline viz/categories/phases/confidence bars), dynamic scope dropdown, migration 6 (deaktiverer 3 generiske skills).
 Repo-header redesign: PageHeaderBar forenklet (subtitle prop), per-page headers i alle 5 repo-sider, tab-navigasjon fjernet, overview shortcuts-kort (2x2 grid).
+
+Skeleton Loading: .skeleton shimmer CSS, 17 loading.tsx filer for alle dashboard-sider, prefetch={true} på sidebar og tools-tabs.
+Template Install Modal: InstallModal med dark backdrop, repo-dropdown, variabel-inputs, font-audit.
+AI Name Preference: aiName i preferences JSONB, konfigurerbart AI-navn i system prompt (default "Jørgen André"), settings UI med initialer-preview, UserPreferencesContext eksporterer aiName/aiInitials, begge chat-sider oppdatert.
 
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.
 

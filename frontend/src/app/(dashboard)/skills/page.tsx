@@ -11,14 +11,33 @@ import {
   type Skill,
   type RepoInfo,
 } from "@/lib/api";
-import { PageHeaderBar } from "@/components/PageHeaderBar";
+import { useRepoContext } from "@/lib/repo-context";
+
+const PHASES = [
+  { label: "Alle", value: "all" },
+  { label: "Planlegging", value: "planning" },
+  { label: "Koding", value: "coding" },
+  { label: "Debug / Test", value: "debugging" },
+  { label: "Review", value: "reviewing" },
+] as const;
+
+const PHASE_LABELS: Record<string, string> = {
+  all: "Alle faser",
+  planning: "Planlegging",
+  coding: "Koding",
+  debugging: "Debug / Test",
+  reviewing: "Review",
+};
 
 export default function SkillsPage() {
+  const { repos } = useRepoContext();
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [repos, setRepos] = useState<RepoInfo[]>([]);
+  const [apiRepos, setApiRepos] = useState<RepoInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [activePhase, setActivePhase] = useState("all");
+  const [repoFilter, setRepoFilter] = useState<string | null>(null);
 
   // Panels
   const [editingSkill, setEditingSkill] = useState<Skill | null>(null);
@@ -32,7 +51,7 @@ export default function SkillsPage() {
         listRepos("Twofold-AS").catch(() => ({ repos: [] })),
       ]);
       setSkills(skillsRes.skills);
-      setRepos(reposRes.repos);
+      setApiRepos(reposRes.repos);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Kunne ikke laste skills");
@@ -80,8 +99,12 @@ export default function SkillsPage() {
     setEditingSkill(null);
   }
 
+  // Filter: search + phase + repo
   const filtered = skills.filter((s) => {
     if (search && !s.name.toLowerCase().includes(search.toLowerCase()) && !s.description.toLowerCase().includes(search.toLowerCase())) return false;
+    if (activePhase !== "all" && s.taskPhase !== activePhase && s.taskPhase !== "all") return false;
+    if (repoFilter === "global" && s.scope !== "global") return false;
+    if (repoFilter && repoFilter.startsWith("repo:") && s.scope !== repoFilter && s.scope !== "global") return false;
     return true;
   });
 
@@ -100,17 +123,75 @@ export default function SkillsPage() {
 
   return (
     <div className="relative">
-      <PageHeaderBar title="Skills" />
-      <div className="p-6">
-        {/* Header */}
-        <div className="flex items-start justify-between mb-6">
-          <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
-            {enabledCount} av {skills.length} aktive
-          </p>
-          <button onClick={() => setShowCreate(true)} className="btn-primary text-sm">
-            + Ny skill
-          </button>
+      {/* Cell-style header with phase tabs */}
+      <div className="flex items-center" style={{ borderBottom: "1px solid var(--border)", minHeight: "80px" }}>
+        <div className="px-5 flex items-center" style={{ borderRight: "1px solid var(--border)", minHeight: "80px" }}>
+          <h1 className="text-xl font-display" style={{ color: "var(--text-primary)" }}>Skills</h1>
         </div>
+
+        {PHASES.map((phase) => {
+          const count = skills.filter((s) => phase.value === "all" ? true : s.taskPhase === phase.value || s.taskPhase === "all").length;
+          return (
+            <button
+              key={phase.value}
+              onClick={() => setActivePhase(phase.value)}
+              className="px-4 flex items-center text-sm"
+              style={{
+                borderRight: "1px solid var(--border)",
+                minHeight: "80px",
+                color: activePhase === phase.value ? "var(--text-primary)" : "var(--text-muted)",
+                background: activePhase === phase.value ? "rgba(255,255,255,0.03)" : "transparent",
+              }}
+            >
+              {phase.label}
+              <span className="ml-1.5 text-xs" style={{ color: "var(--text-muted)" }}>{count}</span>
+            </button>
+          );
+        })}
+
+        {/* Ny skill som celle — SISTE celle i headeren */}
+        <button
+          onClick={() => setShowCreate(true)}
+          className="px-4 flex items-center text-sm ml-auto"
+          style={{
+            borderLeft: "1px solid var(--border)",
+            minHeight: "80px",
+            color: "var(--text-muted)",
+          }}
+        >
+          + Ny skill
+        </button>
+      </div>
+
+      {/* Scope dropdown + search */}
+      <div className="px-5 py-3 flex items-center gap-3" style={{ borderBottom: "1px solid var(--border)" }}>
+        <span className="text-xs" style={{ color: "var(--text-muted)" }}>Scope:</span>
+        <select
+          value={repoFilter || "all"}
+          onChange={(e) => setRepoFilter(e.target.value === "all" ? null : e.target.value)}
+          className="input-field text-sm py-1 px-2"
+          style={{ width: "auto", minWidth: 120 }}
+        >
+          <option value="all">Alle</option>
+          <option value="global">Globale</option>
+          {repos.map((repo) => (
+            <option key={repo.name} value={`repo:${repo.name}`}>{repo.name}</option>
+          ))}
+        </select>
+        <span className="text-xs ml-2" style={{ color: "var(--text-muted)" }}>
+          {filtered.length} av {skills.length} aktive
+        </span>
+        <input
+          type="text"
+          placeholder="Sok..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="input-field ml-auto text-sm py-1 px-3"
+          style={{ width: "200px" }}
+        />
+      </div>
+
+      <div className="p-6">
 
         {error && (
           <div
@@ -121,18 +202,6 @@ export default function SkillsPage() {
           </div>
         )}
 
-        {/* Search */}
-        <div className="mb-6">
-          <input
-            type="text"
-            placeholder="Sok..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="input-field text-sm"
-            style={{ width: "260px" }}
-          />
-        </div>
-
         {/* Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {filtered.length === 0 ? (
@@ -141,7 +210,7 @@ export default function SkillsPage() {
               style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
             >
               <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-                {skills.length === 0 ? "Ingen skills enda. Opprett en for a komme i gang." : "Ingen skills matcher soket."}
+                {skills.length === 0 ? "Ingen skills enda. Opprett en for a komme i gang." : "Ingen skills matcher filteret."}
               </p>
             </div>
           ) : (
@@ -150,6 +219,7 @@ export default function SkillsPage() {
                 key={skill.id}
                 skill={skill}
                 onToggle={handleToggle}
+                onEdit={() => { setEditingSkill(skill); }}
                 onClick={() => setDetailSkill(skill)}
               />
             ))
@@ -160,14 +230,14 @@ export default function SkillsPage() {
       {/* Slide-over: Create */}
       {showCreate && (
         <SlideOver title="Ny skill" onClose={() => setShowCreate(false)}>
-          <SkillForm repos={repos} onSave={handleSaved} onCancel={() => setShowCreate(false)} />
+          <SkillForm repos={apiRepos} onSave={handleSaved} onCancel={() => setShowCreate(false)} />
         </SlideOver>
       )}
 
       {/* Slide-over: Edit */}
       {editingSkill && (
         <SlideOver title="Rediger skill" onClose={() => setEditingSkill(null)}>
-          <SkillForm skill={editingSkill} repos={repos} onSave={handleSaved} onCancel={() => setEditingSkill(null)} />
+          <SkillForm skill={editingSkill} repos={apiRepos} onSave={handleSaved} onCancel={() => setEditingSkill(null)} />
         </SlideOver>
       )}
 
@@ -185,15 +255,17 @@ export default function SkillsPage() {
   );
 }
 
-// --- Skill Card (simplified) ---
+// --- Skill Card ---
 
 function SkillCard({
   skill,
   onToggle,
+  onEdit,
   onClick,
 }: {
   skill: Skill;
   onToggle: (id: string, enabled: boolean) => void;
+  onEdit: () => void;
   onClick: () => void;
 }) {
   return (
@@ -216,27 +288,56 @@ function SkillCard({
           </p>
         </div>
 
-        {/* Toggle */}
-        <button
-          onClick={(e) => { e.stopPropagation(); onToggle(skill.id, !skill.enabled); }}
-          className="relative w-9 h-5 rounded-full transition-colors flex-shrink-0"
-          style={{ background: skill.enabled ? "var(--accent)" : "var(--bg-sidebar)" }}
-        >
-          <span
-            className="absolute top-0.5 w-4 h-4 rounded-full transition-all"
-            style={{ background: "#fff", left: skill.enabled ? "18px" : "2px" }}
-          />
-        </button>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {/* Toggle */}
+          <button
+            onClick={(e) => { e.stopPropagation(); onToggle(skill.id, !skill.enabled); }}
+            className="relative w-9 h-5 rounded-full transition-colors"
+            style={{ background: skill.enabled ? "var(--accent)" : "var(--bg-sidebar)" }}
+          >
+            <span
+              className="absolute top-0.5 w-4 h-4 rounded-full transition-all"
+              style={{ background: "#fff", left: skill.enabled ? "18px" : "2px" }}
+            />
+          </button>
+
+          {/* Edit gear */}
+          <button
+            onClick={(e) => { e.stopPropagation(); onEdit(); }}
+            className="p-1 hover:opacity-80"
+            style={{ color: "var(--text-muted)", background: "transparent", border: "none" }}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+        </div>
       </div>
 
-      {/* Scope badge */}
-      <div className="flex gap-1.5 mt-3">
+      {/* Phase + Scope + Usage */}
+      <div className="flex gap-1.5 mt-3 flex-wrap">
+        <span
+          className="px-2 py-0.5 text-[10px]"
+          style={{ background: "var(--bg-sidebar)", color: "var(--text-muted)" }}
+        >
+          {PHASE_LABELS[skill.taskPhase || "all"] || "Alle faser"}
+        </span>
         <span
           className="px-2 py-0.5 text-[10px]"
           style={{ background: "var(--bg-sidebar)", color: "var(--text-muted)" }}
         >
           {skill.scope === "global" ? "Global" : skill.scope.replace("repo:", "")}
         </span>
+        {skill.routingRules?.keywords && skill.routingRules.keywords.length > 0 && (
+          <span
+            className="px-2 py-0.5 text-[10px]"
+            style={{ background: "var(--bg-sidebar)", color: "var(--text-muted)" }}
+          >
+            {skill.routingRules.keywords.slice(0, 3).join(", ")}
+            {skill.routingRules.keywords.length > 3 ? ` +${skill.routingRules.keywords.length - 3}` : ""}
+          </span>
+        )}
         {skill.totalUses ? (
           <span
             className="px-2 py-0.5 text-[10px]"
@@ -264,12 +365,13 @@ function SlideOver({
   return (
     <>
       <div
-        className="fixed inset-0 z-40 bg-black/40 transition-opacity"
+        className="fixed inset-0 z-40"
+        style={{ background: "rgba(0, 0, 0, 0.6)" }}
         onClick={onClose}
       />
       <div
         className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-lg overflow-y-auto"
-        style={{ background: "var(--bg-main)", borderLeft: "1px solid var(--border)" }}
+        style={{ background: "var(--bg-primary)", borderLeft: "1px solid var(--border)" }}
       >
         <div className="p-6">
           <div className="flex items-center justify-between mb-6">
@@ -279,7 +381,7 @@ function SlideOver({
             <button
               onClick={onClose}
               className="p-1.5 hover:opacity-80"
-              style={{ color: "var(--text-muted)" }}
+              style={{ color: "var(--text-muted)", background: "transparent", border: "none" }}
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -293,7 +395,7 @@ function SlideOver({
   );
 }
 
-// --- Skill Form (simplified) ---
+// --- Skill Form ---
 
 function SkillForm({
   skill,
@@ -310,6 +412,7 @@ function SkillForm({
   const [description, setDescription] = useState(skill?.description || "");
   const [promptFragment, setPromptFragment] = useState(skill?.promptFragment || "");
   const [scope, setScope] = useState(skill?.scope || "global");
+  const [taskPhase, setTaskPhase] = useState(skill?.taskPhase || "all");
   const [keywords, setKeywords] = useState(
     (skill?.routingRules?.keywords || []).join(", ")
   );
@@ -340,6 +443,7 @@ function SkillForm({
           description,
           promptFragment,
           scope,
+          taskPhase,
         });
         onSave(result.skill);
       } else {
@@ -349,6 +453,7 @@ function SkillForm({
           promptFragment,
           appliesTo: ["coding", "review"],
           scope,
+          taskPhase,
         });
         onSave(result.skill);
       }
@@ -386,15 +491,31 @@ function SkillForm({
         />
       </Field>
 
-      <Field label="Scope">
-        <select value={scope} onChange={(e) => setScope(e.target.value)} className="input-field text-sm w-full">
-          {scopeOptions.map((opt) => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
-      </Field>
+      <div className="grid grid-cols-2 gap-4">
+        <Field label="Fase">
+          <select
+            value={taskPhase}
+            onChange={(e) => setTaskPhase(e.target.value)}
+            className="input-field text-sm w-full"
+          >
+            <option value="all">Alle faser</option>
+            <option value="planning">Planlegging</option>
+            <option value="coding">Koding</option>
+            <option value="debugging">Debug / Test</option>
+            <option value="reviewing">Review</option>
+          </select>
+        </Field>
 
-      <Field label="Keywords (kommaseparert — triggere for auto-matching)">
+        <Field label="Scope">
+          <select value={scope} onChange={(e) => setScope(e.target.value)} className="input-field text-sm w-full">
+            {scopeOptions.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </Field>
+      </div>
+
+      <Field label="Keywords (kommaseparert)">
         <input type="text" value={keywords} onChange={(e) => setKeywords(e.target.value)} placeholder="f.eks. security, auth, password" className="input-field w-full text-sm" />
       </Field>
 
@@ -411,7 +532,7 @@ function SkillForm({
   );
 }
 
-// --- Skill Detail (simplified) ---
+// --- Skill Detail ---
 
 function SkillDetail({
   skill,
@@ -436,7 +557,8 @@ function SkillDetail({
       </div>
 
       {/* Metadata */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-3 gap-4">
+        <MetaItem label="Fase" value={PHASE_LABELS[skill.taskPhase || "all"] || "Alle faser"} />
         <MetaItem label="Scope" value={skill.scope === "global" ? "Global" : skill.scope.replace("repo:", "")} />
         <MetaItem label="Status" value={skill.enabled ? "Aktiv" : "Deaktivert"} color={skill.enabled ? "#22c55e" : "var(--text-muted)"} />
       </div>

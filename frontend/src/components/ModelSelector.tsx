@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Cpu, ChevronDown } from "lucide-react";
 import { listModels, type ModelInfo } from "@/lib/api";
 
@@ -31,6 +31,24 @@ export function ModelSelector({ value, onChange, mode }: ModelSelectorProps) {
     if (open) document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [open]);
+
+  // Group by provider
+  const grouped = useMemo(() => {
+    const groups: Record<string, ModelInfo[]> = {};
+    for (const m of models) {
+      const key = m.provider;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(m);
+    }
+    return groups;
+  }, [models]);
+
+  const PROVIDER_LABELS: Record<string, string> = {
+    anthropic: "Anthropic",
+    openai: "OpenAI",
+    moonshot: "Moonshot",
+    google: "Google",
+  };
 
   const selectedModel = models.find((m) => m.id === value);
   const label = mode === "auto"
@@ -95,45 +113,53 @@ export function ModelSelector({ value, onChange, mode }: ModelSelectorProps) {
             </div>
           </button>
 
-          {/* Model list */}
-          <div style={{ maxHeight: "240px", overflowY: "auto" }}>
-            {models.length === 0 ? (
+          {/* Model list grouped by provider */}
+          <div style={{ maxHeight: "300px", overflowY: "auto" }}>
+            {Object.entries(grouped).map(([provider, providerModels]) => (
+              <div key={provider}>
+                <div className="px-3 py-1.5" style={{ background: "var(--bg-secondary)" }}>
+                  <span className="text-[10px] font-medium" style={{ color: "var(--text-muted)" }}>
+                    {PROVIDER_LABELS[provider] || provider}
+                  </span>
+                </div>
+                {providerModels.map((m) => {
+                  const isSelected = value === m.id;
+                  return (
+                    <button
+                      key={m.id}
+                      onClick={() => { onChange(m.id); setOpen(false); }}
+                      className="w-full text-left px-3 py-2 flex items-center justify-between transition-colors"
+                      style={{
+                        background: isSelected ? "var(--bg-hover)" : "transparent",
+                        border: "none",
+                        borderBottom: "1px solid var(--border)",
+                        cursor: "pointer",
+                      }}
+                      onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}
+                    >
+                      <div>
+                        <div className="text-sm" style={{ color: "var(--text-primary)" }}>
+                          {m.displayName || m.id}
+                        </div>
+                        <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
+                          {m.strengths.slice(0, 3).join(", ")}
+                        </div>
+                      </div>
+                      <div className="text-right flex-shrink-0 ml-3">
+                        <div className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
+                          ${m.inputCostPer1M.toFixed(2)}/1M
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {models.length === 0 && (
               <div className="px-3 py-3 text-xs text-center" style={{ color: "var(--text-muted)" }}>
                 Laster modeller...
               </div>
-            ) : (
-              models.map((m) => {
-                const isSelected = value === m.id;
-                return (
-                  <button
-                    key={m.id}
-                    onClick={() => { onChange(m.id); setOpen(false); }}
-                    className="w-full text-left px-3 py-2 flex items-center justify-between transition-colors"
-                    style={{
-                      background: isSelected ? "var(--bg-hover)" : "transparent",
-                      border: "none",
-                      borderBottom: "1px solid var(--border)",
-                      cursor: "pointer",
-                    }}
-                    onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { if (!isSelected) e.currentTarget.style.background = "transparent"; }}
-                  >
-                    <div>
-                      <div className="text-sm" style={{ color: "var(--text-primary)" }}>
-                        {m.displayName || m.id}
-                      </div>
-                      <div className="text-[10px]" style={{ color: "var(--text-muted)" }}>
-                        {m.strengths.slice(0, 2).join(", ")}
-                      </div>
-                    </div>
-                    <div className="text-right flex-shrink-0 ml-3">
-                      <div className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>
-                        ${m.inputCostPer1M.toFixed(2)}/1M
-                      </div>
-                    </div>
-                  </button>
-                );
-              })
             )}
           </div>
         </div>

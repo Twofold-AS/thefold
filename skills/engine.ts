@@ -12,6 +12,7 @@ interface SkillPipelineContext {
   files?: string[];
   userId: string;
   totalTokenBudget: number;
+  taskType?: string; // 'all' | 'planning' | 'coding' | 'debugging' | 'reviewing'
 }
 
 interface ResolvedSkill {
@@ -63,12 +64,13 @@ export const resolve = api(
       name: string;
       prompt_fragment: string;
       execution_phase: string;
+      task_phase: string;
       priority: number;
       token_estimate: number;
       routing_rules: Record<string, unknown>;
       scope: string;
     }>`
-      SELECT id, name, prompt_fragment, execution_phase, priority,
+      SELECT id, name, prompt_fragment, execution_phase, task_phase, priority,
              COALESCE(token_estimate, 0) as token_estimate,
              COALESCE(routing_rules, '{}'::jsonb) as routing_rules,
              scope
@@ -83,6 +85,7 @@ export const resolve = api(
       name: string;
       promptFragment: string;
       phase: ExecutionPhase;
+      taskPhase: string;
       priority: number;
       tokenEstimate: number;
       routingRules: Record<string, unknown>;
@@ -94,6 +97,7 @@ export const resolve = api(
         name: row.name,
         promptFragment: row.prompt_fragment,
         phase: (row.execution_phase as ExecutionPhase) || "inject",
+        taskPhase: row.task_phase || "all",
         priority: row.priority ?? 100,
         tokenEstimate: row.token_estimate ?? 0,
         routingRules: row.routing_rules ?? {},
@@ -101,7 +105,12 @@ export const resolve = api(
     }
 
     // 2. Filter on routing rules (keywords, file patterns, labels)
-    const matched = allSkills.filter((s) => matchesRoutingRules(s.routingRules, ctx));
+    let matched = allSkills.filter((s) => matchesRoutingRules(s.routingRules, ctx));
+
+    // 2.5. Filter on task phase if specified
+    if (ctx.taskType && ctx.taskType !== "all") {
+      matched = matched.filter((s) => s.taskPhase === "all" || s.taskPhase === ctx.taskType);
+    }
 
     // 3. Token budget: include skills until budget exhausted
     const tokenBudget = ctx.totalTokenBudget || 4000;

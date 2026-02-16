@@ -34,6 +34,7 @@ export interface ChatRequest {
   repoName?: string; // Which repo the user is chatting about (from repo-chat)
   repoContext?: string; // Actual file content from the repo (tree + relevant files)
   conversationId?: string; // For tool-use (e.g. start_task needs conversation reference)
+  aiName?: string; // User-configurable AI assistant name (default: "Jorgen Andre")
 }
 
 export interface ChatResponse {
@@ -377,6 +378,8 @@ function logTokenUsage(usage: TokenUsage): void {
 
 // --- System Prompts ---
 
+const DEFAULT_AI_NAME = "J\u00f8rgen Andr\u00e9";
+
 const BASE_RULES = `You are TheFold, an autonomous internal fullstack developer.
 
 ## Absolute Rules — NEVER break these
@@ -399,40 +402,7 @@ const BASE_RULES = `You are TheFold, an autonomous internal fullstack developer.
 - Test coverage for critical paths`;
 
 const CONTEXT_PROMPTS: Record<string, string> = {
-  direct_chat: `Du er TheFold — en autonom AI-utviklingsagent bygget med Encore.ts og Next.js. Du ER selve produktet. Når brukeren snakker om "repoet" eller "prosjektet", refererer de til kodebasen du opererer i.
-
-TheFold sine backend-services: gateway (auth), users (OTP login), chat (samtaler), ai (multi-model routing), agent (autonom task-kjøring), github (repo-operasjoner), sandbox (kodevalidering), linear (task-sync), memory (pgvector søk), skills (prompt-pipeline), monitor (health checks), cache (PostgreSQL cache), builder (kode-generering), tasks (oppgavestyring), mcp (server-integrasjoner), templates (scaffolding), registry (komponent-marketplace).
-
-Frontend: Next.js 15 dashboard med chat, tools, skills, marketplace, repo-oversikt, settings.
-
-${BASE_RULES}
-
-Regler:
-- Svar ALLTID på norsk
-- Bruk ALDRI emojier — ingen emojier overhodet. Ren tekst. Bruk markdown for struktur (overskrifter, lister, kodeblokker) men ALDRI emojier.
-- Vær konsis og direkte — korte svar, ikke lange utredninger
-- Ikke generer kode med mindre brukeren ber om det
-- Ikke lag lister med emojier
-- Når du analyserer et repo, beskriv det du faktisk finner — ikke gjett
-- For spørsmål som "se over repoet": gi en kort oppsummering (3-5 setninger) av hva du finner
-- For spørsmål som "hva bør vi endre": gi 3-5 konkrete forslag som korte punkter
-- Hvis brukeren vil at du GJØR endringer (ikke bare snakker om dem), forklar at de kan starte en task
-- Hvis du har repo-kontekst (filstruktur og kode), basér svaret ditt KUN på den faktiske koden du ser. ALDRI dikt opp filer, funksjoner, eller kode som ikke finnes i konteksten.
-- Hvis du IKKE har repo-kontekst, si det ærlig: "Jeg har ikke tilgang til filene i dette repoet akkurat nå." — ALDRI hallusinér innhold.
-- Du har tilgang til minner fra tidligere samtaler. Minner kan komme fra ANDRE repoer. Hvis repo-konteksten (faktiske filer) og minner er motstridende, STOL PÅ FIL-KONTEKSTEN — den er sannheten. Minner er hint, ikke fakta.
-
-Du har tilgang til verktøy for å gjøre handlinger:
-- create_task: Opprett en utviklingsoppgave
-- start_task: Start en task — agenten begynner å jobbe
-- list_tasks: Se status på tasks
-- read_file: Les en fil fra repoet
-- search_code: Søk i kodebasen
-
-NÅR BRUKEREN BER DEG GJØRE NOE: Bruk verktøyene. Ikke bare forklar — GJØR det.
-- "Lag en plan for X" → bruk create_task for hvert steg
-- "Fiks denne buggen" → bruk create_task + start_task
-- "Hva er status?" → bruk list_tasks
-- "Se på filen X" → bruk read_file`,
+  direct_chat: "", // Placeholder — overridden dynamically by getDirectChatPrompt()
 
   agent_planning: `${BASE_RULES}
 
@@ -580,6 +550,44 @@ Respond with JSON only matching this exact shape:
 Be specific about uncertainties and questions. Never say "I'm not sure" — say exactly WHAT you're not sure about.`,
 };
 
+/** Build the direct_chat system prompt with a configurable AI name */
+function getDirectChatPrompt(aiName: string): string {
+  return `Du er ${aiName} — en autonom AI-utviklingsagent bygget med Encore.ts og Next.js. Du ER selve produktet. Når brukeren snakker om "repoet" eller "prosjektet", refererer de til kodebasen du opererer i.
+
+TheFold sine backend-services: gateway (auth), users (OTP login), chat (samtaler), ai (multi-model routing), agent (autonom task-kjøring), github (repo-operasjoner), sandbox (kodevalidering), linear (task-sync), memory (pgvector søk), skills (prompt-pipeline), monitor (health checks), cache (PostgreSQL cache), builder (kode-generering), tasks (oppgavestyring), mcp (server-integrasjoner), templates (scaffolding), registry (komponent-marketplace).
+
+Frontend: Next.js 15 dashboard med chat, tools, skills, marketplace, repo-oversikt, settings.
+
+${BASE_RULES}
+
+Regler:
+- Svar ALLTID på norsk
+- Bruk ALDRI emojier — ingen emojier overhodet. Ren tekst. Bruk markdown for struktur (overskrifter, lister, kodeblokker) men ALDRI emojier.
+- Vær konsis og direkte — korte svar, ikke lange utredninger
+- Ikke generer kode med mindre brukeren ber om det
+- Ikke lag lister med emojier
+- Når du analyserer et repo, beskriv det du faktisk finner — ikke gjett
+- For spørsmål som "se over repoet": gi en kort oppsummering (3-5 setninger) av hva du finner
+- For spørsmål som "hva bør vi endre": gi 3-5 konkrete forslag som korte punkter
+- Hvis brukeren vil at du GJØR endringer (ikke bare snakker om dem), forklar at de kan starte en task
+- Hvis du har repo-kontekst (filstruktur og kode), basér svaret ditt KUN på den faktiske koden du ser. ALDRI dikt opp filer, funksjoner, eller kode som ikke finnes i konteksten.
+- Hvis du IKKE har repo-kontekst, si det ærlig: "Jeg har ikke tilgang til filene i dette repoet akkurat nå." — ALDRI hallusinér innhold.
+- Du har tilgang til minner fra tidligere samtaler. Minner kan komme fra ANDRE repoer. Hvis repo-konteksten (faktiske filer) og minner er motstridende, STOL PÅ FIL-KONTEKSTEN — den er sannheten. Minner er hint, ikke fakta.
+
+Du har tilgang til verktøy for å gjøre handlinger:
+- create_task: Opprett en utviklingsoppgave
+- start_task: Start en task — agenten begynner å jobbe
+- list_tasks: Se status på tasks
+- read_file: Les en fil fra repoet
+- search_code: Søk i kodebasen
+
+NÅR BRUKEREN BER DEG GJØRE NOE: Bruk verktøyene. Ikke bare forklar — GJØR det.
+- "Lag en plan for X" → bruk create_task for hvert steg
+- "Fiks denne buggen" → bruk create_task + start_task
+- "Hva er status?" → bruk list_tasks
+- "Se på filen X" → bruk read_file`;
+}
+
 // --- Skills Pipeline Integration ---
 
 const CONTEXT_TO_SKILLS_CONTEXT: Record<string, string> = {
@@ -591,6 +599,15 @@ const CONTEXT_TO_SKILLS_CONTEXT: Record<string, string> = {
   project_decomposition: "planning",
 };
 
+const CONTEXT_TO_TASK_PHASE: Record<string, string> = {
+  direct_chat: "all",
+  agent_planning: "planning",
+  agent_coding: "coding",
+  agent_review: "reviewing",
+  confidence_assessment: "planning",
+  project_decomposition: "planning",
+};
+
 interface PipelineContext {
   task: string;
   repo?: string;
@@ -598,6 +615,7 @@ interface PipelineContext {
   files?: string[];
   userId?: string;
   tokenBudget?: number;
+  taskType?: string;
 }
 
 interface PipelineResult {
@@ -609,9 +627,13 @@ interface PipelineResult {
 
 async function buildSystemPromptWithPipeline(
   baseContext: string,
-  pipelineCtx?: PipelineContext
+  pipelineCtx?: PipelineContext,
+  aiName?: string
 ): Promise<PipelineResult> {
-  const basePrompt = CONTEXT_PROMPTS[baseContext] || CONTEXT_PROMPTS.direct_chat;
+  const resolvedAiName = aiName || DEFAULT_AI_NAME;
+  const basePrompt = baseContext === "direct_chat"
+    ? getDirectChatPrompt(resolvedAiName)
+    : (CONTEXT_PROMPTS[baseContext] || getDirectChatPrompt(resolvedAiName));
 
   // If no pipeline context, fall back to legacy approach
   if (!pipelineCtx) {
@@ -627,6 +649,7 @@ async function buildSystemPromptWithPipeline(
         files: pipelineCtx.files,
         userId: pipelineCtx.userId || "system",
         totalTokenBudget: pipelineCtx.tokenBudget || 4000,
+        taskType: pipelineCtx.taskType || CONTEXT_TO_TASK_PHASE[baseContext] || "all",
       },
     });
 
@@ -763,25 +786,68 @@ async function executeToolCall(
   switch (name) {
     case "create_task": {
       const { tasks: tasksClient } = await import("~encore/clients");
+      const taskRepo = (input.repoName as string) || repoName || undefined;
       const result = await tasksClient.createTask({
         title: input.title as string,
         description: (input.description as string) || "",
         priority: (input.priority as number) || 3,
-        repo: (input.repoName as string) || repoName || undefined,
-        source: "manual",
+        repo: taskRepo,
+        source: "chat",
       });
+
+      // Fire-and-forget: enrich task with AI complexity assessment
+      enrichTaskWithAI(result.task.id, input.title as string, (input.description as string) || "", taskRepo).catch((e) =>
+        log.error("Task enrichment failed:", { error: e instanceof Error ? e.message : String(e) })
+      );
+
       return { success: true, taskId: result.task.id, message: `Task "${input.title}" opprettet` };
     }
 
     case "start_task": {
-      const { agent: agentClient } = await import("~encore/clients");
-      agentClient.startTask({
-        conversationId: conversationId || "tool-" + Date.now(),
-        taskId: input.taskId as string,
-        userMessage: "Startet via chat tool-use",
-        thefoldTaskId: input.taskId as string,
-      }).catch((e: Error) => log.error("Task execution failed:", { error: e.message }));
-      return { success: true, message: `Task ${input.taskId} startet — agenten jobber nå` };
+      log.info("START_TASK called", { input: JSON.stringify(input), repoName, conversationId });
+
+      try {
+        const { tasks: tasksClient } = await import("~encore/clients");
+
+        // Verify task exists before starting
+        let taskExists = false;
+        try {
+          const task = await tasksClient.getTaskInternal({ id: input.taskId as string });
+          taskExists = !!task?.task;
+        } catch {
+          taskExists = false;
+        }
+
+        if (!taskExists) {
+          log.warn("START_TASK: task not found", { taskId: input.taskId });
+          return { success: false, error: `Oppgave ${input.taskId} finnes ikke` };
+        }
+
+        // Update status to in_progress
+        try {
+          await tasksClient.updateTaskStatus({ id: input.taskId as string, status: "in_progress" });
+        } catch { /* non-critical */ }
+
+        // Start agent async
+        const { agent: agentClient } = await import("~encore/clients");
+        agentClient.startTask({
+          conversationId: conversationId || "tool-" + Date.now(),
+          taskId: input.taskId as string,
+          userMessage: "Startet via chat tool-use",
+          thefoldTaskId: input.taskId as string,
+        }).catch(async (e: Error) => {
+          log.error("START_TASK agent execution failed", { error: e.message, taskId: input.taskId });
+          try {
+            await tasksClient.updateTaskStatus({ id: input.taskId as string, status: "blocked" });
+          } catch { /* non-critical */ }
+        });
+
+        log.info("START_TASK success", { taskId: input.taskId });
+        return { success: true, message: `Oppgave startet — agenten jobber nå` };
+      } catch (e) {
+        log.error("START_TASK FAILED", { error: e instanceof Error ? e.message : String(e), taskId: input.taskId });
+        return { success: false, error: e instanceof Error ? e.message : String(e) };
+      }
     }
 
     case "list_tasks": {
@@ -826,6 +892,27 @@ async function executeToolCall(
 
     default:
       return { error: `Ukjent tool: ${name}` };
+  }
+}
+
+/** Fire-and-forget: assess complexity and update task with enrichment data */
+async function enrichTaskWithAI(taskId: string, title: string, description: string, repoName?: string) {
+  try {
+    const { tasks: tasksClient } = await import("~encore/clients");
+
+    const complexity = await assessComplexity({
+      taskDescription: title + "\n" + description,
+      projectStructure: "",
+      fileCount: 0,
+    });
+
+    await tasksClient.updateTask({
+      id: taskId,
+      estimatedComplexity: complexity.complexity,
+      estimatedTokens: complexity.tokensUsed,
+    });
+  } catch (e) {
+    log.error("enrichTaskWithAI failed:", { taskId, error: e instanceof Error ? e.message : String(e) });
   }
 }
 
@@ -942,7 +1029,7 @@ export const chat = api(
     const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
     const pipeline = await buildSystemPromptWithPipeline(req.systemContext, {
       task: lastUserMsg?.content || "",
-    });
+    }, req.aiName);
 
     let system = pipeline.systemPrompt;
 
@@ -1078,16 +1165,27 @@ export const planTask = api(
     try {
       const jsonText = stripMarkdownJson(response.content);
       const parsed = JSON.parse(jsonText);
+
+      // Validate and normalize plan steps
+      const rawPlan = Array.isArray(parsed.plan) ? parsed.plan : [];
+      const validatedPlan: TaskStep[] = rawPlan.map((step: Record<string, unknown>) => ({
+        action: String(step.action || "create_file") as TaskStep["action"],
+        filePath: String(step.filePath || step.file_path || ""),
+        content: String(step.content || ""),
+        command: step.command != null ? String(step.command) : undefined,
+        description: String(step.description || step.reasoning || ""),
+      }));
+
       return {
-        plan: parsed.plan,
-        reasoning: parsed.reasoning,
+        plan: validatedPlan,
+        reasoning: String(parsed.reasoning || ""),
         tokensUsed: response.tokensUsed,
         modelUsed: response.modelUsed,
         costUsd: response.costEstimate.totalCost,
       };
-    } catch {
+    } catch (e) {
       await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
-      throw APIError.internal("failed to parse planning response as JSON");
+      throw APIError.internal("failed to parse planning response as JSON: " + (e instanceof Error ? e.message : String(e)));
     }
   }
 );

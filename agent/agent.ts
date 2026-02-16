@@ -169,6 +169,25 @@ async function auditedStep<T>(
   }
 }
 
+// --- Cancel Check ---
+
+async function checkCancelled(ctx: TaskContext, activeSandboxId?: string): Promise<boolean> {
+  try {
+    const result = await tasks.isCancelled({ taskId: ctx.taskId });
+    if (result.cancelled) {
+      await report(ctx, "Oppgaven ble avbrutt av bruker.", "failed");
+      // Destroy sandbox if active
+      if (activeSandboxId) {
+        await sandbox.destroy({ sandboxId: activeSandboxId }).catch(() => {});
+      }
+      return true;
+    }
+  } catch {
+    // Non-critical — continue execution
+  }
+  return false;
+}
+
 // --- The Agent Loop ---
 
 export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions): Promise<ExecuteTaskResult> {
@@ -238,12 +257,44 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       } else if (!options?.skipLinear) {
         await report(ctx, `📋 Leser task ${ctx.taskId}...`, "working");
 
-        const taskDetail = await auditedStep(ctx, "task_read", { taskId: ctx.taskId }, async () => {
-          const detail = await linear.getTask({ taskId: ctx.taskId });
-          ctx.taskDescription = detail.task.title + "\n\n" + detail.task.description;
-          return detail;
-        });
-        taskTitle = taskDetail.task.title;
+        // Try tasks-service first (chat-created tasks), fallback to Linear
+        let taskFound = false;
+        try {
+          const localTask = await tasks.getTaskInternal({ id: ctx.taskId });
+          if (localTask?.task) {
+            ctx.taskDescription = localTask.task.title + (localTask.task.description ? "\n\n" + localTask.task.description : "");
+            ctx.repoName = localTask.task.repo || ctx.repoName;
+            taskTitle = localTask.task.title;
+            taskFound = true;
+
+            // Mark as thefoldTaskId so completion/failure paths update status
+            ctx.thefoldTaskId = ctx.taskId;
+
+            try {
+              await tasks.updateTaskStatus({ id: ctx.taskId, status: "in_progress" });
+            } catch { /* non-critical */ }
+
+            await audit({
+              sessionId: ctx.conversationId,
+              actionType: "task_read",
+              details: { taskId: ctx.taskId, source: "thefold_tasks" },
+              success: true,
+              taskId: ctx.taskId,
+              repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+            });
+          }
+        } catch {
+          // Not found in tasks-service — try Linear
+        }
+
+        if (!taskFound) {
+          const taskDetail = await auditedStep(ctx, "task_read", { taskId: ctx.taskId, source: "linear" }, async () => {
+            const detail = await linear.getTask({ taskId: ctx.taskId });
+            ctx.taskDescription = detail.task.title + "\n\n" + detail.task.description;
+            return detail;
+          });
+          taskTitle = taskDetail.task.title;
+        }
       } else if (options?.taskDescription) {
         ctx.taskDescription = options.taskDescription;
         taskTitle = ctx.taskDescription.split("\n")[0].substring(0, 80);
@@ -391,8 +442,26 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       }
     }
 
+    // Cancel check after context gathering
+    if (await checkCancelled(ctx)) {
+      return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
+    }
+
     // === STEP 4: Assess Confidence (skip for curated — orchestrator handles this) ===
     if (!useCurated) {
+      // Empty repo — no existing code to be uncertain about, skip AI assessment
+      if (treeArray.length === 0) {
+        await report(ctx, "Tomt repo — starter direkte uten klargjøring.", "working");
+        await audit({
+          sessionId: ctx.conversationId,
+          actionType: "confidence_details",
+          details: { overall: 90, reason: "empty_repo", recommended_action: "proceed" },
+          success: true,
+          confidenceScore: 90,
+          taskId: ctx.taskId,
+          repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+        });
+      } else {
       await report(ctx, "Vurderer min evne til å løse oppgaven...", "working");
 
       const confidenceResult = await auditedStep(ctx, "confidence_assessed", {}, async () => {
@@ -476,6 +545,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         `Jeg er ${confidence.overall}% sikker på å løse dette. Starter arbeid...`,
         "working"
       );
+      } // end else (non-empty repo)
     }
 
     // === STEP 4.5: Assess complexity and select model ===
@@ -520,6 +590,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     }
 
     ctx.selectedModel = selectedModel;
+
+    // Cancel check before planning
+    if (await checkCancelled(ctx)) {
+      return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
+    }
 
     // === STEP 5: Plan the work ===
     await report(ctx, "Planlegger arbeidet...", "working");
@@ -638,6 +713,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       }
     }
 
+    // Cancel check before builder
+    if (await checkCancelled(ctx)) {
+      return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
+    }
+
     // === STEP 6: Create sandbox and execute plan via Builder ===
     const sandboxId = await auditedStep(ctx, "sandbox_created", {
       repoOwner: ctx.repoOwner,
@@ -649,6 +729,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     const previousErrors: string[] = [];
 
     while (ctx.totalAttempts < ctx.maxAttempts) {
+      // Cancel check between retry attempts
+      if (await checkCancelled(ctx, sandboxId.id)) {
+        return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
+      }
+
       ctx.totalAttempts++;
       const attemptStart = Date.now();
 

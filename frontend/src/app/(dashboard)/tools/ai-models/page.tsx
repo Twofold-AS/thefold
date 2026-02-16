@@ -1,24 +1,20 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 import {
-  listModels,
+  listProviders,
   updateModelMode,
   updatePreferences,
   getMe,
   estimateSubAgentCost,
-  type ModelInfo,
+  type AIProvider,
   type SubAgentCostPreview,
 } from "@/lib/api";
-
-const PROVIDER_LABELS: Record<string, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  moonshot: "Moonshot",
-};
+import { Settings } from "lucide-react";
 
 export default function AIModelsPage() {
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [providers, setProviders] = useState<AIProvider[]>([]);
   const [mode, setMode] = useState<"auto" | "manual">("auto");
   const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
   const [costPreview, setCostPreview] = useState<SubAgentCostPreview | null>(null);
@@ -28,8 +24,8 @@ export default function AIModelsPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [modelsRes, meRes] = await Promise.all([listModels(), getMe()]);
-        setModels(modelsRes.models);
+        const [provRes, meRes] = await Promise.all([listProviders(), getMe()]);
+        setProviders(provRes.providers);
         const prefs = meRes.user.preferences as Record<string, unknown>;
         if (prefs?.modelMode === "manual") setMode("manual");
         if (prefs?.subAgentsEnabled === true) setSubAgentsEnabled(true);
@@ -121,7 +117,7 @@ export default function AIModelsPage() {
         </div>
         <p className="text-xs mt-2" style={{ color: "var(--text-muted)" }}>
           {mode === "auto"
-            ? "AI velger optimal modell basert på oppgavens kompleksitet og budsjett."
+            ? "AI velger optimal modell basert pa oppgavens kompleksitet og budsjett."
             : "Du velger modell manuelt for hver oppgave."}
           {saving && " Lagrer..."}
         </p>
@@ -195,63 +191,92 @@ export default function AIModelsPage() {
         )}
       </div>
 
-      {/* Model list */}
-      <div className="card overflow-hidden">
-        <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
-          <h2 className="text-lg font-display font-medium" style={{ color: "var(--text-primary)" }}>
-            Tilgjengelige modeller
-          </h2>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                <th className="table-header text-left px-5 py-3">Modell</th>
-                <th className="table-header text-left px-3 py-3">Provider</th>
-                <th className="table-header text-center px-3 py-3">Tier</th>
-                <th className="table-header text-right px-3 py-3">Input $/1M</th>
-                <th className="table-header text-right px-3 py-3">Output $/1M</th>
-                <th className="table-header text-right px-5 py-3">Kontekst</th>
-              </tr>
-            </thead>
-            <tbody>
-              {models.map((m) => (
-                <tr key={m.id} style={{ borderBottom: "1px solid var(--border)" }}>
-                  <td className="px-5 py-3">
-                    <span className="font-sans text-sm" style={{ color: "var(--text-primary)" }}>
-                      {m.displayName}
-                    </span>
-                  </td>
-                  <td className="px-3 py-3">
-                    <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-                      {PROVIDER_LABELS[m.provider] || m.provider}
-                    </span>
-                  </td>
-                  <td className="px-3 py-3 text-center">
-                    <span
-                      className="inline-flex items-center justify-center w-6 h-6 text-xs font-sans font-medium"
-                      style={{
-                        background: m.tier >= 4 ? "var(--accent)" : "var(--bg-tertiary)",
-                        color: m.tier >= 4 ? "#fff" : "var(--text-secondary)",
-                      }}
-                    >
-                      {m.tier}
-                    </span>
-                  </td>
-                  <td className="px-3 py-3 text-right font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
-                    ${m.inputCostPer1M.toFixed(2)}
-                  </td>
-                  <td className="px-3 py-3 text-right font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
-                    ${m.outputCostPer1M.toFixed(2)}
-                  </td>
-                  <td className="px-5 py-3 text-right font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
-                    {(m.contextWindow / 1000).toFixed(0)}K
-                  </td>
+      {/* Provider-grouped model list */}
+      {providers.map((p) => (
+        <div key={p.id} className="card overflow-hidden">
+          <div className="px-5 py-3 flex items-center justify-between" style={{ borderBottom: "1px solid var(--border)" }}>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-display font-medium" style={{ color: "var(--text-primary)" }}>
+                {p.name}
+              </h2>
+              {!p.enabled && (
+                <span className="text-[10px] px-1.5 py-0.5" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
+                  deaktivert
+                </span>
+              )}
+            </div>
+            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+              {p.models.filter((m) => m.enabled).length}/{p.models.length} aktive
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                  <th className="table-header text-left px-5 py-3">Modell</th>
+                  <th className="table-header text-center px-3 py-3">Tier</th>
+                  <th className="table-header text-right px-3 py-3">Input $/1M</th>
+                  <th className="table-header text-right px-3 py-3">Output $/1M</th>
+                  <th className="table-header text-right px-3 py-3">Kontekst</th>
+                  <th className="table-header text-center px-5 py-3">Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {p.models.map((m) => (
+                  <tr key={m.id} style={{ borderBottom: "1px solid var(--border)", opacity: m.enabled ? 1 : 0.5 }}>
+                    <td className="px-5 py-3">
+                      <div className="text-sm" style={{ color: "var(--text-primary)" }}>{m.displayName}</div>
+                      <div className="text-[10px] font-mono" style={{ color: "var(--text-muted)" }}>{m.modelId}</div>
+                    </td>
+                    <td className="px-3 py-3 text-center">
+                      <span
+                        className="inline-flex items-center justify-center w-6 h-6 text-xs font-medium"
+                        style={{
+                          background: m.tier >= 4 ? "var(--accent)" : "var(--bg-tertiary)",
+                          color: m.tier >= 4 ? "#fff" : "var(--text-secondary)",
+                        }}
+                      >
+                        {m.tier}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
+                      ${Number(m.inputPrice).toFixed(2)}
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
+                      ${Number(m.outputPrice).toFixed(2)}
+                    </td>
+                    <td className="px-3 py-3 text-right font-mono text-xs" style={{ color: "var(--text-secondary)" }}>
+                      {(m.contextWindow / 1000).toFixed(0)}K
+                    </td>
+                    <td className="px-5 py-3 text-center">
+                      <span
+                        className="text-[10px] px-1.5 py-0.5"
+                        style={{
+                          background: m.enabled ? "rgba(34,197,94,0.15)" : "var(--bg-tertiary)",
+                          color: m.enabled ? "#22c55e" : "var(--text-muted)",
+                        }}
+                      >
+                        {m.enabled ? "aktiv" : "av"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
+      ))}
+
+      {/* Link to manage */}
+      <div className="text-center">
+        <Link
+          href="/settings/models"
+          className="inline-flex items-center gap-2 text-xs transition-colors"
+          style={{ color: "var(--text-muted)" }}
+        >
+          <Settings size={12} />
+          Administrer leverandorer og modeller
+        </Link>
       </div>
     </div>
   );

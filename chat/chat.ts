@@ -420,6 +420,18 @@ export const send = api(
       `;
       if (!placeholderMsg) throw APIError.internal("failed to create placeholder message");
 
+      // Fetch user's AI name preference
+      let userAiName: string | undefined;
+      try {
+        const { users: usersClient } = await import("~encore/clients");
+        const userInfo = await usersClient.getUser({ userId: getAuthData()!.userID });
+        if (userInfo.preferences?.aiName && typeof userInfo.preferences.aiName === "string") {
+          userAiName = userInfo.preferences.aiName;
+        }
+      } catch {
+        // Non-critical — use default
+      }
+
       // Fire-and-forget async processing
       processAIResponse(
         req.conversationId,
@@ -428,6 +440,7 @@ export const send = api(
         { email: getAuthData()!.email, userID: getAuthData()!.userID },
         req.skillIds,
         req.repoName,
+        userAiName,
       ).catch((err) => {
         console.error("AI processing failed:", err);
         updateMessageContent(placeholderMsg.id, "Beklager, noe gikk galt. Prøv igjen.").catch(() => {});
@@ -449,6 +462,7 @@ async function processAIResponse(
   auth: { email: string; userID: string },
   skillIds?: string[],
   repoName?: string,
+  aiName?: string,
 ) {
   // Start heartbeat — updates updated_at every 10s so frontend knows we're alive
   const heartbeat = setInterval(async () => {
@@ -506,10 +520,17 @@ async function processAIResponse(
     history.reverse();
 
     // Step 3: Resolve skills (try/catch — don't crash on failure)
-    let resolvedSkills = { skills: [] as { promptFragment: string }[] };
+    let resolvedSkills = { result: { injectedPrompt: "", injectedSkillIds: [] as string[], tokensUsed: 0, preRunResults: [], postRunSkills: [] } };
     try {
-      const { skills } = await import("~encore/clients");
-      resolvedSkills = await skills.resolve({ task: userContent, context: "chat" });
+      const { skills: skillsClient } = await import("~encore/clients");
+      resolvedSkills = await skillsClient.resolve({
+        context: {
+          task: userContent,
+          userId: auth.userID,
+          repo: repoName,
+          totalTokenBudget: 4000,
+        },
+      });
     } catch (e) {
       console.error("Skills resolve failed:", e);
     }
@@ -520,8 +541,8 @@ async function processAIResponse(
       if (i === 1) return { ...s, status: "active" as const };
       return s;
     });
-    if (resolvedSkills.skills?.length > 0) {
-      postSkillsSteps.splice(1, 0, { label: `${resolvedSkills.skills.length} skills aktive`, icon: "sparkle", status: "done" });
+    if (resolvedSkills.result.injectedSkillIds?.length > 0) {
+      postSkillsSteps.splice(1, 0, { label: `${resolvedSkills.result.injectedSkillIds.length} skills aktive`, icon: "sparkle", status: "done" });
     }
 
     await updateAgentStatus(placeholderId, {
@@ -551,7 +572,7 @@ async function processAIResponse(
         title: `Ser over ${repoName}`,
         steps: [
           { label: "Analyserer meldingen", icon: "search", status: "done" },
-          { label: `${resolvedSkills.skills?.length || 0} skills funnet`, icon: "sparkle", status: "done" },
+          { label: `${resolvedSkills.result.injectedSkillIds?.length || 0} skills funnet`, icon: "sparkle", status: "done" },
           { label: `${memories.results?.length || 0} relevante minner`, icon: "search", status: "done" },
           { label: "Henter filstruktur fra GitHub", icon: "service", status: "active" },
           { label: "Genererer svar", icon: "code", status: "pending" },
@@ -574,7 +595,7 @@ async function processAIResponse(
           title: `Ser over ${repoName}`,
           steps: [
             { label: "Analyserer meldingen", icon: "search", status: "done" },
-            { label: `${resolvedSkills.skills?.length || 0} skills funnet`, icon: "sparkle", status: "done" },
+            { label: `${resolvedSkills.result.injectedSkillIds?.length || 0} skills funnet`, icon: "sparkle", status: "done" },
             { label: `${memories.results?.length || 0} relevante minner`, icon: "search", status: "done" },
             { label: `Filstruktur hentet (${tree.tree?.length || 0} filer)`, icon: "service", status: "done" },
             { label: "Henter relevante filer", icon: "code", status: "active" },
@@ -633,8 +654,8 @@ async function processAIResponse(
     const preAiSteps: Array<{ label: string; icon: string; status: "done" | "active" }> = [
       { label: "Forstår forespørselen", icon: "search", status: "done" },
     ];
-    if (resolvedSkills.skills?.length > 0) {
-      preAiSteps.push({ label: `${resolvedSkills.skills.length} skills aktive`, icon: "sparkle", status: "done" });
+    if (resolvedSkills.result.injectedSkillIds?.length > 0) {
+      preAiSteps.push({ label: `${resolvedSkills.result.injectedSkillIds.length} skills aktive`, icon: "sparkle", status: "done" });
     }
     if (memories.results?.length > 0) {
       preAiSteps.push({ label: `${memories.results.length} relevante minner`, icon: "memory", status: "done" });
@@ -666,6 +687,7 @@ async function processAIResponse(
         repoName,
         repoContext: repoContext || undefined,
         conversationId,
+        aiName,
       });
     } catch (e) {
       console.error("AI call failed:", e);
@@ -737,7 +759,7 @@ async function processAIResponse(
           logRepoActivity(repoName, "tool_use", `Verktoy: ${tool}`, null, undefined, { tool });
         }
       }
-      logRepoActivity(repoName, "ai_response", "TheFold svarte", aiResponse.content.substring(0, 100), undefined, {
+      logRepoActivity(repoName, "ai_response", `${aiName || "TheFold"} svarte`, aiResponse.content.substring(0, 100), undefined, {
         model: aiResponse.modelUsed,
         tokens: aiResponse.usage?.totalTokens,
         cost: aiResponse.costUsd,

@@ -37,7 +37,19 @@ async function apiFetch<T>(path: string, options?: FetchOptions): Promise<T> {
     throw new Error(errBody || `API error ${res.status}`);
   }
 
-  const data = await res.json();
+  const text = await res.text();
+
+  if (!text || text.length === 0) {
+    return {} as T;
+  }
+
+  let data: T;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return {} as T;
+  }
+
   debugToast(method, path, bodyStr, JSON.stringify(data).substring(0, 200));
   return data;
 }
@@ -350,6 +362,7 @@ export interface Skill {
   appliesTo: string[];
   scope: string;
   enabled: boolean;
+  taskPhase?: string;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -396,6 +409,7 @@ export async function createSkill(data: {
   promptFragment: string;
   appliesTo: string[];
   scope?: string;
+  taskPhase?: string;
 }) {
   return apiFetch<{ skill: Skill }>("/skills/create", {
     method: "POST",
@@ -410,6 +424,7 @@ export async function updateSkill(data: {
   promptFragment?: string;
   appliesTo?: string[];
   scope?: string;
+  taskPhase?: string;
 }) {
   return apiFetch<{ skill: Skill }>("/skills/update", {
     method: "POST",
@@ -552,17 +567,100 @@ export interface ModelInfo {
   id: string;
   provider: string;
   displayName: string;
-  tier: number; // 1-5 (1 = billigst, 5 = best)
+  tier: number;
   inputCostPer1M: number;
   outputCostPer1M: number;
   contextWindow: number;
   strengths: string[];
   bestFor: string[];
+  supportsTools: boolean;
+  supportsVision: boolean;
 }
 
 export async function listModels() {
   return apiFetch<{ models: ModelInfo[] }>("/ai/models", {
     method: "GET",
+  });
+}
+
+// --- AI Providers & Models (CRUD) ---
+
+export interface AIModelRow {
+  id: string;
+  modelId: string;
+  displayName: string;
+  inputPrice: number;
+  outputPrice: number;
+  contextWindow: number;
+  maxOutputTokens: number;
+  tags: string[];
+  tier: number;
+  enabled: boolean;
+  supportsTools: boolean;
+  supportsVision: boolean;
+}
+
+export interface AIProvider {
+  id: string;
+  name: string;
+  slug: string;
+  baseUrl: string | null;
+  apiKeySet: boolean;
+  enabled: boolean;
+  models: AIModelRow[];
+}
+
+export async function listProviders() {
+  return apiFetch<{ providers: AIProvider[] }>("/ai/providers", {
+    method: "GET",
+  });
+}
+
+export async function saveProvider(data: {
+  id?: string;
+  name: string;
+  slug: string;
+  baseUrl?: string;
+  enabled: boolean;
+}) {
+  return apiFetch<{ id: string }>("/ai/providers/save", {
+    method: "POST",
+    body: data,
+  });
+}
+
+export async function saveModel(data: {
+  id?: string;
+  providerId: string;
+  modelId: string;
+  displayName: string;
+  inputPrice: number;
+  outputPrice: number;
+  contextWindow: number;
+  maxOutputTokens?: number;
+  tags: string[];
+  tier: number;
+  enabled: boolean;
+  supportsTools?: boolean;
+  supportsVision?: boolean;
+}) {
+  return apiFetch<{ id: string }>("/ai/models/save", {
+    method: "POST",
+    body: data,
+  });
+}
+
+export async function toggleModel(id: string, enabled: boolean) {
+  return apiFetch<void>("/ai/models/toggle", {
+    method: "POST",
+    body: { id, enabled },
+  });
+}
+
+export async function deleteModel(id: string) {
+  return apiFetch<void>("/ai/models/delete", {
+    method: "POST",
+    body: { id },
   });
 }
 
@@ -740,6 +838,26 @@ export async function createTask(data: {
     method: "POST",
     body: data,
   });
+}
+
+export async function listDeletedTasks(repoName: string) {
+  return apiFetch<{ tasks: TheFoldTask[] }>(`/tasks/deleted/${repoName}`);
+}
+
+export async function softDeleteTask(taskId: string) {
+  return apiFetch<void>("/tasks/soft-delete", { method: "POST", body: { taskId } });
+}
+
+export async function restoreTask(taskId: string) {
+  return apiFetch<void>("/tasks/restore", { method: "POST", body: { taskId } });
+}
+
+export async function permanentDeleteTask(taskId: string) {
+  return apiFetch<void>("/tasks/permanent-delete", { method: "POST", body: { taskId } });
+}
+
+export async function cancelTask(taskId: string) {
+  return apiFetch<{ cancelled: boolean }>("/tasks/cancel", { method: "POST", body: { taskId } });
 }
 
 export async function getTaskStats() {

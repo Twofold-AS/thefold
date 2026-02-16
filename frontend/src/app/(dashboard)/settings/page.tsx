@@ -18,7 +18,7 @@ import {
   listMCPServers,
   type AuditLogEntry,
 } from "@/lib/api";
-import { Check, DollarSign, LogOut, Shield } from "lucide-react";
+import { Check, Cpu, DollarSign, LogOut, Shield } from "lucide-react";
 import { useUser } from "@/contexts/UserPreferencesContext";
 import { isDebugEnabled, setDebugEnabled } from "@/lib/debug";
 import { getStoredTheme, setStoredTheme, type Theme } from "@/lib/theme";
@@ -51,26 +51,44 @@ export default function SettingsPage() {
     <div>
       <PageHeaderBar
         title="Settings"
-        actions={
-          <div className="flex items-center gap-4">
-            <Link
-              href="/settings/costs"
-              className="inline-flex items-center gap-2 text-sm transition-colors"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              <DollarSign size={14} />
-              Kostnader
-            </Link>
-            <Link
-              href="/settings/security"
-              className="inline-flex items-center gap-2 text-sm transition-colors"
-              style={{ color: "var(--text-secondary)" }}
-            >
-              <Shield size={14} />
-              Security & Audit
-            </Link>
-          </div>
-        }
+        rightCells={[
+          {
+            content: (
+              <Link
+                href="/settings/models"
+                className="inline-flex items-center gap-2 text-sm"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                <Cpu size={14} />
+                AI-modeller
+              </Link>
+            ),
+          },
+          {
+            content: (
+              <Link
+                href="/settings/costs"
+                className="inline-flex items-center gap-2 text-sm"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                <DollarSign size={14} />
+                Kostnader
+              </Link>
+            ),
+          },
+          {
+            content: (
+              <Link
+                href="/settings/security"
+                className="inline-flex items-center gap-2 text-sm"
+                style={{ color: "var(--text-secondary)" }}
+              >
+                <Shield size={14} />
+                Security & Audit
+              </Link>
+            ),
+          },
+        ]}
       />
       <div className="p-6">
       {/* Tabs */}
@@ -261,6 +279,10 @@ function ProfilTab({
    Preferanser Tab
    ============================================ */
 
+function getInitials(name: string): string {
+  return name.split(" ").map(w => w.charAt(0).toUpperCase()).slice(0, 2).join("");
+}
+
 function PreferanserTab({
   user,
   refreshUser,
@@ -272,6 +294,7 @@ function PreferanserTab({
   const [notifyTaskDone, setNotifyTaskDone] = useState(true);
   const [notifyReview, setNotifyReview] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [aiName, setAiName] = useState("");
 
   useEffect(() => {
     setTheme(getStoredTheme());
@@ -283,6 +306,7 @@ function PreferanserTab({
       const prefs = user.preferences as Record<string, unknown>;
       if (typeof prefs.notifyTaskDone === "boolean") setNotifyTaskDone(prefs.notifyTaskDone);
       if (typeof prefs.notifyReview === "boolean") setNotifyReview(prefs.notifyReview);
+      if (typeof prefs.aiName === "string") setAiName(prefs.aiName);
     }
   }, [user?.preferences]);
 
@@ -303,6 +327,19 @@ function PreferanserTab({
       // Revert on error
       if (key === "notifyTaskDone") setNotifyTaskDone(!value);
       if (key === "notifyReview") setNotifyReview(!value);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleAINameSave() {
+    const trimmed = aiName.trim();
+    setSaving(true);
+    try {
+      await updatePreferences({ aiName: trimmed || "" });
+      await refreshUser();
+    } catch {
+      // Silent
     } finally {
       setSaving(false);
     }
@@ -387,6 +424,30 @@ function PreferanserTab({
             Lagrer...
           </p>
         )}
+      </div>
+
+      {/* AI Assistant Name */}
+      <div style={{ border: "1px solid var(--border)" }}>
+        <div className="px-4 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
+          <span className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>AI-assistent</span>
+        </div>
+        <div className="px-4 py-4 space-y-4">
+          <div>
+            <label className="text-sm block mb-1" style={{ color: "var(--text-muted)" }}>Navn p&aring; AI-assistenten</label>
+            <input
+              type="text"
+              value={aiName}
+              onChange={(e) => setAiName(e.target.value)}
+              onBlur={handleAINameSave}
+              placeholder="J&oslash;rgen Andr&eacute;"
+              className="w-full px-3 py-2 text-sm"
+              style={{ border: "1px solid var(--border)", background: "transparent", color: "var(--text-primary)" }}
+            />
+            <span className="text-xs mt-1 block" style={{ color: "var(--text-muted)" }}>
+              Initialer i chat: {getInitials(aiName || "J\u00f8rgen Andr\u00e9")}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );

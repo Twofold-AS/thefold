@@ -30,7 +30,7 @@ import Image from "next/image";
 export default function ChatPage() {
   const router = useRouter();
   const { preferences } = usePreferences();
-  const { initial, avatarColor } = useUser();
+  const { initial, avatarColor, aiName, aiInitials } = useUser();
   const { repos } = useRepoContext();
   const modelMode = preferences.modelMode;
 
@@ -302,12 +302,51 @@ export default function ChatPage() {
           title: data.title || data.phase,
           steps: data.steps || [],
           error: data.error,
+          questions: data.questions,
         };
       }
     } catch {
       // Not JSON agent_status
     }
     return null;
+  }
+
+  // Agent callbacks
+  function handleAgentReply(answer: string) {
+    if (!activeConvId) return;
+    // Send the reply as a normal user message — backend picks it up
+    const convId = activeConvId;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: "temp-reply-" + Date.now(),
+        conversationId: convId,
+        role: "user",
+        content: answer,
+        messageType: "chat",
+        createdAt: new Date().toISOString(),
+        metadata: null,
+      },
+    ]);
+    setPollMode("waiting");
+    sendMessage(convId, answer, { chatOnly: true, modelOverride: selectedModel }).then(() => loadHistory()).catch(() => {});
+  }
+
+  function handleAgentRetry() {
+    // Re-send the last user message
+    const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+    if (lastUserMsg && activeConvId) {
+      setPollMode("waiting");
+      sendMessage(activeConvId, lastUserMsg.content, { chatOnly: true, modelOverride: selectedModel }).then(() => loadHistory()).catch(() => {});
+    }
+  }
+
+  function handleAgentCancel() {
+    if (activeConvId) {
+      cancelChatGeneration(activeConvId).catch(() => {});
+      setPollMode("idle");
+      setHeartbeatLost(false);
+    }
   }
 
   // Check if AI is still thinking (last message is agent_status or we're sending)
@@ -471,9 +510,8 @@ export default function ChatPage() {
               </div>
             ) : (
               <div className="space-y-4 max-w-4xl mx-auto pt-4">
-                {messages.map((msg) => {
+                {messages.filter(m => m.messageType !== "agent_report").map((msg) => {
                   const isUser = msg.role === "user";
-                  const isAgentReport = msg.messageType === "agent_report";
                   const isContextTransfer = msg.messageType === "context_transfer";
 
                   // Agent status message — render as AgentStatus panel
@@ -481,7 +519,12 @@ export default function ChatPage() {
                   if (agentData) {
                     return (
                       <div key={msg.id} className="message-enter">
-                        <AgentStatus data={agentData} />
+                        <AgentStatus
+                          data={agentData}
+                          onReply={handleAgentReply}
+                          onRetry={handleAgentRetry}
+                          onCancel={handleAgentCancel}
+                        />
                       </div>
                     );
                   }
@@ -500,29 +543,18 @@ export default function ChatPage() {
                           border: isUser ? "none" : "1px solid var(--border)",
                         }}
                       >
-                        {isUser ? initial : "TF"}
+                        {isUser ? initial : aiInitials}
                       </div>
 
                       {/* Bubble */}
                       <div
                         className={`${isUser ? "max-w-[70%] text-right" : "max-w-[85%]"}`}
                         style={{
-                          ...(isAgentReport
-                            ? { borderLeft: "2px solid #6366f1", paddingLeft: "12px" }
-                            : isContextTransfer
+                          ...(isContextTransfer
                             ? { borderLeft: "2px solid #22c55e", paddingLeft: "12px" }
                             : {}),
                         }}
                       >
-                        {/* Badge for special types */}
-                        {isAgentReport && (
-                          <span
-                            className="inline-block text-[10px] px-1.5 py-0.5 mb-1 font-medium"
-                            style={{ background: "rgba(99,102,241,0.15)", color: "#818cf8" }}
-                          >
-                            Agent Report
-                          </span>
-                        )}
                         {isContextTransfer && (
                           <span
                             className="inline-block text-[10px] px-1.5 py-0.5 mb-1 font-medium"
@@ -596,7 +628,7 @@ export default function ChatPage() {
                       className="agent-pulse"
                       style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--success)", display: "inline-block" }}
                     />
-                    <span className="text-sm agent-shimmer" style={{ color: "var(--text-muted)" }}>TheFold tenker</span>
+                    <span className="text-sm agent-shimmer" style={{ color: "var(--text-muted)" }}>{aiName} tenker</span>
                     <span className="agent-dots">
                       <span className="dot">.</span>
                       <span className="dot">.</span>
@@ -609,7 +641,7 @@ export default function ChatPage() {
                 {heartbeatLost && (
                   <div className="px-4 py-3 message-enter" style={{ border: "1px solid #ef4444" }}>
                     <span className="text-sm" style={{ color: "#ef4444" }}>
-                      Mistet kontakt med TheFold.
+                      Mistet kontakt med {aiName}.
                     </span>
                     <button
                       onClick={() => { setPollMode("idle"); setHeartbeatLost(false); }}
@@ -628,7 +660,7 @@ export default function ChatPage() {
                       className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0"
                       style={{ background: "var(--bg-card)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
                     >
-                      TF
+                      {aiInitials}
                     </div>
                     <div className="flex items-center gap-1 px-3 py-2">
                       <span className="typing-dot" style={{ animationDelay: "0ms" }} />

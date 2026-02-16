@@ -15,6 +15,7 @@ export interface Skill {
   appliesTo: string[];
   scope: string;
   enabled: boolean;
+  taskPhase: string;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -37,19 +38,8 @@ export const listSkills = api(
     const skills: Skill[] = [];
 
     if (req.context && req.enabledOnly) {
-      const rows = db.query<{
-        id: string;
-        name: string;
-        description: string;
-        prompt_fragment: string;
-        applies_to: string[];
-        scope: string;
-        enabled: boolean;
-        created_by: string | null;
-        created_at: Date;
-        updated_at: Date;
-      }>`
-        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+      const rows = db.query<SkillRow>`
+        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
         FROM skills
         WHERE ${req.context} = ANY(applies_to) AND enabled = TRUE
         ORDER BY name
@@ -58,19 +48,8 @@ export const listSkills = api(
         skills.push(rowToSkill(row));
       }
     } else if (req.context) {
-      const rows = db.query<{
-        id: string;
-        name: string;
-        description: string;
-        prompt_fragment: string;
-        applies_to: string[];
-        scope: string;
-        enabled: boolean;
-        created_by: string | null;
-        created_at: Date;
-        updated_at: Date;
-      }>`
-        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+      const rows = db.query<SkillRow>`
+        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
         FROM skills
         WHERE ${req.context} = ANY(applies_to)
         ORDER BY name
@@ -79,19 +58,8 @@ export const listSkills = api(
         skills.push(rowToSkill(row));
       }
     } else if (req.enabledOnly) {
-      const rows = db.query<{
-        id: string;
-        name: string;
-        description: string;
-        prompt_fragment: string;
-        applies_to: string[];
-        scope: string;
-        enabled: boolean;
-        created_by: string | null;
-        created_at: Date;
-        updated_at: Date;
-      }>`
-        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+      const rows = db.query<SkillRow>`
+        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
         FROM skills
         WHERE enabled = TRUE
         ORDER BY name
@@ -100,19 +68,8 @@ export const listSkills = api(
         skills.push(rowToSkill(row));
       }
     } else {
-      const rows = db.query<{
-        id: string;
-        name: string;
-        description: string;
-        prompt_fragment: string;
-        applies_to: string[];
-        scope: string;
-        enabled: boolean;
-        created_by: string | null;
-        created_at: Date;
-        updated_at: Date;
-      }>`
-        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+      const rows = db.query<SkillRow>`
+        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
         FROM skills
         ORDER BY name
       `;
@@ -138,19 +95,8 @@ interface GetSkillResponse {
 export const getSkill = api(
   { method: "POST", path: "/skills/get", expose: true, auth: true },
   async (req: GetSkillRequest): Promise<GetSkillResponse> => {
-    const row = await db.queryRow<{
-      id: string;
-      name: string;
-      description: string;
-      prompt_fragment: string;
-      applies_to: string[];
-      scope: string;
-      enabled: boolean;
-      created_by: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>`
-      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+    const row = await db.queryRow<SkillRow>`
+      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
       FROM skills
       WHERE id = ${req.id}
     `;
@@ -171,6 +117,7 @@ interface CreateSkillRequest {
   promptFragment: string;
   appliesTo: string[];
   scope?: string;
+  taskPhase?: string;
 }
 
 interface CreateSkillResponse {
@@ -196,22 +143,12 @@ export const createSkill = api(
     }
 
     const scope = req.scope || "global";
+    const taskPhase = req.taskPhase || "all";
 
-    const row = await db.queryRow<{
-      id: string;
-      name: string;
-      description: string;
-      prompt_fragment: string;
-      applies_to: string[];
-      scope: string;
-      enabled: boolean;
-      created_by: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>`
-      INSERT INTO skills (name, description, prompt_fragment, applies_to, scope)
-      VALUES (${req.name}, ${req.description}, ${req.promptFragment}, ${req.appliesTo}, ${scope})
-      RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+    const row = await db.queryRow<SkillRow>`
+      INSERT INTO skills (name, description, prompt_fragment, applies_to, scope, task_phase)
+      VALUES (${req.name}, ${req.description}, ${req.promptFragment}, ${req.appliesTo}, ${scope}, ${taskPhase})
+      RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
     `;
 
     if (!row) {
@@ -231,6 +168,7 @@ interface UpdateSkillRequest {
   promptFragment?: string;
   appliesTo?: string[];
   scope?: string;
+  taskPhase?: string;
 }
 
 interface UpdateSkillResponse {
@@ -273,20 +211,12 @@ export const updateSkill = api(
     if (req.scope !== undefined) {
       await db.exec`UPDATE skills SET scope = ${req.scope}, updated_at = NOW() WHERE id = ${req.id}`;
     }
+    if (req.taskPhase !== undefined) {
+      await db.exec`UPDATE skills SET task_phase = ${req.taskPhase}, updated_at = NOW() WHERE id = ${req.id}`;
+    }
 
-    const row = await db.queryRow<{
-      id: string;
-      name: string;
-      description: string;
-      prompt_fragment: string;
-      applies_to: string[];
-      scope: string;
-      enabled: boolean;
-      created_by: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>`
-      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+    const row = await db.queryRow<SkillRow>`
+      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
       FROM skills
       WHERE id = ${req.id}
     `;
@@ -313,21 +243,10 @@ interface ToggleSkillResponse {
 export const toggleSkill = api(
   { method: "POST", path: "/skills/toggle", expose: true, auth: true },
   async (req: ToggleSkillRequest): Promise<ToggleSkillResponse> => {
-    const row = await db.queryRow<{
-      id: string;
-      name: string;
-      description: string;
-      prompt_fragment: string;
-      applies_to: string[];
-      scope: string;
-      enabled: boolean;
-      created_by: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>`
+    const row = await db.queryRow<SkillRow>`
       UPDATE skills SET enabled = ${req.enabled}, updated_at = NOW()
       WHERE id = ${req.id}
-      RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+      RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
     `;
 
     if (!row) {
@@ -379,19 +298,8 @@ export const getActiveSkills = api(
   async (req: GetActiveSkillsRequest): Promise<GetActiveSkillsResponse> => {
     const skills: Skill[] = [];
 
-    const rows = db.query<{
-      id: string;
-      name: string;
-      description: string;
-      prompt_fragment: string;
-      applies_to: string[];
-      scope: string;
-      enabled: boolean;
-      created_by: string | null;
-      created_at: Date;
-      updated_at: Date;
-    }>`
-      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, created_by, created_at, updated_at
+    const rows = db.query<SkillRow>`
+      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
       FROM skills
       WHERE enabled = TRUE AND ${req.context} = ANY(applies_to)
       ORDER BY name
@@ -455,6 +363,7 @@ interface SkillRow {
   applies_to: string[];
   scope: string;
   enabled: boolean;
+  task_phase: string;
   created_by: string | null;
   created_at: Date;
   updated_at: Date;
@@ -469,6 +378,7 @@ function rowToSkill(row: SkillRow): Skill {
     appliesTo: row.applies_to,
     scope: row.scope,
     enabled: row.enabled,
+    taskPhase: row.task_phase || "all",
     createdBy: row.created_by,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),

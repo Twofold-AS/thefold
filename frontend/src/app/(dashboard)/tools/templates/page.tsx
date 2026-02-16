@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   listTemplates,
+  listRepos,
   useTemplateApi,
   type Template,
   type TemplateFile,
@@ -53,7 +54,7 @@ export default function TemplatesPage() {
     <div className="relative">
       {/* Info card */}
       <div className="card p-5 mb-6">
-        <h2 className="text-lg font-sans font-medium mb-2" style={{ color: "var(--text-primary)" }}>
+        <h2 className="text-lg font-display font-medium mb-2" style={{ color: "var(--text-primary)" }}>
           Template Library
         </h2>
         <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
@@ -137,7 +138,7 @@ function TemplateCard({ template, onClick }: { template: Template; onClick: () =
       className="p-4 cursor-pointer transition-all hover:-translate-y-0.5"
       style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
     >
-      <h3 className="text-sm font-sans font-semibold" style={{ color: "var(--text-primary)" }}>
+      <h3 className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
         {template.name}
       </h3>
       <p className="text-xs mt-1 line-clamp-2" style={{ color: "var(--text-muted)" }}>
@@ -185,27 +186,7 @@ function TemplateSlideOver({
   onUsed: () => void;
 }) {
   const [expandedFile, setExpandedFile] = useState<string | null>(null);
-  const [variables, setVariables] = useState<Record<string, string>>(() => {
-    const defaults: Record<string, string> = {};
-    for (const v of template.variables) {
-      defaults[v.name] = v.defaultValue;
-    }
-    return defaults;
-  });
-  const [useLoading, setUseLoading] = useState(false);
-  const [result, setResult] = useState<{ files: TemplateFile[]; dependencies: string[] } | null>(null);
-
-  async function handleUse() {
-    setUseLoading(true);
-    try {
-      const res = await useTemplateApi(template.id, "current-project", variables);
-      setResult(res);
-    } catch {
-      // Error handling
-    } finally {
-      setUseLoading(false);
-    }
-  }
+  const [showInstallModal, setShowInstallModal] = useState(false);
 
   return (
     <>
@@ -219,7 +200,7 @@ function TemplateSlideOver({
         <div className="p-6">
           {/* Header */}
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
+            <h2 className="text-lg font-display font-semibold" style={{ color: "var(--text-primary)" }}>
               {template.name}
             </h2>
             <button onClick={onClose} className="p-1.5 hover:opacity-80" style={{ color: "var(--text-muted)" }}>
@@ -233,37 +214,13 @@ function TemplateSlideOver({
             {template.description}
           </p>
 
-          {/* Variables */}
-          {template.variables.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-xs font-medium mb-3" style={{ color: "var(--text-secondary)" }}>
-                Variabler
-              </h3>
-              <div className="space-y-3">
-                {template.variables.map((v) => (
-                  <div key={v.name}>
-                    <label className="text-[11px] block mb-1" style={{ color: "var(--text-muted)" }}>
-                      {v.name} — {v.description}
-                    </label>
-                    <input
-                      type="text"
-                      value={variables[v.name] ?? v.defaultValue}
-                      onChange={(e) => setVariables({ ...variables, [v.name]: e.target.value })}
-                      className="input-field w-full text-sm font-mono"
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* Files */}
           <div className="mb-6">
             <h3 className="text-xs font-medium mb-3" style={{ color: "var(--text-secondary)" }}>
               Filer ({template.files.length})
             </h3>
             <div className="space-y-2">
-              {(result?.files ?? template.files).map((file) => (
+              {template.files.map((file) => (
                 <div key={file.path} className="overflow-hidden" style={{ border: "1px solid var(--border)" }}>
                   <button
                     onClick={() => setExpandedFile(expandedFile === file.path ? null : file.path)}
@@ -309,25 +266,215 @@ function TemplateSlideOver({
             </div>
           )}
 
+          {/* Variables preview */}
+          {template.variables.length > 0 && (
+            <div className="mb-6">
+              <h3 className="text-xs font-medium mb-2" style={{ color: "var(--text-secondary)" }}>
+                Variabler ({template.variables.length})
+              </h3>
+              <div className="flex gap-2 flex-wrap">
+                {template.variables.map((v) => (
+                  <span key={v.name} className="px-2 py-1 text-xs font-mono" style={{ background: "var(--bg-sidebar)", color: "var(--text-secondary)" }}>
+                    {v.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Use button */}
           <div className="pt-4" style={{ borderTop: "1px solid var(--border)" }}>
-            {result ? (
-              <div className="text-center">
-                <p className="text-sm font-medium mb-2" style={{ color: "#22c55e" }}>
-                  Mal generert med {result.files.length} filer
-                </p>
-                <button onClick={onUsed} className="btn-primary text-sm">
-                  Lukk
-                </button>
-              </div>
-            ) : (
-              <button onClick={handleUse} disabled={useLoading} className="btn-primary text-sm w-full">
-                {useLoading ? "Genererer..." : "Legg til i prosjekt"}
-              </button>
-            )}
+            <button onClick={() => setShowInstallModal(true)} className="btn-primary text-sm w-full">
+              Legg til i prosjekt
+            </button>
           </div>
         </div>
       </div>
+
+      {/* Install modal */}
+      {showInstallModal && (
+        <InstallTemplateModal
+          template={template}
+          onClose={() => setShowInstallModal(false)}
+          onInstalled={() => {
+            setShowInstallModal(false);
+            onUsed();
+          }}
+        />
+      )}
     </>
+  );
+}
+
+// --- Install Template Modal ---
+
+function InstallTemplateModal({
+  template,
+  onClose,
+  onInstalled,
+}: {
+  template: Template;
+  onClose: () => void;
+  onInstalled: () => void;
+}) {
+  const [variables, setVariables] = useState<Record<string, string>>(() => {
+    const defaults: Record<string, string> = {};
+    for (const v of template.variables) {
+      defaults[v.name] = v.defaultValue;
+    }
+    return defaults;
+  });
+  const [repos, setRepos] = useState<{ name: string; fullName: string }[]>([]);
+  const [selectedRepo, setSelectedRepo] = useState("");
+  const [reposLoading, setReposLoading] = useState(true);
+  const [installing, setInstalling] = useState(false);
+  const [result, setResult] = useState<{ files: TemplateFile[]; dependencies: string[] } | null>(null);
+
+  useEffect(() => {
+    loadRepos();
+  }, []);
+
+  async function loadRepos() {
+    setReposLoading(true);
+    try {
+      const res = await listRepos("Twofold-AS");
+      setRepos(res.repos.map((r) => ({ name: r.name, fullName: r.fullName })));
+      if (res.repos.length > 0) {
+        setSelectedRepo(res.repos[0].name);
+      }
+    } catch {
+      // Fail silently
+    } finally {
+      setReposLoading(false);
+    }
+  }
+
+  async function handleInstall() {
+    if (!selectedRepo) return;
+    setInstalling(true);
+    try {
+      const res = await useTemplateApi(template.id, selectedRepo, variables);
+      setResult(res);
+    } catch {
+      // Error handling
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center"
+      style={{ background: "rgba(0,0,0,0.6)" }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        className="w-full max-w-lg max-h-[90vh] overflow-y-auto"
+        style={{ background: "var(--bg-page)", border: "1px solid var(--border)" }}
+      >
+        <div className="p-6">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-5">
+            <h2 className="text-base font-display font-semibold" style={{ color: "var(--text-primary)" }}>
+              Installer template
+            </h2>
+            <button onClick={onClose} className="p-1 hover:opacity-80" style={{ color: "var(--text-muted)" }}>
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Template info */}
+          <div className="mb-5 pb-5" style={{ borderBottom: "1px solid var(--border)" }}>
+            <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+              {template.name}
+            </p>
+            <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+              {template.description}
+            </p>
+          </div>
+
+          {result ? (
+            /* Success state */
+            <div className="text-center py-4">
+              <p className="text-sm font-medium mb-1" style={{ color: "#22c55e" }}>
+                Installert
+              </p>
+              <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
+                {result.files.length} filer generert til {selectedRepo}
+              </p>
+              <button onClick={onInstalled} className="btn-primary text-sm">
+                Lukk
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* Repo selector */}
+              <div className="mb-4">
+                <label className="text-xs font-medium block mb-1.5" style={{ color: "var(--text-secondary)" }}>
+                  Repo
+                </label>
+                {reposLoading ? (
+                  <div className="flex items-center gap-2 px-3 py-2 text-xs" style={{ background: "var(--bg-secondary)", border: "1px solid var(--border)", color: "var(--text-muted)" }}>
+                    Laster repos...
+                  </div>
+                ) : (
+                  <select
+                    value={selectedRepo}
+                    onChange={(e) => setSelectedRepo(e.target.value)}
+                    className="input-field w-full text-sm"
+                  >
+                    {repos.map((r) => (
+                      <option key={r.name} value={r.name}>
+                        {r.fullName}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              {/* Variables */}
+              {template.variables.length > 0 && (
+                <div className="mb-5">
+                  <label className="text-xs font-medium block mb-2" style={{ color: "var(--text-secondary)" }}>
+                    Variabler
+                  </label>
+                  <div className="space-y-3">
+                    {template.variables.map((v) => (
+                      <div key={v.name}>
+                        <label className="text-[11px] block mb-1" style={{ color: "var(--text-muted)" }}>
+                          <span className="font-mono">{v.name}</span> — {v.description}
+                        </label>
+                        <input
+                          type="text"
+                          value={variables[v.name] ?? v.defaultValue}
+                          onChange={(e) => setVariables({ ...variables, [v.name]: e.target.value })}
+                          className="input-field w-full text-sm"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex gap-3 pt-4" style={{ borderTop: "1px solid var(--border)" }}>
+                <button onClick={onClose} className="btn-secondary text-sm flex-1">
+                  Avbryt
+                </button>
+                <button
+                  onClick={handleInstall}
+                  disabled={installing || !selectedRepo}
+                  className="btn-primary text-sm flex-1"
+                >
+                  {installing ? "Installerer..." : "Installer"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
