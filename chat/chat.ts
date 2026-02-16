@@ -388,6 +388,8 @@ export const send = api(
         taskId: req.linearTaskId!,
         userMessage: req.message,
         modelOverride: req.modelOverride ?? undefined,
+        repoName: req.repoName,
+        repoOwner: "Twofold-AS",
       });
 
       // Store a "task started" message

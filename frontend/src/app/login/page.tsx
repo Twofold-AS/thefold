@@ -179,7 +179,10 @@ export default function LoginPage() {
                 <span className="font-display text-[32px] block mb-1" style={{ color: "var(--text-secondary)" }}>
                   Logg inn p&aring;
                 </span>
-                <span className="font-brand text-[48px] block" style={{ color: "var(--text-primary)", lineHeight: "1.1" }}>
+                <span
+                  className="text-shimmer-slow block"
+                  style={{ fontFamily: "'TheFold Brand', var(--font-display)", fontSize: "3rem", lineHeight: "1.1" }}
+                >
                   TheFold
                 </span>
               </h1>

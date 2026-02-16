@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { useRepoContext, type Repo } from "@/lib/repo-context";
@@ -89,14 +88,11 @@ export function Sidebar() {
       className="fixed top-0 left-0 z-50 h-screen w-60 flex flex-col"
       style={{ background: "var(--bg-sidebar)", borderRight: "1px solid var(--sidebar-border)" }}
     >
-      {/* Logo + brand + profile */}
+      {/* Brand + profile */}
       <div className="flex items-center justify-between px-5 py-4">
-        <div className="flex items-center gap-3">
-          <Image src="/logo.svg" alt="TheFold" width={24} height={24} className="flex-shrink-0" />
-          <span className="font-brand text-lg font-medium brand-shimmer" style={{ color: "var(--sidebar-text-active)" }}>
-            TheFold
-          </span>
-        </div>
+        <span className="text-lg text-shimmer-slow" style={{ fontFamily: "'TheFold Brand', var(--font-display)", color: "var(--text-primary)" }}>
+          TheFold
+        </span>
         <div
           className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0"
           style={{ background: avatarColor, color: "#fff" }}
@@ -210,6 +206,11 @@ export function Sidebar() {
             active={isActive("/settings")}
             onNavigate={() => setMobileOpen(false)}
           />
+        </div>
+
+        {/* Twofold branding at bottom */}
+        <div className="px-4 py-4 flex items-center gap-2" style={{ borderTop: "1px solid var(--border)" }}>
+          <span className="text-xs" style={{ color: "var(--text-muted)", opacity: 0.5 }}>Twofold</span>
         </div>
       </nav>
     </aside>

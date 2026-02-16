@@ -45,6 +45,8 @@ export interface StartTaskRequest {
   userId?: string; // optional — used to fetch model preference
   modelOverride?: string; // manuelt modellvalg fra chat
   thefoldTaskId?: string; // TheFold task engine ID (if task comes from tasks service)
+  repoName?: string; // repo name from caller (chat/tool)
+  repoOwner?: string; // repo owner from caller
 }
 
 export interface StartTaskResponse {
@@ -1238,10 +1240,10 @@ export const startTask = api(
       taskId: req.taskId,
       taskDescription: "", // filled in during execution
       userMessage: req.userMessage,
-      repoOwner: REPO_OWNER,
-      repoName: REPO_NAME,
+      repoOwner: req.repoOwner || REPO_OWNER,
+      repoName: req.repoName || REPO_NAME,
       branch: "main",
-      thefoldTaskId: req.thefoldTaskId,
+      thefoldTaskId: req.thefoldTaskId || req.taskId,
       modelMode,
       modelOverride: req.modelOverride,
       selectedModel: "claude-sonnet-4-5-20250929", // default, oppdateres etter complexity assessment

@@ -20,6 +20,15 @@
   font-display: swap;
 }
 
+/* TheFold Brand — custom logotype font */
+@font-face {
+  font-family: "TheFold Brand";
+  src: url("/fonts/thefold.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* Inter — generell UI */
 @font-face {
   font-family: "Inter";
@@ -603,6 +612,34 @@
 
 /* --- TheFold brand shimmer (sidebar + chat avatar) --- */
 
+.text-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--text-primary) 0%,
+    rgba(255,255,255,0.4) 50%,
+    var(--text-primary) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: text-shimmer-kf 3s ease-in-out infinite;
+}
+
+.text-shimmer-slow {
+  background: linear-gradient(
+    90deg,
+    var(--text-primary) 0%,
+    rgba(255,255,255,0.4) 50%,
+    var(--text-primary) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: text-shimmer-kf 5s ease-in-out infinite;
+}
+
 .brand-shimmer {
   background: linear-gradient(
     90deg,
@@ -614,11 +651,12 @@
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
-  animation: brand-shimmer-kf 3s ease-in-out infinite;
+  animation: text-shimmer-kf 3s ease-in-out infinite;
 }
-@keyframes brand-shimmer-kf {
-  0% { background-position: 300% 0; }
-  100% { background-position: -300% 0; }
+
+@keyframes text-shimmer-kf {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 /* --- Animated dots --- */

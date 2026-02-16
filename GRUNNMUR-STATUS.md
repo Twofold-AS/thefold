@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 16. februar 2026 (Agent dual-source task lookup + tool-use forbedringer)
+> Sist oppdatert: 16. februar 2026 (Agent repo routing fix + multi-repo support)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -148,6 +148,16 @@
 | POST /agent/audit/list | 🟢 | true | Ja | Liste audit-logg med filtrering + paginering |
 | POST /agent/audit/trace | 🟢 | true | Ja | Full trace for en task med summary |
 | POST /agent/audit/stats | 🟢 | true | Ja | Statistikk (success rate, action counts, failures) |
+
+### Multi-Repo Routing (agent repo routing)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| StartTaskRequest with repoName/repoOwner | 🟢 | Agent tar nå `repoName?` og `repoOwner?` i request i stedet for hardkodet REPO_NAME/REPO_OWNER |
+| Task repo propagation | 🟢 | `ai.start_task` tool henter `task.repo` fra DB og sender til `agent.startTask()` |
+| Chat repo routing | 🟢 | `chat.shouldTriggerAgent()` sender `req.repoName` til `agent.startTask()` — repo-kontekst fra chat propagerer til agent |
+| Duplicate task prevention | 🟢 | `create_task` tool sjekker for existing tasks med samme tittel før opprettelse |
+| thefoldTaskId defaults | 🟢 | `startTask()` setter automatisk `thefoldTaskId = req.taskId` hvis ikke angitt |
 
 ### Project Orchestrator (Steg 3.4)
 

@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.9 - Agent dual-source task lookup + tool-use forbedringer
+> **Versjon:** 3.10 - Agent repo routing fix + multi-repo support
 > **Sist oppdatert:** 16. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -108,6 +108,13 @@
 - **FIX 2 — Task enrichment at creation:** `ai/ai.ts` `create_task` tool bruker nå `source: "chat"` i stedet for `"manual"`. Ny `enrichTaskWithAI()` funksjon (fire-and-forget) estimerer `estimatedComplexity` og `estimatedTokens` etter opprettelse. "chat" lagt til `TaskSource` type i `tasks/types.ts`
 - **FIX 3 — start_task verification + status update:** `ai/ai.ts` `start_task` tool verifiserer nå at task eksisterer via `tasks.getTaskInternal()` før agent startes. Returnerer feil hvis task ikke finnes. Oppdaterer status til `in_progress` før start, `blocked` ved feil
 - **FIX 4 — conversationId propagation:** Verifisert at `conversationId` allerede flyter korrekt fra chat til agent via `start_task` — ingen endring nødvendig
+
+### ✅ Ferdig — Bugfiks Runde 7: Agent Repo Routing (februar 2026)
+- **FIX 1 — Agent multi-repo support (KRITISK):** `agent/types.ts` `StartTaskRequest` nå accept `repoName?` og `repoOwner?` — agent bruker disse i stedet for hardkodet REPO_NAME/REPO_OWNER. Tillater agenten å jobbe med hvilket som helst repo
+- **FIX 2 — Task-to-agent repo propagation:** `ai/ai.ts` `start_task` tool henter nå `task.repo` fra DB og sender den til `agent.startTask()`. Sikrer at agent jobber med korrekt repo basert på task-data
+- **FIX 3 — Chat-to-agent repo routing:** `chat/chat.ts` `shouldTriggerAgent()` sender nå `req.repoName` til `agent.startTask()`. Repo-kontekst fra chat-request propagerer til agent
+- **FIX 4 — Duplicate task prevention:** `create_task` tool implementerer nå duplicate-check — forhindrer opprettelse av samme task flere ganger (basert på title-match)
+- **FIX 5 — thefoldTaskId default:** `startTask()` i agent setter nå `thefoldTaskId` automatisk til `req.taskId` hvis ikke angitt. Forenkler routing av opprettede tasks
 
 ### ✅ Ferdig — Cancel/Stop Task Mechanism (februar 2026)
 - **Backend:** `POST /tasks/cancel` endpoint (exposed, auth) med in-memory `cancelledTasks` Set. `isCancelled` intern endpoint returnerer cancellation status for task

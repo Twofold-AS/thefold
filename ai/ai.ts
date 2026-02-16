@@ -787,6 +787,19 @@ async function executeToolCall(
     case "create_task": {
       const { tasks: tasksClient } = await import("~encore/clients");
       const taskRepo = (input.repoName as string) || repoName || undefined;
+
+      // Duplicate check — prevent creating same task twice
+      try {
+        const existing = await tasksClient.listTasks({ repo: taskRepo, limit: 20 });
+        const duplicate = existing.tasks.find((t: { title: string; status: string }) =>
+          t.title.toLowerCase() === (input.title as string).toLowerCase() &&
+          t.status !== "deleted" && t.status !== "done"
+        );
+        if (duplicate) {
+          return { success: false, taskId: duplicate.id, message: `Oppgave "${input.title}" finnes allerede (ID: ${duplicate.id})` };
+        }
+      } catch { /* non-critical — proceed with creation */ }
+
       const result = await tasksClient.createTask({
         title: input.title as string,
         description: (input.description as string) || "",
@@ -808,41 +821,46 @@ async function executeToolCall(
 
       try {
         const { tasks: tasksClient } = await import("~encore/clients");
+        const taskId = input.taskId as string;
 
-        // Verify task exists before starting
-        let taskExists = false;
+        // Verify task exists and get repo info
+        let taskData: { repo?: string } | null = null;
         try {
-          const task = await tasksClient.getTaskInternal({ id: input.taskId as string });
-          taskExists = !!task?.task;
+          const result = await tasksClient.getTaskInternal({ id: taskId });
+          if (result?.task) {
+            taskData = { repo: result.task.repo };
+          }
         } catch {
-          taskExists = false;
+          taskData = null;
         }
 
-        if (!taskExists) {
-          log.warn("START_TASK: task not found", { taskId: input.taskId });
-          return { success: false, error: `Oppgave ${input.taskId} finnes ikke` };
+        if (!taskData) {
+          log.warn("START_TASK: task not found", { taskId });
+          return { success: false, error: `Oppgave ${taskId} finnes ikke` };
         }
 
         // Update status to in_progress
         try {
-          await tasksClient.updateTaskStatus({ id: input.taskId as string, status: "in_progress" });
+          await tasksClient.updateTaskStatus({ id: taskId, status: "in_progress" });
         } catch { /* non-critical */ }
 
-        // Start agent async
+        // Start agent with correct repo from task or chat context
         const { agent: agentClient } = await import("~encore/clients");
         agentClient.startTask({
           conversationId: conversationId || "tool-" + Date.now(),
-          taskId: input.taskId as string,
+          taskId,
           userMessage: "Startet via chat tool-use",
-          thefoldTaskId: input.taskId as string,
+          thefoldTaskId: taskId,
+          repoName: taskData.repo || repoName,
+          repoOwner: "Twofold-AS",
         }).catch(async (e: Error) => {
-          log.error("START_TASK agent execution failed", { error: e.message, taskId: input.taskId });
+          log.error("START_TASK agent execution failed", { error: e.message, taskId });
           try {
-            await tasksClient.updateTaskStatus({ id: input.taskId as string, status: "blocked" });
+            await tasksClient.updateTaskStatus({ id: taskId, status: "blocked" });
           } catch { /* non-critical */ }
         });
 
-        log.info("START_TASK success", { taskId: input.taskId });
+        log.info("START_TASK success", { taskId, repoName: taskData.repo || repoName });
         return { success: true, message: `Oppgave startet — agenten jobber nå` };
       } catch (e) {
         log.error("START_TASK FAILED", { error: e instanceof Error ? e.message : String(e), taskId: input.taskId });
