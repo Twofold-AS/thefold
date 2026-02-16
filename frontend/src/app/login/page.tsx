@@ -175,13 +175,22 @@ export default function LoginPage() {
             }}
           >
             <div className="mb-10">
-              <div className="mb-4">
-                <span className="font-display text-[32px] block mb-3" style={{ color: "var(--text-secondary)" }}>
+              <div style={{ textAlign: "center" }}>
+                <p style={{ color: "var(--text-muted)", fontSize: "0.875rem", marginBottom: "0.5rem" }}>
                   Logg inn p&aring;
-                </span>
-                <img src="/logo.svg" alt="TheFold" className="logo-shimmer" style={{ height: "192px", width: "auto" }} />
+                </p>
+                <h1 className="text-shimmer-slow" style={{
+                  fontFamily: "'TheFold Brand', sans-serif",
+                  fontSize: "2.5rem",
+                  fontWeight: "normal",
+                  letterSpacing: "normal",
+                  lineHeight: 1,
+                  color: "var(--text-primary)",
+                }}>
+                  TheFold
+                </h1>
               </div>
-              <p className="mt-3 text-sm" style={{ color: "var(--text-secondary)" }}>
+              <p className="mt-3 text-sm" style={{ color: "var(--text-secondary)", textAlign: "center" }}>
                 An AI that actually commits.
               </p>
             </div>
@@ -342,7 +351,6 @@ export default function LoginPage() {
 
       {/* Footer */}
       <div className="py-6 flex flex-col items-center gap-2">
-        <Image src="/logo.svg" alt="TheFold" width={24} height={24} />
         <p className="text-xs" style={{ color: "var(--text-muted)" }}>
           Twofold AS &middot; &copy; 2025
         </p>

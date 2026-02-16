@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.11 - Agent chat robusthet (UUID-validering, getTree try/catch, Pub/Sub rewrite, magiske fraser)
+> **Versjon:** 3.15 - Prompt AA (Chat UX, Task Blocking, Voyage Rate Limit, JSON Rendering)
 > **Sist oppdatert:** 16. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -132,6 +132,35 @@
 - **FIX 8 — Skills selector (bekreftet):** SkillsSelector-komponent henter allerede fra listSkills API — fungerer korrekt
 - **FIX 9 — Magiske fraser i tenker-tab:** Erstattet "tenker..." med unike fraser (Tryller/Glitrer/Forhekser/Hokus Pokus/Alakazam) med distinkte SVG-animasjoner, visuelt adskilt fra AgentStatus-boksen
 
+### ✅ Ferdig — Bugfiks Runde 9: Agent Crash Resilience (februar 2026)
+- **FIX 1 — Memory try/catch (Voyage 429):** Alle 5 `memory.search()`/`memory.store()` kall i `agent/agent.ts` executeTask wrappet i try/catch — Voyage API 429-feil krasjer ikke lenger agenten, agent fortsetter med tom kontekst
+- **FIX 2 — Linear skip for lokale tasks:** Ny `updateLinearIfExists()` helper i agent/agent.ts — alle 3 direkte `linear.updateTask()` kall erstattet. Skipper Linear-oppdatering for tasks uten linearTaskId (lokale/chat-opprettede tasks)
+- **FIX 3 — executeTask outer try/catch:** Allerede eksisterte, nå bruker `updateLinearIfExists()` + `reportSteps()` for failure-rapport slik at feil alltid kommuniseres tilbake
+- **FIX 4 — reportSteps helper:** Ny funksjon for strukturert steg-rapportering via agentReports Pub/Sub med JSON-payload (`{ agent_status: { step, status, detail } }`)
+- **FIX 5 — Agent reports EVERY step:** 7 `reportSteps()`-kall gjennom executeTask: start, context, planning, building, validation, review, completion/failure — full synlighet i frontend
+- **FIX 6 — Pub/Sub handles structured JSON:** chat.ts subscription-handler detekterer JSON `agent_status` fra reportSteps, faller tilbake til legacy string-parsing for bakoverkompatibilitet
+- **FIX 7 — Initial agent_status at start_task:** chat.ts oppretter initial "Forbereder"-status (agent_status melding) når agent task trigges — bruker ser umiddelbart at agenten er i gang
+- **FIX 8 — Button-in-button fix:** `settings/models/page.tsx` outer `<button>` endret til `<div>` for å unnga HTML-validering-feil med nested interactive elements
+
+### ✅ Ferdig — Bugfiks Runde 10: UX Polish (februar 2026)
+- **FIX 1 — Emoji-fjerning i agent:** Alle emojier fjernet fra `agent/agent.ts` report()-kall (10+ emojier: planlegging, prikker, haker, advarsler, feil). Også fjernet emoji fra `chat/chat.ts` task-started melding. Agenten bruker nå ren tekst
+- **FIX 2 — ActivityIcon SVG-komponent:** Ny `ActivityIcon.tsx` med 12 animerte SVG-ikoner (created, completed, failed, pr, working, chat, auth, build, task, sync, heal, cost + default). Erstatter emojier i activity-tidslinjen. Ikoner har SVG-animasjoner (opacity pulse, rotate, scale)
+- **FIX 3 — AgentMode + Magic Header (BUG 5):** `tryParseAgentStatus` sjekker nå `metadata.taskId` — returnerer null for simple chat (ingen AgentStatus-boks for vanlige svar). `hasAgentStatus` filtrerer på taskId. Magic-indikator flyttet fra meldingsområdet til header-baren. Simple mode viser `{aiName} · {phrase} · tenker · {N}s`, agent mode viser bare `{phrase}`
+- **FIX 4 — Thinking Timer:** Ny `thinkingSeconds` teller i begge chat-sider. Starter ved `isWaitingForAI`, teller opp sekunder, vises i header for simple mode
+
+### ✅ Ferdig — Prompt AA: Chat UX, Task Blocking, Voyage Rate Limit (februar 2026)
+- **FIX 1 — Ra JSON i chat (KRITISK):** agent_status og agent_report meldinger filtreres ut fra meldings-rendering i begge chat-sider. AgentStatus rendres separat via useMemo (lastAgentStatus + agentActive). tryParseAgentStatus og hasAgentStatus fjernet som dead code
+- **FIX 2 — Tenker-indikator i chat (KRITISK):** MagicIcon + aiName + frase + sekunder vises na i chat-omradet (erstatter AI-avatar mens AI jobber). Header-indikatoren viser kun magisk frase i agent-modus (agentActive). Fjernet header-tekst for enkel modus
+- **FIX 3 — Task error_message (HOY):** Ny migrasjon tasks/migrations/2_add_error_message.up.sql. updateTaskStatus tar na errorMessage parameter. Agent catch-blokk og impossible_task-diagnose sender errorMessage (maks 500 tegn). Frontend TaskCard viser feilmelding pa blokkerte tasks (rod bakgrunn)
+- **FIX 4 — Duplikat-sjekk (HOY):** create_task duplikat-sjekk ignorerer na ogsa "blocked" og "failed" tasks. Disse er "dode" og skal ikke blokkere opprettelse av nye tasks med samme tittel
+- **FIX 5 — Blokkerte tasks kan ikke startes (HOY):** start_task sjekker na status for blocked/done/in_progress og returnerer feilmelding. Blokkerte tasks viser ogsa errorMessage i feilmeldingen
+- **FIX 6 — Voyage 429 retry (KRITISK):** embed() i memory.ts har na eksponentiell backoff (1s, 2s, 4s) med 3 retries ved 429 Too Many Requests. Alle memory-kall i agent.ts allerede wrappet i try/catch
+- **FIX 7 — Task type med errorMessage (HOY):** errorMessage lagt til i Task (types.ts), TaskRow, parseTask, TheFoldTask (frontend api.ts), og alle SELECT-queries i tasks.ts
+
+### ✅ Ferdig — Bugfiks Runde 11: Tool-use Robusthet (februar 2026)
+- **FIX 1 — Task ID hallusinering (BUG 1 KRITISK):** Claude sender feil UUID til start_task etter create_task. Fiks: `lastCreatedTaskId` tracking i `callAnthropicWithTools` — ved start_task overskrives input.taskId med siste opprettede task-ID. Start_task tool description oppdatert med eksplisitt instruks om å bruke ID fra create_task. Debug console.log fjernet, erstattet med structured `log.info`/`log.warn`
+- **FIX 2 — Skills selector tom (BUG 7):** `SkillsSelector` kalte `listSkills("chat")` men ingen skills har "chat" i `applies_to`. Fiks: kaller nå `listSkills()` uten context-filter — viser alle tilgjengelige skills
+
 ### ✅ Ferdig — Tilleggsarbeid (utover opprinnelig plan)
 - **Chat Redesign:** Meldingsbobler med bruker/TF-avatarer, dynamisk avatarfarge, tidsstempler, typing-indikator (3 pulserende prikker), smart auto-scroll, tomme-tilstander med foreslåtte spørsmål, agent report & context transfer badges
 - **Context Transfer:** `POST /chat/transfer-context` — AI-oppsummering med fallback til rå meldinger, hovedchat → repo-chat flyt med redirect og konversasjons-ID
@@ -172,7 +201,7 @@ Mange features har grunnmur (database-felter, interfaces, stub-implementeringer)
 **Nøkkeltall:**
 | Status | Antall |
 |--------|--------|
-| 🟢 AKTIVE | 290+ |
+| 🟢 AKTIVE | 295+ |
 | 🟡 STUBBEDE (kode finnes, passthrough) | 2 |
 | 🔴 GRUNNMUR (DB-felter/interfaces) | 19 |
 | ⚪ PLANLAGTE (ingen kode) | 9 |
@@ -1176,6 +1205,15 @@ AI Name Preference: aiName i preferences JSONB, konfigurerbart AI-navn i system 
 - ✅ Pub/Sub agent_status oppdatering: Subscription-handler omskrevet — oppdaterer eksisterende melding i stedet for duplisering
 - ✅ parseReportToSteps: Ny helper for live AgentStatus-rendering fra agent reports
 - ✅ Magiske fraser: "tenker..." erstattet med Tryller/Glitrer/Forhekser/Hokus Pokus/Alakazam + SVG-animasjoner
+
+**Bugfiks Runde 9: Agent Crash Resilience (16. feb):**
+- ✅ Memory try/catch: Alle 5 memory.search/memory.store-kall i executeTask wrappet i try/catch (Voyage 429-resiliens)
+- ✅ updateLinearIfExists: Ny helper — skipper linear.updateTask() for lokale tasks uten linearTaskId, alle 3 direkte kall erstattet
+- ✅ executeTask outer try/catch: Bruker nå updateLinearIfExists + reportSteps for failure-rapport
+- ✅ reportSteps: Ny funksjon for strukturert Pub/Sub JSON (step, status, detail), 7 rapportpunkter gjennom executeTask
+- ✅ Structured Pub/Sub: chat.ts detekterer JSON agent_status fra reportSteps, fallback til legacy parsing
+- ✅ Initial agent_status: chat.ts oppretter "Forbereder"-status ved task-trigger — umiddelbar feedback til bruker
+- ✅ Button-in-button fix: settings/models/page.tsx outer button→div
 
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.
 

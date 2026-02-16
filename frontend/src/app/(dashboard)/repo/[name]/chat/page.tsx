@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import {
   sendMessage,
@@ -21,9 +21,10 @@ import { SkillsSelector, MessageSkillBadges } from "@/components/SkillsSelector"
 import { ChatToolsMenu } from "@/components/ChatToolsMenu";
 import { InlineSkillForm } from "@/components/InlineSkillForm";
 import { LivePreview } from "@/components/LivePreview";
-import { AgentStatus, type AgentStatusData } from "@/components/AgentStatus";
+import { AgentStatus } from "@/components/AgentStatus";
 import { ChatMessage } from "@/components/ChatMessage";
 import { usePreferences, useUser } from "@/contexts/UserPreferencesContext";
+import { MagicIcon, magicPhrases } from "@/components/MagicIcon";
 import Image from "next/image";
 
 export default function RepoChatPage() {
@@ -48,6 +49,8 @@ export default function RepoChatPage() {
   const [pollMode, setPollMode] = useState<"idle" | "waiting" | "cooldown">("idle");
   const [heartbeatLost, setHeartbeatLost] = useState(false);
   const [phraseIndex, setPhraseIndex] = useState(0);
+  const [thinkingStart, setThinkingStart] = useState<number | null>(null);
+  const [thinkingSeconds, setThinkingSeconds] = useState(0);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -279,25 +282,29 @@ export default function RepoChatPage() {
     return d.toLocaleDateString("nb-NO", { day: "numeric", month: "short" });
   }
 
-  // Parse agent_status messages for AgentStatus rendering
-  function tryParseAgentStatus(msg: Message): AgentStatusData | null {
-    if (msg.messageType !== "agent_status") return null;
+  // Agent status tracking for AgentStatus box (rendered separately from messages)
+  const lastAgentStatus = useMemo(() => {
+    const statusMsgs = messages.filter(m => m.messageType === "agent_status");
+    if (statusMsgs.length === 0) return null;
+    const last = statusMsgs[statusMsgs.length - 1];
     try {
-      const data = JSON.parse(msg.content);
-      if (data.type === "agent_status" && data.phase) {
-        return {
-          phase: data.phase,
-          title: data.title || data.phase,
-          steps: data.steps || [],
-          error: data.error,
-          questions: data.questions,
-        };
-      }
-    } catch {
-      // Not JSON agent_status
-    }
+      const parsed = JSON.parse(last.content);
+      if (parsed.type === "agent_status") return { ...parsed, messageId: last.id, metadata: last.metadata };
+    } catch {}
     return null;
-  }
+  }, [messages]);
+
+  const agentActive = useMemo(() => {
+    if (!lastAgentStatus) return false;
+    // Only show AgentStatus for real agent tasks (must have taskId in metadata)
+    try {
+      const meta = typeof lastAgentStatus.metadata === "string"
+        ? JSON.parse(lastAgentStatus.metadata)
+        : lastAgentStatus.metadata;
+      if (!meta?.taskId) return false;
+    } catch { return false; }
+    return lastAgentStatus.phase !== "Ferdig" && lastAgentStatus.phase !== "Feilet";
+  }, [lastAgentStatus]);
 
   // Agent callbacks
   function handleAgentReply(answer: string) {
@@ -338,10 +345,6 @@ export default function RepoChatPage() {
   // Check if AI is still thinking
   const lastMsg = messages[messages.length - 1];
   const isWaitingForAI = pollMode === "waiting" && (!lastMsg || lastMsg.role === "user" || lastMsg.messageType === "agent_status");
-  const hasAgentStatus = messages.some(m => m.messageType === "agent_status");
-
-  // Magic phrases for tab indicator (distinct from AgentStatus box)
-  const magicPhrases = ["Tryller", "Glitrer", "Forhekser", "Hokus Pokus", "Alakazam"];
 
   useEffect(() => {
     if (!isWaitingForAI) return;
@@ -354,6 +357,24 @@ export default function RepoChatPage() {
     }, 3000);
     return () => clearInterval(interval);
   }, [isWaitingForAI]);
+
+  // Thinking timer for simple mode header
+  useEffect(() => {
+    if (isWaitingForAI) {
+      setThinkingStart(Date.now());
+    } else {
+      setThinkingStart(null);
+      setThinkingSeconds(0);
+    }
+  }, [isWaitingForAI]);
+
+  useEffect(() => {
+    if (!thinkingStart) return;
+    const timer = setInterval(() => {
+      setThinkingSeconds(Math.floor((Date.now() - thinkingStart) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [thinkingStart]);
 
   return (
     <div className="flex flex-col" style={{ height: "100vh" }}>
@@ -497,24 +518,13 @@ export default function RepoChatPage() {
                 </div>
               ) : (
                 <div className="space-y-4 max-w-4xl mx-auto pt-4">
-                  {messages.filter(m => m.messageType !== "agent_report").map((msg) => {
+                  {messages.filter(m => {
+                    if (m.messageType === "agent_status") return false;
+                    if (m.messageType === "agent_report") return false;
+                    return true;
+                  }).map((msg) => {
                     const isUser = msg.role === "user";
                     const isContextTransfer = msg.messageType === "context_transfer";
-
-                    // Agent status message — render as AgentStatus panel
-                    const agentData = tryParseAgentStatus(msg);
-                    if (agentData) {
-                      return (
-                        <div key={msg.id} className="message-enter">
-                          <AgentStatus
-                            data={agentData}
-                            onReply={handleAgentReply}
-                            onRetry={handleAgentRetry}
-                            onCancel={handleAgentCancel}
-                          />
-                        </div>
-                      );
-                    }
 
                     return (
                       <div
@@ -607,74 +617,42 @@ export default function RepoChatPage() {
                     );
                   })}
 
-                  {/* Magic tab indicator — rotates fun phrases with unique SVGs */}
-                  {isWaitingForAI && !hasAgentStatus && (
-                    <div className="flex items-center gap-2 py-3 pl-4 message-enter">
-                      <span style={{ color: "var(--text-muted)" }}>
-                        {magicPhrases[phraseIndex] === "Tryller" && (
-                          <svg className="w-4 h-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
-                            <line x1="3" y1="17" x2="14" y2="6" strokeLinecap="round">
-                              <animateTransform attributeName="transform" type="rotate" values="0 8.5 11.5;-5 8.5 11.5;5 8.5 11.5;0 8.5 11.5" dur="2s" repeatCount="indefinite" />
-                            </line>
-                            <circle cx="14" cy="6" r="1" fill="currentColor">
-                              <animate attributeName="opacity" values="1;0.3;1" dur="0.8s" repeatCount="indefinite" />
-                            </circle>
-                            <circle cx="16" cy="4" r="0.5" fill="currentColor">
-                              <animate attributeName="opacity" values="0.3;1;0.3" dur="0.6s" repeatCount="indefinite" />
-                            </circle>
-                            <circle cx="15" cy="3" r="0.5" fill="currentColor">
-                              <animate attributeName="opacity" values="0.5;1;0.5" dur="1s" repeatCount="indefinite" />
-                            </circle>
-                          </svg>
-                        )}
-                        {magicPhrases[phraseIndex] === "Glitrer" && (
-                          <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
-                            <path d="M10 2l1 3 3 1-3 1-1 3-1-3-3-1 3-1z">
-                              <animate attributeName="opacity" values="1;0.2;1" dur="1.2s" repeatCount="indefinite" />
-                              <animateTransform attributeName="transform" type="scale" values="1;0.8;1.1;1" dur="1.2s" repeatCount="indefinite" additive="sum" />
-                            </path>
-                            <path d="M15 10l0.7 2 2 0.7-2 0.7-0.7 2-0.7-2-2-0.7 2-0.7z" opacity="0.6">
-                              <animate attributeName="opacity" values="0.6;1;0.3;0.6" dur="0.9s" repeatCount="indefinite" />
-                            </path>
-                            <path d="M5 12l0.5 1.5 1.5 0.5-1.5 0.5-0.5 1.5-0.5-1.5-1.5-0.5 1.5-0.5z" opacity="0.4">
-                              <animate attributeName="opacity" values="0.4;1;0.4" dur="1.5s" repeatCount="indefinite" />
-                            </path>
-                          </svg>
-                        )}
-                        {magicPhrases[phraseIndex] === "Forhekser" && (
-                          <svg className="w-4 h-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1">
-                            <circle cx="10" cy="10" r="7" strokeDasharray="4 3">
-                              <animateTransform attributeName="transform" type="rotate" values="0 10 10;360 10 10" dur="4s" repeatCount="indefinite" />
-                            </circle>
-                            <circle cx="10" cy="10" r="3" strokeDasharray="2 2">
-                              <animateTransform attributeName="transform" type="rotate" values="360 10 10;0 10 10" dur="3s" repeatCount="indefinite" />
-                            </circle>
-                            <circle cx="10" cy="10" r="1" fill="currentColor">
-                              <animate attributeName="r" values="1;1.5;1" dur="1.5s" repeatCount="indefinite" />
-                            </circle>
-                          </svg>
-                        )}
-                        {magicPhrases[phraseIndex] === "Hokus Pokus" && (
-                          <svg className="w-4 h-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
-                            <path d="M6 16h8M7 16l1-8h4l1 8" strokeLinecap="round" />
-                            <ellipse cx="10" cy="8" rx="4" ry="1" />
-                            <path d="M9 7c0-2-1-4-1-5M11 7c0-2 1-4 1-5" strokeLinecap="round">
-                              <animate attributeName="d" values="M9 7c0-2-1-4-1-5M11 7c0-2 1-4 1-5;M9 7c0-2-2-3-2-5M11 7c0-2 2-3 2-5;M9 7c0-2-1-4-1-5M11 7c0-2 1-4 1-5" dur="2s" repeatCount="indefinite" />
-                            </path>
-                          </svg>
-                        )}
-                        {magicPhrases[phraseIndex] === "Alakazam" && (
-                          <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
-                            <path d="M11 2L6 10h4l-1 8 7-10h-4l2-6z">
-                              <animate attributeName="opacity" values="1;0.5;1;0.7;1" dur="0.8s" repeatCount="indefinite" />
-                              <animateTransform attributeName="transform" type="scale" values="1;1.05;0.95;1" dur="0.8s" repeatCount="indefinite" additive="sum" />
-                            </path>
-                          </svg>
-                        )}
-                      </span>
-                      <span className="text-xs agent-shimmer" style={{ color: "var(--text-muted)" }}>
-                        {magicPhrases[phraseIndex]}
-                      </span>
+                  {/* AgentStatus — rendered separately from messages */}
+                  {agentActive && lastAgentStatus && (
+                    <div className="message-enter">
+                      <AgentStatus
+                        data={{
+                          phase: lastAgentStatus.phase,
+                          title: lastAgentStatus.title || lastAgentStatus.phase,
+                          steps: lastAgentStatus.steps || [],
+                          error: lastAgentStatus.error,
+                          questions: lastAgentStatus.questions,
+                        }}
+                        onReply={handleAgentReply}
+                        onRetry={handleAgentRetry}
+                        onCancel={handleAgentCancel}
+                      />
+                    </div>
+                  )}
+
+                  {/* Thinking indicator — MagicIcon replaces AI avatar while generating */}
+                  {isWaitingForAI && !agentActive && (
+                    <div className="flex items-center gap-3 px-4 py-3">
+                      <div className="w-8 h-8 flex-shrink-0 flex items-center justify-center"
+                        style={{ color: "var(--text-muted)" }}>
+                        <MagicIcon phrase={magicPhrases[phraseIndex]} />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm" style={{ color: "var(--text-muted)" }}>
+                          {aiName}
+                        </span>
+                        <span className="text-xs" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
+                          &middot; {magicPhrases[phraseIndex]}
+                        </span>
+                        <span className="text-xs" style={{ color: "var(--text-muted)", opacity: 0.4 }}>
+                          &middot; tenker &middot; {thinkingSeconds}s
+                        </span>
+                      </div>
                     </div>
                   )}
 

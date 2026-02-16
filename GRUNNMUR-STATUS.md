@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 16. februar 2026 (Agent chat robusthet: UUID-validering, getTree try/catch, Pub/Sub rewrite, magiske fraser)
+> Sist oppdatert: 16. februar 2026 (Prompt AA: Chat UX, Task Blocking, Voyage Rate Limit, JSON Rendering)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -110,7 +110,7 @@
 | 1. Hent task (dual-source) | 🟢 | Prøver `tasks.getTaskInternal()` først, fallback til `linear.getTask()`. Lokal task → setter `ctx.thefoldTaskId`, oppdaterer status til `in_progress` | — |
 | 2. Les prosjekt-tre | 🟢 | `github.getTree()` + `findRelevantFiles()` | — |
 | 2.5. Smart fillesing | 🟢 | Context windowing: <100→full, 100-500→chunks, >500→start+slutt | — |
-| 3. Samle kontekst | 🟢 | `memory.search()` (10 resultater) + `docs.lookupForTask()` | — |
+| 3. Samle kontekst | 🟢 | `memory.search()` (10 resultater) + `docs.lookupForTask()`, alle memory-kall wrappet i try/catch (Voyage 429-resiliens) | — |
 | 4. Confidence assessment | 🟢 | `ai.assessConfidence()` → <60: stopp, <75: foreslå oppdeling, ≥75: fortsett | — |
 | 4.5. Modellvalg | 🟢 | `ai.assessComplexity()` → `selectOptimalModel()` | — |
 | 5. Lag plan | 🟢 | `ai.planTask()` → strukturert JSON (description, action, filePath, content) | — |
@@ -127,9 +127,9 @@
 | 9. Review eget arbeid | 🟢 | `ai.reviewCode()` → dokumentasjon, kvalitetsscore, concerns | — |
 | 9.5. Review gate | 🟢 | `submitReviewInternal()` → lagrer review, notifiserer chat, returnerer pending_review | skipReview=true for å hoppe over |
 | 10. Opprett PR | 🟢 | `github.createPR()` med branch + commit + PR (kun skipReview-path) | — |
-| 11. Oppdater Linear | 🟢 | `linear.updateTask()` med PR-lenke og review | State-oppdatering ufullstendig |
+| 11. Oppdater Linear | 🟢 | `updateLinearIfExists()` — skipper for lokale tasks uten linearTaskId, oppdaterer med PR-lenke og review | — |
 | 12. Lagre læring | 🟢 | `memory.store()` for decisions + error patterns med TTL og tags | — |
-| 13. Cleanup og rapport | 🟢 | `sandbox.destroy()`, audit, cost-rapport i chat | — |
+| 13. Cleanup og rapport | 🟢 | `sandbox.destroy()`, audit, cost-rapport i chat, `reportSteps()` for strukturert JSON-rapportering via Pub/Sub | — |
 
 ### Retry-logikk
 
@@ -138,6 +138,16 @@
 | MAX_RETRIES | 5 | Hovedloop-grense |
 | MAX_PLAN_REVISIONS | 2 | Maks plan-revisjoner ved bad_plan |
 | MAX_FILE_FIX_RETRIES | 2 | Maks fix-retries per fil (inkrementell validering) |
+
+### Crash Resilience
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| Memory try/catch (Voyage 429) | 🟢 | Alle 5 memory.search/memory.store-kall i executeTask wrappet i try/catch — Voyage API 429-feil krasjer ikke agenten |
+| updateLinearIfExists helper | 🟢 | Ny funksjon som skipper linear.updateTask() for lokale tasks uten linearTaskId — alle 3 direkte kall erstattet |
+| Outer try/catch i executeTask | 🟢 | Fanger alle uventede feil, bruker updateLinearIfExists + reportSteps for failure-rapport |
+| reportSteps helper | 🟢 | Ny funksjon for strukturert steg-rapportering via agentReports Pub/Sub med JSON-payload (step, status, detail) |
+| Agent reports EVERY step | 🟢 | 7 reportSteps-kall gjennom executeTask: start, context, planning, building, validation, review, completion/failure |
 
 ### Endepunkter
 
@@ -296,7 +306,7 @@
 | POST /ai/models/save | 🟢 | Opprett/oppdater modell |
 | POST /ai/models/toggle | 🟢 | Aktiver/deaktiver modell |
 | POST /ai/models/delete | 🟢 | Slett modell |
-| Frontend /settings/models | 🟢 | Full CRUD for providers + modeller, expand/collapse, modal forms |
+| Frontend /settings/models | 🟢 | Full CRUD for providers + modeller, expand/collapse, modal forms, button-in-button fix (outer button→div) |
 | Frontend /tools/ai-models | 🟢 | Provider-grupperte modeller |
 | Frontend ModelSelector | 🟢 | Grupperte modeller per provider |
 | Router cache (60s TTL) | 🟢 | DB-backed cache med fallback-modeller ved cold start |
@@ -571,7 +581,8 @@
 | Samtaleliste | 🟢 | GET /chat/conversations |
 | Context transfer | 🟢 | POST /chat/transfer-context (AI-oppsummering med fallback) |
 | Conversation ownership (OWASP A01) | 🟢 | conversations.owner_email, verifisert i alle endpoints |
-| Agent reports via Pub/Sub | 🟢 | agentReports topic → store-agent-report subscription: oppdaterer eksisterende agent_status-melding i stedet for a opprette nye agent_report-meldinger |
+| Agent reports via Pub/Sub | 🟢 | agentReports topic → store-agent-report subscription: detekterer strukturert JSON (agent_status fra reportSteps), fallback til legacy parsing. Oppdaterer eksisterende agent_status-melding |
+| Initial agent_status | 🟢 | chat.ts oppretter initial "Forbereder"-status når agent task trigges — bruker ser umiddelbart at agenten er i gang |
 | Build progress via Pub/Sub | 🟢 | buildProgress topic → chat-build-progress subscription |
 | Task events via Pub/Sub | 🟢 | taskEvents topic → chat-task-events subscription |
 | SkillIds i meldingsmetadata | 🟢 | Lagres i user message metadata |
@@ -600,7 +611,7 @@
 | Samtale-tittel fra bruker | 🟢 | Første USER-melding som tittel, filtrerer bort agent_status JSON |
 | Tenker-indikator deduplisert | 🟢 | "TheFold tenker..." kun vist før første agent_status — ingen dobbel visning |
 | Fase-ikoner i AgentStatus | 🟢 | Spinner (default), forstørrelsesglass (Analyserer), wrench (Bygger), check/X (Ferdig/Feilet) |
-| Emoji-forbud i AI-svar | 🟢 | direct_chat system prompt forbyr alle emojier, kun ren tekst + markdown |
+| Emoji-forbud i AI-svar | 🟢 | direct_chat system prompt forbyr alle emojier, kun ren tekst + markdown. Agent report()-kall + chat task-meldinger også emoji-frie |
 | AI name preference (backend) | 🟢 | aiName i preferences JSONB, leses i chat/chat.ts processAIResponse, sendes til ai.ts system prompt (default "Jørgen André") |
 | AI name i system prompt | 🟢 | getDirectChatPrompt aksepterer aiName parameter, AI identifiserer seg med konfigurerbart navn |
 | ChatMessage markdown-parser | 🟢 | Kodeblokker, overskrifter, lister, bold/italic/inline-kode i assistant-meldinger |
@@ -738,7 +749,7 @@
 
 | Feature | Status | Beskrivelse |
 |---------|--------|-------------|
-| tasks-tabell | 🟢 | 24 kolonner, 5 indekser, 4 sources, 7 statuser (inkl. deleted) |
+| tasks-tabell | 🟢 | 25 kolonner (inkl. error_message), 5 indekser, 4 sources, 7 statuser (inkl. deleted) |
 | createTask | 🟢 | POST /tasks/create, auth, full validering |
 | updateTask | 🟢 | POST /tasks/update, individuelle felt-oppdateringer |
 | deleteTask | 🟢 | POST /tasks/delete |
@@ -1198,7 +1209,7 @@
 
 | Kategori | Antall |
 |----------|--------|
-| 🟢 AKTIVE features | 290+ |
+| 🟢 AKTIVE features | 295+ |
 | 🟡 STUBBEDE features | 2 |
 | 🔴 GRUNNMUR features | 19 |
 | ⚪ PLANLAGTE features | 9 |
@@ -1219,3 +1230,6 @@
 - ✅ DEL 2 item 3 (Cache investigation): cache/cache.ts cacher KUN embeddings/repo/plans — INGEN skills caching (skills hentes alltid friskt fra DB)
 - ✅ DEL 3 completion (AgentStatus callbacks): Begge chat-sider wired med onReply/onRetry/onCancel callbacks, tryParseAgentStatus extraherer questions, handleAgentReply sender svar, handleAgentRetry re-sender siste melding, handleAgentCancel kaller cancelChatGeneration
 - ✅ Bugfiks Runde 8: Agent Chat Robusthet — start_task UUID-validering (regex + bedre feilmeldinger), start_task debug-logging, create_task returnerer tydelig UUID, getTree try/catch i alle chat-kall (prosjektdekomponering + repo-kontekst), Pub/Sub agent_status oppdatering (erstatter duplisering), parseReportToSteps helper for live AgentStatus, magiske fraser i tenker-tab (Tryller/Glitrer/Forhekser/Hokus Pokus/Alakazam med SVG-animasjoner)
+- ✅ Bugfiks Runde 9: Agent Crash Resilience — memory try/catch for Voyage 429 (alle 5 memory-kall), updateLinearIfExists helper (skipper Linear for lokale tasks), reportSteps for strukturert Pub/Sub JSON (7 rapportpunkter), chat.ts detekterer JSON agent_status med fallback til legacy, initial "Forbereder"-status ved task-trigger, button-in-button fix i settings/models (outer button→div)
+- ✅ Bugfiks Runde 10: UX Polish — emoji-fjerning fra agent report()-kall (10+ emojier), ActivityIcon SVG-komponent (12 animerte ikoner erstatter emojier i aktivitetstidslinje), agentMode-deteksjon via metadata.taskId (AgentStatus-boks KUN for ekte agent-tasks, ikke simple chat), magic header-indikator (flyttet fra meldingsområde til header), thinking timer (sekunder teller opp i simple mode)
+- ✅ Bugfiks Runde 11: Tool-use Robusthet — lastCreatedTaskId tracking i callAnthropicWithTools (forhindrer Claude task-ID hallusinering), start_task tool description forbedret, debug console.log→structured log, SkillsSelector listSkills() uten "chat" filter (viser alle skills)

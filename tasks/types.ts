@@ -19,6 +19,7 @@ export interface Task {
   buildJobId: string | null;
   prUrl: string | null;
   reviewId: string | null;
+  errorMessage?: string;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;

@@ -48,7 +48,7 @@ export function SkillsSelector({ selectedIds, onChange }: SkillsSelectorProps) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    listSkills("chat")
+    listSkills()
       .then((res) => {
         setSkills(res.skills);
         // Initialize with globally enabled skills if no selection yet

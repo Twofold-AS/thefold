@@ -729,11 +729,11 @@ const CHAT_TOOLS: Array<{
   },
   {
     name: "start_task",
-    description: "Start en eksisterende oppgave — agenten begynner å jobbe. Bruk dette når brukeren sier 'start', 'kjør', 'begynn'.",
+    description: "Start en eksisterende oppgave — agenten begynner å jobbe. Bruk dette når brukeren sier 'start', 'kjør', 'begynn'. VIKTIG: Bruk NØYAKTIG samme taskId som ble returnert fra create_task. Bruk ALDRI en ID du husker fra tidligere — bruk ID fra siste create_task respons.",
     input_schema: {
       type: "object",
       properties: {
-        taskId: { type: "string", description: "Task ID som skal startes" },
+        taskId: { type: "string", description: "Task UUID fra create_task responsen — KOPIER NØYAKTIG" },
       },
       required: ["taskId"],
     },
@@ -793,7 +793,7 @@ async function executeToolCall(
         const existing = await tasksClient.listTasks({ repo: taskRepo, limit: 20 });
         const duplicate = existing.tasks.find((t: { title: string; status: string }) =>
           t.title.toLowerCase() === (input.title as string).toLowerCase() &&
-          t.status !== "deleted" && t.status !== "done"
+          !["deleted", "done", "blocked", "failed"].includes(t.status)
         );
         if (duplicate) {
           return { success: false, taskId: duplicate.id, message: `Oppgave "${input.title}" finnes allerede (ID: ${duplicate.id})` };
@@ -817,11 +817,6 @@ async function executeToolCall(
     }
 
     case "start_task": {
-      console.log("=== START_TASK DEBUG ===");
-      console.log("Full input object:", JSON.stringify(input, null, 2));
-      console.log("input.taskId:", input.taskId);
-      console.log("typeof input.taskId:", typeof input.taskId);
-
       try {
         const { tasks: tasksClient } = await import("~encore/clients");
         const taskId = String(input.taskId || "").trim();
@@ -829,25 +824,36 @@ async function executeToolCall(
         // UUID validation
         const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         if (!taskId || !uuidRegex.test(taskId)) {
-          console.error("start_task: Invalid taskId:", taskId, "full input:", JSON.stringify(input));
+          log.warn("start_task: Invalid taskId", { taskId });
           return { success: false, error: `Ugyldig task ID format: "${taskId}". Trenger UUID.` };
         }
 
-        // Verify task exists and get repo info
-        let taskData: { repo?: string; title?: string } | null = null;
+        // Verify task exists and get repo info + status
+        let taskData: { repo?: string; title?: string; status?: string; errorMessage?: string } | null = null;
         try {
           const result = await tasksClient.getTaskInternal({ id: taskId });
           if (result?.task) {
-            taskData = { repo: result.task.repo, title: result.task.title };
+            taskData = { repo: result.task.repo, title: result.task.title, status: result.task.status, errorMessage: result.task.errorMessage };
           }
         } catch (e) {
-          console.error("start_task: getTaskInternal failed:", e);
+          log.warn("start_task: getTaskInternal failed", { taskId, error: e instanceof Error ? e.message : String(e) });
           taskData = null;
         }
 
         if (!taskData) {
           log.warn("START_TASK: task not found", { taskId });
           return { success: false, error: `Fant ikke oppgave med ID ${taskId}` };
+        }
+
+        // Status guard — blocked/done/in_progress tasks cannot be started
+        if (taskData.status === "blocked") {
+          return { success: false, error: `Oppgaven "${taskData.title}" er blokkert${taskData.errorMessage ? ": " + taskData.errorMessage : ""}. Opprett en ny oppgave.` };
+        }
+        if (taskData.status === "done") {
+          return { success: false, error: "Oppgaven er allerede fullfort." };
+        }
+        if (taskData.status === "in_progress") {
+          return { success: false, error: "Oppgaven kjorer allerede." };
         }
 
         // Update status to in_progress
@@ -867,11 +873,10 @@ async function executeToolCall(
         }).catch(async (e: Error) => {
           log.error("START_TASK agent execution failed", { error: e.message, taskId });
           try {
-            await tasksClient.updateTaskStatus({ id: taskId, status: "blocked" });
+            await tasksClient.updateTaskStatus({ id: taskId, status: "blocked", errorMessage: e.message?.substring(0, 500) });
           } catch { /* non-critical */ }
         });
 
-        console.log("start_task: SUCCESS for", taskId, "repo:", taskData.repo || repoName);
         return { success: true, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber nå.` };
       } catch (e) {
         log.error("START_TASK FAILED", { error: e instanceof Error ? e.message : String(e), taskId: input.taskId });
@@ -982,10 +987,26 @@ async function callAnthropicWithTools(options: AICallOptions & {
   // If tools were called, execute them and send results back
   if (toolUseBlocks.length > 0) {
     const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string }> = [];
+    let lastCreatedTaskId: string | null = null;
 
     for (const block of toolUseBlocks) {
+      // For start_task, prefer lastCreatedTaskId over potentially hallucinated input
+      if (block.name === "start_task" && lastCreatedTaskId) {
+        log.info("start_task: overriding input taskId with lastCreatedTaskId", {
+          inputTaskId: block.input.taskId,
+          lastCreatedTaskId,
+        });
+        block.input.taskId = lastCreatedTaskId;
+      }
+
       const result = await executeToolCall(block.name, block.input, options.repoName, options.conversationId);
       toolsUsed.push(block.name);
+
+      // Track created task ID for subsequent start_task calls
+      if (block.name === "create_task" && result.taskId) {
+        lastCreatedTaskId = result.taskId as string;
+      }
+
       toolResults.push({
         type: "tool_result",
         tool_use_id: block.id,

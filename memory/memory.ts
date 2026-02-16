@@ -23,24 +23,42 @@ async function embed(text: string): Promise<number[]> {
     return cached.embedding;
   }
 
-  // Cache miss — call Voyage API
-  const res = await fetch("https://api.voyageai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${voyageKey()}`,
-    },
-    body: JSON.stringify({ input: truncated, model: "voyage-3-lite" }),
-  });
+  // Cache miss — call Voyage API with retry for 429
+  const maxRetries = 3;
 
-  if (!res.ok) throw APIError.internal(`Voyage API error: ${res.status}`);
-  const data = await res.json();
-  const embedding: number[] = data.data[0].embedding;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${voyageKey()}`,
+        },
+        body: JSON.stringify({ input: truncated, model: "voyage-3-lite" }),
+      });
 
-  // Store in cache for next time
-  await cache.getOrSetEmbedding({ content: truncated, embedding });
+      if (res.status === 429) {
+        const waitMs = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+        console.warn(`Voyage 429 — waiting ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        continue;
+      }
 
-  return embedding;
+      if (!res.ok) throw APIError.internal(`Voyage API error: ${res.status}`);
+      const data = await res.json();
+      const embedding: number[] = data.data[0].embedding;
+
+      // Store in cache for next time
+      await cache.getOrSetEmbedding({ content: truncated, embedding });
+
+      return embedding;
+    } catch (e) {
+      if (attempt === maxRetries - 1) throw e;
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+    }
+  }
+
+  throw APIError.internal("Voyage API failed after retries");
 }
 
 interface SearchRequest {

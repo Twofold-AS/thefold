@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { MagicIcon, magicPhrases } from "./MagicIcon";
 
 export interface AgentStep {
   label: string;
@@ -97,13 +98,28 @@ function PhaseIcon({ phase }: { phase: string }) {
 export function AgentStatus({ data, onReply, onRetry, onCancel }: AgentStatusProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [replyText, setReplyText] = useState("");
+  const [phraseIndex, setPhraseIndex] = useState(0);
   const isFailed = data.phase === "Feilet";
   const isComplete = data.phase === "Ferdig";
   const isWaiting = data.phase === "Venter";
+  const isWorking = !isComplete && !isFailed && !isWaiting;
+
+  // Rotate magic phrases while working
+  useEffect(() => {
+    if (!isWorking) return;
+    const interval = setInterval(() => {
+      setPhraseIndex(prev => {
+        let next;
+        do { next = Math.floor(Math.random() * magicPhrases.length); } while (next === prev && magicPhrases.length > 1);
+        return next;
+      });
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [isWorking]);
 
   return (
     <div className="my-3 max-w-lg message-enter">
-      {/* TAB — fase-indikator */}
+      {/* TAB — MagicIcon + magic phrase (while working), PhaseIcon for terminal states */}
       <div
         className="inline-flex items-center gap-2 px-4 py-2 cursor-pointer"
         style={{
@@ -113,13 +129,26 @@ export function AgentStatus({ data, onReply, onRetry, onCancel }: AgentStatusPro
         }}
         onClick={() => setCollapsed(!collapsed)}
       >
-        <PhaseIcon phase={data.phase} />
-        <span
-          className={`text-sm font-medium ${!isComplete && !isFailed && !isWaiting ? "agent-shimmer" : ""}`}
-          style={{ color: isFailed ? "#ef4444" : isWaiting ? "#eab308" : "var(--text-primary)" }}
-        >
-          {data.phase === "Venter" ? "Venter pa input" : data.phase}
-        </span>
+        {isWorking ? (
+          <>
+            <span style={{ color: "var(--text-muted)" }}>
+              <MagicIcon phrase={magicPhrases[phraseIndex]} />
+            </span>
+            <span className="text-sm font-medium agent-shimmer" style={{ color: "var(--text-muted)" }}>
+              {magicPhrases[phraseIndex]}
+            </span>
+          </>
+        ) : (
+          <>
+            <PhaseIcon phase={data.phase} />
+            <span
+              className="text-sm font-medium"
+              style={{ color: isFailed ? "#ef4444" : isWaiting ? "#eab308" : "var(--text-primary)" }}
+            >
+              {data.phase === "Venter" ? "Venter pa input" : data.phase}
+            </span>
+          </>
+        )}
       </div>
 
       {/* BOKS — innhold */}

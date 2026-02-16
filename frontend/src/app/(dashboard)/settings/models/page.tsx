@@ -128,10 +128,10 @@ export default function SettingsModelsPage() {
           return (
             <div key={p.id} style={{ border: "1px solid var(--border)" }}>
               {/* Provider header */}
-              <button
+              <div
                 onClick={() => setExpandedProvider(isExpanded ? null : p.id)}
                 className="w-full flex items-center justify-between px-4 py-3 text-left transition-colors"
-                style={{ background: "var(--bg-secondary)", border: "none", cursor: "pointer" }}
+                style={{ background: "var(--bg-secondary)", cursor: "pointer" }}
               >
                 <div className="flex items-center gap-3">
                   {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -162,7 +162,7 @@ export default function SettingsModelsPage() {
                     <Pencil size={12} />
                   </button>
                 </div>
-              </button>
+              </div>
 
               {/* Models list */}
               {isExpanded && (

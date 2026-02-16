@@ -13,29 +13,29 @@ import {
   type RepoActivityEvent,
 } from "@/lib/api";
 import { PageHeaderBar } from "@/components/PageHeaderBar";
+import { ActivityIcon } from "@/components/ActivityIcon";
 
 /* ── Event types ── */
 
 interface TimelineEvent {
   id: string;
   time: Date;
-  icon: string;
   category: string;
   title: string;
   detail?: string;
   color: string;
 }
 
-const CATEGORY_STYLE: Record<string, { icon: string; color: string }> = {
-  builder: { icon: "\uD83D\uDD27", color: "#3b82f6" },
-  review_approved: { icon: "\u2705", color: "#22c55e" },
-  review_rejected: { icon: "\u274C", color: "#ef4444" },
-  healing: { icon: "\uD83D\uDD04", color: "#a855f7" },
-  task: { icon: "\uD83D\uDCCB", color: "#eab308" },
-  sync: { icon: "\uD83D\uDD0D", color: "#06b6d4" },
-  chat: { icon: "\uD83D\uDCAC", color: "#8b5cf6" },
-  cost: { icon: "\uD83D\uDCB0", color: "#f97316" },
-  agent: { icon: "\uD83E\uDD16", color: "#3b82f6" },
+const CATEGORY_STYLE: Record<string, { color: string }> = {
+  builder: { color: "#3b82f6" },
+  review_approved: { color: "#22c55e" },
+  review_rejected: { color: "#ef4444" },
+  healing: { color: "#a855f7" },
+  task: { color: "#eab308" },
+  sync: { color: "#06b6d4" },
+  chat: { color: "#8b5cf6" },
+  cost: { color: "#f97316" },
+  agent: { color: "#3b82f6" },
 };
 
 /* ── Helpers ── */
@@ -56,7 +56,6 @@ function auditToEvent(entry: AuditLogEntry): TimelineEvent {
   return {
     id: `audit-${entry.id}`,
     time: new Date(entry.timestamp),
-    icon: style.icon,
     category: cat,
     title: entry.actionType.replace(/_/g, " "),
     detail: entry.errorMessage || (entry.details ? JSON.stringify(entry.details).substring(0, 120) : undefined),
@@ -69,7 +68,6 @@ function taskToEvent(task: TheFoldTask): TimelineEvent {
   return {
     id: `task-${task.id}`,
     time: new Date(task.updatedAt || task.createdAt),
-    icon: style.icon,
     category: "task",
     title: `Oppgave: ${task.title}`,
     detail: `Status: ${task.status}`,
@@ -82,7 +80,6 @@ function builderToEvent(job: BuilderJobSummary): TimelineEvent {
   return {
     id: `builder-${job.id}`,
     time: new Date(job.completedAt || job.startedAt || job.createdAt),
-    icon: style.icon,
     category: "builder",
     title: `Builder: ${job.buildStrategy} (${job.status})`,
     detail: `${job.totalSteps} steg, $${job.totalCostUsd.toFixed(3)}`,
@@ -112,7 +109,6 @@ function repoActivityToEvent(a: RepoActivityEvent): TimelineEvent {
   return {
     id: `activity-${a.id}`,
     time: new Date(a.createdAt),
-    icon: style.icon,
     category: cat,
     title: a.title,
     detail,
@@ -222,7 +218,7 @@ export default function RepoActivityPage() {
                     onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-card)")}
                     onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                   >
-                    <span className="text-sm flex-shrink-0 mt-0.5">{evt.icon}</span>
+                    <span className="flex-shrink-0 mt-0.5" style={{ color: evt.color }}><ActivityIcon type={evt.category} /></span>
                     <span
                       className="text-[11px] font-mono flex-shrink-0 mt-0.5"
                       style={{ color: "var(--text-muted)", minWidth: "40px" }}

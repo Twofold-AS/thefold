@@ -807,6 +807,7 @@ export interface TheFoldTask {
   labels: string[];
   source: string;
   assignedTo: string;
+  errorMessage: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;

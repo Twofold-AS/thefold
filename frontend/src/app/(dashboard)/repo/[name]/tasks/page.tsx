@@ -423,6 +423,18 @@ function TaskCard({
         </div>
       </div>
 
+      {/* Error message for blocked tasks */}
+      {task.status === "blocked" && task.errorMessage && (
+        <div className="text-xs mt-2 px-2 py-1.5"
+          style={{
+            color: "#ef4444",
+            background: "rgba(239,68,68,0.05)",
+            border: "1px solid rgba(239,68,68,0.1)",
+          }}>
+          {task.errorMessage}
+        </div>
+      )}
+
       {/* Expanded details */}
       {expanded && (
         <div className="mt-3 pt-2 space-y-2" style={{ borderTop: "1px solid var(--border)" }}>

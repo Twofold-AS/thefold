@@ -90,7 +90,14 @@ export function Sidebar() {
     >
       {/* Brand + profile */}
       <div className="flex items-center justify-between px-5 py-4">
-        <img src="/logo.svg" alt="TheFold" className="logo-shimmer" style={{ height: "96px", width: "auto" }} />
+        <span className="text-shimmer-slow" style={{
+          fontFamily: "'TheFold Brand', sans-serif",
+          fontSize: "2.5rem",
+          fontWeight: "normal",
+          color: "var(--text-primary)",
+        }}>
+          TheFold
+        </span>
         <div
           className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0"
           style={{ background: avatarColor, color: "#fff" }}

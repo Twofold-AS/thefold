@@ -27,23 +27,22 @@ export const agentReports = new Topic<AgentReport>("agent-reports", {
 // Subscribe to agent reports and UPDATE existing agent_status (not create new agent_report)
 const _ = new Subscription(agentReports, "store-agent-report", {
   handler: async (report) => {
-    // Map status to phase
-    const phase = report.status === "working" ? "Bygger"
-      : report.status === "completed" ? "Ferdig"
-      : report.status === "failed" ? "Feilet"
-      : report.status === "needs_input" ? "Venter"
-      : "Bygger";
+    // Check if content is structured JSON (from reportSteps)
+    let statusContent: string;
 
-    // Build updated agent_status content
-    const statusContent = JSON.stringify({
-      type: "agent_status",
-      phase,
-      title: report.status === "completed" ? "Fullfort"
-        : report.status === "failed" ? "Feilet"
-        : report.content.substring(0, 80),
-      steps: parseReportToSteps(report),
-      questions: report.status === "needs_input" ? [report.content] : undefined,
-    });
+    try {
+      const parsed = JSON.parse(report.content);
+      if (parsed.type === "agent_status") {
+        // Already structured — use directly
+        statusContent = report.content;
+      } else {
+        // JSON but not agent_status — treat as legacy
+        statusContent = buildLegacyStatusContent(report);
+      }
+    } catch {
+      // Not JSON — legacy format, convert
+      statusContent = buildLegacyStatusContent(report);
+    }
 
     const metadata = JSON.stringify({
       taskId: report.taskId,
@@ -76,6 +75,24 @@ const _ = new Subscription(agentReports, "store-agent-report", {
     }
   },
 });
+
+function buildLegacyStatusContent(report: AgentReport): string {
+  const phase = report.status === "working" ? "Bygger"
+    : report.status === "completed" ? "Ferdig"
+    : report.status === "failed" ? "Feilet"
+    : report.status === "needs_input" ? "Venter"
+    : "Bygger";
+
+  return JSON.stringify({
+    type: "agent_status",
+    phase,
+    title: report.status === "completed" ? "Fullfort"
+      : report.status === "failed" ? "Feilet"
+      : report.content.substring(0, 80),
+    steps: parseReportToSteps(report),
+    questions: report.status === "needs_input" ? [report.content] : undefined,
+  });
+}
 
 function parseReportToSteps(report: AgentReport): Array<{ label: string; icon: string; status: string }> {
   const steps: Array<{ label: string; icon: string; status: string }> = [];
@@ -239,10 +256,6 @@ async function updateMessageContent(messageId: string, content: string) {
 
 async function updateMessageType(messageId: string, messageType: string) {
   await db.exec`UPDATE messages SET message_type = ${messageType} WHERE id = ${messageId}::uuid`;
-}
-
-async function updateAgentStatus(messageId: string, status: object) {
-  await db.exec`UPDATE messages SET content = ${JSON.stringify({ type: "agent_status", ...status })}, updated_at = NOW() WHERE id = ${messageId}::uuid`;
 }
 
 // --- Intent detection ---
@@ -472,8 +485,20 @@ export const send = api(
       await db.exec`
         INSERT INTO messages (conversation_id, role, content, message_type, metadata)
         VALUES (${req.conversationId}, 'assistant',
-                ${"🔧 Jeg har startet arbeidet med " + req.linearTaskId + ". Jeg rapporterer fremgang her."},
+                ${"Jeg har startet arbeidet med " + req.linearTaskId + ". Jeg rapporterer fremgang her."},
                 'task_start', ${JSON.stringify({ taskId: req.linearTaskId })})
+      `;
+
+      // Create initial agent_status message for immediate frontend rendering
+      const initialStatus = JSON.stringify({
+        type: "agent_status",
+        phase: "Forbereder",
+        steps: [{ label: "Starter oppgave...", status: "active" }],
+      });
+      await db.exec`
+        INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+        VALUES (${req.conversationId}, 'assistant', ${initialStatus}, 'agent_status',
+          ${JSON.stringify({ taskId: req.linearTaskId, status: "working" })}::jsonb)
       `;
 
       return {
@@ -483,16 +508,10 @@ export const send = api(
       };
     } else {
       // Direct chat — return immediately, process AI async
-      // Insert a placeholder agent_status message
+      // Insert a placeholder chat message (NOT agent_status — that's for agent tasks only)
       const placeholderMsg = await db.queryRow<Message>`
         INSERT INTO messages (conversation_id, role, content, message_type)
-        VALUES (${req.conversationId}, 'assistant',
-                ${JSON.stringify({
-                  type: "agent_status",
-                  phase: "Tenker",
-                  steps: [{ label: "Starter...", icon: "search", status: "active" }],
-                })},
-                'agent_status')
+        VALUES (${req.conversationId}, 'assistant', '', 'chat')
         RETURNING id, conversation_id as "conversationId", role, content,
                   message_type as "messageType", metadata, created_at as "createdAt"
       `;
@@ -553,34 +572,8 @@ async function processAIResponse(
     const { ai } = await import("~encore/clients");
     const { memory } = await import("~encore/clients");
 
-    // Detect intent for richer steps
+    // Detect intent for richer context
     const intent = detectMessageIntent(userContent);
-
-    // Build dynamic steps based on what we'll actually do
-    const initialPhase = intent === "repo_review" ? "Forbereder" : intent === "task_request" ? "Planlegger" : "Tenker";
-    const initialTitle = intent === "repo_review" ? `Samler kontekst for ${repoName || "repoet"}` : intent === "task_request" ? "Forstår forespørselen" : "Forbereder svar";
-
-    const dynamicSteps: Array<{ label: string; icon: string; status: "active" | "pending" | "done" }> = [];
-    dynamicSteps.push({ label: "Forstår forespørselen", icon: "search", status: "active" });
-    if (repoName) {
-      dynamicSteps.push({ label: `Henter filer fra ${repoName}`, icon: "service", status: "pending" });
-    }
-    if (intent === "task_request" || intent === "repo_review" || userContent.length > 100) {
-      dynamicSteps.push({ label: "Søker i tidligere erfaringer", icon: "memory", status: "pending" });
-    }
-    if (intent === "task_request") {
-      dynamicSteps.push({ label: "Planlegger oppgave", icon: "plan", status: "pending" });
-    } else if (intent === "repo_review") {
-      dynamicSteps.push({ label: "Skriver analyse", icon: "write", status: "pending" });
-    } else {
-      dynamicSteps.push({ label: "Formulerer svar", icon: "write", status: "pending" });
-    }
-
-    await updateAgentStatus(placeholderId, {
-      phase: initialPhase,
-      title: initialTitle,
-      steps: dynamicSteps,
-    });
 
     if (isCancelled(conversationId)) return;
 
@@ -613,22 +606,6 @@ async function processAIResponse(
       console.error("Skills resolve failed:", e);
     }
 
-    // Mark first step done, advance to next
-    const postSkillsSteps = dynamicSteps.map((s, i) => {
-      if (i === 0) return { ...s, status: "done" as const };
-      if (i === 1) return { ...s, status: "active" as const };
-      return s;
-    });
-    if (resolvedSkills.result.injectedSkillIds?.length > 0) {
-      postSkillsSteps.splice(1, 0, { label: `${resolvedSkills.result.injectedSkillIds.length} skills aktive`, icon: "sparkle", status: "done" });
-    }
-
-    await updateAgentStatus(placeholderId, {
-      phase: initialPhase,
-      title: initialTitle,
-      steps: postSkillsSteps,
-    });
-
     if (isCancelled(conversationId)) return;
 
     // Step 4: Search memories — only for complex queries (saves tokens and time)
@@ -645,18 +622,6 @@ async function processAIResponse(
     let repoContext = "";
 
     if (repoName) {
-      await updateAgentStatus(placeholderId, {
-        phase: "Analyserer",
-        title: `Ser over ${repoName}`,
-        steps: [
-          { label: "Analyserer meldingen", icon: "search", status: "done" },
-          { label: `${resolvedSkills.result.injectedSkillIds?.length || 0} skills funnet`, icon: "sparkle", status: "done" },
-          { label: `${memories.results?.length || 0} relevante minner`, icon: "search", status: "done" },
-          { label: "Henter filstruktur fra GitHub", icon: "service", status: "active" },
-          { label: "Genererer svar", icon: "code", status: "pending" },
-        ],
-      });
-
       if (isCancelled(conversationId)) return;
 
       try {
@@ -672,19 +637,6 @@ async function processAIResponse(
         if (tree?.tree?.length > 0) {
           repoContext += `\nFilstruktur for ${repoName} (${tree.tree.length} filer):\n${tree.treeString}`;
         }
-
-        await updateAgentStatus(placeholderId, {
-          phase: "Analyserer",
-          title: `Ser over ${repoName}`,
-          steps: [
-            { label: "Analyserer meldingen", icon: "search", status: "done" },
-            { label: `${resolvedSkills.result.injectedSkillIds?.length || 0} skills funnet`, icon: "sparkle", status: "done" },
-            { label: `${memories.results?.length || 0} relevante minner`, icon: "search", status: "done" },
-            { label: `Filstruktur hentet (${tree.tree?.length || 0} filer)`, icon: "service", status: "done" },
-            { label: "Henter relevante filer", icon: "code", status: "active" },
-            { label: "Genererer svar", icon: "code", status: "pending" },
-          ],
-        });
 
         // Find relevant files based on the user's message
         try {
@@ -731,33 +683,6 @@ async function processAIResponse(
       }
     }
 
-    // Update status — all prep done, now generating
-    const preAiPhase = intent === "repo_review" ? "Analyserer" : intent === "task_request" ? "Utfører" : "Genererer";
-    const preAiTitle = intent === "repo_review" ? "Gjennomgår kodebasen" : intent === "task_request" ? "Gjennomfører handlinger" : "Skriver svar";
-    const preAiSteps: Array<{ label: string; icon: string; status: "done" | "active" }> = [
-      { label: "Forstår forespørselen", icon: "search", status: "done" },
-    ];
-    if (resolvedSkills.result.injectedSkillIds?.length > 0) {
-      preAiSteps.push({ label: `${resolvedSkills.result.injectedSkillIds.length} skills aktive`, icon: "sparkle", status: "done" });
-    }
-    if (memories.results?.length > 0) {
-      preAiSteps.push({ label: `${memories.results.length} relevante minner`, icon: "memory", status: "done" });
-    }
-    if (repoName) {
-      preAiSteps.push({ label: "Repo-kontekst hentet", icon: "service", status: "done" });
-    }
-    preAiSteps.push({
-      label: intent === "task_request" ? "Planlegger oppgave" : intent === "repo_review" ? "Skriver analyse" : "Formulerer svar",
-      icon: "write",
-      status: "active",
-    });
-
-    await updateAgentStatus(placeholderId, {
-      phase: preAiPhase,
-      title: preAiTitle,
-      steps: preAiSteps,
-    });
-
     if (isCancelled(conversationId)) return;
 
     // Step 5: Call AI (try/catch — graceful error message on failure)
@@ -793,32 +718,6 @@ async function processAIResponse(
     console.log(`AI Response: ${aiResponse.usage.totalTokens} tokens (${aiResponse.usage.inputTokens} inn, ${aiResponse.usage.outputTokens} ut), kostnad: $${aiResponse.costUsd.toFixed(4)}, stop: ${aiResponse.stopReason}`);
 
     if (isCancelled(conversationId)) return;
-
-    // Show tool usage if any
-    if (aiResponse.toolsUsed && aiResponse.toolsUsed.length > 0) {
-      const toolLabels: Record<string, string> = {
-        create_task: "Opprettet ny task",
-        start_task: "Startet agent på task",
-        list_tasks: "Hentet task-oversikt",
-        read_file: "Leste fil fra repo",
-        search_code: "Søkte i kodebasen",
-      };
-      const toolSteps = aiResponse.toolsUsed.map((t: string) => ({
-        label: toolLabels[t] || t,
-        icon: "service",
-        status: "done" as const,
-      }));
-
-      await updateAgentStatus(placeholderId, {
-        phase: "Utfører",
-        title: "Gjennomfører handlinger",
-        steps: [
-          ...preAiSteps.map((s) => ({ ...s, status: "done" as const })),
-          ...toolSteps,
-          { label: "Skriver svar", icon: "write", status: "active" },
-        ],
-      });
-    }
 
     // Step 6: Replace placeholder with actual response + metadata
     await updateMessageContent(placeholderId, aiResponse.content);
@@ -874,12 +773,6 @@ async function processAIResponse(
     // CATCH ALL — never leave user stuck in "Tenker..."
     console.error("processAIResponse crashed:", e);
     try {
-      await updateAgentStatus(placeholderId, {
-        phase: "Feilet",
-        title: "Noe gikk galt",
-        steps: [],
-        error: (e instanceof Error ? e.message : "Ukjent feil") + "\n\nPrøv igjen.",
-      });
       await updateMessageContent(placeholderId,
         "Noe gikk galt under prosessering. Feil: " + (e instanceof Error ? e.message : "Ukjent feil") + "\n\nPrøv igjen."
       );

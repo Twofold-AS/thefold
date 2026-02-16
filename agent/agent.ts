@@ -104,6 +104,47 @@ async function report(
   });
 }
 
+// --- Helper: Report structured steps to chat (for live AgentStatus) ---
+
+async function reportSteps(
+  ctx: TaskContext,
+  phase: string,
+  steps: Array<{ label: string; status: "active" | "done" | "error" | "info" }>
+) {
+  const statusContent = JSON.stringify({
+    type: "agent_status",
+    phase,
+    steps,
+  });
+
+  await agentReports.publish({
+    conversationId: ctx.conversationId,
+    taskId: ctx.taskId,
+    content: statusContent,
+    status: phase === "Ferdig" ? "completed" : phase === "Feilet" ? "failed" : "working",
+  });
+}
+
+// --- Helper: Update Linear only if task exists in Linear (skip local tasks) ---
+
+async function updateLinearIfExists(ctx: TaskContext, comment: string, state?: string) {
+  // If thefoldTaskId matches taskId, it's a local task — skip Linear
+  if (ctx.thefoldTaskId && ctx.thefoldTaskId === ctx.taskId) {
+    return;
+  }
+
+  try {
+    await linear.updateTask({
+      taskId: ctx.taskId,
+      ...(state ? { state } : {}),
+      comment,
+    });
+  } catch (e) {
+    console.warn("Linear update failed (task may not exist in Linear):", e);
+    // Don't crash — Linear update is optional
+  }
+}
+
 // --- Audit Logging ---
 
 interface AuditOptions {
@@ -236,14 +277,14 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         // Non-critical
       }
 
-      await report(ctx, `📋 Starter oppgave: ${taskTitle}`, "working");
+      await report(ctx, `Starter oppgave: ${taskTitle}`, "working");
     } else {
       // === STANDARD PATH: Full context gathering (steps 1-3) ===
 
       // === STEP 1: Understand the task ===
       if (ctx.thefoldTaskId) {
         // TheFold task engine path — read from tasks service
-        await report(ctx, `📋 Leser task fra TheFold...`, "working");
+        await report(ctx, `Leser task fra TheFold...`, "working");
 
         const tfTask = await auditedStep(ctx, "task_read", { taskId: ctx.thefoldTaskId, source: "thefold" }, async () => {
           const result = await tasks.getTaskInternal({ id: ctx.thefoldTaskId! });
@@ -257,7 +298,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "in_progress" });
         } catch { /* non-critical */ }
       } else if (!options?.skipLinear) {
-        await report(ctx, `📋 Leser task ${ctx.taskId}...`, "working");
+        await report(ctx, `Leser task ${ctx.taskId}...`, "working");
 
         // Try tasks-service first (chat-created tasks), fallback to Linear
         let taskFound = false;
@@ -300,11 +341,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       } else if (options?.taskDescription) {
         ctx.taskDescription = options.taskDescription;
         taskTitle = ctx.taskDescription.split("\n")[0].substring(0, 80);
-        await report(ctx, `📋 Starter oppgave: ${taskTitle}`, "working");
+        await report(ctx, `Starter oppgave: ${taskTitle}`, "working");
       }
 
       // === STEP 2: Read the project ===
-      await report(ctx, "📂 Leser prosjektstruktur fra GitHub...", "working");
+      await report(ctx, "Leser prosjektstruktur fra GitHub...", "working");
 
       const projectTree = await auditedStep(ctx, "project_tree_read", {
         owner: ctx.repoOwner,
@@ -414,11 +455,21 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       });
 
       // === STEP 3: Gather context ===
-      await report(ctx, "🧠 Henter relevant kontekst og dokumentasjon...", "working");
+      await reportSteps(ctx, "Analyserer", [
+        { label: "Leser oppgave", status: "done" },
+        { label: "Henter prosjektstruktur", status: "done" },
+        { label: "Henter kontekst og dokumentasjon", status: "active" },
+      ]);
 
-      const memories = await auditedStep(ctx, "memory_searched", {
-        query: ctx.taskDescription.substring(0, 200),
-      }, () => memory.search({ query: ctx.taskDescription, limit: 10 }));
+      let memories = { results: [] as { content: string; accessCount: number; createdAt: string }[] };
+      try {
+        memories = await auditedStep(ctx, "memory_searched", {
+          query: ctx.taskDescription.substring(0, 200),
+        }, () => memory.search({ query: ctx.taskDescription, limit: 10 }));
+      } catch (e) {
+        console.warn("Memory search failed (rate limited?):", e);
+        // Continue without memories — don't crash
+      }
 
       const docsResults = await auditedStep(ctx, "docs_looked_up", {
         dependencyCount: Object.keys(packageJson.dependencies as Record<string, string> || {}).length,
@@ -442,6 +493,16 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       } catch {
         // Non-critical — MCP service may not be running
       }
+    }
+
+    // Report context gathered
+    if (!useCurated) {
+      await reportSteps(ctx, "Planlegger", [
+        { label: "Leser oppgave", status: "done" },
+        { label: "Henter prosjektstruktur", status: "done" },
+        { label: "Henter kontekst", status: "done" },
+        { label: "Vurderer oppgaven", status: "active" },
+      ]);
     }
 
     // Cancel check after context gathering
@@ -599,7 +660,12 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     }
 
     // === STEP 5: Plan the work ===
-    await report(ctx, "Planlegger arbeidet...", "working");
+    await reportSteps(ctx, "Planlegger", [
+      { label: "Leser oppgave", status: "done" },
+      { label: "Henter prosjektstruktur", status: "done" },
+      { label: "Henter kontekst", status: "done" },
+      { label: "Planlegger arbeidet", status: "active" },
+    ]);
 
     let plan = await auditedStep(ctx, "plan_created", {
       taskDescription: ctx.taskDescription.substring(0, 200),
@@ -620,7 +686,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     const planSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
     await report(
       ctx,
-      `📝 Plan:\n${planSummary}\n\nBegrunnelse: ${plan.reasoning}`,
+      `Plan:\n${planSummary}\n\nBegrunnelse: ${plan.reasoning}`,
       "working"
     );
 
@@ -715,6 +781,15 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       }
     }
 
+    // Report plan ready
+    await reportSteps(ctx, "Bygger", [
+      { label: "Leser oppgave", status: "done" },
+      { label: "Henter prosjektstruktur", status: "done" },
+      { label: "Henter kontekst", status: "done" },
+      { label: `Plan klar: ${plan.plan.length} steg`, status: "done" },
+      { label: "Oppretter sandbox", status: "active" },
+    ]);
+
     // Cancel check before builder
     if (await checkCancelled(ctx)) {
       return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
@@ -741,7 +816,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
       try {
         // Delegate to Builder service for file-by-file generation with dependency analysis
-        await report(ctx, "Builder kjører: fil-for-fil generering med avhengighetsanalyse...", "working");
+        await reportSteps(ctx, "Bygger", [
+          { label: "Plan klar", status: "done" },
+          { label: "Builder kjører", status: "active" },
+          { label: `Forsøk ${ctx.totalAttempts}/${ctx.maxAttempts}`, status: "info" },
+        ]);
 
         const buildResult = await auditedStep(ctx, "builder_executed", {
           taskId: ctx.taskId,
@@ -787,7 +866,10 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         });
 
         // === STEP 7: Validate (already done by builder integrate phase) ===
-        await report(ctx, "Validering fullført via Builder...", "working");
+        await reportSteps(ctx, "Reviewer", [
+          { label: "Builder ferdig", status: "done" },
+          { label: "Validerer kode (tsc + lint)", status: "active" },
+        ]);
 
         const validation = await auditedStep(ctx, "validation_run", {
           attempt: ctx.totalAttempts,
@@ -887,10 +969,15 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
               // Fetch more context and retry
               await report(ctx, `Mangler kontekst — henter mer informasjon...`, "working");
 
-              const moreMemories = await memory.search({
-                query: `${ctx.taskDescription} ${validation.output.substring(0, 200)}`,
-                limit: 10,
-              });
+              let moreMemories = { results: [] as { content: string }[] };
+              try {
+                moreMemories = await memory.search({
+                  query: `${ctx.taskDescription} ${validation.output.substring(0, 200)}`,
+                  limit: 10,
+                });
+              } catch (e) {
+                console.warn("Memory search failed during missing_context retry:", e);
+              }
 
               plan = await auditedStep(ctx, "plan_retry_with_context", {
                 extraMemories: moreMemories.results.length,
@@ -911,12 +998,21 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
             } else if (diagnosis.rootCause === "impossible_task") {
               // Escalate to human
               await report(ctx, `Denne oppgaven ser umulig ut: ${diagnosis.reason}`, "needs_input");
-              await linear.updateTask({
-                taskId: ctx.taskId,
-                state: "blocked",
-                comment: `TheFold klarer ikke denne oppgaven: ${diagnosis.reason}`,
-              });
-              return;
+              await updateLinearIfExists(ctx, `TheFold klarer ikke denne oppgaven: ${diagnosis.reason}`, "blocked");
+
+              // Update TheFold task status if applicable
+              if (ctx.thefoldTaskId) {
+                try {
+                  await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked", errorMessage: diagnosis.reason?.substring(0, 500) });
+                } catch { /* non-critical */ }
+              }
+              return {
+                success: false,
+                filesChanged: [],
+                costUsd: ctx.totalCostUsd,
+                tokensUsed: ctx.totalTokensUsed,
+                errorMessage: "impossible_task",
+              };
 
             } else if (diagnosis.rootCause === "environment_error") {
               // Wait and retry
@@ -964,7 +1060,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     }
 
     // === STEP 8: Review own work ===
-    await report(ctx, "📖 Reviewer koden og skriver dokumentasjon...", "working");
+    await reportSteps(ctx, "Reviewer", [
+      { label: "Alle filer skrevet", status: "done" },
+      { label: "Kode validert", status: "done" },
+      { label: "Reviewer kode og skriver dokumentasjon", status: "active" },
+    ]);
 
     const validationOutput = await sandbox.validate({ sandboxId: sandboxId.id });
     const review = await auditedStep(ctx, "review_completed", {
@@ -1039,7 +1139,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     }
 
     // === STEP 9: Commit and create PR (skipReview path only) ===
-    await report(ctx, "🚀 Oppretter branch og pull request...", "working");
+    await reportSteps(ctx, "Utfører", [
+      { label: "Kode validert", status: "done" },
+      { label: "Review fullført", status: "done" },
+      { label: "Oppretter pull request", status: "active" },
+    ]);
 
     const branchName = `thefold/${ctx.taskId.toLowerCase().replace(/\s+/g, "-")}`;
 
@@ -1061,43 +1165,51 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
     // === STEP 10: Update Linear (skip for orchestrator tasks) ===
     if (!options?.skipLinear) {
-      await auditedStep(ctx, "linear_updated", {
-        taskId: ctx.taskId,
-        newState: "in_review",
-      }, () => linear.updateTask({
-        taskId: ctx.taskId,
-        state: "in_review",
-        comment: `## TheFold har fullført denne oppgaven\n\n${review.documentation}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.qualityScore}/10\n\n${review.concerns.length > 0 ? "**Bekymringer:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : "Ingen bekymringer."}`,
-      }));
+      try {
+        await auditedStep(ctx, "linear_updated", {
+          taskId: ctx.taskId,
+          newState: "in_review",
+        }, () => updateLinearIfExists(ctx, `## TheFold har fullført denne oppgaven\n\n${review.documentation}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.qualityScore}/10\n\n${review.concerns.length > 0 ? "**Bekymringer:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : "Ingen bekymringer."}`, "in_review"));
+      } catch (e) {
+        console.warn("Linear update in STEP 10 failed:", e);
+      }
     }
 
     // === STEP 11: Store memories + error patterns ===
     for (const mem of review.memoriesExtracted) {
-      await auditedStep(ctx, "memory_stored", {
-        content: mem.substring(0, 200),
-        category: "decision",
-      }, () => memory.store({
-        content: mem,
-        category: "decision",
-        linearTaskId: ctx.taskId,
-        memoryType: "decision",
-        sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
-        sourceTaskId: ctx.taskId,
-      }));
+      try {
+        await auditedStep(ctx, "memory_stored", {
+          content: mem.substring(0, 200),
+          category: "decision",
+        }, () => memory.store({
+          content: mem,
+          category: "decision",
+          linearTaskId: ctx.taskId,
+          memoryType: "decision",
+          sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
+          sourceTaskId: ctx.taskId,
+        }));
+      } catch (e) {
+        console.warn("Memory store failed (rate limited?):", e);
+      }
     }
 
     // Store error patterns for future learning
     if (previousErrors.length > 0) {
-      const errorSummary = previousErrors.join("\n---\n").substring(0, 3000);
-      await memory.store({
-        content: `Error patterns from task ${ctx.taskId}:\n${errorSummary}\n\nResolution: Task completed after ${ctx.totalAttempts} attempts with ${ctx.planRevisions} plan revisions.`,
-        category: "error_pattern",
-        memoryType: "error_pattern",
-        sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
-        sourceTaskId: ctx.taskId,
-        tags: ["error_pattern", "auto_resolved"],
-        ttlDays: 180,
-      });
+      try {
+        const errorSummary = previousErrors.join("\n---\n").substring(0, 3000);
+        await memory.store({
+          content: `Error patterns from task ${ctx.taskId}:\n${errorSummary}\n\nResolution: Task completed after ${ctx.totalAttempts} attempts with ${ctx.planRevisions} plan revisions.`,
+          category: "error_pattern",
+          memoryType: "error_pattern",
+          sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
+          sourceTaskId: ctx.taskId,
+          tags: ["error_pattern", "auto_resolved"],
+          ttlDays: 180,
+        });
+      } catch (e) {
+        console.warn("Error pattern store failed:", e);
+      }
     }
 
     // === STEP 12: Clean up sandbox ===
@@ -1135,14 +1247,20 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       durationMs: Date.now() - taskStart,
     });
 
-    const costLine = `💰 **Kostnad:** $${ctx.totalCostUsd.toFixed(4)} (${ctx.totalTokensUsed} tokens med ${ctx.selectedModel})`;
+    // Final AgentStatus: Ferdig!
+    await reportSteps(ctx, "Ferdig", [
+      { label: "Oppgave fullført!", status: "done" },
+      { label: pr.url ? `PR: ${pr.url}` : "Endringer pushet", status: "done" },
+    ]);
+
+    const costLine = `**Kostnad:** $${ctx.totalCostUsd.toFixed(4)} (${ctx.totalTokensUsed} tokens med ${ctx.selectedModel})`;
     const savingsLine = savings.savedPercent > 0
-      ? `\n📉 **Spart:** $${savings.savedUsd.toFixed(4)} (${savings.savedPercent.toFixed(0)}% vs Opus)`
+      ? `\n**Spart:** $${savings.savedUsd.toFixed(4)} (${savings.savedPercent.toFixed(0)}% vs Opus)`
       : "";
 
     await report(
       ctx,
-      `✅ **Ferdig med ${ctx.taskId}**\n\n${review.documentation}\n\n📎 **PR:** ${pr.url}\n⭐ **Kvalitet:** ${review.qualityScore}/10\n${costLine}${savingsLine}${review.concerns.length > 0 ? "\n\n⚠️ **Ting å se på:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : ""}`,
+      `**Ferdig med ${ctx.taskId}**\n\n${review.documentation}\n\n**PR:** ${pr.url}\n**Kvalitet:** ${review.qualityScore}/10\n${costLine}${savingsLine}${review.concerns.length > 0 ? "\n\n**Ting a se pa:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : ""}`,
       "completed",
       { prUrl: pr.url, filesChanged: changedPaths }
     );
@@ -1180,22 +1298,24 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
     await report(
       ctx,
-      `❌ **Feil under arbeid med ${ctx.taskId}:**\n\`\`\`\n${errorMsg}\n\`\`\`\n\nJeg klarte ikke å fullføre denne oppgaven automatisk. Kan du hjelpe meg med mer kontekst, eller skal jeg prøve en annen tilnærming?`,
+      `**Feil under arbeid med ${ctx.taskId}:**\n\`\`\`\n${errorMsg}\n\`\`\`\n\nJeg klarte ikke a fullfare denne oppgaven automatisk. Kan du hjelpe meg med mer kontekst, eller skal jeg prove en annen tilnarming?`,
       "failed"
     );
 
+    // Report failure to AgentStatus
+    await reportSteps(ctx, "Feilet", [
+      { label: errorMsg.substring(0, 80), status: "error" },
+    ]);
+
     // Update Linear (skip for orchestrator tasks)
     if (!options?.skipLinear) {
-      await linear.updateTask({
-        taskId: ctx.taskId,
-        comment: `TheFold feilet på denne oppgaven: ${errorMsg}`,
-      });
+      await updateLinearIfExists(ctx, `TheFold feilet på denne oppgaven: ${errorMsg}`);
     }
 
     // Update TheFold task status if applicable
     if (ctx.thefoldTaskId) {
       try {
-        await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked" });
+        await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked", errorMessage: errorMsg.substring(0, 500) });
       } catch { /* non-critical */ }
     }
 
