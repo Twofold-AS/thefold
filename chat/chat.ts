@@ -24,26 +24,96 @@ export const agentReports = new Topic<AgentReport>("agent-reports", {
   deliveryGuarantee: "at-least-once",
 });
 
-// Subscribe to agent reports and store them as messages
+// Subscribe to agent reports and UPDATE existing agent_status (not create new agent_report)
 const _ = new Subscription(agentReports, "store-agent-report", {
   handler: async (report) => {
-    await db.exec`
-      INSERT INTO messages (conversation_id, role, content, message_type, metadata)
-      VALUES (
-        ${report.conversationId},
-        'assistant',
-        ${report.content},
-        'agent_report',
-        ${JSON.stringify({
-          taskId: report.taskId,
-          status: report.status,
-          prUrl: report.prUrl,
-          filesChanged: report.filesChanged,
-        })}
-      )
+    // Map status to phase
+    const phase = report.status === "working" ? "Bygger"
+      : report.status === "completed" ? "Ferdig"
+      : report.status === "failed" ? "Feilet"
+      : report.status === "needs_input" ? "Venter"
+      : "Bygger";
+
+    // Build updated agent_status content
+    const statusContent = JSON.stringify({
+      type: "agent_status",
+      phase,
+      title: report.status === "completed" ? "Fullfort"
+        : report.status === "failed" ? "Feilet"
+        : report.content.substring(0, 80),
+      steps: parseReportToSteps(report),
+      questions: report.status === "needs_input" ? [report.content] : undefined,
+    });
+
+    const metadata = JSON.stringify({
+      taskId: report.taskId,
+      status: report.status,
+      prUrl: report.prUrl,
+      filesChanged: report.filesChanged,
+    });
+
+    // Try to find existing agent_status message for this conversation
+    const existing = await db.queryRow<{ id: string }>`
+      SELECT id FROM messages
+      WHERE conversation_id = ${report.conversationId}
+        AND message_type = 'agent_status'
+      ORDER BY created_at DESC LIMIT 1
     `;
+
+    if (existing) {
+      // UPDATE existing agent_status
+      await db.exec`
+        UPDATE messages
+        SET content = ${statusContent}, metadata = ${metadata}::jsonb, updated_at = NOW()
+        WHERE id = ${existing.id}::uuid
+      `;
+    } else {
+      // No agent_status exists — create one
+      await db.exec`
+        INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+        VALUES (${report.conversationId}, 'assistant', ${statusContent}, 'agent_status', ${metadata}::jsonb)
+      `;
+    }
   },
 });
+
+function parseReportToSteps(report: AgentReport): Array<{ label: string; icon: string; status: string }> {
+  const steps: Array<{ label: string; icon: string; status: string }> = [];
+
+  if (report.content.includes("Leser task") || report.content.includes("oppgave")) {
+    steps.push({ label: "Leser oppgave", icon: "search", status: "done" });
+  }
+  if (report.content.includes("prosjektstruktur") || report.content.includes("GitHub")) {
+    steps.push({ label: "Leser prosjektstruktur", icon: "service", status: "done" });
+  }
+  if (report.content.includes("kontekst") || report.content.includes("memory")) {
+    steps.push({ label: "Henter kontekst", icon: "memory", status: "done" });
+  }
+  if (report.content.includes("Planlegger") || report.content.includes("plan")) {
+    steps.push({ label: "Planlegger arbeidet", icon: "plan", status: report.status === "working" ? "active" : "done" });
+  }
+  if (report.content.includes("sandbox") || report.content.includes("Skriver") || report.content.includes("kode")) {
+    steps.push({ label: "Skriver kode", icon: "code", status: report.status === "working" ? "active" : "done" });
+  }
+  if (report.content.includes("Validerer") || report.content.includes("validering")) {
+    steps.push({ label: "Validerer kode", icon: "service", status: report.status === "working" ? "active" : "done" });
+  }
+  if (report.content.includes("PR") || report.content.includes("pull request")) {
+    steps.push({ label: "Oppretter PR", icon: "service", status: report.status === "working" ? "active" : "done" });
+  }
+
+  // Final step based on status
+  if (report.status === "completed") {
+    steps.push({ label: "Fullfort!", icon: "check", status: "done" });
+  } else if (report.status === "failed") {
+    steps.push({ label: report.content.substring(0, 100), icon: "error", status: "error" });
+  } else if (report.status === "working" && !steps.some(s => s.status === "active")) {
+    const lastContent = report.content.split("...")[0] || report.content;
+    steps.push({ label: lastContent.substring(0, 80), icon: "code", status: "active" });
+  }
+
+  return steps;
+}
 
 // Subscribe to build progress and notify users
 import { buildProgress } from "../builder/db";
@@ -323,15 +393,21 @@ export const send = api(
       const { agent: agentClient } = await import("~encore/clients");
 
       try {
-        // Get project structure
-        const tree = await ghClient.getTree({ owner: "Twofold-AS", repo: "thefold" });
+        // Get project structure (try/catch — empty repos return fallback)
+        let treeString = "(Tomt repo — ingen eksisterende filer)";
+        try {
+          const tree = await ghClient.getTree({ owner: "Twofold-AS", repo: "thefold" });
+          treeString = tree.treeString || treeString;
+        } catch (e) {
+          console.warn("getTree failed for project decomposition (likely empty repo):", e);
+        }
 
         // Decompose project
         const decomposition = await aiClient.decomposeProject({
           userMessage: req.message,
           repoOwner: "Twofold-AS",
           repoName: "thefold",
-          projectStructure: tree.treeString,
+          projectStructure: treeString,
         });
 
         // Store project plan via agent service (project_plans is in agent DB)
@@ -586,8 +662,13 @@ async function processAIResponse(
       try {
         const { github } = await import("~encore/clients");
 
-        // Fetch file tree
-        const tree = await github.getTree({ owner: "Twofold-AS", repo: repoName });
+        // Fetch file tree (try/catch — empty repos return fallback)
+        let tree: { tree: Array<{ path: string; type: string }>; treeString: string } = { tree: [], treeString: "" };
+        try {
+          tree = await github.getTree({ owner: "Twofold-AS", repo: repoName });
+        } catch (e) {
+          console.warn(`getTree failed for ${repoName} (likely empty repo):`, e);
+        }
         if (tree?.tree?.length > 0) {
           repoContext += `\nFilstruktur for ${repoName} (${tree.tree.length} filer):\n${tree.treeString}`;
         }

@@ -175,17 +175,12 @@ export default function LoginPage() {
             }}
           >
             <div className="mb-10">
-              <h1>
-                <span className="font-display text-[32px] block mb-1" style={{ color: "var(--text-secondary)" }}>
+              <div className="mb-4">
+                <span className="font-display text-[32px] block mb-3" style={{ color: "var(--text-secondary)" }}>
                   Logg inn p&aring;
                 </span>
-                <span
-                  className="text-shimmer-slow block"
-                  style={{ fontFamily: "'TheFold Brand', var(--font-display)", fontSize: "3rem", lineHeight: "1.1" }}
-                >
-                  TheFold
-                </span>
-              </h1>
+                <img src="/logo.svg" alt="TheFold" className="logo-shimmer" style={{ height: "192px", width: "auto" }} />
+              </div>
               <p className="mt-3 text-sm" style={{ color: "var(--text-secondary)" }}>
                 An AI that actually commits.
               </p>

@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 16. februar 2026 (Agent repo routing fix + multi-repo support)
+> Sist oppdatert: 16. februar 2026 (Agent chat robusthet: UUID-validering, getTree try/catch, Pub/Sub rewrite, magiske fraser)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -268,6 +268,9 @@
 | create_task source: "chat" | 🟢 | Tasks opprettet fra chat bruker `source: "chat"` i stedet for `"manual"` |
 | create_task AI-berikelse | 🟢 | `enrichTaskWithAI()` fire-and-forget: estimerer complexity + tokens etter opprettelse |
 | start_task verifisering | 🟢 | Verifiserer task eksisterer via `tasks.getTaskInternal()`, setter `in_progress`, `blocked` ved feil |
+| start_task UUID-validering | 🟢 | Regex-sjekk av taskId-format før `getTaskInternal()` — bedre feilmeldinger ved ugyldig UUID |
+| start_task debug-logging | 🟢 | `console.log` med full input-objekt for feilsøking av tool-kall |
+| create_task UUID-retur | 🟢 | Returnerer tydelig UUID med melding om å bruke `start_task` for å starte oppgaven |
 | conversationId-propagering | 🟢 | `conversationId` flyter fra chat → start_task → agent |
 
 ### Prompt caching
@@ -568,7 +571,7 @@
 | Samtaleliste | 🟢 | GET /chat/conversations |
 | Context transfer | 🟢 | POST /chat/transfer-context (AI-oppsummering med fallback) |
 | Conversation ownership (OWASP A01) | 🟢 | conversations.owner_email, verifisert i alle endpoints |
-| Agent reports via Pub/Sub | 🟢 | agentReports topic → store-agent-report subscription (agent_report/agent_status filtreres ut i frontend rendering) |
+| Agent reports via Pub/Sub | 🟢 | agentReports topic → store-agent-report subscription: oppdaterer eksisterende agent_status-melding i stedet for a opprette nye agent_report-meldinger |
 | Build progress via Pub/Sub | 🟢 | buildProgress topic → chat-build-progress subscription |
 | Task events via Pub/Sub | 🟢 | taskEvents topic → chat-task-events subscription |
 | SkillIds i meldingsmetadata | 🟢 | Lagres i user message metadata |
@@ -589,7 +592,8 @@
 | Heartbeat-system | 🟢 | processAIResponse oppdaterer updated_at hvert 10s, frontend sjekker 30s timeout |
 | Try/catch per steg | 🟢 | Skills, memory, AI har egne try/catch — aldri evig "Tenker" |
 | Intent-baserte steg | 🟢 | detectMessageIntent(): repo_review/task_request/question/general → ulike steg |
-| AgentStatus tab+boks | 🟢 | Tab (fase) + boks (tittel + steg), Feilet/Ferdig states, error-melding |
+| AgentStatus tab+boks | 🟢 | Tab (fase) + boks (tittel + steg), Feilet/Ferdig states, error-melding. parseReportToSteps helper for live rendering fra agent reports |
+| Tenker-tab magiske fraser | 🟢 | Erstattet "tenker..." med unike fraser (Tryller/Glitrer/Forhekser/Hokus Pokus/Alakazam) med SVG-animasjoner, distinkt fra AgentStatus-boksen |
 | Send→Stopp sirkel | 🟢 | Rund knapp: pil opp (send) ↔ firkant (stopp) basert på isWaitingForAI |
 | Heartbeat-lost UI | 🟢 | "Mistet kontakt med TheFold" etter 30s uten heartbeat |
 | TF-ikon fjernet | 🟢 | Ingen TF-boks i AgentStatus eller tenker-indikator |
@@ -603,7 +607,7 @@
 | CodeBlock komponent | 🟢 | Collapsible kodeblokker med filnavn, språk-badge, kopier-knapp, linjenumre |
 | TheFold identitet i system prompt | 🟢 | AI vet at den ER TheFold, kjenner alle 17 services, svarer på norsk, ingen emojier |
 | Repo-kontekst i chat | 🟢 | repoName sendes fra repo-chat frontend → chat backend → ai.chat system prompt. AI vet hvilket repo den ser på |
-| GitHub fil-kontekst i chat | 🟢 | processAIResponse henter filtre (getTree), relevante filer (findRelevantFiles), innhold (getFile, topp 5 filer à 200 linjer). repoContext injiseres i system prompt med anti-hallusinering |
+| GitHub fil-kontekst i chat | 🟢 | processAIResponse henter filtre (getTree), relevante filer (findRelevantFiles), innhold (getFile, topp 5 filer a 200 linjer). repoContext injiseres i system prompt med anti-hallusinering. Alle getTree-kall wrappet i try/catch (prosjektdekomponering + repo-kontekst) |
 | Chat input-boks restructurert | 🟢 | + ikon (borderless 32px), textarea, send-knapp — horisontal rad. minHeight 56px, maxHeight 150px |
 | Bredere chat-meldinger | 🟢 | Container max-w-4xl, bruker-meldinger max-w-[70%], AI-meldinger max-w-[85%], padding px-4 |
 | Tomt repo handling | 🟢 | Hvis repoContext er tom etter GitHub-kall, AI får eksplisitt beskjed om at repoet er tomt — ingen hallusinering |
@@ -1194,7 +1198,7 @@
 
 | Kategori | Antall |
 |----------|--------|
-| 🟢 AKTIVE features | 285+ |
+| 🟢 AKTIVE features | 290+ |
 | 🟡 STUBBEDE features | 2 |
 | 🔴 GRUNNMUR features | 19 |
 | ⚪ PLANLAGTE features | 9 |
@@ -1214,3 +1218,4 @@
 - ✅ DEL 4 (Skills task_phase system): Ny task_phase kolonne (all/planning/coding/debugging/reviewing), migrasjon 7, skills/skills.ts + skills/engine.ts oppdatert med taskType→task_phase filtrering, ai.ts CONTEXT_TO_TASK_PHASE mapping, frontend redesign med fase-tabs + scope filter + badges
 - ✅ DEL 2 item 3 (Cache investigation): cache/cache.ts cacher KUN embeddings/repo/plans — INGEN skills caching (skills hentes alltid friskt fra DB)
 - ✅ DEL 3 completion (AgentStatus callbacks): Begge chat-sider wired med onReply/onRetry/onCancel callbacks, tryParseAgentStatus extraherer questions, handleAgentReply sender svar, handleAgentRetry re-sender siste melding, handleAgentCancel kaller cancelChatGeneration
+- ✅ Bugfiks Runde 8: Agent Chat Robusthet — start_task UUID-validering (regex + bedre feilmeldinger), start_task debug-logging, create_task returnerer tydelig UUID, getTree try/catch i alle chat-kall (prosjektdekomponering + repo-kontekst), Pub/Sub agent_status oppdatering (erstatter duplisering), parseReportToSteps helper for live AgentStatus, magiske fraser i tenker-tab (Tryller/Glitrer/Forhekser/Hokus Pokus/Alakazam med SVG-animasjoner)

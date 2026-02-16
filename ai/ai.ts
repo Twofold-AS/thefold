@@ -813,30 +813,41 @@ async function executeToolCall(
         log.error("Task enrichment failed:", { error: e instanceof Error ? e.message : String(e) })
       );
 
-      return { success: true, taskId: result.task.id, message: `Task "${input.title}" opprettet` };
+      return { success: true, taskId: result.task.id, message: `Oppgave opprettet med ID ${result.task.id}. Bruk start_task med denne IDen for å starte den.` };
     }
 
     case "start_task": {
-      log.info("START_TASK called", { input: JSON.stringify(input), repoName, conversationId });
+      console.log("=== START_TASK DEBUG ===");
+      console.log("Full input object:", JSON.stringify(input, null, 2));
+      console.log("input.taskId:", input.taskId);
+      console.log("typeof input.taskId:", typeof input.taskId);
 
       try {
         const { tasks: tasksClient } = await import("~encore/clients");
-        const taskId = input.taskId as string;
+        const taskId = String(input.taskId || "").trim();
+
+        // UUID validation
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!taskId || !uuidRegex.test(taskId)) {
+          console.error("start_task: Invalid taskId:", taskId, "full input:", JSON.stringify(input));
+          return { success: false, error: `Ugyldig task ID format: "${taskId}". Trenger UUID.` };
+        }
 
         // Verify task exists and get repo info
-        let taskData: { repo?: string } | null = null;
+        let taskData: { repo?: string; title?: string } | null = null;
         try {
           const result = await tasksClient.getTaskInternal({ id: taskId });
           if (result?.task) {
-            taskData = { repo: result.task.repo };
+            taskData = { repo: result.task.repo, title: result.task.title };
           }
-        } catch {
+        } catch (e) {
+          console.error("start_task: getTaskInternal failed:", e);
           taskData = null;
         }
 
         if (!taskData) {
           log.warn("START_TASK: task not found", { taskId });
-          return { success: false, error: `Oppgave ${taskId} finnes ikke` };
+          return { success: false, error: `Fant ikke oppgave med ID ${taskId}` };
         }
 
         // Update status to in_progress
@@ -860,8 +871,8 @@ async function executeToolCall(
           } catch { /* non-critical */ }
         });
 
-        log.info("START_TASK success", { taskId, repoName: taskData.repo || repoName });
-        return { success: true, message: `Oppgave startet — agenten jobber nå` };
+        console.log("start_task: SUCCESS for", taskId, "repo:", taskData.repo || repoName);
+        return { success: true, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber nå.` };
       } catch (e) {
         log.error("START_TASK FAILED", { error: e instanceof Error ? e.message : String(e), taskId: input.taskId });
         return { success: false, error: e instanceof Error ? e.message : String(e) };

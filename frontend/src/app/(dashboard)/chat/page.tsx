@@ -50,6 +50,7 @@ export default function ChatPage() {
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [pollMode, setPollMode] = useState<"idle" | "waiting" | "cooldown">("idle");
   const [heartbeatLost, setHeartbeatLost] = useState(false);
+  const [phraseIndex, setPhraseIndex] = useState(0);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -354,6 +355,21 @@ export default function ChatPage() {
   const isWaitingForAI = pollMode === "waiting" && (!lastMsg || lastMsg.role === "user" || lastMsg.messageType === "agent_status");
   const hasAgentStatus = messages.some(m => m.messageType === "agent_status");
 
+  // Magic phrases for tab indicator (distinct from AgentStatus box)
+  const magicPhrases = ["Tryller", "Glitrer", "Forhekser", "Hokus Pokus", "Alakazam"];
+
+  useEffect(() => {
+    if (!isWaitingForAI) return;
+    const interval = setInterval(() => {
+      setPhraseIndex((prev) => {
+        let next: number;
+        do { next = Math.floor(Math.random() * magicPhrases.length); } while (next === prev);
+        return next;
+      });
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [isWaitingForAI]);
+
   return (
     <div className="flex flex-col" style={{ height: "100vh" }}>
       {/* Chat header — custom, not PageHeaderBar */}
@@ -621,18 +637,65 @@ export default function ChatPage() {
                   );
                 })}
 
-                {/* "TheFold tenker..." indicator — only before first agent_status arrives */}
+                {/* Magic tab indicator — rotates fun phrases with unique SVGs */}
                 {isWaitingForAI && !hasAgentStatus && (
                   <div className="flex items-center gap-2 py-3 pl-4 message-enter">
-                    <span
-                      className="agent-pulse"
-                      style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--success)", display: "inline-block" }}
-                    />
-                    <span className="text-sm agent-shimmer" style={{ color: "var(--text-muted)" }}>{aiName} tenker</span>
-                    <span className="agent-dots">
-                      <span className="dot">.</span>
-                      <span className="dot">.</span>
-                      <span className="dot">.</span>
+                    <span style={{ color: "var(--text-muted)" }}>
+                      {magicPhrases[phraseIndex] === "Tryller" && (
+                        <svg className="w-4 h-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+                          <line x1="3" y1="17" x2="14" y2="6" strokeLinecap="round">
+                            <animateTransform attributeName="transform" type="rotate" values="0 8.5 11.5;-5 8.5 11.5;5 8.5 11.5;0 8.5 11.5" dur="2s" repeatCount="indefinite" />
+                          </line>
+                          <circle cx="14" cy="6" r="1" fill="currentColor">
+                            <animate attributeName="opacity" values="1;0.3;1" dur="0.8s" repeatCount="indefinite" />
+                          </circle>
+                          <circle cx="16" cy="4" r="0.5" fill="currentColor">
+                            <animate attributeName="opacity" values="0.3;1;0.3" dur="0.6s" repeatCount="indefinite" />
+                          </circle>
+                        </svg>
+                      )}
+                      {magicPhrases[phraseIndex] === "Glitrer" && (
+                        <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                          <path d="M10 2l1 3 3 1-3 1-1 3-1-3-3-1 3-1z">
+                            <animate attributeName="opacity" values="1;0.2;1" dur="1.2s" repeatCount="indefinite" />
+                          </path>
+                          <path d="M15 10l0.7 2 2 0.7-2 0.7-0.7 2-0.7-2-2-0.7 2-0.7z" opacity="0.6">
+                            <animate attributeName="opacity" values="0.6;1;0.3;0.6" dur="0.9s" repeatCount="indefinite" />
+                          </path>
+                        </svg>
+                      )}
+                      {magicPhrases[phraseIndex] === "Forhekser" && (
+                        <svg className="w-4 h-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1">
+                          <circle cx="10" cy="10" r="7" strokeDasharray="4 3">
+                            <animateTransform attributeName="transform" type="rotate" values="0 10 10;360 10 10" dur="4s" repeatCount="indefinite" />
+                          </circle>
+                          <circle cx="10" cy="10" r="3" strokeDasharray="2 2">
+                            <animateTransform attributeName="transform" type="rotate" values="360 10 10;0 10 10" dur="3s" repeatCount="indefinite" />
+                          </circle>
+                          <circle cx="10" cy="10" r="1" fill="currentColor">
+                            <animate attributeName="r" values="1;1.5;1" dur="1.5s" repeatCount="indefinite" />
+                          </circle>
+                        </svg>
+                      )}
+                      {magicPhrases[phraseIndex] === "Hokus Pokus" && (
+                        <svg className="w-4 h-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+                          <path d="M6 16h8M7 16l1-8h4l1 8" strokeLinecap="round" />
+                          <ellipse cx="10" cy="8" rx="4" ry="1" />
+                          <path d="M9 7c0-2-1-4-1-5M11 7c0-2 1-4 1-5" strokeLinecap="round">
+                            <animate attributeName="d" values="M9 7c0-2-1-4-1-5M11 7c0-2 1-4 1-5;M9 7c0-2-2-3-2-5M11 7c0-2 2-3 2-5;M9 7c0-2-1-4-1-5M11 7c0-2 1-4 1-5" dur="2s" repeatCount="indefinite" />
+                          </path>
+                        </svg>
+                      )}
+                      {magicPhrases[phraseIndex] === "Alakazam" && (
+                        <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                          <path d="M11 2L6 10h4l-1 8 7-10h-4l2-6z">
+                            <animate attributeName="opacity" values="1;0.5;1;0.7;1" dur="0.8s" repeatCount="indefinite" />
+                          </path>
+                        </svg>
+                      )}
+                    </span>
+                    <span className="text-xs agent-shimmer" style={{ color: "var(--text-muted)" }}>
+                      {magicPhrases[phraseIndex]}
                     </span>
                   </div>
                 )}

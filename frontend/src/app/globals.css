@@ -659,6 +659,16 @@
   100% { background-position: -200% 0; }
 }
 
+/* --- Logo shimmer (for SVG/image logos) --- */
+.logo-shimmer {
+  animation: logo-shimmer 5s ease-in-out infinite;
+}
+
+@keyframes logo-shimmer {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.4) drop-shadow(0 0 8px rgba(255,255,255,0.15)); }
+}
+
 /* --- Animated dots --- */
 
 .agent-dots .dot {

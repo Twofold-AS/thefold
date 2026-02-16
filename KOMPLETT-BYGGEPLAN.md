@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.10 - Agent repo routing fix + multi-repo support
+> **Versjon:** 3.11 - Agent chat robusthet (UUID-validering, getTree try/catch, Pub/Sub rewrite, magiske fraser)
 > **Sist oppdatert:** 16. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -121,6 +121,17 @@
 - **Agent:** `checkCancelled()` helper funksjon poller `tasks.isCancelled()` mellom agent-steg (4 sjekkpunkter: after context, before planning, before builder, inside retry loop). Destroyer sandbox og returnerer ved cancellation
 - **Frontend:** `cancelTask` API-funksjon i api.ts. Stopp-knapp på in_progress tasks i `/repo/[name]/tasks` med optimistic UI (flytter task til backlog umiddelbart, rollback ved feil)
 
+### ✅ Ferdig — Bugfiks Runde 8: Agent Chat Robusthet (februar 2026)
+- **FIX 1 — start_task UUID-validering:** `ai/ai.ts` start_task tool validerer nå taskId-format med regex sjekk for UUID-struktur for `getTaskInternal()`, gir bedre feilmeldinger ved ugyldig input
+- **FIX 2 — start_task debug-logging:** `console.log` med full input-objekt i start_task for feilsoking av tool-kall
+- **FIX 3 — create_task UUID-retur:** `create_task` returnerer nå tydelig UUID med melding om at bruker skal bruke `start_task` for a starte oppgaven
+- **FIX 4 — getTree try/catch i chat:** `chat/chat.ts` — alle `getTree`-kall wrappet i try/catch (2 steder: prosjektdekomponering og repo-kontekst). Forhindrer at GitHub-feil krasjer hele chat-flyten
+- **FIX 5 — Pub/Sub agent_status oppdatering:** Subscription-handler i chat omskrevet til a oppdatere eksisterende `agent_status`-melding i stedet for a opprette nye `agent_report`-meldinger. Eliminerer duplikater i chatten
+- **FIX 6 — parseReportToSteps helper:** Ny helper-funksjon for live AgentStatus-rendering fra agent reports i frontend
+- **FIX 7 — Polling (bekreftet):** 2s polling nar agenten jobber — bekreftet at eksisterende implementasjon fungerer korrekt
+- **FIX 8 — Skills selector (bekreftet):** SkillsSelector-komponent henter allerede fra listSkills API — fungerer korrekt
+- **FIX 9 — Magiske fraser i tenker-tab:** Erstattet "tenker..." med unike fraser (Tryller/Glitrer/Forhekser/Hokus Pokus/Alakazam) med distinkte SVG-animasjoner, visuelt adskilt fra AgentStatus-boksen
+
 ### ✅ Ferdig — Tilleggsarbeid (utover opprinnelig plan)
 - **Chat Redesign:** Meldingsbobler med bruker/TF-avatarer, dynamisk avatarfarge, tidsstempler, typing-indikator (3 pulserende prikker), smart auto-scroll, tomme-tilstander med foreslåtte spørsmål, agent report & context transfer badges
 - **Context Transfer:** `POST /chat/transfer-context` — AI-oppsummering med fallback til rå meldinger, hovedchat → repo-chat flyt med redirect og konversasjons-ID
@@ -161,7 +172,7 @@ Mange features har grunnmur (database-felter, interfaces, stub-implementeringer)
 **Nøkkeltall:**
 | Status | Antall |
 |--------|--------|
-| 🟢 AKTIVE | 270+ |
+| 🟢 AKTIVE | 290+ |
 | 🟡 STUBBEDE (kode finnes, passthrough) | 2 |
 | 🔴 GRUNNMUR (DB-felter/interfaces) | 19 |
 | ⚪ PLANLAGTE (ingen kode) | 9 |
@@ -1077,7 +1088,7 @@ Basert på gjennomgang av `OWASP-2025-2026-Report.md` (OWASP Top 10:2025, ASVS 5
 
 ## 🚀 Status per februar 2026
 
-**Fase 1-4 er KOMPLETT. Fase 5 Del 1 er ferdig.** Totalt 310+ tester, 285+ aktive features, 16 Encore.ts-tjenester.
+**Fase 1-4 er KOMPLETT. Fase 5 Del 1 er ferdig.** Totalt 310+ tester, 290+ aktive features, 16 Encore.ts-tjenester.
 
 **Dynamic AI Provider & Model System (16. feb):**
 - ✅ DB-drevet modellregister: 2 nye tabeller (ai_providers, ai_models), 9 pre-seeded modeller
@@ -1156,6 +1167,15 @@ Repo-header redesign: PageHeaderBar forenklet (subtitle prop), per-page headers 
 Skeleton Loading: .skeleton shimmer CSS, 17 loading.tsx filer for alle dashboard-sider, prefetch={true} på sidebar og tools-tabs.
 Template Install Modal: InstallModal med dark backdrop, repo-dropdown, variabel-inputs, font-audit.
 AI Name Preference: aiName i preferences JSONB, konfigurerbart AI-navn i system prompt (default "Jørgen André"), settings UI med initialer-preview, UserPreferencesContext eksporterer aiName/aiInitials, begge chat-sider oppdatert.
+
+**Bugfiks Runde 8: Agent Chat Robusthet (16. feb):**
+- ✅ start_task UUID-validering: Regex-sjekk av taskId-format for getTaskInternal(), bedre feilmeldinger
+- ✅ start_task debug-logging: console.log med full input-objekt for feilsoking
+- ✅ create_task UUID-retur: Tydelig UUID med melding om start_task-bruk
+- ✅ getTree try/catch: Alle getTree-kall i chat.ts wrappet (prosjektdekomponering + repo-kontekst)
+- ✅ Pub/Sub agent_status oppdatering: Subscription-handler omskrevet — oppdaterer eksisterende melding i stedet for duplisering
+- ✅ parseReportToSteps: Ny helper for live AgentStatus-rendering fra agent reports
+- ✅ Magiske fraser: "tenker..." erstattet med Tryller/Glitrer/Forhekser/Hokus Pokus/Alakazam + SVG-animasjoner
 
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.
 
