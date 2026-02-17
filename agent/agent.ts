@@ -66,6 +66,8 @@ export interface ExecuteTaskOptions {
   taskDescription?: string;        // Override task description (from orchestrator)
   collectOnly?: boolean;           // If true: run steps 1-7 only, skip review/PR/cleanup. Sandbox kept alive.
   sandboxId?: string;              // Reuse existing sandbox instead of creating new one
+  forceContinue?: boolean;         // If true: skip assessConfidence, go straight to planning
+  userClarification?: string;      // User's clarification response (appended to task description)
 }
 
 export interface ExecuteTaskResult {
@@ -115,10 +117,15 @@ async function reportSteps(
   steps: Array<{ label: string; status: "active" | "done" | "error" | "info" }>,
   extra?: { title?: string; planProgress?: { current: number; total: number }; tasks?: Array<{ id: string; title: string; status: string }> }
 ) {
+  // Use fixed phase title if no explicit title or plan progress, preventing title/content duplication
+  const title = extra?.planProgress
+    ? `Utfører plan ${extra.planProgress.current}/${extra.planProgress.total}`
+    : extra?.title || PHASE_TITLES[phase] || phase;
+
   const statusContent = JSON.stringify({
     type: "agent_status",
     phase,
-    title: extra?.title,
+    title,
     planProgress: extra?.planProgress,
     activeTasks: extra?.tasks,
     steps,
@@ -237,6 +244,79 @@ async function checkCancelled(ctx: TaskContext, activeSandboxId?: string): Promi
   }
   return false;
 }
+
+// --- shouldStopTask: Check actual DB status (DEL 7) ---
+
+const ACTIVE_STATUSES = ["in_progress", "in_review", "pending_review", "planned"];
+const STOPPED_STATUSES = ["backlog", "blocked", "cancelled"];
+
+async function shouldStopTask(ctx: TaskContext, phase: string, activeSandboxId?: string): Promise<boolean> {
+  // First check in-memory cancellation
+  if (await checkCancelled(ctx, activeSandboxId)) return true;
+
+  // Then check actual DB status if we have a thefold task ID
+  const taskId = ctx.thefoldTaskId || ctx.taskId;
+  try {
+    const taskResult = await tasks.getTaskInternal({ id: taskId });
+    const status = taskResult.task.status;
+
+    if (STOPPED_STATUSES.includes(status)) {
+      const reason = status === "backlog" ? "Oppgaven ble sendt tilbake til backlog"
+        : status === "blocked" ? "Oppgaven ble blokkert"
+        : "Oppgaven ble avbrutt";
+
+      await reportSteps(ctx, "Stopped", [
+        { label: reason, status: "error" },
+      ], { title: "Oppgave stoppet" });
+
+      await audit({
+        sessionId: ctx.conversationId,
+        actionType: "task_externally_modified",
+        details: {
+          taskId,
+          expectedStatus: "in_progress",
+          actualStatus: status,
+          agentPhase: phase,
+        },
+        success: false,
+        errorMessage: reason,
+        taskId: ctx.taskId,
+        repoName: `${ctx.repoOwner}/${ctx.repoName}`,
+      });
+
+      if (activeSandboxId) {
+        await sandbox.destroy({ sandboxId: activeSandboxId }).catch(() => {});
+      }
+      return true;
+    }
+
+    // Also check "done" — if someone else already completed it
+    if (status === "done") {
+      await reportSteps(ctx, "Stopped", [
+        { label: "Oppgaven er allerede fullført", status: "info" },
+      ], { title: "Oppgave stoppet" });
+      return true;
+    }
+  } catch {
+    // Task might not exist in tasks-service (Linear-only) — continue
+  }
+  return false;
+}
+
+// --- Fixed phase titles for reportSteps (DEL 2) ---
+
+const PHASE_TITLES: Record<string, string> = {
+  Forbereder: "Forbereder",
+  Analyserer: "Analyserer",
+  Planlegger: "Planlegger",
+  Bygger: "Bygger kode",
+  Reviewer: "Reviewer kode",
+  Utfører: "Jobber med oppgave",
+  Venter: "Trenger avklaring",
+  Ferdig: "Oppgave fullført",
+  Feilet: "Feil oppstod",
+  Stopped: "Oppgave stoppet",
+};
 
 // --- Auto-init for empty repos ---
 
@@ -703,9 +783,9 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
     }
 
-    // === STEP 4: Assess Confidence (skip for curated — orchestrator handles this) ===
+    // === STEP 4: Assess Confidence (skip for curated or forceContinue) ===
     console.log("[DEBUG-AF] STEP 4: Assessing confidence...");
-    if (!useCurated) {
+    if (!useCurated && !options?.forceContinue) {
       // Empty repo — no existing code to be uncertain about, skip AI assessment
       if (treeArray.length === 0) {
         await report(ctx, "Tomt repo — starter direkte uten klargjøring.", "working");
@@ -771,7 +851,22 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           taskId: ctx.taskId,
           repoName: `${ctx.repoOwner}/${ctx.repoName}`,
         });
+        // Send structured agent_status for rich frontend rendering
+        await reportSteps(ctx, "Venter", [
+          { label: `Konfidenssjekk: ${confidence.overall}%`, status: "done" },
+        ], {
+          title: "Trenger avklaring",
+        });
+        // The raw report triggers the legacy path which adds questions
         await report(ctx, msg, "needs_input");
+
+        // Also update task status to needs_input for chat routing
+        if (ctx.thefoldTaskId) {
+          try {
+            await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked", errorMessage: "Trenger avklaring" });
+          } catch { /* non-critical */ }
+        }
+
         return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "low_confidence" };
       }
 
@@ -877,6 +972,9 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     // Track cost
     ctx.totalCostUsd += plan.costUsd;
     ctx.totalTokensUsed += plan.tokensUsed;
+
+    // planSummary: used by retry-loop to show AI what was previously attempted
+    let planSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
 
     const planStepCount = plan.plan.length;
     console.log("[DEBUG-AF] STEP 5: Plan has", planStepCount, "steps");
@@ -991,9 +1089,9 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       { label: "Oppretter sandbox", status: "active" },
     ], { title: `Utfører plan 1/${planStepCount}`, planProgress: { current: 1, total: planStepCount } });
 
-    // Cancel check before builder
-    if (await checkCancelled(ctx)) {
-      return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
+    // Cancel/stop check before builder (DEL 7)
+    if (await shouldStopTask(ctx, "pre_sandbox")) {
+      return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "stopped" };
     }
 
     // === STEP 6: Create sandbox (or reuse provided one) and execute plan via Builder ===
@@ -1009,9 +1107,9 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     const previousErrors: string[] = [];
 
     while (ctx.totalAttempts < ctx.maxAttempts) {
-      // Cancel check between retry attempts
-      if (await checkCancelled(ctx, sandboxId.id)) {
-        return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
+      // Cancel/stop check between retry attempts (DEL 7)
+      if (await shouldStopTask(ctx, "pre_builder", sandboxId.id)) {
+        return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "stopped" };
       }
 
       ctx.totalAttempts++;
@@ -1143,6 +1241,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
               ctx.totalCostUsd += plan.costUsd;
               ctx.totalTokensUsed += plan.tokensUsed;
+              planSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
               allFiles.length = 0; // Reset files for new plan
               continue;
 
@@ -1167,6 +1266,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
               ctx.totalCostUsd += plan.costUsd;
               ctx.totalTokensUsed += plan.tokensUsed;
+              planSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
               continue;
 
             } else if (diagnosis.rootCause === "missing_context") {
@@ -1197,6 +1297,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
               ctx.totalCostUsd += plan.costUsd;
               ctx.totalTokensUsed += plan.tokensUsed;
+              planSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
               continue;
 
             } else if (diagnosis.rootCause === "impossible_task") {
@@ -1231,10 +1332,10 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
               model: ctx.selectedModel,
             }, () => ai.planTask({
               task: ctx.taskDescription,
-              projectStructure: projectTree.treeString,
+              projectStructure: treeString,
               relevantFiles,
-              memoryContext: memories.results.map((r) => r.content),
-              docsContext: docsResults.docs.map((d) => `[${d.source}] ${d.content}`),
+              memoryContext: memoryStrings,
+              docsContext: docsStrings,
               previousAttempt: planSummary,
               errorMessage: validation.output,
               model: ctx.selectedModel,
@@ -1242,6 +1343,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
             ctx.totalCostUsd += plan.costUsd;
             ctx.totalTokensUsed += plan.tokensUsed;
+            planSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
             continue;
           }
 
@@ -1277,6 +1379,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       };
     }
 
+    // Stop check before review (DEL 7)
+    if (await shouldStopTask(ctx, "pre_review", sandboxId.id)) {
+      return { success: false, filesChanged: allFiles.map(f => f.path), costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "stopped" };
+    }
+
     // === STEP 8: Review own work ===
     await reportSteps(ctx, "Reviewer", [
       { label: "Alle filer skrevet", status: "done" },
@@ -1302,6 +1409,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
     ctx.totalCostUsd += review.costUsd;
     ctx.totalTokensUsed += review.tokensUsed;
+
+    // Verify task wasn't stopped during review (DEL 7B)
+    if (await shouldStopTask(ctx, "pre_submit_review", sandboxId.id)) {
+      return { success: false, filesChanged: allFiles.map(f => f.path), costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "stopped" };
+    }
 
     // === STEP 8.5: Submit for review ===
     const aiReviewData: AIReviewData = {
@@ -1507,6 +1619,105 @@ export const checkPendingTasks = api(
     }
 
     return { tasksFound: started };
+  }
+);
+
+// --- DEL 4: Respond to clarification ---
+
+export const respondToClarification = api(
+  { method: "POST", path: "/agent/respond", expose: true, auth: true },
+  async (req: { taskId: string; response: string; conversationId: string }): Promise<{ success: boolean }> => {
+    // 1. Set task status back to in_progress
+    try {
+      await tasks.updateTaskStatus({ id: req.taskId, status: "in_progress" });
+    } catch { /* non-critical */ }
+
+    // 2. Find the task to get context
+    const taskResult = await tasks.getTaskInternal({ id: req.taskId });
+    const task = taskResult.task;
+
+    // 3. Re-execute with user clarification as extra context
+    const convId = req.conversationId;
+
+    const ctx: TaskContext = {
+      conversationId: convId,
+      taskId: req.taskId,
+      taskDescription: `${task.title}\n\n${task.description || ""}\n\n**Brukerens avklaring:** ${req.response}`,
+      userMessage: req.response,
+      repoOwner: REPO_OWNER,
+      repoName: task.repo || REPO_NAME,
+      branch: "main",
+      thefoldTaskId: req.taskId,
+      modelMode: "auto",
+      selectedModel: "claude-sonnet-4-5-20250929",
+      totalCostUsd: 0,
+      totalTokensUsed: 0,
+      attemptHistory: [],
+      errorPatterns: [],
+      totalAttempts: 0,
+      maxAttempts: MAX_RETRIES,
+      planRevisions: 0,
+      maxPlanRevisions: MAX_PLAN_REVISIONS,
+      subAgentsEnabled: false,
+    };
+
+    // Fire and forget
+    executeTask(ctx).catch((err) => {
+      console.error("[respondToClarification] executeTask failed:", err);
+    });
+
+    return { success: true };
+  }
+);
+
+// --- DEL 4: Force continue without clarification ---
+
+export const forceContinue = api(
+  { method: "POST", path: "/agent/force-continue", expose: true, auth: true },
+  async (req: { taskId: string; conversationId: string }): Promise<{ success: boolean }> => {
+    // 1. Set task status to in_progress
+    try {
+      await tasks.updateTaskStatus({ id: req.taskId, status: "in_progress" });
+    } catch { /* non-critical */ }
+
+    // 2. Find the task to get context
+    const taskResult = await tasks.getTaskInternal({ id: req.taskId });
+    const task = taskResult.task;
+
+    // 3. Re-execute with forceContinue flag (standard path, skips assessConfidence)
+    const convId = req.conversationId;
+
+    const ctx: TaskContext = {
+      conversationId: convId,
+      taskId: req.taskId,
+      taskDescription: task.title + (task.description ? "\n\n" + task.description : ""),
+      userMessage: "Force continue — brukeren har valgt å fortsette uten avklaring",
+      repoOwner: REPO_OWNER,
+      repoName: task.repo || REPO_NAME,
+      branch: "main",
+      thefoldTaskId: req.taskId,
+      modelMode: "auto",
+      selectedModel: "claude-sonnet-4-5-20250929",
+      totalCostUsd: 0,
+      totalTokensUsed: 0,
+      attemptHistory: [],
+      errorPatterns: [],
+      totalAttempts: 0,
+      maxAttempts: MAX_RETRIES,
+      planRevisions: 0,
+      maxPlanRevisions: MAX_PLAN_REVISIONS,
+      subAgentsEnabled: false,
+    };
+
+    // Use standard path but skip confidence check
+    executeTask(ctx, {
+      forceContinue: true,
+      taskDescription: ctx.taskDescription,
+    }).catch((err) => {
+      console.error("[forceContinue] executeTask failed:", err);
+    });
+
+    return { success: true };
   }
 );
 

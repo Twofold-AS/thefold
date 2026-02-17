@@ -408,6 +408,35 @@ export const send = api(
 
     if (!msg) throw APIError.internal("failed to store message");
 
+    // DEL 4: Check if there's an active needs_input task for this conversation
+    // If so, route the message as a clarification response
+    if (!req.chatOnly) {
+      try {
+        const agentStatusMsg = await db.queryRow<{ content: string; metadata: string }>`
+          SELECT content, metadata::text FROM messages
+          WHERE conversation_id = ${req.conversationId}
+            AND message_type = 'agent_status'
+          ORDER BY created_at DESC LIMIT 1
+        `;
+        if (agentStatusMsg) {
+          const parsed = JSON.parse(agentStatusMsg.content);
+          const meta = typeof agentStatusMsg.metadata === "string" ? JSON.parse(agentStatusMsg.metadata) : agentStatusMsg.metadata;
+          if (parsed.phase === "Venter" && !parsed.reviewData && meta?.taskId) {
+            // Route to agent as clarification response
+            const { agent: agentClient } = await import("~encore/clients");
+            await agentClient.respondToClarification({
+              taskId: meta.taskId,
+              response: req.message,
+              conversationId: req.conversationId,
+            });
+            return { messageId: msg.id, conversationId: req.conversationId };
+          }
+        }
+      } catch {
+        // Non-critical — fall through to normal chat flow
+      }
+    }
+
     // Determine: agent work, project decomposition, or direct chat?
     const shouldTriggerAgent = req.linearTaskId && !req.chatOnly;
 

@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 17. februar 2026 (Prompt AV: createPR delay+retry, review repo-filter, AgentStatus plan-progress, completion-melding)
+> Sist oppdatert: 17. februar 2026 (Prompt AX: planSummary fix, forceContinue standard path, conversationId coupling, task-status polling, retry planSummary update)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -1248,3 +1248,4 @@
 - ✅ Bugfiks Runde 9: Agent Crash Resilience — memory try/catch for Voyage 429 (alle 5 memory-kall), updateLinearIfExists helper (skipper Linear for lokale tasks), reportSteps for strukturert Pub/Sub JSON (7 rapportpunkter), chat.ts detekterer JSON agent_status med fallback til legacy, initial "Forbereder"-status ved task-trigger, button-in-button fix i settings/models (outer button→div)
 - ✅ Bugfiks Runde 10: UX Polish — emoji-fjerning fra agent report()-kall (10+ emojier), ActivityIcon SVG-komponent (12 animerte ikoner erstatter emojier i aktivitetstidslinje), agentMode-deteksjon via metadata.taskId (AgentStatus-boks KUN for ekte agent-tasks, ikke simple chat), magic header-indikator (flyttet fra meldingsområde til header), thinking timer (sekunder teller opp i simple mode)
 - ✅ Bugfiks Runde 11: Tool-use Robusthet — lastCreatedTaskId tracking i callAnthropicWithTools (forhindrer Claude task-ID hallusinering), start_task tool description forbedret, debug console.log→structured log, SkillsSelector listSkills() uten "chat" filter (viser alle skills)
+- ✅ Prompt AW: AgentStatus Refaktorering — monolittisk AgentStatus splittet til 8 komponenter under frontend/src/components/agent/ (dispatcher + 6 fase-komponenter + types + StepList + PhaseTab + parseAgentMessage). motion-icons-react installert med animerte Lucide-ikoner i steg-lister og fase-tabs. Tittel/innhold-duplisering fikset (faste fase-titler i PHASE_TITLES). AgentClarification med strukturert spørsmål-parsing, "Besvar nedenfor"-hint, "Fortsett likevel"/"Avbryt"-knapper. AgentStopped ny fase for eksternt stoppede oppgaver. shouldStopTask() sjekker faktisk DB-status (ikke bare in-memory) før sandbox, builder, review og ferdig-rapport. respondToClarification + forceContinue API-endepunkter i agent.ts. chat.ts send-endepunkt detekterer aktive needs_input-oppgaver og ruter til agent. task_externally_modified audit-event. Begge chat-sider oppdatert med nye props (onForceContinue, onCancelTask). Stopped-fase vises i AgentStatus-boks.

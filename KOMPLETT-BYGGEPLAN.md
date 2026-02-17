@@ -1328,6 +1328,29 @@ DEL 4 (Completion-melding): AgentReport utvidet med `completionMessage` felt. ch
 
 Filer endret: github/github.ts (delay+retry), agent/review.ts (listReviews repoName + completionMessage), agent/agent.ts (reportSteps extra params + autoInitRepo reporting + plan report), chat/chat.ts (completionMessage handling), frontend: api.ts (ReviewSummary + listReviews), AgentStatus.tsx (planProgress + activeTasks), review/page.tsx (table-layout), chat/page.tsx + repo/[name]/chat/page.tsx (nye AgentStatus props).
 
+### Prompt AW — AgentStatus Refaktorering + motion-icons + shouldStopTask (17. feb 2026)
+
+DEL 1 (motion-icons-react): Installert motion-icons-react. Animerte Lucide-ikoner i steg-lister (Loader2/spin, CheckCircle2/pulse, XCircle/shake, Circle, Info/bounce) og fase-tabs (Hammer/bounce, MessageCircleQuestion/pulse, Eye/pulse, PartyPopper/bounce, AlertTriangle/shake, StopCircle/pulse).
+DEL 2 (Tittel-fix): PHASE_TITLES map med faste norske titler. reportSteps bruker fase-tittel som default.
+DEL 3 (Komponent-splitting): 11 filer i frontend/src/components/agent/: types, StepList, PhaseTab, AgentWorking, AgentWaiting, AgentReview, AgentComplete, AgentFailed, AgentClarification, AgentStopped, AgentStatus (dispatcher), parseAgentMessage, index. Gammel fil re-eksporterer.
+DEL 4 (AgentClarification): parseClarificationContent regex, strukturerte sporsmalsbokser, hint-tekst, Fortsett likevel/Avbryt-knapper. Backend: POST /agent/respond + POST /agent/force-continue. chat.ts ruter needs_input automatisk.
+DEL 5 (AgentWorking): "Utforer plan X/Y" tittel, activeTasks med motion-icon status.
+DEL 6 (Status-synk): Stopped terminal fase, AgentStopped komponent.
+DEL 7 (shouldStopTask): Sjekker DB-status for STOPPED_STATUSES (backlog/blocked/cancelled). 4 sjekkpunkter: pre_sandbox, pre_builder, pre_review, pre_submit_review. task_externally_modified audit.
+
+Filer opprettet: frontend/src/components/agent/ (11 filer). Filer endret: AgentStatus.tsx (re-export), agent/agent.ts (shouldStopTask + PHASE_TITLES + endpoints), chat/chat.ts (needs_input routing), api.ts (2 nye funksjoner), begge chat-sider (nye props), GRUNNMUR-STATUS.md, KOMPLETT-BYGGEPLAN.md.
+
+### Prompt AX — 6 Bugfikser fra Prompt AW (17. feb 2026)
+
+FIX 1 (planSummary undefined): planSummary definert etter plan settes (utenfor if/else), tilgjengelig for bade curated og standard path.
+FIX 2 (forceContinue curated bug): forceContinue bruker na standard path med `forceContinue: true` option — skip assessConfidence, gir full kontekst-innhenting.
+FIX 3 (conversationId-kobling): conversationId gjort required i respondToClarification og forceContinue. Fjernet fallback til `clarification-{taskId}`. Frontend sender alltid activeConvId.
+FIX 4 (Task-status polling): getTask() i api.ts. useEffect poller hvert 5s nar agent er aktiv. Detekterer backlog/blocked/cancelled → viser Stopped. Begge chat-sider.
+FIX 5 (planSummary i retry): planSummary oppdateres etter alle 4 re-plan steder: bad_plan, implementation_error, missing_context, default retry. Fikset ogsa default retry som refererte projectTree/memories/docsResults (ikke tilgjengelig i curated) → bruker treeString/memoryStrings/docsStrings.
+FIX 6 (ExecuteTaskOptions type): forceContinue + userClarification lagt til i ExecuteTaskOptions interface.
+
+Filer endret: agent/agent.ts (6 endringer), frontend/src/lib/api.ts (getTask, required params), frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx (polling + import + handleForceContinue), frontend/src/app/(dashboard)/chat/page.tsx (polling + import + handleForceContinue), GRUNNMUR-STATUS.md, KOMPLETT-BYGGEPLAN.md.
+
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.
 
 **Gjenstår:** Fase 5 Del 2 (AI auto-extraction, semantisk komponent-matching, healing propagation), MCP call routing.

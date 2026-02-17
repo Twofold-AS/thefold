@@ -883,6 +883,20 @@ export async function cancelTask(taskId: string) {
   return apiFetch<{ cancelled: boolean }>("/tasks/cancel", { method: "POST", body: { taskId } });
 }
 
+export async function respondToClarification(taskId: string, response: string, conversationId: string) {
+  return apiFetch<{ success: boolean }>("/agent/respond", { method: "POST", body: { taskId, response, conversationId } });
+}
+
+export async function forceContinueTask(taskId: string, conversationId: string) {
+  return apiFetch<{ success: boolean }>("/agent/force-continue", { method: "POST", body: { taskId, conversationId } });
+}
+
+// --- Task Lookup (for polling) ---
+
+export async function getTask(taskId: string) {
+  return apiFetch<{ task: TheFoldTask }>(`/tasks/get?id=${encodeURIComponent(taskId)}`);
+}
+
 export async function getTaskStats() {
   return apiFetch<{
     total: number;

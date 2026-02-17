@@ -15,6 +15,8 @@ import {
   listSkills,
   approveReview,
   rejectReview,
+  forceContinueTask,
+  getTask,
   type Message,
   type ConversationSummary,
   type Skill,
@@ -329,8 +331,44 @@ export default function ChatPage() {
         : lastAgentStatus.metadata;
       if (!meta?.taskId) return false;
     } catch { return false; }
-    return lastAgentStatus.phase !== "Ferdig" && lastAgentStatus.phase !== "Feilet";
+    return lastAgentStatus.phase !== "Ferdig" && lastAgentStatus.phase !== "Feilet" && lastAgentStatus.phase !== "Stopped";
   }, [lastAgentStatus]);
+
+  // Extract active task ID from agent status metadata
+  const activeTaskId = useMemo(() => {
+    if (!lastAgentStatus) return null;
+    try {
+      const meta = typeof lastAgentStatus.metadata === "string"
+        ? JSON.parse(lastAgentStatus.metadata)
+        : lastAgentStatus.metadata;
+      return meta?.taskId || null;
+    } catch { return null; }
+  }, [lastAgentStatus]);
+
+  // FIX 4: Poll task status to detect external stops
+  useEffect(() => {
+    if (!activeTaskId || !agentActive) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const result = await getTask(activeTaskId);
+        const stoppedStatuses = ["backlog", "blocked", "cancelled"];
+        if (stoppedStatuses.includes(result.task.status)) {
+          setStatusOverride({
+            type: "agent_status",
+            phase: "Stopped",
+            title: "Oppgave stoppet",
+            error: result.task.errorMessage || "Oppgaven ble stoppet eksternt",
+            steps: [{ label: "Oppgaven ble stoppet eksternt", status: "error" }],
+          });
+          setPollMode("idle");
+          clearInterval(interval);
+        }
+      } catch { /* ignore — task may not exist in tasks-service */ }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [activeTaskId, agentActive]);
 
   // Agent callbacks
   function handleAgentReply(answer: string) {
@@ -440,6 +478,21 @@ export default function ChatPage() {
     setStatusOverride(null);
     setPollMode("idle");
     setHeartbeatLost(false);
+  }
+
+  async function handleForceContinue(taskId: string) {
+    if (!activeConvId) return;
+    try {
+      await forceContinueTask(taskId, activeConvId);
+      setPollMode("waiting");
+    } catch (e: any) {
+      console.error("Force continue failed:", e);
+    }
+  }
+
+  function handleCancelTask(taskId: string) {
+    cancelTask(taskId).catch(() => {});
+    handleDismissStatus();
   }
 
   // Check if AI is still thinking (last message is agent_status or we're sending)
@@ -752,8 +805,8 @@ export default function ChatPage() {
                 })}
 
                 {/* Heartbeat lost — backend stopped responding */}
-                {/* AgentStatus — rendered separately from messages, stays visible on failure */}
-                {lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet") && (
+                {/* AgentStatus — rendered separately from messages, stays visible on failure/stopped */}
+                {lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet" || lastAgentStatus.phase === "Stopped") && (
                   <div className="message-enter">
                     <AgentStatus
                       data={{
@@ -765,12 +818,15 @@ export default function ChatPage() {
                         reviewData: lastAgentStatus.reviewData,
                         planProgress: lastAgentStatus.planProgress,
                         activeTasks: lastAgentStatus.activeTasks,
+                        ...(lastAgentStatus.metadata?.taskId ? { taskId: lastAgentStatus.metadata.taskId } : {}),
                       }}
                       onReply={handleAgentReply}
                       onDismiss={handleDismissStatus}
                       onApprove={handleApproveFromChat}
                       onRequestChanges={handleRequestChangesFromChat}
                       onReject={handleRejectFromChat}
+                      onForceContinue={handleForceContinue}
+                      onCancelTask={handleCancelTask}
                     />
                   </div>
                 )}

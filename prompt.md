@@ -1,108 +1,163 @@
 Se på følgende filer før du begynner:
-- github/github.ts (createPR — empty-repo if-blokken)
-- agent/agent.ts (autoInitRepo-funksjonen og executeTask)
-- agent/review.ts (listReviews, approveReview, hele review-endepunkter)
-- frontend/src/app/(dashboard)/review/page.tsx (review-listen)
-- frontend/src/app/(dashboard)/review/[id]/page.tsx (review-detaljer)
-- frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx (chat-side med AgentStatus)
-- frontend/src/components/AgentStatus.tsx (status-boksen som vises under oppgaver)
-- chat/chat.ts (PubSub agent report subscriber)
+- agent/agent.ts (HELE filen — spesielt executeTask, planSummary, retry-loopen,
+  og curated vs standard path)
+- agent/review.ts (respondToClarification, forceContinue)
+- chat/chat.ts (send-endepunkt — der clarification-ruting skjer)
+- tasks/tasks.ts (shouldStopTask / isCancelled)
+- frontend/src/components/agent/AgentClarification.tsx
+- frontend/src/components/agent/AgentStopped.tsx
+- frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx (polling/status-logikk)
 - GRUNNMUR-STATUS.md
 - KOMPLETT-BYGGEPLAN.md
 
 KONTEKST:
-createPR fungerer nå for tomme repos. Men det er 4 problemer å fikse:
+Prompt AW implementerte komponent-splitting, animerte ikoner, shouldStopTask,
+og clarification-UX. Rapporten identifiserte 6 problemer som må fikses.
 
-=== DEL 1: autoInitRepo — legg til delay etter Contents API ===
+=== FIX 1: planSummary undefined i curated path ===
 
-I createPR sin empty-repo if-blokk (github/github.ts), legg til en liten
-delay mellom Contents API-kallet og getRefSha-kallet:
+BUG: planSummary refereres i retry-loopen (previousAttempt: planSummary) men
+er bare definert i standard path. Når curated path kjører retry, krasjer den.
 
-  await ghApi(`/repos/${req.owner}/${req.repo}/contents/README.md`, {
-    method: "PUT",
-    body: {
-      message: "Initial commit — TheFold",
-      content: Buffer.from(`# ${req.repo}\n\nInitialized by TheFold\n`).toString("base64"),
-    },
-  });
+Finn alle steder planSummary brukes i agent.ts. Det er definert som:
+  const planSummary = plan.plan.map((s, i) => `${i+1}. ${s.description}`).join("\n");
 
-  // GitHub needs a moment to propagate the new branch
-  await new Promise(resolve => setTimeout(resolve, 2000));
+I standard path er dette OK fordi plan defineres rett over.
 
-  baseSha = await getRefSha(req.owner, req.repo, "main");
+I curated path — sjekk om plan defineres FØR planSummary. Hvis curated path
+har en separat plan-variabel, lag planSummary der også. Hvis curated path
+deler samme plan-variabel, flytt planSummary-definisjonen til ETTER plan er
+satt, utenfor if/else-blokkene, slik at begge paths bruker den.
 
-Legg til retry-logikk: hvis getRefSha fortsatt returnerer null etter delay,
-prøv én gang til med 3 sekunder ekstra delay. Først etter to mislykkede
-forsøk, kast feilen.
+Mønsteret bør være:
+  let plan = ...; // settes i curated ELLER standard path
+  let planSummary = plan.plan.map((s, i) => `${i+1}. ${s.description}`).join("\n");
+  // retry-loop bruker planSummary trygt
 
-=== DEL 2: Reviews — filtrering per repo + UI-fix ===
+Oppdater OGSÅ planSummary etter re-plan i retry-loopen:
+  plan = await ai.planTask({ ... previousAttempt: planSummary, errorMessage ... });
+  planSummary = plan.plan.map((s, i) => `${i+1}. ${s.description}`).join("\n");
 
-Problem 1: /review-siden viser reviews fra ALLE repos. Reviews bør filtreres
-per repo når brukeren er i repo-kontekst.
+=== FIX 2: forceContinue bruker tom curated context ===
 
-Backend (agent/review.ts):
-- Oppdater listReviews endepunktet til å akseptere en valgfri `repoName?: string`
-  parameter
-- Når repoName er satt, filtrer SQL-spørringen med WHERE repo_name = $repoName
-  (eller tilsvarende — sjekk hva som finnes i code_reviews tabellen)
-- Når repoName ikke er satt, returnér alle reviews (for /review global-siden)
+BUG: Når brukeren trykker "Fortsett likevel", kalles executeTask med
+forceContinue=true og tom curated context. Agenten hopper over confidence-sjekk
+men har ingen fil-kontekst å jobbe med.
 
-Frontend:
-- /review (global): vis alle reviews som nå (ingen repoName-filter)
-- Hvis det finnes en repo-spesifikk review-side, send repoName som parameter
+Fiks: forceContinue skal IKKE bruke curated path. Den skal:
+  1. Sette status tilbake til in_progress
+  2. Kalle executeTask med useCurated=false (standard path)
+  3. Legge til forceContinue=true i options som gjør at assessConfidence
+     returnerer 100% confidence uansett (skip clarification-loopen)
 
-Problem 2: Review-listen krymper i bredde etter navigering inn/ut av et review.
-I review/page.tsx:
-- Sørg for at tabellen/listen bruker `width: 100%` og `min-width: 0`
-- Slett-knappen og "Ja/Nei" bekreftelsen skal IKKE endre layout-bredden
-- Bruk `table-layout: fixed` eller `flex: 1` for å holde stabil bredde
-- Test at bredden er konsistent ved: initial load, etter navigering tilbake
-  fra /review/[id], og etter sletting av en review
+I agent.ts executeTask:
+  - Sjekk om options?.forceContinue === true
+  - Hvis ja: hopp over assessConfidence-kallet helt, gå rett til planning
+  - IKKE bruk curated path — la standard path samle kontekst normalt
 
-=== DEL 3: AgentStatus-boksen — bedre visning ===
+I agent/review.ts forceContinue-endepunktet:
+  Endre fra:
+    executeTask(ctx, { useCurated: true, curatedContext: {} })
+  Til:
+    executeTask(ctx, { forceContinue: true })
 
-Problem 1: Tittelen viser "Plan: 1. [innhold]" to ganger — en gang som tittel
-og en gang som steg-beskrivelse. Fjern dupliseringen.
+=== FIX 3: respondToClarification conversationId-kobling ===
 
-Problem 2: Vis "Utfører plan X/Y" i stedet for bare "Plan: 1."
-- Når agenten har en plan med N steg, vis "Utfører plan 1/N" som undertittel
-- Oppdater for hvert steg som fullføres: "Utfører plan 2/N", etc.
+BUG: Hvis conversationId ikke sendes med, opprettes ny konversasjon og
+agenten mister konteksten fra den opprinnelige samtalen.
 
-Problem 3: Vis alle oppgaver agenten jobber med, inkludert auto-genererte
-- autoInitRepo oppretter en "Initialiser repo" oppgave som ikke vises i boksen
-- Alle oppgaver som agenten starter (enten bruker-opprettede eller auto-genererte)
-  skal være synlige i AgentStatus-boksen
-- Vis dem som en liste med status per oppgave (working/done/failed)
+Fiks i respondToClarification (agent/review.ts eller agent/agent.ts):
+  1. Krev conversationId som parameter: { taskId, response, conversationId }
+  2. Bruk conversationId til å sette riktig ctx.conversationId
+  3. I frontend: send alltid activeConvId med kallet
 
-=== DEL 4: Rapport i chat når oppgave fullføres ===
+I chat.ts send-endepunktet (der clarification-ruting skjer):
+  Når en melding rutes til respondToClarification, send med conversationId
+  fra den aktive samtalen.
 
-Når agenten fullfører en oppgave (status: completed, phase: Ferdig), skal det
-vises en synlig melding i chatten — ikke bare en status-oppdatering via PubSub.
+Sjekk at frontend sender conversationId:
+  - AgentClarification.tsx / chat page kaller respondToClarification
+  - Sørg for at activeConvId sendes med
 
-I agent/agent.ts (eller review.ts ved approveReview):
-- Etter at PR er opprettet og task er satt til "done", send en chat-melding
-  via chat.addSystemMessage (eller tilsvarende) med:
-  - PR-URL
-  - Antall filer endret
-  - Kvalitetsscore fra review
-  - Totalt kostnad (costUsd)
-- Denne meldingen skal vises som en vanlig TheFold-melding i chat-historikken
-  (ikke som en agent_status PubSub-event som forsvinner)
+=== FIX 4: Frontend task-status polling ===
 
-Sjekk chat/chat.ts for om det finnes en addSystemMessage eller lignende funksjon.
-Hvis ikke, lag en intern funksjon som inserter en melding med role="assistant"
-i chat_messages tabellen.
+Mangler: Frontend har ingen måte å oppdage at en oppgave er stoppet fra
+tasks-siden. Backend sjekker shouldStopTask, men frontend viser fortsatt
+"Venter på input" til neste agent_status-melding kommer.
+
+Implementer enkel polling i chat-siden:
+  - Når AgentStatus viser en aktiv oppgave (working/waiting/clarification),
+    poll task-status hvert 5 sekunder
+  - Kall GET eller POST /tasks/get { id: activeTaskId }
+  - Hvis status er backlog/blocked/cancelled → oppdater AgentStatus til "Stopped"
+  - Stopp polling når oppgave er i terminal state (done/stopped/failed)
+
+I frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx:
+  useEffect(() => {
+    if (!activeTaskId || !agentActive) return;
+    
+    const interval = setInterval(async () => {
+      try {
+        const task = await getTask(activeTaskId);
+        const stoppedStatuses = ['backlog', 'blocked', 'cancelled'];
+        if (stoppedStatuses.includes(task.status)) {
+          // Oppdater agent status til stopped
+          setAgentPhase('Stopped');
+          setAgentContent('Oppgaven ble stoppet eksternt');
+          clearInterval(interval);
+        }
+      } catch { /* ignore */ }
+    }, 5000);
+    
+    return () => clearInterval(interval);
+  }, [activeTaskId, agentActive]);
+
+Legg til getTask i api.ts hvis den ikke finnes:
+  export async function getTask(taskId: string) {
+    return apiFetch<{ id: string; status: string; ... }>("/tasks/get", {
+      method: "POST",
+      body: { id: taskId },
+    });
+  }
+
+=== FIX 5: Oppdater planSummary i retry-loopen ===
+
+Relatert til FIX 1 — etter at plan re-genereres i retry-loopen, oppdater
+planSummary slik at neste retry bruker den oppdaterte planen:
+
+  while (attempt < MAX_RETRIES) {
+    // ... validation fails ...
+    plan = await ai.planTask({ ..., previousAttempt: planSummary, ... });
+    planSummary = plan.plan.map((s, i) => `${i+1}. ${s.description}`).join("\n");
+    continue;
+  }
+
+Uten dette sender retry alltid den ORIGINALE planen som previousAttempt,
+og AI-en får ikke informasjon om hva den allerede prøvde å fikse.
+
+=== FIX 6: forceContinue type i ExecuteTaskOptions ===
+
+Legg til forceContinue i ExecuteTaskOptions type (agent/types.ts eller
+agent/agent.ts — der typen er definert):
+
+  interface ExecuteTaskOptions {
+    useCurated?: boolean;
+    curatedContext?: CuratedContext;
+    forceContinue?: boolean;     // <-- ny
+    userClarification?: string;  // <-- sjekk at denne finnes
+  }
 
 === IKKE GJØR ===
-- Ikke endre createPR-logikken utover å legge til delay + retry
-- Ikke endre sandbox, builder, eller AI-tjenestene
-- Ikke endre Linear-integrasjonen (den feilen er kjent og separat)
+- Ikke endre komponent-strukturen fra Prompt AW
+- Ikke endre motion-icons
+- Ikke endre PubSub-definisjoner
+- Ikke endre createPR, sandbox, eller builder
 
 === ETTER DU ER FERDIG ===
-- Oppdater GRUNNMUR-STATUS.md med endringene
-- Oppdater KOMPLETT-BYGGEPLAN.md under ny prompt-seksjon
+- Oppdater GRUNNMUR-STATUS.md
+- Oppdater KOMPLETT-BYGGEPLAN.md under Prompt AX
 - Gi meg rapport med:
-  1. Hva som ble fullført (filer endret, funksjoner lagt til)
+  1. Hva som ble fullført (filer endret, funksjoner fikset)
   2. Hva som IKKE ble gjort og hvorfor
   3. Bugs, edge cases eller svakheter oppdaget
   4. Forslag til videre arbeid
