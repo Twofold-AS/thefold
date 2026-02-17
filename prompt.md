@@ -1,312 +1,101 @@
-# Prompt AP — Håndter tomme GitHub-repoer
+Se på følgende filer før du begynner:
+- github/github.ts (HELE filen — spesielt createPR-funksjonen og CreatePRResponse-typen)
+- agent/review.ts (HELE filen — spesielt approveReview, rejectReview, og alle endepunkter)
+- agent/db.ts (database-referanse)
+- sandbox/sandbox.ts (destroy-endepunktet)
+- github/github.test.ts (eksisterende tester)
+- GRUNNMUR-STATUS.md
+- KOMPLETT-BYGGEPLAN.md
 
-`git pull` først.
+KONTEKST:
+createPR feiler med GitHub API 409 "Git Repository is empty" for repos som ikke har noen commits.
+Feilen skjer to steder:
+1. autoInitRepo() kaller createPR → 409 fordi createPR antar at main-branch finnes
+2. approveReview() kaller createPR → 409 av samme grunn
 
-## OVERSIKT
+Loggen viser dette tydelig:
+- Linje 72: ERR endpoint=createPR "GitHub API error 409: Git Repository is empty" (autoInitRepo)
+- Linje 337: ERR endpoint=createPR "GitHub API error 409: Git Repository is empty" (approveReview)
 
-| # | Hva | Prioritet |
-|---|-----|-----------|
-| 1 | createPR feiler på tomt repo — push direkte til main | KRITISK |
-| 2 | "Jørgen André tenker" spinner forsvinner ikke etter Lukk | HØY |
-| 3 | Ferdig-melding sendes ikke etter godkjenning pga createPR-crash | HØY |
+createPR starter med `ghApi(/repos/.../git/ref/heads/main)` som feiler fordi main-branch ikke eksisterer i et tomt repo.
 
----
+I tillegg mangler review-systemet mulighet til å slette gamle/feilede reviews.
 
-## Les disse filene FØR du endrer:
+DEL 1 — Fix createPR for tomme repos (github/github.ts):
 
-```bash
-# GitHub createPR — hva feiler?
-cat github/github.ts
-grep -rn "createPR\|createRef\|getRef\|base.*main\|refs/heads" github/github.ts
+1. Lag en helper-funksjon `getRefSha(owner, repo, branch)`:
+   - Kaller `ghApi(/repos/${owner}/${repo}/git/ref/heads/${branch})`
+   - Ved suksess: returnerer `data.object.sha`
+   - Ved 404 ELLER 409: returnerer `null` (ikke throw)
+   - Ved andre feil: throw som normalt
 
-# Agent approve — hva skjer når createPR feiler?
-grep -rn "createPR\|approveReview" agent/review.ts | head -20
+2. Oppdater createPR med empty-repo-flyt:
+   - Kall `getRefSha(owner, repo, "main")` i stedet for direkte ghApi-kall
+   - Hvis baseSha === null (tomt repo):
+     a. Opprett en initial commit på main:
+        - Lag blob for README.md med innhold: `# ${repo}\n\nInitialized by TheFold`
+        - Lag tree med denne ene bloben (UTEN base_tree — ny rot-tree)
+        - Lag commit UTEN parents (tom parents-array)
+        - Opprett ref `refs/heads/main` som peker til denne committen
+     b. Bruk denne nye committen som baseSha
+     c. Fortsett med normal PR-flyt (blobs → tree → commit → branch → PR)
+   - Hvis baseSha !== null: normal flyt som i dag (ingen endring)
 
-# Frontend spinner
-grep -rn "tenker\|thinking\|sending\|waitingForReply\|agentActive" frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx | head -20
-```
+3. Fjern `directPush` fra CreatePRResponse-typen (om det ikke allerede er gjort)
 
----
+4. Skriv tester i github.test.ts:
+   - Test: getRefSha returnerer null for 404
+   - Test: getRefSha returnerer null for 409
+   - Test: getRefSha returnerer sha for gyldig ref
+   - Test: createPR med tomt repo oppretter initial commit + PR
+   - Test: createPR med eksisterende repo fungerer som normalt
 
-## FIX 1: createPR håndterer tomt repo (KRITISK)
+DEL 2 — Review-sletting (agent/review.ts):
 
-### Problem
-Linje 411 i loggen:
-```
-GitHub API error 409: Git Repository is empty
-endpoint=createPR → get-a-reference
-```
+1. Legg til endepunkt POST /agent/review/delete:
+   - Input: { reviewId: string }
+   - Henter reviewen fra DB
+   - Hvis reviewen har en sandboxId og status er 'pending': kall sandbox.destroy()
+   - Slett reviewen fra code_reviews tabellen
+   - Oppdater tilhørende task-status til 'cancelled' via tasks.updateTaskStatus()
+   - Returnerer { deleted: true }
+   - Auth: true, expose: true
 
-`createPR` prøver å hente `refs/heads/main` for å bruke som base for PR. Tomt repo har ingen branches → 409.
+2. Legg til endepunkt POST /agent/review/cleanup:
+   - Ingen input (tom request)
+   - Finner alle reviews med status 'pending' som er eldre enn 24 timer
+   - For hver: destroyer sandbox (hvis den finnes), sletter reviewen
+   - Returnerer { deleted: number, errors: number }
+   - Auth: true, expose: true
 
-### Løsning
-Når repo er tomt, push filer DIREKTE til main (ikke via PR). Flyten:
+3. Legg til endepunkt POST /agent/review/delete-all:
+   - Ingen input
+   - Sletter ALLE reviews uavhengig av status og alder
+   - Destroyer alle tilknyttede sandboxer
+   - Returnerer { deleted: number }
+   - Auth: true, expose: true
+   - MERK: Farlig endepunkt — bare for utvikling/testing
 
-1. Prøv normal PR-flyt (getRef → createBlob → createTree → createCommit → createRef → createPR)
-2. Hvis getRef feiler med 409 "Git Repository is empty":
-   - Lag initial commit direkte på main
-   - Returner `{ url: "direct-push", directPush: true }` i stedet for PR-URL
+4. Oppdater frontend review-listen (/review-siden):
+   - Legg til en "Slett"-knapp (søppelbøtte-ikon) på hver review i listen
+   - Legg til en "Rydd opp" knapp øverst som kaller /review/cleanup
+   - Bekreftelsesdialog før sletting
+   - Oppdater listen etter sletting
 
-### Implementasjon i `github/github.ts`
+IKKE GJØR:
+- Ikke endre agent.ts (executeTask, autoInitRepo — de er fine, problemet er i createPR)
+- Ikke endre orchestrator.ts
+- Ikke endre sandbox-servicen
+- Ikke endre getTree (den håndterer tomme repos allerede)
+- Ikke endre noe annet i github.ts enn createPR og CreatePRResponse
 
-```typescript
-export const createPR = api(
-  { method: "POST", path: "/github/pr", expose: false },
-  async (req: CreatePRRequest): Promise<CreatePRResponse> => {
-    const token = githubToken();
-    const { owner, repo, branch, title, body, files } = req;
-    const baseUrl = `https://api.github.com/repos/${owner}/${repo}`;
-    const headers = {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      Accept: "application/vnd.github.v3+json",
-    };
-
-    // STEG 1: Sjekk om repo er tomt ved å hente default branch ref
-    let baseSha: string;
-    let isEmptyRepo = false;
-
-    try {
-      const refRes = await fetch(`${baseUrl}/git/refs/heads/main`, { headers });
-      if (refRes.status === 409) {
-        // Repo er tomt — ingen branches
-        isEmptyRepo = true;
-      } else if (!refRes.ok) {
-        // Prøv "master" som fallback
-        const masterRes = await fetch(`${baseUrl}/git/refs/heads/master`, { headers });
-        if (masterRes.status === 409) {
-          isEmptyRepo = true;
-        } else if (!masterRes.ok) {
-          throw new Error(`Could not find base branch: ${refRes.status}`);
-        } else {
-          const masterData = await masterRes.json();
-          baseSha = masterData.object.sha;
-        }
-      } else {
-        const refData = await refRes.json();
-        baseSha = refData.object.sha;
-      }
-    } catch (e: any) {
-      if (e?.message?.includes("409") || e?.message?.includes("empty")) {
-        isEmptyRepo = true;
-      } else {
-        throw e;
-      }
-    }
-
-    // STEG 2: Lag blobs for alle filer
-    const blobPromises = files.map(async (file) => {
-      const blobRes = await fetch(`${baseUrl}/git/blobs`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          content: file.content,
-          encoding: "utf-8",
-        }),
-      });
-      if (!blobRes.ok) throw new Error(`Failed to create blob: ${blobRes.status}`);
-      const blobData = await blobRes.json();
-      return {
-        path: file.path,
-        mode: "100644" as const,
-        type: "blob" as const,
-        sha: blobData.sha,
-      };
-    });
-
-    const treeItems = await Promise.all(blobPromises);
-
-    if (isEmptyRepo) {
-      // === TOMT REPO: Push direkte til main ===
-      console.log(`[DEBUG-AP] Empty repo detected, pushing directly to main`);
-
-      // Lag tree UTEN base_tree (tomt repo)
-      const treeRes = await fetch(`${baseUrl}/git/trees`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ tree: treeItems }),
-      });
-      if (!treeRes.ok) throw new Error(`Failed to create tree: ${treeRes.status}`);
-      const treeData = await treeRes.json();
-
-      // Lag commit UTEN parent (initial commit)
-      const commitRes = await fetch(`${baseUrl}/git/commits`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          message: title || "Initial commit from TheFold",
-          tree: treeData.sha,
-          // INGEN parents — dette er initial commit
-        }),
-      });
-      if (!commitRes.ok) throw new Error(`Failed to create commit: ${commitRes.status}`);
-      const commitData = await commitRes.json();
-
-      // Lag refs/heads/main som peker til denne commit
-      const refCreateRes = await fetch(`${baseUrl}/git/refs`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          ref: "refs/heads/main",
-          sha: commitData.sha,
-        }),
-      });
-      if (!refCreateRes.ok) throw new Error(`Failed to create ref: ${refCreateRes.status}`);
-
-      return {
-        url: `https://github.com/${owner}/${repo}/commit/${commitData.sha}`,
-        number: 0,  // Ingen PR-nummer
-        directPush: true,
-      };
-    }
-
-    // === NORMAL FLYT: Lag PR ===
-    // ... eksisterende PR-logikk med baseSha ...
-    // (behold hele den eksisterende koden herfra)
-  }
-);
-```
-
-### Oppdater CreatePRResponse type
-
-```typescript
-interface CreatePRResponse {
-  url: string;
-  number: number;
-  directPush?: boolean;  // Ny: true hvis pushet direkte (tomt repo)
-}
-```
-
-### Oppdater approveReview for directPush
-
-I `agent/review.ts` — `approveReview`:
-
-```typescript
-const prResult = await github.createPR(prParams);
-
-if (prResult.directPush) {
-  // Tomt repo — pushet direkte, ingen PR å vise
-  console.log(`[DEBUG-AP] Direct push to empty repo: ${prResult.url}`);
-  
-  // Send melding om direkte push
-  await agentReports.publish({
-    taskId,
-    conversationId: review.conversationId,
-    status: "completed",
-    content: `Review godkjent — kode pushet direkte til main (nytt repo): ${prResult.url}`
-  });
-} else {
-  // Normal PR
-  await agentReports.publish({
-    taskId,
-    conversationId: review.conversationId,
-    status: "completed",
-    content: `Review godkjent — PR opprettet: ${prResult.url}`
-  });
-}
-```
-
----
-
-## FIX 2: "Jørgen André tenker" spinner etter Lukk (HØY)
-
-### Problem
-Etter å lukke Feilet-boksen med "Lukk" vises fremdeles "Jørgen André · tenker · 57s".
-
-### Rotårsak
-`statusDismissed` skjuler AgentStatus-boksen, men `showThinking` beregnes uavhengig og viser thinking-indikatoren.
-
-### Fiks
-Når statusDismissed er true, skjul OGSÅ thinking-indikatoren:
-
-```typescript
-// I chat page
-const showThinking = useMemo(() => {
-  if (statusDismissed) return false;  // ← NYTT: Lukk fjerner alt
-  if (cancelled) return false;
-  return sending || waitingForReply;
-}, [sending, waitingForReply, cancelled, statusDismissed]);
-```
-
-ELLER bedre — når bruker trykker Lukk på en Feilet-boks, reset ALL agent-state:
-
-```typescript
-const handleDismissStatus = () => {
-  setLastAgentStatus(null);
-  setStatusDismissed(true);
-  setStatusOverride(null);
-  setSending(false);
-  setWaitingForReply(false);
-  // Reset polling
-  setPollMode?.("idle");
-};
-```
-
----
-
-## FIX 3: Ferdig-melding garanti (HØY)
-
-### Problem
-Etter godkjenning, hvis createPR feiler, sendes ingen ferdig/feilet-melding til chat. Frontend viser "Feilet" via optimistisk oppdatering, men backend har ikke oppdatert noe.
-
-### Fiks
-I approveReview, wrap createPR i try/catch og ALLTID send status:
-
-```typescript
-export const approveReview = async (req) => {
-  let prResult;
-  
-  try {
-    prResult = await github.createPR(prParams);
-  } catch (e: any) {
-    console.error("[DEBUG-AP] createPR failed:", e?.message);
-    
-    // Send feilet-status
-    await agentReports.publish({
-      taskId,
-      conversationId: review.conversationId,
-      status: "failed",
-      content: JSON.stringify({
-        type: "agent_status",
-        phase: "Feilet",
-        title: "PR-opprettelse feilet",
-        error: e?.message?.includes("409") 
-          ? "Repoet er tomt — kan ikke lage PR uten initial commit"
-          : e?.message || "Ukjent feil",
-        steps: [
-          { label: "Kode skrevet", status: "done" },
-          { label: "Validert", status: "done" },
-          { label: "Review godkjent", status: "done" },
-          { label: "PR opprettelse", status: "failed" }
-        ]
-      })
-    });
-    
-    // Sett task til blocked med tydelig feilmelding
-    await tasks.updateTaskStatus({ 
-      id: taskId, 
-      status: "blocked", 
-      errorMessage: `PR feilet: ${e?.message}` 
-    });
-    
-    throw e; // Re-throw så frontend får 500
-  }
-  
-  // Suksess — send ferdig
-  // ... resten av eksisterende kode
-};
-```
-
----
-
-## Oppdater dokumentasjon
-- GRUNNMUR-STATUS.md — legg til "Tomme repoer håndtert" 
-- KOMPLETT-BYGGEPLAN.md — changelog
-
-## Rapport
-Svar på:
-1. Hva skjer nå når createPR kalles på et tomt repo?
-2. Har du testet extractRepoFromConversationId med ekte conversation_id format?
-3. Forsvinner "Jørgen André tenker" etter Lukk nå?
-4. Sendes feilet/ferdig Pub/Sub ALLTID etter approve, uansett createPR-resultat?
-5. Hva er response format for directPush vs normal PR?
+ETTER AT DU ER FERDIG:
+- Oppdater GRUNNMUR-STATUS.md:
+  - createPR: marker som 🟢 med note om empty-repo-støtte
+  - Review-endepunkter: legg til delete, cleanup, delete-all
+- Oppdater KOMPLETT-BYGGEPLAN.md med hva som ble gjort under ny prompt-seksjon
+- Gi meg en rapport med:
+  1. Hva som ble fullført (filer endret, funksjoner lagt til)
+  2. Hva som IKKE ble gjort og hvorfor
+  3. Bugs, edge cases eller svakheter oppdaget
+  4. Forslag til videre arbeid

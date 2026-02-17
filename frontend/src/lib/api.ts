@@ -561,6 +561,27 @@ export async function rejectReview(reviewId: string, reason?: string) {
   });
 }
 
+export async function deleteReview(reviewId: string) {
+  return apiFetch<{ deleted: boolean }>("/agent/review/delete", {
+    method: "POST",
+    body: { reviewId },
+  });
+}
+
+export async function cleanupReviews() {
+  return apiFetch<{ deleted: number; errors: number }>("/agent/review/cleanup", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function deleteAllReviews() {
+  return apiFetch<{ deleted: number }>("/agent/review/delete-all", {
+    method: "POST",
+    body: {},
+  });
+}
+
 // --- Model Routing & Cost ---
 
 export interface ModelInfo {

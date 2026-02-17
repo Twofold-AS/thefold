@@ -282,7 +282,7 @@ export const approveReview = api(
     const targetRepo = review.repoName || extractRepoFromConversationId(review.conversationId);
     const branchName = `thefold/${review.taskId.toLowerCase().replace(/\s+/g, "-")}`;
 
-    let pr: { url: string; directPush?: boolean };
+    let pr: { url: string; number: number };
     try {
       pr = await github.createPR({
         owner: "Twofold-AS",
@@ -384,8 +384,8 @@ export const approveReview = api(
     }
 
     // Notify chat — structured "Ferdig" status
-    const prLabel = pr.directPush ? "Kode pushet til main" : "PR opprettet";
-    const titleMsg = pr.directPush ? "Review godkjent — kode pushet direkte til main" : "Review godkjent — PR opprettet";
+    const prLabel = "PR opprettet";
+    const titleMsg = "Review godkjent — PR opprettet";
     await agentReports.publish({
       conversationId: review.conversationId,
       taskId: review.taskId,
@@ -550,5 +550,113 @@ export const rejectReview = api(
     });
 
     return { status: "rejected" };
+  }
+);
+
+// --- API: Delete a single review ---
+
+interface DeleteReviewRequest {
+  reviewId: string;
+}
+
+export const deleteReview = api(
+  { method: "POST", path: "/agent/review/delete", expose: true, auth: true },
+  async (req: DeleteReviewRequest): Promise<{ deleted: boolean }> => {
+    const row = await db.queryRow<{ id: string; status: string; sandbox_id: string; task_id: string }>`
+      SELECT id, status, sandbox_id, task_id
+      FROM code_reviews WHERE id = ${req.reviewId}
+    `;
+
+    if (!row) throw APIError.notFound("review ikke funnet");
+
+    // Destroy sandbox if review is pending and has one
+    if (row.sandbox_id && row.status === "pending") {
+      try {
+        await sandbox.destroy({ sandboxId: row.sandbox_id });
+      } catch {
+        // Sandbox may already be destroyed
+      }
+    }
+
+    // Delete the review
+    await db.exec`DELETE FROM code_reviews WHERE id = ${req.reviewId}`;
+
+    // Update task status to cancelled
+    try {
+      await tasks.updateTaskStatus({ id: row.task_id, status: "blocked", errorMessage: "Review slettet" });
+    } catch {
+      // Task update is optional
+    }
+
+    return { deleted: true };
+  }
+);
+
+// --- API: Cleanup old pending reviews (>24h) ---
+
+export const cleanupReviews = api(
+  { method: "POST", path: "/agent/review/cleanup", expose: true, auth: true },
+  async (): Promise<{ deleted: number; errors: number }> => {
+    let deleted = 0;
+    let errors = 0;
+
+    const rows = db.query<{ id: string; sandbox_id: string }>`
+      SELECT id, sandbox_id FROM code_reviews
+      WHERE status = 'pending' AND created_at < NOW() - INTERVAL '24 hours'
+    `;
+
+    for await (const row of rows) {
+      try {
+        if (row.sandbox_id) {
+          try {
+            await sandbox.destroy({ sandboxId: row.sandbox_id });
+          } catch {
+            // Sandbox may already be destroyed
+          }
+        }
+        await db.exec`DELETE FROM code_reviews WHERE id = ${row.id}`;
+        deleted++;
+      } catch {
+        errors++;
+      }
+    }
+
+    return { deleted, errors };
+  }
+);
+
+// --- API: Delete ALL reviews (dev/testing only) ---
+
+export const deleteAllReviews = api(
+  { method: "POST", path: "/agent/review/delete-all", expose: true, auth: true },
+  async (): Promise<{ deleted: number }> => {
+    // Collect sandbox IDs first
+    const rows = db.query<{ sandbox_id: string }>`
+      SELECT DISTINCT sandbox_id FROM code_reviews WHERE sandbox_id IS NOT NULL
+    `;
+
+    const sandboxIds: string[] = [];
+    for await (const row of rows) {
+      if (row.sandbox_id) sandboxIds.push(row.sandbox_id);
+    }
+
+    // Destroy all sandboxes
+    for (const sid of sandboxIds) {
+      try {
+        await sandbox.destroy({ sandboxId: sid });
+      } catch {
+        // Best-effort
+      }
+    }
+
+    // Delete all reviews
+    const result = await db.queryRow<{ count: number }>`
+      WITH deleted AS (
+        DELETE FROM code_reviews RETURNING 1
+      )
+      SELECT COUNT(*)::int AS count FROM deleted
+    `;
+
+    return { deleted: result?.count || 0 };
   }
 );

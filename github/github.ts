@@ -38,6 +38,7 @@ interface TreeResponse {
   tree: string[];
   treeString: string;
   packageJson?: { dependencies?: Record<string, string> };
+  empty?: boolean;
 }
 
 interface FileRequest {
@@ -75,7 +76,6 @@ interface CreatePRRequest {
 interface CreatePRResponse {
   url: string;
   number: number;
-  directPush?: boolean;
 }
 
 // --- Endpoints ---
@@ -114,10 +114,28 @@ export const getTree = api(
       };
     }
 
-    // Cache miss — fetch from GitHub
-    const data = await ghApi(
-      `/repos/${req.owner}/${req.repo}/git/trees/${ref}?recursive=1`
+    // Cache miss — fetch from GitHub (handle empty repos)
+    const treeRes = await fetch(
+      `https://api.github.com/repos/${req.owner}/${req.repo}/git/trees/${ref}?recursive=1`,
+      {
+        headers: {
+          Authorization: `Bearer ${githubToken()}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      }
     );
+
+    // Empty repo returns 404 or 409 — return empty indicator
+    if (treeRes.status === 404 || treeRes.status === 409) {
+      return { tree: [], treeString: "", empty: true };
+    }
+
+    if (!treeRes.ok) {
+      const error = await treeRes.text();
+      throw APIError.internal(`GitHub API error ${treeRes.status}: ${error}`);
+    }
+
+    const data = await treeRes.json();
 
     const tree: string[] = data.tree
       .filter((item: any) => item.type === "blob")
@@ -313,43 +331,74 @@ export const findRelevantFiles = api(
   }
 );
 
+// Fetch a git ref, returning null instead of throwing on 404/409 (empty repo)
+async function getRefSha(owner: string, repo: string, branch: string): Promise<string | null> {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`, {
+    headers: {
+      Authorization: `Bearer ${githubToken()}`,
+      Accept: "application/vnd.github.v3+json",
+    },
+  });
+  if (res.status === 404 || res.status === 409) return null;
+  if (!res.ok) {
+    const error = await res.text();
+    throw APIError.internal(`GitHub API error ${res.status}: ${error}`);
+  }
+  const data = await res.json();
+  return data.object.sha;
+}
+
 // Create a branch, commit files, and open a pull request
-// Handles empty repos by pushing directly to main
+// Handles empty repos: creates an initial commit on main, then opens a PR as normal
 export const createPR = api(
   { method: "POST", path: "/github/pr", expose: false },
   async (req: CreatePRRequest): Promise<CreatePRResponse> => {
-    // 1. Check if repo is empty by fetching the base branch ref
-    let baseSha: string | null = null;
-
-    const refRes = await fetch(`https://api.github.com/repos/${req.owner}/${req.repo}/git/ref/heads/main`, {
-      headers: {
-        Authorization: `Bearer ${githubToken()}`,
-        Accept: "application/vnd.github.v3+json",
-      },
-    });
-
-    if (refRes.status === 409 || refRes.status === 404) {
-      // 409 = empty repo, 404 = no main branch — try master
-      const masterRes = await fetch(`https://api.github.com/repos/${req.owner}/${req.repo}/git/ref/heads/master`, {
-        headers: {
-          Authorization: `Bearer ${githubToken()}`,
-          Accept: "application/vnd.github.v3+json",
-        },
-      });
-      if (masterRes.ok) {
-        const masterData = await masterRes.json();
-        baseSha = masterData.object.sha;
-      }
-      // else: both main and master missing — empty repo
-    } else if (refRes.ok) {
-      const refData = await refRes.json();
-      baseSha = refData.object.sha;
-    } else {
-      const error = await refRes.text();
-      throw APIError.internal(`GitHub API error ${refRes.status}: ${error}`);
+    // 1. Get the SHA of the base branch (main, fallback master)
+    let baseSha = await getRefSha(req.owner, req.repo, "main");
+    if (!baseSha) {
+      baseSha = await getRefSha(req.owner, req.repo, "master");
     }
 
-    // 2. Create blobs for all files
+    // 2. If repo is empty, create an initial commit on main first
+    if (!baseSha) {
+      const readmeBlob = await ghApi(`/repos/${req.owner}/${req.repo}/git/blobs`, {
+        method: "POST",
+        body: { content: `# ${req.repo}\n\nInitialized by TheFold.\n`, encoding: "utf-8" },
+      });
+
+      const initTree = await ghApi(`/repos/${req.owner}/${req.repo}/git/trees`, {
+        method: "POST",
+        body: {
+          tree: [{
+            path: "README.md",
+            mode: "100644",
+            type: "blob",
+            sha: readmeBlob.sha,
+          }],
+        },
+      });
+
+      const initCommit = await ghApi(`/repos/${req.owner}/${req.repo}/git/commits`, {
+        method: "POST",
+        body: {
+          message: "Initial commit",
+          tree: initTree.sha,
+          // No parents — this is the first commit
+        },
+      });
+
+      await ghApi(`/repos/${req.owner}/${req.repo}/git/refs`, {
+        method: "POST",
+        body: {
+          ref: "refs/heads/main",
+          sha: initCommit.sha,
+        },
+      });
+
+      baseSha = initCommit.sha;
+    }
+
+    // 3. Create blobs for all files
     const treeItems = await Promise.all(
       req.files
         .filter((f) => f.action !== "delete")
@@ -367,42 +416,6 @@ export const createPR = api(
         })
     );
 
-    if (!baseSha) {
-      // === EMPTY REPO: Push directly to main ===
-
-      // Create tree WITHOUT base_tree
-      const newTree = await ghApi(`/repos/${req.owner}/${req.repo}/git/trees`, {
-        method: "POST",
-        body: { tree: treeItems },
-      });
-
-      // Create commit WITHOUT parents (initial commit)
-      const commit = await ghApi(`/repos/${req.owner}/${req.repo}/git/commits`, {
-        method: "POST",
-        body: {
-          message: req.title || "Initial commit from TheFold",
-          tree: newTree.sha,
-        },
-      });
-
-      // Create refs/heads/main pointing to this commit
-      await ghApi(`/repos/${req.owner}/${req.repo}/git/refs`, {
-        method: "POST",
-        body: {
-          ref: "refs/heads/main",
-          sha: commit.sha,
-        },
-      });
-
-      return {
-        url: `https://github.com/${req.owner}/${req.repo}/commit/${commit.sha}`,
-        number: 0,
-        directPush: true,
-      };
-    }
-
-    // === NORMAL FLOW: Create PR ===
-
     // Handle deletions
     req.files
       .filter((f) => f.action === "delete")
@@ -415,18 +428,18 @@ export const createPR = api(
         });
       });
 
-    // Get the base tree
+    // 4. Get the base tree
     const baseCommit = await ghApi(
       `/repos/${req.owner}/${req.repo}/git/commits/${baseSha}`
     );
 
-    // Create new tree with base
+    // 5. Create new tree with base
     const newTree = await ghApi(`/repos/${req.owner}/${req.repo}/git/trees`, {
       method: "POST",
       body: { base_tree: baseCommit.tree.sha, tree: treeItems },
     });
 
-    // Create commit
+    // 6. Create commit
     const commit = await ghApi(`/repos/${req.owner}/${req.repo}/git/commits`, {
       method: "POST",
       body: {
@@ -436,7 +449,7 @@ export const createPR = api(
       },
     });
 
-    // Create branch
+    // 7. Create branch
     try {
       await ghApi(`/repos/${req.owner}/${req.repo}/git/refs`, {
         method: "POST",
@@ -450,7 +463,7 @@ export const createPR = api(
       });
     }
 
-    // Create pull request
+    // 8. Create pull request
     const pr = await ghApi(`/repos/${req.owner}/${req.repo}/pulls`, {
       method: "POST",
       body: {

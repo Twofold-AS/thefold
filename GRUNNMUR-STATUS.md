@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 17. februar 2026 (Prompt AP: Tomme GitHub-repoer + spinner fix + ferdig-garanti)
+> Sist oppdatert: 17. februar 2026 (Prompt AT: createPR empty-repo fix + review-sletting)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -125,11 +125,9 @@
 | 8d. impossible_task | 🟢 | Eskaler til bruker, blokker i Linear | — |
 | 8e. environment_error | 🟢 | Vent 30s, retry | — |
 | 9. Review eget arbeid | 🟢 | `ai.reviewCode()` → dokumentasjon, kvalitetsscore, concerns | — |
-| 9.5. Review gate | 🟢 | `submitReviewInternal()` → lagrer review, notifiserer chat, returnerer pending_review | skipReview=true for å hoppe over |
-| 10. Opprett PR | 🟢 | `github.createPR()` med branch + commit + PR (kun skipReview-path) | — |
-| 11. Oppdater Linear | 🟢 | `updateLinearIfExists()` — skipper for lokale tasks uten linearTaskId, oppdaterer med PR-lenke og review | — |
-| 12. Lagre læring | 🟢 | `memory.store()` for decisions + error patterns med TTL og tags | — |
-| 13. Cleanup og rapport | 🟢 | `sandbox.destroy()`, audit, cost-rapport i chat, `reportSteps()` for strukturert JSON-rapportering via Pub/Sub | — |
+| 9.5. Review gate | 🟢 | `submitReviewInternal()` → lagrer review, notifiserer chat, returnerer pending_review | Alltid aktiv (skipReview fjernet) |
+| collectOnly-modus | 🟢 | Når `collectOnly=true`: stopper etter validering, returnerer `filesContent` + `sandboxId`, ingen review/PR/cleanup | Brukes av orchestrator |
+| Auto-init tomme repos | 🟢 | `autoInitRepo()` — oppdager `empty: true` fra getTree, oppretter synlig init-task, pusher README/.gitignore/package.json/tsconfig.json via createPR, re-fetcher tree etterpå | Kjøres automatisk i STEP 2 |
 
 ### Retry-logikk
 
@@ -183,7 +181,7 @@
 | DecomposeProjectRequest/Response | 🟢 | Input/output for ai.decomposeProject |
 | ai.decomposeProject | 🟢 | Bryter ned store forespørsler til atomære tasks i faser |
 | Project Conventions skill | 🟢 | Seed skill med priority=1, applies_to=['planning','coding','review'] |
-| Orchestrator loop (executeProject) | 🟢 | Fase-basert kjøring, avhengighetssjekk, feilhåndtering, gjenopptagelse etter krasj |
+| Orchestrator loop (executeProject) | 🟢 | Delt sandbox, collectOnly-tasks, fil-akkumulering, samlet ai.reviewProject(), ÉN review for hele prosjektet, auto-init for tomme repos |
 | Fase-revisjon (reviseProjectPhase) | 🟢 | AI-drevet re-planlegging mellom faser: reviderer descriptions, skipper tasks, legger til nye |
 | Context Curator (curateContext) | 🟢 | Intelligent kontekstvalg per sub-task: avhengigheter → memory → GitHub → docs → token-trimming |
 | executeTask med curatedContext | 🟢 | Bakoverkompatibel dual-path: kuratert eller standard kontekstsamling |
@@ -208,6 +206,9 @@
 | POST /agent/review/approve | 🟢 | Godkjenn → opprett PR → destroy sandbox. createPR wrappet med 403 error handling (klar PAT scope-melding) |
 | POST /agent/review/request-changes | 🟢 | Be om endringer → re-kjør agent med feedback |
 | POST /agent/review/reject | 🟢 | Avvis → destroy sandbox |
+| POST /agent/review/delete | 🟢 | Slett enkelt review, destroyer sandbox (pending), oppdaterer task |
+| POST /agent/review/cleanup | 🟢 | Slett alle pending reviews eldre enn 24 timer, destroyer sandboxer |
+| POST /agent/review/delete-all | 🟢 | Slett ALLE reviews + destroyer sandboxer (dev/testing) |
 | reviewer_id kolonne | 🟢 | Endret fra UUID til TEXT (migrasjon 5) — root cause: auth?.email lagres som tekst, ikke UUID |
 | /review side | 🟢 | Liste med statusfilter-tabs |
 | /review/[id] side | 🟢 | Detaljer, filvisning, handlingsknapper. Alle emojier fjernet fra review-meldinger i chat |
@@ -218,8 +219,10 @@
 | repo_name kolonne | 🟢 | code_reviews lagrer repo_name (migrasjon 6). approveReview/requestChanges bruker korrekt repo for createPR (ikke hardkodet) |
 | Heartbeat fase-bevissthet | 🟢 | Frontend heartbeat-timeout: 5 min for "Venter"-fase, 30s ellers. Forhindrer "Mistet kontakt" under review-venting |
 | Feilet-boks UX | 🟢 | "Prøv igjen"/"Avbryt" fjernet fra Feilet-fase, erstattet med "Lukk" (onDismiss). Optimistisk oppdatering ved Godkjenn/Avvis |
-| Tomme repoer | 🟢 | createPR håndterer tomme repoer — pusher direkte til main med initial commit. directPush flag i response |
+| Tomme repoer | 🟢 | createPR håndterer tomme repoer — oppretter initial commit på main, deretter normal feature-branch + PR. getTree returnerer `empty: true` for tomme repoer |
 | PR-feil garanti | 🟢 | approveReview sender Feilet agent_status + blokkerer task selv ved createPR-crash. Ferdig-melding garantert |
+| directPush fjernet | 🟢 | Fjernet fra CreatePRResponse i github.ts og alle referanser i review.ts. createPR returnerer alltid ekte PR |
+| Samlet prosjekt-review | 🟢 | `ai.reviewProject()` reviewer HELE prosjektet, orchestrator sender ÉN review via submitReviewInternal. Token-trimming (MAX_FILE_TOKENS=60000) |
 | ⚪ Git-integrasjon i UI | ⚪ | Planlagt: commit-feed, branch-status, one-click merge, GitHub webhook, diff-visning |
 | ⚪ OpenAI embeddings | ⚪ | Planlagt: bytt Voyage → OpenAI text-embedding-3-small (512 dim, $0.02/M tokens, høyere rate limits) |
 
@@ -787,7 +790,7 @@
 | getFileMetadata | 🟢 | Linjetall og størrelse |
 | getFileChunk | 🟢 | Linje-basert chunking, 1-basert, maks 500 linjer |
 | findRelevantFiles | 🟢 | Keyword-scoring av filnavn |
-| createPR | 🟢 | Branch → blobs → tree → commit → PR |
+| createPR | 🟢 | Branch → blobs → tree → commit → PR. Tomme repoer: initial commit → feature-branch → PR |
 | listRepos | 🟢 | Liste org-repos (sortert push-dato, filtrert ikke-arkiverte) |
 
 ### Users-service

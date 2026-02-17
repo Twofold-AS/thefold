@@ -64,17 +64,20 @@ export interface ExecuteTaskOptions {
   projectConventions?: string;     // Included in system prompt
   skipLinear?: boolean;            // Skip Linear read/update (orchestrator tasks)
   taskDescription?: string;        // Override task description (from orchestrator)
-  skipReview?: boolean;            // Skip review gate (default: false)
+  collectOnly?: boolean;           // If true: run steps 1-7 only, skip review/PR/cleanup. Sandbox kept alive.
+  sandboxId?: string;              // Reuse existing sandbox instead of creating new one
 }
 
 export interface ExecuteTaskResult {
   success: boolean;
   prUrl?: string;
   filesChanged: string[];
+  filesContent?: Array<{ path: string; content: string; action: string }>; // populated when collectOnly=true
   costUsd: number;
   tokensUsed: number;
   errorMessage?: string;
   reviewId?: string;
+  sandboxId?: string;              // returned when collectOnly=true (sandbox kept alive)
   status?: 'completed' | 'pending_review' | 'failed';
 }
 
@@ -231,6 +234,146 @@ async function checkCancelled(ctx: TaskContext, activeSandboxId?: string): Promi
   return false;
 }
 
+// --- Auto-init for empty repos ---
+
+export async function autoInitRepo(ctx: TaskContext): Promise<void> {
+  const repoName = ctx.repoName;
+  const repoOwner = ctx.repoOwner;
+
+  // 1. Create a visible init task
+  const initTask = await tasks.createTask({
+    title: `Initialiser repo: ${repoName}`,
+    description: [
+      `Automatisk opprettet av agenten fordi repoet ${repoOwner}/${repoName} var tomt.`,
+      "",
+      "Oppretter grunnleggende prosjektstruktur:",
+      "- README.md med reponavn og beskrivelse",
+      "- .gitignore for Node/TypeScript",
+      "- package.json med grunnleggende oppsett",
+      "- tsconfig.json med fornuftige defaults",
+    ].join("\n"),
+    repo: repoName,
+    source: "chat",
+    labels: ["auto-init"],
+    priority: 1,
+  });
+
+  // 2. Mark as in_progress
+  await tasks.updateTaskStatus({ id: initTask.task.id, status: "in_progress" });
+
+  // 3. Create the init files and push via createPR
+  const initFiles = [
+    {
+      path: "README.md",
+      content: `# ${repoName}\n\nProject initialized by TheFold.\n`,
+      action: "create" as const,
+    },
+    {
+      path: ".gitignore",
+      content: [
+        "node_modules/",
+        "dist/",
+        ".next/",
+        "*.log",
+        ".env",
+        ".env.local",
+        ".DS_Store",
+        "coverage/",
+        ".turbo/",
+        "",
+      ].join("\n"),
+      action: "create" as const,
+    },
+    {
+      path: "package.json",
+      content: JSON.stringify(
+        {
+          name: repoName.toLowerCase(),
+          version: "0.1.0",
+          private: true,
+          scripts: {
+            build: "tsc",
+            dev: "tsc --watch",
+            test: "echo \"No tests yet\"",
+          },
+          dependencies: {},
+          devDependencies: {
+            typescript: "^5.4.0",
+          },
+        },
+        null,
+        2,
+      ) + "\n",
+      action: "create" as const,
+    },
+    {
+      path: "tsconfig.json",
+      content: JSON.stringify(
+        {
+          compilerOptions: {
+            target: "ES2022",
+            module: "NodeNext",
+            moduleResolution: "NodeNext",
+            strict: true,
+            esModuleInterop: true,
+            skipLibCheck: true,
+            outDir: "dist",
+            rootDir: ".",
+            declaration: true,
+          },
+          include: ["**/*.ts"],
+          exclude: ["node_modules", "dist"],
+        },
+        null,
+        2,
+      ) + "\n",
+      action: "create" as const,
+    },
+  ];
+
+  try {
+    const pr = await githubBreaker.call(() =>
+      github.createPR({
+        owner: repoOwner,
+        repo: repoName,
+        branch: "init/project-setup",
+        title: `Initialiser repo: ${repoName}`,
+        body: [
+          "## Automatisk repo-initialisering",
+          "",
+          "Opprettet av TheFold fordi repoet var tomt.",
+          "",
+          "**Filer:**",
+          "- `README.md` — Prosjektbeskrivelse",
+          "- `.gitignore` — Node/TypeScript ignores",
+          "- `package.json` — Grunnleggende prosjektoppsett",
+          "- `tsconfig.json` — TypeScript-konfigurasjon",
+        ].join("\n"),
+        files: initFiles,
+      }),
+    );
+
+    // 4. Mark init task as done
+    await tasks.updateTaskStatus({
+      id: initTask.task.id,
+      status: "done",
+      prUrl: pr.url,
+    });
+
+    await report(ctx, `Repo initialisert — PR opprettet: ${pr.url}`, "working");
+  } catch (e) {
+    // Mark init task as blocked if it fails
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    await tasks.updateTaskStatus({
+      id: initTask.task.id,
+      status: "blocked",
+      errorMessage: `Auto-init feilet: ${errorMsg}`,
+    });
+    console.warn("autoInitRepo failed:", errorMsg);
+    // Don't throw — let the original task continue (it may still work)
+  }
+}
+
 // --- The Agent Loop ---
 
 export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions): Promise<ExecuteTaskResult> {
@@ -264,14 +407,17 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       ctx.taskDescription = options?.taskDescription || ctx.taskDescription;
       taskTitle = ctx.taskDescription.split("\n")[0].substring(0, 80);
 
-      // Still need tree for planning — fetch it (try/catch for empty repos)
-      let projectTree = { tree: [] as Array<{ path: string; type: string; size?: number }>, treeString: "(Tomt repo)", packageJson: {} as Record<string, unknown> };
-      try {
+      // Fetch tree for planning (returns empty: true for empty repos)
+      let projectTree = await github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName });
+
+      // Auto-init empty repos before continuing
+      if (projectTree.empty) {
+        await report(ctx, "Tomt repo oppdaget — initialiserer...", "working");
+        await autoInitRepo(ctx);
         projectTree = await github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName });
-      } catch (e) {
-        console.warn("getTree failed (empty repo?):", e);
       }
-      treeString = projectTree.treeString;
+
+      treeString = projectTree.treeString || "";
       treeArray = projectTree.tree;
       packageJson = projectTree.packageJson || {};
 
@@ -367,17 +513,19 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       console.log("[DEBUG-AF] STEP 2: Reading project tree for", ctx.repoOwner + "/" + ctx.repoName);
       await report(ctx, "Leser prosjektstruktur fra GitHub...", "working");
 
-      let projectTree = { tree: [] as Array<{ path: string; type: string; size?: number }>, treeString: "(Tomt repo)", packageJson: {} as Record<string, unknown> };
-      try {
-        projectTree = await auditedStep(ctx, "project_tree_read", {
-          owner: ctx.repoOwner,
-          repo: ctx.repoName,
-        }, () => githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName })));
-      } catch (e) {
-        console.warn("getTree failed (empty repo?):", e);
+      let projectTree = await auditedStep(ctx, "project_tree_read", {
+        owner: ctx.repoOwner,
+        repo: ctx.repoName,
+      }, () => githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName })));
+
+      // Auto-init empty repos before continuing
+      if (projectTree.empty) {
+        await report(ctx, "Tomt repo oppdaget — initialiserer...", "working");
+        await autoInitRepo(ctx);
+        projectTree = await githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName }));
       }
 
-      treeString = projectTree.treeString;
+      treeString = projectTree.treeString || "";
       treeArray = projectTree.tree;
       packageJson = projectTree.packageJson || {};
       console.log("[DEBUG-AF] STEP 2: Tree loaded,", treeArray.length, "files");
@@ -826,11 +974,13 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
     }
 
-    // === STEP 6: Create sandbox and execute plan via Builder ===
-    const sandboxId = await auditedStep(ctx, "sandbox_created", {
-      repoOwner: ctx.repoOwner,
-      repoName: ctx.repoName,
-    }, () => sandboxBreaker.call(() => sandbox.create({ repoOwner: ctx.repoOwner, repoName: ctx.repoName })));
+    // === STEP 6: Create sandbox (or reuse provided one) and execute plan via Builder ===
+    const sandboxId = options?.sandboxId
+      ? { id: options.sandboxId }
+      : await auditedStep(ctx, "sandbox_created", {
+          repoOwner: ctx.repoOwner,
+          repoName: ctx.repoName,
+        }, () => sandboxBreaker.call(() => sandbox.create({ repoOwner: ctx.repoOwner, repoName: ctx.repoName })));
 
     const allFiles: { path: string; content: string; action: string }[] = [];
     let lastError: string | null = null;
@@ -1091,6 +1241,20 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       }
     }
 
+    // === collectOnly: return early with files — skip review/PR/cleanup ===
+    if (options?.collectOnly) {
+      await report(ctx, `Task fullført (${allFiles.length} filer) — samles for prosjekt-review`, "working");
+      return {
+        success: true,
+        filesChanged: allFiles.map((f) => f.path),
+        filesContent: allFiles,
+        sandboxId: sandboxId.id,
+        costUsd: ctx.totalCostUsd,
+        tokensUsed: ctx.totalTokensUsed,
+        status: 'completed',
+      };
+    }
+
     // === STEP 8: Review own work ===
     await reportSteps(ctx, "Reviewer", [
       { label: "Alle filer skrevet", status: "done" },
@@ -1117,160 +1281,34 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     ctx.totalCostUsd += review.costUsd;
     ctx.totalTokensUsed += review.tokensUsed;
 
-    // === STEP 8.5: Submit for review (unless skipReview) ===
-    if (!options?.skipReview) {
-      const aiReviewData: AIReviewData = {
-        documentation: review.documentation,
-        qualityScore: review.qualityScore,
-        concerns: review.concerns,
-        memoriesExtracted: review.memoriesExtracted,
-      };
+    // === STEP 8.5: Submit for review ===
+    const aiReviewData: AIReviewData = {
+      documentation: review.documentation,
+      qualityScore: review.qualityScore,
+      concerns: review.concerns,
+      memoriesExtracted: review.memoriesExtracted,
+    };
 
-      const reviewResult = await submitReviewInternal({
-        conversationId: ctx.conversationId,
-        taskId: ctx.taskId,
-        sandboxId: sandboxId.id,
-        repoName: ctx.repoName,
-        filesChanged: allFiles.map((f) => ({
-          path: f.path,
-          content: f.content,
-          action: f.action as "create" | "modify" | "delete",
-        })),
-        aiReview: aiReviewData,
-      });
-
-      await audit({
-        sessionId: ctx.conversationId,
-        actionType: "review_submitted",
-        details: {
-          reviewId: reviewResult.reviewId,
-          qualityScore: review.qualityScore,
-          filesChanged: allFiles.map((f) => f.path),
-        },
-        success: true,
-        taskId: ctx.taskId,
-        repoName: `${ctx.repoOwner}/${ctx.repoName}`,
-        durationMs: Date.now() - taskStart,
-      });
-
-      // Update TheFold task status to in_review if applicable
-      if (ctx.thefoldTaskId) {
-        try {
-          await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "in_review", reviewId: reviewResult.reviewId });
-        } catch { /* non-critical */ }
-      }
-
-      // Return early — DO NOT create PR, DO NOT destroy sandbox
-      return {
-        success: true,
-        reviewId: reviewResult.reviewId,
-        status: 'pending_review',
-        filesChanged: allFiles.map((f) => f.path),
-        costUsd: ctx.totalCostUsd,
-        tokensUsed: ctx.totalTokensUsed,
-      };
-    }
-
-    // === STEP 9: Commit and create PR (skipReview path only) ===
-    await reportSteps(ctx, "Utfører", [
-      { label: "Kode validert", status: "done" },
-      { label: "Review fullført", status: "done" },
-      { label: "Oppretter pull request", status: "active" },
-    ]);
-
-    const branchName = `thefold/${ctx.taskId.toLowerCase().replace(/\s+/g, "-")}`;
-
-    const pr = await auditedStep(ctx, "pr_created", {
-      branch: branchName,
-      filesChanged: allFiles.map((f) => f.path),
-    }, () => github.createPR({
-      owner: ctx.repoOwner,
-      repo: ctx.repoName,
-      branch: branchName,
-      title: `[TheFold] ${taskTitle}`,
-      body: review.documentation,
-      files: allFiles.map((f) => ({
+    const reviewResult = await submitReviewInternal({
+      conversationId: ctx.conversationId,
+      taskId: ctx.taskId,
+      sandboxId: sandboxId.id,
+      repoName: ctx.repoName,
+      filesChanged: allFiles.map((f) => ({
         path: f.path,
         content: f.content,
         action: f.action as "create" | "modify" | "delete",
       })),
-    }));
-
-    // === STEP 10: Update Linear (skip for orchestrator tasks) ===
-    if (!options?.skipLinear) {
-      try {
-        await auditedStep(ctx, "linear_updated", {
-          taskId: ctx.taskId,
-          newState: "in_review",
-        }, () => updateLinearIfExists(ctx, `## TheFold har fullført denne oppgaven\n\n${review.documentation}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.qualityScore}/10\n\n${review.concerns.length > 0 ? "**Bekymringer:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : "Ingen bekymringer."}`, "in_review"));
-      } catch (e) {
-        console.warn("Linear update in STEP 10 failed:", e);
-      }
-    }
-
-    // === STEP 11: Store memories + error patterns ===
-    for (const mem of review.memoriesExtracted) {
-      try {
-        await auditedStep(ctx, "memory_stored", {
-          content: mem.substring(0, 200),
-          category: "decision",
-        }, () => memory.store({
-          content: mem,
-          category: "decision",
-          linearTaskId: ctx.taskId,
-          memoryType: "decision",
-          sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
-        }));
-      } catch (e) {
-        console.warn("Memory store failed (rate limited?):", e);
-      }
-    }
-
-    // Store error patterns for future learning
-    if (previousErrors.length > 0) {
-      try {
-        const errorSummary = previousErrors.join("\n---\n").substring(0, 3000);
-        await memory.store({
-          content: `Error patterns from task ${ctx.taskId}:\n${errorSummary}\n\nResolution: Task completed after ${ctx.totalAttempts} attempts with ${ctx.planRevisions} plan revisions.`,
-          category: "error_pattern",
-          memoryType: "error_pattern",
-          sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
-          tags: ["error_pattern", "auto_resolved"],
-          ttlDays: 180,
-        });
-      } catch (e) {
-        console.warn("Error pattern store failed:", e);
-      }
-    }
-
-    // === STEP 12: Clean up sandbox ===
-    await auditedStep(ctx, "sandbox_destroyed", {
-      sandboxId: sandboxId.id,
-    }, () => sandbox.destroy({ sandboxId: sandboxId.id }));
-
-    // === STEP 13: Report completion ===
-    const changedPaths = allFiles.map((f) => f.path);
-
-    const savings = calculateSavings(ctx.totalTokensUsed, 0, ctx.selectedModel);
+      aiReview: aiReviewData,
+    });
 
     await audit({
       sessionId: ctx.conversationId,
-      actionType: "task_completed",
+      actionType: "review_submitted",
       details: {
-        filesChanged: changedPaths,
+        reviewId: reviewResult.reviewId,
         qualityScore: review.qualityScore,
-        concerns: review.concerns,
-        totalDurationMs: Date.now() - taskStart,
-        attempts: ctx.totalAttempts,
-        prUrl: pr.url,
-        costTracking: {
-          totalCostUsd: ctx.totalCostUsd,
-          totalTokensUsed: ctx.totalTokensUsed,
-          modelUsed: ctx.selectedModel,
-          modelMode: ctx.modelMode,
-          savedVsOpusUsd: savings.savedUsd,
-          savedVsOpusPercent: savings.savedPercent,
-        },
+        filesChanged: allFiles.map((f) => f.path),
       },
       success: true,
       taskId: ctx.taskId,
@@ -1278,38 +1316,23 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       durationMs: Date.now() - taskStart,
     });
 
-    // Final AgentStatus: Ferdig!
-    await reportSteps(ctx, "Ferdig", [
-      { label: "Oppgave fullført!", status: "done" },
-      { label: pr.url ? `PR: ${pr.url}` : "Endringer pushet", status: "done" },
-    ]);
-
-    const costLine = `**Kostnad:** $${ctx.totalCostUsd.toFixed(4)} (${ctx.totalTokensUsed} tokens med ${ctx.selectedModel})`;
-    const savingsLine = savings.savedPercent > 0
-      ? `\n**Spart:** $${savings.savedUsd.toFixed(4)} (${savings.savedPercent.toFixed(0)}% vs Opus)`
-      : "";
-
-    await report(
-      ctx,
-      `**Ferdig med ${ctx.taskId}**\n\n${review.documentation}\n\n**PR:** ${pr.url}\n**Kvalitet:** ${review.qualityScore}/10\n${costLine}${savingsLine}${review.concerns.length > 0 ? "\n\n**Ting a se pa:**\n" + review.concerns.map((c) => `- ${c}`).join("\n") : ""}`,
-      "completed",
-      { prUrl: pr.url, filesChanged: changedPaths }
-    );
-
-    // Update TheFold task status if applicable
+    // Update TheFold task status to in_review if applicable
     if (ctx.thefoldTaskId) {
       try {
-        await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "done", prUrl: pr.url });
+        await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "in_review", reviewId: reviewResult.reviewId });
       } catch { /* non-critical */ }
     }
 
+    // Return — DO NOT create PR, DO NOT destroy sandbox (handled by review approval)
     return {
       success: true,
-      prUrl: pr.url,
-      filesChanged: changedPaths,
+      reviewId: reviewResult.reviewId,
+      status: 'pending_review',
+      filesChanged: allFiles.map((f) => f.path),
       costUsd: ctx.totalCostUsd,
       tokensUsed: ctx.totalTokensUsed,
     };
+
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error("[DEBUG-AF] executeTask CRASHED:", errorMsg);

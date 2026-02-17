@@ -1338,6 +1338,138 @@ export const reviewCode = api(
   }
 );
 
+// --- Project Review (whole-project, used by orchestrator) ---
+
+interface ProjectReviewRequest {
+  projectDescription: string;
+  phases: Array<{
+    name: string;
+    tasks: Array<{
+      title: string;
+      status: string;
+      filesChanged: string[];
+    }>;
+  }>;
+  allFiles: Array<{ path: string; content: string; action: string }>;
+  totalCostUsd: number;
+  totalTokensUsed: number;
+  model?: string;
+}
+
+interface ProjectReviewResponse {
+  documentation: string;
+  qualityScore: number;
+  concerns: string[];
+  architecturalDecisions: string[];
+  memoriesExtracted: string[];
+  tokensUsed: number;
+  modelUsed: string;
+  costUsd: number;
+}
+
+export const reviewProject = api(
+  { method: "POST", path: "/ai/review-project", expose: false },
+  async (req: ProjectReviewRequest): Promise<ProjectReviewResponse> => {
+    const model = req.model || "claude-sonnet-4-5-20250929";
+
+    // Build file summary with token-trimming
+    const MAX_FILE_TOKENS = 60000;
+    let fileTokens = 0;
+    let fileSection = "## Alle filer\n\n";
+    const fullFiles: string[] = [];
+    const summaryFiles: string[] = [];
+
+    // Sort: shorter files first (more likely to fit in full)
+    const sortedFiles = [...req.allFiles].sort((a, b) => a.content.length - b.content.length);
+
+    for (const f of sortedFiles) {
+      const fileTokenEst = Math.ceil(f.content.length / 4);
+      if (fileTokens + fileTokenEst < MAX_FILE_TOKENS) {
+        fullFiles.push(`### ${f.path} (${f.action})\n\`\`\`\n${f.content}\n\`\`\`\n`);
+        fileTokens += fileTokenEst;
+      } else {
+        const lines = f.content.split("\n").length;
+        summaryFiles.push(`- ${f.path} (${f.action}, ${lines} linjer)`);
+      }
+    }
+
+    fileSection += fullFiles.join("\n");
+    if (summaryFiles.length > 0) {
+      fileSection += `\n### Filer vist som sammendrag (token-grense)\n${summaryFiles.join("\n")}\n`;
+    }
+
+    // Build phase summary
+    let phaseSection = "## Faser og oppgaver\n\n";
+    for (const phase of req.phases) {
+      phaseSection += `### ${phase.name}\n`;
+      for (const task of phase.tasks) {
+        const fileList = task.filesChanged.length > 0
+          ? ` (${task.filesChanged.length} filer: ${task.filesChanged.slice(0, 5).join(", ")}${task.filesChanged.length > 5 ? "..." : ""})`
+          : "";
+        phaseSection += `- [${task.status}] ${task.title}${fileList}\n`;
+      }
+      phaseSection += "\n";
+    }
+
+    const prompt = [
+      `## Prosjektbeskrivelse\n${req.projectDescription}\n`,
+      phaseSection,
+      fileSection,
+      `## Kostnad\nTotalt: $${req.totalCostUsd.toFixed(4)} (${req.totalTokensUsed} tokens)\n`,
+      "",
+      "Review hele dette prosjektet. Gi en samlet vurdering av:",
+      "1. Hva som ble bygget og hvorfor",
+      "2. Arkitektoniske valg som ble gjort",
+      "3. Samlet kodekvalitet (1-10)",
+      "4. Bekymringer eller svakheter",
+      "5. Viktige beslutninger å huske til fremtiden",
+      "",
+      "Svar KUN med JSON i dette formatet:",
+      '{ "documentation": "markdown", "qualityScore": 7, "concerns": ["..."], "architecturalDecisions": ["..."], "memoriesExtracted": ["..."] }',
+    ].join("\n");
+
+    const systemPrompt = [
+      "Du er en senior arkitekt som reviewer et komplett prosjekt bygget av en AI-agent.",
+      "Du skal gi en helhetlig vurdering — ikke per-fil, men prosjektet som helhet.",
+      "Fokuser på: arkitektur, kodekvalitet, sikkerhet, testbarhet, vedlikeholdbarhet.",
+      "Svar KUN med gyldig JSON.",
+    ].join("\n");
+
+    const response = await callAIWithFallback({
+      model,
+      system: systemPrompt,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 8192,
+    });
+
+    try {
+      const jsonText = stripMarkdownJson(response.content);
+      const parsed = JSON.parse(jsonText);
+      return {
+        documentation: parsed.documentation || "",
+        qualityScore: parsed.qualityScore || 5,
+        concerns: parsed.concerns || [],
+        architecturalDecisions: parsed.architecturalDecisions || [],
+        memoriesExtracted: parsed.memoriesExtracted || [],
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    } catch {
+      return {
+        documentation: response.content,
+        qualityScore: 5,
+        concerns: ["Kunne ikke parse AI-respons som JSON"],
+        architecturalDecisions: [],
+        memoriesExtracted: [],
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
+    }
+  }
+);
+
 // --- Complexity Assessment ---
 
 export interface AssessComplexityRequest {

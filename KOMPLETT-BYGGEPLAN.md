@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.26 - Prompt AP (Tomme GitHub-repoer + spinner fix + ferdig-garanti)
+> **Versjon:** 3.30 - Prompt AT (createPR empty-repo fix + review-sletting)
 > **Sist oppdatert:** 17. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -142,16 +142,23 @@
 - **FIX 7 — Initial agent_status at start_task:** chat.ts oppretter initial "Forbereder"-status (agent_status melding) når agent task trigges — bruker ser umiddelbart at agenten er i gang
 - **FIX 8 — Button-in-button fix:** `settings/models/page.tsx` outer `<button>` endret til `<div>` for å unnga HTML-validering-feil med nested interactive elements
 
+### ✅ Ferdig — Prompt AR: getTree-forenkling + Auto-init tomme repos (februar 2026)
+- **OPPGAVE 1 — getTree try/catch fjernet:** agent.ts (2 steder: curated path + standard path) og orchestrator.ts (2 steder: curateContext + executeProject) — try/catch erstattet med `result.empty`-sjekk. Renere kode, ingen console.warn for normal empty-repo-tilfelle
+- **OPPGAVE 2 — autoInitRepo():** Ny funksjon i agent.ts. Når getTree returnerer `empty: true`, opprettes automatisk en synlig init-task via tasks-servicen med tittel "Initialiser repo: {repoName}". Pusher 4 filer (README.md, .gitignore, package.json, tsconfig.json) via createPR. Init-task markeres som `done` med PR-URL. Feil markerer tasken som `blocked`. Etter init re-fetches tree og original oppgave fortsetter
+- **Filer endret:** agent/agent.ts (autoInitRepo + 2x getTree-forenkling), agent/orchestrator.ts (2x getTree-forenkling), GRUNNMUR-STATUS.md, KOMPLETT-BYGGEPLAN.md
+
 ### ✅ Ferdig — Bugfiks Runde 10: UX Polish (februar 2026)
 - **FIX 1 — Emoji-fjerning i agent:** Alle emojier fjernet fra `agent/agent.ts` report()-kall (10+ emojier: planlegging, prikker, haker, advarsler, feil). Også fjernet emoji fra `chat/chat.ts` task-started melding. Agenten bruker nå ren tekst
 - **FIX 2 — ActivityIcon SVG-komponent:** Ny `ActivityIcon.tsx` med 12 animerte SVG-ikoner (created, completed, failed, pr, working, chat, auth, build, task, sync, heal, cost + default). Erstatter emojier i activity-tidslinjen. Ikoner har SVG-animasjoner (opacity pulse, rotate, scale)
 - **FIX 3 — AgentMode + Magic Header (BUG 5):** `tryParseAgentStatus` sjekker nå `metadata.taskId` — returnerer null for simple chat (ingen AgentStatus-boks for vanlige svar). `hasAgentStatus` filtrerer på taskId. Magic-indikator flyttet fra meldingsområdet til header-baren. Simple mode viser `{aiName} · {phrase} · tenker · {N}s`, agent mode viser bare `{phrase}`
 - **FIX 4 — Thinking Timer:** Ny `thinkingSeconds` teller i begge chat-sider. Starter ved `isWaitingForAI`, teller opp sekunder, vises i header for simple mode
 
-### ✅ Ferdig — Prompt AP: Tomme GitHub-repoer + spinner fix + ferdig-garanti (februar 2026)
-- **FIX 1 — createPR håndterer tomme repoer (KRITISK):** Sjekker om repo er tomt (409/404 på ref/heads/main). Tomt repo → push direkte til main (initial commit uten parent). Normal repo → vanlig PR-flyt. `directPush: true` i response. approveReview viser "Kode pushet til main" i stedet for "PR opprettet"
+### ✅ Ferdig — Prompt AP/AQ: Tomme GitHub-repoer + spinner fix + ferdig-garanti (februar 2026)
+- **FIX 1 — createPR håndterer tomme repoer (KRITISK):** `getRefSha()` helper sjekker main/master (returnerer null ved 404/409). Tomt repo → oppretter initial commit med README.md på main (blob → tree → commit → ref uten parents), deretter normal feature-branch + PR-flyt. Alltid ekte PR — `directPush` fjernet
+- **FIX 1b — getTree empty-repo indikator:** getTree returnerer `{ tree: [], treeString: "", empty: true }` for tomme repoer i stedet for å kaste feil. Bruker raw fetch med 404/409-deteksjon
 - **FIX 2 — Spinner forsvinner etter Lukk:** `showThinking` inkluderer `&& !statusDismissed`. `handleDismissStatus` resetter også `pollMode` og `heartbeatLost`
 - **FIX 3 — Ferdig/feilet-melding garanti:** createPR catch-block sender Feilet agent_status + blokkerer task FØR re-throw. Frontend får 500 med optimistisk oppdatering allerede vist
+- **Tester:** 5 nye tester i github.test.ts — getTree empty (via non-existent repo 404), getTree normal (empty undefined), createPR empty repo (mocked full flow), createPR normal repo (skip initial commit), createPR deletions
 
 ### ✅ Ferdig — Prompt AO: AgentStatus Feilet-boks + Approve fallback + UX (februar 2026)
 - **FIX 1 — Fjernet "Prøv igjen"/"Avbryt" fra Feilet-boks:** Erstattet med "Lukk"-knapp (onDismiss) som skjuler boksen. onRetry/onCancel fjernet fra AgentStatus props. handleAgentRetry fjernet (dead code)
@@ -1291,6 +1298,27 @@ AI Name Preference: aiName i preferences JSONB, konfigurerbart AI-navn i system 
 - ✅ Structured Pub/Sub: chat.ts detekterer JSON agent_status fra reportSteps, fallback til legacy parsing
 - ✅ Initial agent_status: chat.ts oppretter "Forbereder"-status ved task-trigger — umiddelbar feedback til bruker
 - ✅ Button-in-button fix: settings/models/page.tsx outer button→div
+
+**Prompt AQ: getTree empty indicator + tester (17. feb):**
+getTree returnerer `{ tree: [], treeString: "", empty: true }` for tomme repos (404/409). 5 nye tester i github.test.ts.
+
+**Prompt AR: getTree-forenkling + autoInitRepo (17. feb):**
+Fjernet try/catch rundt getTree i agent.ts og orchestrator.ts — bruker `result.empty` i stedet. Ny `autoInitRepo()` funksjon: oppdager tomme repos, oppretter init-task, pusher scaffold-filer (README, .gitignore, package.json, tsconfig.json) via createPR.
+
+**Prompt AS: Orchestrator refaktorering — autonom prosjektkjøring (17. feb):**
+Stor 6-delers refaktorering av orchestrator-flyten for ekte autonomi:
+- DEL 1: `collectOnly` modus i executeTask — kjører steg 1-7, stopper etter validering, returnerer `filesContent` + `sandboxId`. `skipReview` fjernet helt (review gate er nå ALLTID aktiv for enkelt-tasks). Steg 9-13 (direkte PR-path) slettet som dead code — alt går nå via review gate.
+- DEL 2: Orchestrator bruker ÉN delt sandbox for hele prosjektet. autoInitRepo() før sandbox for tomme repos. Fil-akkumulering med path-basert deduplisering.
+- DEL 3: Samlet prosjekt-review — etter alle faser: `ai.reviewProject()` reviewer hele prosjektet, `submitReviewInternal()` sender ÉN review. Prosjektstatus settes til `pending_review`. Sandbox lever til godkjenning/avvisning.
+- DEL 4: Enkelt-task flyt (fra chat) uendret — fungerer som før med per-task review gate.
+- DEL 5: Nytt `ai.reviewProject()` endepunkt — token-trimming (MAX_FILE_TOKENS=60000), sorterer filer etter størrelse, viser mindre filer fullt ut. Returnerer dokumentasjon, qualityScore, concerns, arkitektoniske beslutninger, memoriesExtracted.
+- DEL 6: `directPush` fjernet fra CreatePRResponse og alle referanser i review.ts. createPR returnerer alltid ekte PR.
+
+Filer endret: agent/agent.ts (collectOnly + dead code removal), agent/orchestrator.ts (major rewrite), agent/review.ts (directPush cleanup), ai/ai.ts (reviewProject endpoint), github/github.ts (directPush fjernet), agent/e2e.test.ts (skipReview→collectOnly).
+
+**Prompt AT: createPR empty-repo fix + review-sletting (17. feb):**
+DEL 1 (createPR): Allerede implementert i Prompt AQ/AR — getRefSha helper, empty-repo initial commit, directPush fjernet. Stale test-assertion (directPush) ryddet opp.
+DEL 2 (Review-sletting): 3 nye endepunkter i review.ts: `POST /agent/review/delete` (slett enkelt review, destroyer sandbox, oppdaterer task), `POST /agent/review/cleanup` (slett pending >24h), `POST /agent/review/delete-all` (slett alle, dev/testing). Frontend: Slett-knapp (trash icon) per review med Ja/Nei bekreftelse, "Rydd opp"-knapp i PageHeaderBar med bekreftelsesdialog. 3 nye API-funksjoner i api.ts (deleteReview, cleanupReviews, deleteAllReviews).
 
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.
 

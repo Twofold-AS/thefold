@@ -153,8 +153,10 @@ Key files:
 - `frontend/src/app/(dashboard)/settings/models/page.tsx` — Full CRUD UI (expand/collapse, modal forms)
 
 ## Agent Flow (with meta-reasoning)
-1. Task picked up via **dual-source lookup**: tries tasks service first (`tasks.getTaskInternal()`), falls back to Linear (`linear.getTask()`). When found locally, sets `ctx.thefoldTaskId = ctx.taskId` and updates status to `in_progress`. Also triggered by user request via chat tool-use dispatch
-2. GitHub: read project tree + relevant files (with context windowing)
+
+### Single-task flow (from chat or direct trigger)
+1. Task picked up via **dual-source lookup**: tries tasks service first (`tasks.getTaskInternal()`), falls back to Linear (`linear.getTask()`). When found locally, sets `ctx.thefoldTaskId = ctx.taskId` and updates status to `in_progress`
+2. GitHub: read project tree + relevant files (with context windowing). If repo is empty (`tree.empty`), runs `autoInitRepo()` to scaffold and push initial files
 3. Memory: search for relevant context (with temporal decay scoring)
 4. Memory: search for similar error patterns from previous tasks
 5. Context7: look up library docs
@@ -170,37 +172,45 @@ Key files:
     - `impossible_task` → escalate to human, block Linear task
     - `environment_error` → wait 30s and retry
 12. Max 5 total attempts (up from 3)
-13. **Review gate** (unless `skipReview=true`): submit for user review via `submitReviewInternal()`
+13. **Review gate** (always): submit for user review via `submitReviewInternal()`
     - Agent pauses, sandbox stays alive, status = `pending_review`
     - User reviews at `/review/[id]`: approve, request changes, or reject
     - Approve → creates PR, updates Linear, stores memories, destroys sandbox
     - Request changes → re-executes task with feedback, creates new review
     - Reject → destroys sandbox
-14. If `skipReview=true`: GitHub: create branch + PR with documentation (direct)
-15. Linear: update task to "In Review"
-16. Memory: store decisions + error patterns for future learning
-17. Chat: report to user with cost tracking
+
+### collectOnly mode (used by orchestrator)
+When `ExecuteTaskOptions.collectOnly = true`, executeTask runs steps 1-7 (plan, build, validate) but stops after validation. It returns `ExecuteTaskResult` with `filesContent` (all files written) and `sandboxId` (for reuse). No review gate, no PR, no cleanup. The orchestrator accumulates these results across all tasks and submits one aggregated review at the end.
 
 ## Project Orchestrator
-When a user sends a large request ("Build a task app with auth and teams"), the orchestrator:
+When a user sends a large request ("Build a task app with auth and teams"), the orchestrator runs ALL tasks autonomously and submits ONE aggregated review:
+
 1. Chat detects project request via heuristics (>100 words, build intent, multiple systems)
 2. `ai.decomposeProject()` breaks it into atomic tasks organized in phases
 3. Plan stored via `agent.storeProjectPlan()` with dependency-index-to-UUID resolution
 4. User confirms → `executeProject()` starts async via `agent.startProject()`
-5. For each phase, for each task:
+5. **Auto-init**: If repo is empty, `autoInitRepo()` scaffolds initial files before sandbox creation
+6. **One shared sandbox** created for the entire project — all tasks execute in the same sandbox
+7. For each phase, for each task:
    - `curateContext()` gathers dependency outputs, memory, GitHub files, docs
    - Token-trimming with priority: conventions → deps → files → memory → docs (max 30K tokens)
-   - `executeTask()` runs with curated context (skips steps 1-3)
+   - `executeTask()` runs with `collectOnly: true` + shared `sandboxId` — returns files without creating PR or triggering review
+   - Files accumulated in `accumulatedFiles` array with path-based deduplication
    - Results update task status, cost, output_files in DB
-6. Failed tasks → downstream dependents marked as 'skipped'
-7. Between phases: `ai.reviseProjectPhase()` reviews completed results and adjusts next phase tasks (skip, revise descriptions, add new tasks)
-8. After each phase: progress report via agentReports pub/sub
-9. Crash-resumable: reads current state from DB, skips completed tasks
+8. Failed tasks → downstream dependents marked as 'skipped', other tasks continue
+9. Between phases: `ai.reviseProjectPhase()` reviews completed results and adjusts next phase tasks
+10. After each phase: progress report via agentReports pub/sub
+11. After ALL phases complete: `ai.reviewProject()` reviews the entire project (all files, all tasks, all phases)
+12. **One aggregated review** submitted via `submitReviewInternal()` — user reviews everything at once
+13. Project status set to `pending_review` — sandbox stays alive until user decides
+14. Approve → ONE PR with all files, sandbox destroyed. Request changes → re-execute specific tasks. Reject → sandbox destroyed
+15. Crash-resumable: reads current state from DB, skips completed tasks, outer try/catch destroys sandbox on unexpected errors
 
 Key files:
 - `agent/orchestrator.ts` — curateContext, executeProject, 5 API endpoints
-- `agent/agent.ts` — executeTask with optional `ExecuteTaskOptions` (dual-path)
-- `agent/types.ts` — ProjectPlan, ProjectTask, CuratedContext
+- `agent/agent.ts` — executeTask with `collectOnly` mode, `autoInitRepo`
+- `agent/types.ts` — ProjectPlan, ProjectTask, CuratedContext, ExecuteTaskResult (with filesContent, sandboxId)
+- `ai/ai.ts` — `reviewProject()` endpoint for whole-project AI review with token-trimming
 - `chat/detection.ts` — detectProjectRequest heuristics
 - `chat/chat.ts` — send endpoint with project detection integration
 
@@ -208,16 +218,25 @@ Endpoints: `/agent/project/start`, `/status`, `/pause`, `/resume`, `/store`
 Database: `project_plans` + `project_tasks` tables (in agent service)
 
 ## Code Review System
-Review gate sits between AI review (step 8) and PR creation. Agent pauses after self-review, stores review in DB, notifies user via chat. User reviews changes at `/review/[id]`.
+Two review modes depending on context:
+
+### Single-task review (from chat)
+Review gate sits after validation in executeTask. Agent pauses, stores review in DB, notifies user via chat. User reviews at `/review/[id]`.
+
+### Project review (from orchestrator)
+After ALL tasks complete, orchestrator calls `ai.reviewProject()` for a whole-project AI review, then submits ONE aggregated review covering all files from all tasks. User approves once → one PR.
 
 Key flows:
 - **Approve**: `approveReview()` → creates PR → updates Linear → stores memories → destroys sandbox
 - **Request changes**: stores feedback → re-executes `executeTask()` with feedback in taskDescription → new review created
 - **Reject**: destroys sandbox, notifies chat
-- **Orchestrator integration**: `pending_review` pauses project, resumes after approval
 
 Endpoints: `/agent/review/submit` (internal), `/get`, `/list`, `/approve`, `/request-changes`, `/reject`
 Database: `code_reviews` table (in agent service) — JSONB for files_changed and ai_review
+
+### ai.reviewProject()
+Dedicated endpoint for reviewing entire projects. Receives all files, tasks, and phases. Token-trimming sorts files by size — smaller files included in full, larger ones as summaries (MAX_FILE_TOKENS = 60000). Returns: documentation, qualityScore (1-10), concerns, architecturalDecisions, memoriesExtracted.
+Endpoint: `POST /ai/review-project` (internal)
 
 ## Circuit Breaker (OWASP ASI08)
 Agent wraps critical service calls with circuit breakers to prevent cascading failures:

@@ -40,7 +40,7 @@ describe.skip("Test 1: Enkel task-flyt (uten review)", () => {
   // Krever AnthropicAPIKey, GitHubToken, VoyageAPIKey, LinearAPIKey
   // Fjern .skip når alle secrets er konfigurert for testmiljø
 
-  it("should execute a simple task end-to-end with skipReview", async () => {
+  it("should execute a simple task end-to-end with collectOnly", async () => {
     // Import executeTask dynamically to avoid pulling in all service deps
     const { executeTask } = await import("./agent");
 
@@ -65,7 +65,7 @@ describe.skip("Test 1: Enkel task-flyt (uten review)", () => {
     };
 
     const result = await executeTask(ctx, {
-      skipReview: true,
+      collectOnly: true,
       skipLinear: true,
       taskDescription: ctx.taskDescription,
     });

@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { getTree, getFile, findRelevantFiles, getFileMetadata, getFileChunk } from "./github";
+import { describe, it, expect, vi } from "vitest";
+import { getTree, getFile, findRelevantFiles, getFileMetadata, getFileChunk, createPR } from "./github";
 
 describe("GitHub service", () => {
   const testOwner = "Twofold-AS";
@@ -340,6 +340,299 @@ describe("GitHub service", () => {
         } else {
           expect(result.endLine).toBe(100);
           expect(result.hasMore).toBe(true);
+        }
+      }
+    );
+  });
+
+  describe("getTree — empty repo handling", () => {
+    it(
+      "should return empty: true for a non-existent repo (simulates empty repo 404)",
+      { timeout: 30000 },
+      async () => {
+        // A non-existent repo returns 404 — same as an empty repo
+        const result = await getTree({
+          owner: testOwner,
+          repo: "this-repo-does-not-exist-thefold-test-2026",
+        });
+
+        expect(result.empty).toBe(true);
+        expect(result.tree).toEqual([]);
+        expect(result.treeString).toBe("");
+        expect(result.packageJson).toBeUndefined();
+      }
+    );
+
+    it(
+      "should NOT set empty for a normal repo",
+      { timeout: 30000 },
+      async () => {
+        const result = await getTree({
+          owner: testOwner,
+          repo: testRepo,
+        });
+
+        expect(result.empty).toBeUndefined();
+        expect(result.tree.length).toBeGreaterThan(0);
+      }
+    );
+  });
+
+  describe("createPR — empty repo handling", () => {
+    it(
+      "should handle empty repo by creating initial commit then normal PR",
+      { timeout: 30000 },
+      async () => {
+        // This test verifies the createPR logic flow using mocked fetch.
+        // We mock fetch to simulate: empty repo (404 on ref), then successful
+        // blob/tree/commit/ref/PR creation.
+        const originalFetch = global.fetch;
+        let fetchCalls: string[] = [];
+
+        global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+          const urlStr = typeof url === "string" ? url : url.toString();
+          fetchCalls.push(urlStr);
+
+          // 1. getRefSha("main") → 404 (empty repo)
+          if (urlStr.includes("/git/ref/heads/main")) {
+            return new Response("", { status: 404 });
+          }
+          // 2. getRefSha("master") → 404 (empty repo)
+          if (urlStr.includes("/git/ref/heads/master")) {
+            return new Response("", { status: 404 });
+          }
+          // 3. Create blob (README + file blobs)
+          if (urlStr.includes("/git/blobs") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sha: "blob-sha-" + Math.random().toString(36).slice(2, 8) }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // 4. Create tree
+          if (urlStr.includes("/git/trees") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sha: "tree-sha-123" }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // 5. Create commit
+          if (urlStr.includes("/git/commits") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sha: "commit-sha-123", tree: { sha: "tree-sha-123" } }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // 6. Create/get ref
+          if (urlStr.includes("/git/refs") && init?.method === "POST") {
+            return new Response(JSON.stringify({ ref: "refs/heads/main", object: { sha: "commit-sha-123" } }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // 7. Get commit (for base_tree)
+          if (urlStr.includes("/git/commits/") && (!init?.method || init.method === "GET")) {
+            return new Response(JSON.stringify({ sha: "commit-sha-123", tree: { sha: "tree-sha-123" } }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // 8. Create pull request
+          if (urlStr.includes("/pulls") && init?.method === "POST") {
+            return new Response(JSON.stringify({ html_url: "https://github.com/test/repo/pull/1", number: 1 }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+
+          return new Response("Not found", { status: 404 });
+        }) as any;
+
+        try {
+          const result = await createPR({
+            owner: "test-owner",
+            repo: "empty-repo",
+            branch: "feature/test",
+            title: "Test PR",
+            body: "Test body",
+            files: [{ path: "index.ts", content: "console.log('hello');", action: "create" }],
+          });
+
+          expect(result.url).toBe("https://github.com/test/repo/pull/1");
+          expect(result.number).toBe(1);
+
+          // Verify the flow: should have checked main, checked master,
+          // then created initial commit (blob + tree + commit + ref)
+          // then created PR files (blob + tree + commit + branch ref + PR)
+          expect(fetchCalls.some(u => u.includes("/git/ref/heads/main"))).toBe(true);
+          expect(fetchCalls.some(u => u.includes("/git/ref/heads/master"))).toBe(true);
+          // At least 2 blob calls: 1 for README init + 1 for the file
+          const blobCalls = fetchCalls.filter(u => u.includes("/git/blobs"));
+          expect(blobCalls.length).toBeGreaterThanOrEqual(2);
+          // Should create a pull request at the end
+          expect(fetchCalls.some(u => u.includes("/pulls"))).toBe(true);
+        } finally {
+          global.fetch = originalFetch;
+        }
+      }
+    );
+
+    it(
+      "should skip initial commit for repos that already have commits",
+      { timeout: 30000 },
+      async () => {
+        const originalFetch = global.fetch;
+        let fetchCalls: string[] = [];
+
+        global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+          const urlStr = typeof url === "string" ? url : url.toString();
+          fetchCalls.push(urlStr);
+
+          // getRefSha("main") → 200 (repo has commits)
+          if (urlStr.includes("/git/ref/heads/main") && (!init?.method || init.method === "GET")) {
+            return new Response(JSON.stringify({ object: { sha: "existing-sha-456" } }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // Create blob
+          if (urlStr.includes("/git/blobs") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sha: "blob-sha-789" }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // Get commit (base tree)
+          if (urlStr.includes("/git/commits/existing-sha-456")) {
+            return new Response(JSON.stringify({ sha: "existing-sha-456", tree: { sha: "base-tree-sha" } }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // Create tree
+          if (urlStr.includes("/git/trees") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sha: "new-tree-sha" }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // Create commit
+          if (urlStr.includes("/git/commits") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sha: "new-commit-sha" }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // Create ref (branch)
+          if (urlStr.includes("/git/refs") && init?.method === "POST") {
+            return new Response(JSON.stringify({ ref: "refs/heads/feature/test" }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          // Create PR
+          if (urlStr.includes("/pulls") && init?.method === "POST") {
+            return new Response(JSON.stringify({ html_url: "https://github.com/test/repo/pull/2", number: 2 }), {
+              status: 201,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+
+          return new Response("Not found", { status: 404 });
+        }) as any;
+
+        try {
+          const result = await createPR({
+            owner: "test-owner",
+            repo: "existing-repo",
+            branch: "feature/test",
+            title: "Test PR",
+            body: "Test body",
+            files: [{ path: "index.ts", content: "console.log('hello');", action: "create" }],
+          });
+
+          expect(result.url).toBe("https://github.com/test/repo/pull/2");
+          expect(result.number).toBe(2);
+
+          // Should NOT check master (main succeeded)
+          expect(fetchCalls.some(u => u.includes("/git/ref/heads/master"))).toBe(false);
+          // Should only have 1 blob call (the file, no README init)
+          const blobCalls = fetchCalls.filter(u => u.includes("/git/blobs"));
+          expect(blobCalls.length).toBe(1);
+        } finally {
+          global.fetch = originalFetch;
+        }
+      }
+    );
+
+    it(
+      "should handle file deletions in PR",
+      { timeout: 30000 },
+      async () => {
+        const originalFetch = global.fetch;
+
+        global.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+          const urlStr = typeof url === "string" ? url : url.toString();
+
+          if (urlStr.includes("/git/ref/heads/main")) {
+            return new Response(JSON.stringify({ object: { sha: "base-sha" } }), {
+              status: 200, headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (urlStr.includes("/git/blobs") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sha: "blob-sha" }), {
+              status: 201, headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (urlStr.includes("/git/commits/base-sha")) {
+            return new Response(JSON.stringify({ sha: "base-sha", tree: { sha: "base-tree" } }), {
+              status: 200, headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (urlStr.includes("/git/trees") && init?.method === "POST") {
+            // Verify tree includes deletion (sha: null)
+            const body = JSON.parse(init.body as string);
+            const deleteItem = body.tree.find((t: any) => t.path === "old-file.ts");
+            expect(deleteItem).toBeDefined();
+            expect(deleteItem.sha).toBeNull();
+            return new Response(JSON.stringify({ sha: "new-tree" }), {
+              status: 201, headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (urlStr.includes("/git/commits") && init?.method === "POST") {
+            return new Response(JSON.stringify({ sha: "new-commit" }), {
+              status: 201, headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (urlStr.includes("/git/refs") && init?.method === "POST") {
+            return new Response(JSON.stringify({ ref: "refs/heads/feat" }), {
+              status: 201, headers: { "Content-Type": "application/json" },
+            });
+          }
+          if (urlStr.includes("/pulls") && init?.method === "POST") {
+            return new Response(JSON.stringify({ html_url: "https://github.com/t/r/pull/3", number: 3 }), {
+              status: 201, headers: { "Content-Type": "application/json" },
+            });
+          }
+
+          return new Response("", { status: 404 });
+        }) as any;
+
+        try {
+          const result = await createPR({
+            owner: "test",
+            repo: "repo",
+            branch: "feat",
+            title: "Delete + Create",
+            body: "body",
+            files: [
+              { path: "new-file.ts", content: "new", action: "create" },
+              { path: "old-file.ts", content: "", action: "delete" },
+            ],
+          });
+
+          expect(result.number).toBe(3);
+        } finally {
+          global.fetch = originalFetch;
         }
       }
     );
