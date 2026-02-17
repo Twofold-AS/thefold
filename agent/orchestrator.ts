@@ -497,9 +497,9 @@ export async function executeProject(
 
         await reportProject(
           conversationId,
-          `👀 Task "${task.title}" venter på review. Prosjektet er pauset.\n` +
-          `Godkjenn reviewen for å fortsette, eller be om endringer.` +
-          (result.reviewId ? `\n[Se review](/review/${result.reviewId})` : "")
+          `Task "${task.title}" venter pa review. Prosjektet er pauset.\n` +
+          `Godkjenn reviewen for a fortsette, eller be om endringer.` +
+          (result.reviewId ? `\nSe review: /review/${result.reviewId}` : "")
         );
         return; // Stop orchestrator — resumes after review approval
       } else if (result.success) {

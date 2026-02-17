@@ -1,7 +1,7 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.20 - Prompt AJ (Sandbox Fallback Cleanup + Frontend Timer Stopp)
-> **Sist oppdatert:** 16. februar 2026
+> **Versjon:** 3.22 - Prompt AL (Review Godkjenn/Avvis + Chat Review UX)
+> **Sist oppdatert:** 17. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
 ---
@@ -147,6 +147,16 @@
 - **FIX 2 — ActivityIcon SVG-komponent:** Ny `ActivityIcon.tsx` med 12 animerte SVG-ikoner (created, completed, failed, pr, working, chat, auth, build, task, sync, heal, cost + default). Erstatter emojier i activity-tidslinjen. Ikoner har SVG-animasjoner (opacity pulse, rotate, scale)
 - **FIX 3 — AgentMode + Magic Header (BUG 5):** `tryParseAgentStatus` sjekker nå `metadata.taskId` — returnerer null for simple chat (ingen AgentStatus-boks for vanlige svar). `hasAgentStatus` filtrerer på taskId. Magic-indikator flyttet fra meldingsområdet til header-baren. Simple mode viser `{aiName} · {phrase} · tenker · {N}s`, agent mode viser bare `{phrase}`
 - **FIX 4 — Thinking Timer:** Ny `thinkingSeconds` teller i begge chat-sider. Starter ved `isWaitingForAI`, teller opp sekunder, vises i header for simple mode
+
+### ✅ Ferdig — Prompt AL: Review Godkjenn/Avvis + Chat Review UX (februar 2026)
+- **FIX 1 — approveReview 403 error handling:** approveReview wrapper createPR med 403 error handling, kaster APIError.permissionDenied med klar PAT scope-melding
+- **FIX 2 — reviewer_id UUID->TEXT migrasjon:** agent/migrations/5 endrer reviewer_id fra UUID til TEXT. Root cause: auth?.email lagres som tekst i UUID-kolonne
+- **FIX 3 — Emoji-fjerning i review-meldinger:** Alle emojier fjernet fra review.ts + orchestrator.ts chat-meldinger (👀⚠️✅📎🔄❌)
+- **FIX 4 — Review page design system compliance:** Rounded classes fjernet fra /review/[id] side (border-radius: 0 i tråd med designsystemet)
+
+### ✅ Ferdig — Prompt AK: Smart validering + Avbryt-knapp (februar 2026)
+- **FIX 1 — Smart validering:** Sandbox pipeline skips tsc when no tsconfig.json/TypeScript dependency, skips eslint when no config. Supports filesystem + Docker
+- **FIX 2 — Avbryt-knapp:** Cancelled state, handleAgentCancel calls cancelTask + cancelChatGeneration, showThinking respects cancelled, stop button unified with handleAgentCancel, cancelled resets on new messages. Applied to both chat pages
 
 ### ✅ Ferdig — Prompt AJ: Sandbox Fallback Cleanup + Frontend Timer Stopp (februar 2026)
 - **FIX 1 — Sandbox fallback crash (KRITISK):** `rmSync(repoPath, { recursive: true, force: true })` mellom hvert clone-forsøk. Level 1 lager partial mappe → slettes → level 2 prøver rent → slettes → level 3 git init rent. Også: `stdio: "pipe"` på alle execSync for å unngå console-støy

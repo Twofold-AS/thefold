@@ -342,9 +342,31 @@ function dockerRunner(sandboxId: string): CommandRunner {
   };
 }
 
-async function runTypeCheck(run: CommandRunner): Promise<ValidationStepResult> {
+async function runTypeCheck(run: CommandRunner, repoDir: string, isDocker: boolean): Promise<ValidationStepResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  // Skip typecheck if project doesn't use TypeScript
+  if (!isDocker) {
+    const hasTsConfig = fs.existsSync(path.join(repoDir, "tsconfig.json"));
+    const hasPackageJson = fs.existsSync(path.join(repoDir, "package.json"));
+    let hasTsDep = false;
+    if (hasPackageJson) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(repoDir, "package.json"), "utf-8"));
+        hasTsDep = !!(pkg.devDependencies?.typescript || pkg.dependencies?.typescript);
+      } catch {}
+    }
+    if (!hasTsConfig && !hasTsDep) {
+      return { step: "typecheck", success: true, errors: [], warnings: ["Skipped — no TypeScript config or dependency"] };
+    }
+  } else {
+    // Docker: check via command
+    const check = await run("test -f tsconfig.json && echo YES || echo NO", 5_000);
+    if (check.stdout.trim() === "NO") {
+      return { step: "typecheck", success: true, errors: [], warnings: ["Skipped — no TypeScript config"] };
+    }
+  }
 
   const result = await run("npx tsc --noEmit", 60_000);
   if (result.exitCode === 0) {
@@ -358,9 +380,29 @@ async function runTypeCheck(run: CommandRunner): Promise<ValidationStepResult> {
   return { step: "typecheck", success: errors.length === 0, errors, warnings };
 }
 
-async function runLint(run: CommandRunner): Promise<ValidationStepResult> {
+async function runLint(run: CommandRunner, repoDir: string, isDocker: boolean): Promise<ValidationStepResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  // Skip lint if no ESLint config exists
+  const eslintConfigs = ["eslint.config.js", "eslint.config.mjs", ".eslintrc.js", ".eslintrc.json", ".eslintrc.yml", ".eslintrc"];
+  if (!isDocker) {
+    const hasEslintConfig = eslintConfigs.some(f => fs.existsSync(path.join(repoDir, f)));
+    let hasEslintInPkg = false;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(repoDir, "package.json"), "utf-8"));
+      hasEslintInPkg = !!pkg.eslintConfig || !!(pkg.devDependencies?.eslint || pkg.dependencies?.eslint);
+    } catch {}
+    if (!hasEslintConfig && !hasEslintInPkg) {
+      return { step: "lint", success: true, errors: [], warnings: ["Skipped — no ESLint config"] };
+    }
+  } else {
+    // Docker: check via command
+    const check = await run("ls eslint.config.* .eslintrc* 2>/dev/null | head -1 || echo NONE", 5_000);
+    if (check.stdout.trim() === "NONE") {
+      return { step: "lint", success: true, errors: [], warnings: ["Skipped — no ESLint config"] };
+    }
+  }
 
   const result = await run("npx eslint . --no-error-on-unmatched-pattern", 60_000);
   if (result.exitCode === 0) {
@@ -428,8 +470,8 @@ interface PipelineStep {
 }
 
 const VALIDATION_PIPELINE: PipelineStep[] = [
-  { name: "typecheck", enabled: true, run: (r) => runTypeCheck(r) },
-  { name: "lint", enabled: true, run: (r) => runLint(r) },
+  { name: "typecheck", enabled: true, run: (r, d, docker) => runTypeCheck(r, d, docker) },
+  { name: "lint", enabled: true, run: (r, d, docker) => runLint(r, d, docker) },
   { name: "test", enabled: true, run: (r, d, docker) => runTests(r, d, docker) },
   { name: "snapshot", enabled: false, run: () => runSnapshotComparison() },
   { name: "performance", enabled: false, run: () => runPerformanceBenchmark() },

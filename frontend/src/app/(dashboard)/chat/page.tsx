@@ -10,6 +10,7 @@ import {
   transferContext,
   deleteConversation,
   cancelChatGeneration,
+  cancelTask,
   uploadChatFile,
   listSkills,
   type Message,
@@ -53,6 +54,7 @@ export default function ChatPage() {
   const [heartbeatLost, setHeartbeatLost] = useState(false);
   const [phraseIndex, setPhraseIndex] = useState(0);
   const [thinkingSeconds, setThinkingSeconds] = useState(0);
+  const [cancelled, setCancelled] = useState(false);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -349,10 +351,22 @@ export default function ChatPage() {
   }
 
   function handleAgentCancel() {
+    setCancelled(true);
     if (activeConvId) {
       cancelChatGeneration(activeConvId).catch(() => {});
       setPollMode("idle");
       setHeartbeatLost(false);
+    }
+    // Also cancel the task if we have a taskId
+    if (lastAgentStatus) {
+      try {
+        const meta = typeof lastAgentStatus.metadata === "string"
+          ? JSON.parse(lastAgentStatus.metadata)
+          : lastAgentStatus.metadata;
+        if (meta?.taskId) {
+          cancelTask(meta.taskId).catch(() => {});
+        }
+      } catch {}
     }
   }
 
@@ -379,7 +393,10 @@ export default function ChatPage() {
     return false;
   }, [messages]);
 
-  const showThinking = sending || waitingForReply;
+  const showThinking = (sending || waitingForReply) && !cancelled;
+
+  // Reset cancelled flag when new messages arrive
+  useEffect(() => { setCancelled(false); }, [messages.length]);
 
   useEffect(() => {
     if (!showThinking) return;
@@ -781,16 +798,10 @@ export default function ChatPage() {
                   rows={1}
                   disabled={sending}
                 />
-                {isWaitingForAI ? (
+                {isWaitingForAI && !cancelled ? (
                   <button
                     type="button"
-                    onClick={async () => {
-                      if (activeConvId) {
-                        await cancelChatGeneration(activeConvId);
-                        setPollMode("idle");
-                        setHeartbeatLost(false);
-                      }
-                    }}
+                    onClick={() => handleAgentCancel()}
                     className="flex items-center justify-center hover:bg-white/10 transition-colors"
                     style={{ width: "32px", height: "32px", border: "1px solid var(--border)", borderRadius: "50%", background: "transparent", flexShrink: 0 }}
                     title="Stopp generering"

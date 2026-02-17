@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 16. februar 2026 (Prompt AJ: Sandbox Fallback Cleanup + Frontend Timer Stopp)
+> Sist oppdatert: 17. februar 2026 (Prompt AL: Review Godkjenn/Avvis + Chat Review UX)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -205,11 +205,12 @@
 | POST /agent/review/submit | 🟢 | Intern: lagre review + notifiser chat |
 | POST /agent/review/get | 🟢 | Hent full review med filer |
 | POST /agent/review/list | 🟢 | Liste reviews med statusfilter |
-| POST /agent/review/approve | 🟢 | Godkjenn → opprett PR → destroy sandbox |
+| POST /agent/review/approve | 🟢 | Godkjenn → opprett PR → destroy sandbox. createPR wrappet med 403 error handling (klar PAT scope-melding) |
 | POST /agent/review/request-changes | 🟢 | Be om endringer → re-kjør agent med feedback |
 | POST /agent/review/reject | 🟢 | Avvis → destroy sandbox |
+| reviewer_id kolonne | 🟢 | Endret fra UUID til TEXT (migrasjon 5) — root cause: auth?.email lagres som tekst, ikke UUID |
 | /review side | 🟢 | Liste med statusfilter-tabs |
-| /review/[id] side | 🟢 | Detaljer, filvisning, handlingsknapper |
+| /review/[id] side | 🟢 | Detaljer, filvisning, handlingsknapper. Alle emojier fjernet fra review-meldinger i chat |
 
 ### Hva trengs for full aktivering
 1. Agent-loopen er **fullt implementert** — alle 13 steg fungerer
@@ -342,8 +343,8 @@
 
 | Steg | Status | Enabled | Beskrivelse | Aktivering |
 |------|--------|---------|-------------|------------|
-| typecheck | 🟢 | true | `npx tsc --noEmit` | — |
-| lint | 🟢 | true | `npx eslint . --no-error-on-unmatched-pattern` | — |
+| typecheck | 🟢 | true | `npx tsc --noEmit` — smart detection: skippes når ingen tsconfig.json eller TypeScript-dependency finnes (filesystem + Docker) | — |
+| lint | 🟢 | true | `npx eslint . --no-error-on-unmatched-pattern` — smart detection: skippes når ingen eslint-config eller eslint-dependency finnes (filesystem + Docker) | — |
 | test | 🟢 | true | `npm test --if-present` | — |
 | snapshot | 🟡 | false | Returnerer "not yet enabled" warning | Implementer snapshot-sammenligning |
 | performance | 🟡 | false | Returnerer "not yet enabled" warning | Implementer performance benchmarks |
@@ -595,7 +596,7 @@
 | Async sendMessage | 🟢 | Backend returnerer umiddelbart, AI prosesserer asynkront med fire-and-forget |
 | withTimeout på eksterne kall | 🟢 | Memory 5s, AI 60s, graceful fallback |
 | cancelGeneration | 🟢 | POST /chat/cancel, in-memory cancellation set, checkpoint-sjekker mellom steg |
-| Stopp-knapp (frontend) | 🟢 | Under TheFold tenker-indikator, kaller cancelChatGeneration, resetter pollMode |
+| Stopp-knapp (frontend) | 🟢 | Under TheFold tenker-indikator, kaller cancelChatGeneration + tasks.cancel, setter cancelled-state som stopper tenker-indikator, resetter ved nye meldinger |
 | TheFold tenker redesign | 🟢 | TF-ikon med brand-shimmer, agent-pulse, agent-dots, stopp-knapp |
 | Brand shimmer sidebar | 🟢 | brand-shimmer CSS-klasse på "TheFold" tekst i sidebar |
 | AI system prompt (norsk) | 🟢 | direct_chat prompt konversasjonelt, ingen kode-dumping, norsk |

@@ -43,7 +43,7 @@ function FileIcon({ action }: { action: string }) {
     delete: "#ef4444",
   };
   return (
-    <span className="text-xs font-mono px-1.5 py-0.5 rounded" style={{ color: colors[action] || "#888" }}>
+    <span className="text-xs font-mono px-1.5 py-0.5" style={{ color: colors[action] || "#888" }}>
       {action === "create" ? "A" : action === "delete" ? "D" : "M"}
     </span>
   );
@@ -203,7 +203,7 @@ export default function ReviewDetailPage() {
           <div className="mt-4 text-xs" style={{ color: "var(--text-secondary)" }}>
             <details>
               <summary className="cursor-pointer" style={{ color: "var(--text-muted)" }}>Dokumentasjon</summary>
-              <pre className="mt-2 whitespace-pre-wrap text-xs p-3 rounded" style={{ background: "var(--bg-secondary)" }}>
+              <pre className="mt-2 whitespace-pre-wrap text-xs p-3" style={{ background: "var(--bg-secondary)" }}>
                 {review.aiReview.documentation}
               </pre>
             </details>
