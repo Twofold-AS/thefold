@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 17. februar 2026 (Prompt AT: createPR empty-repo fix + review-sletting)
+> Sist oppdatert: 17. februar 2026 (Prompt AU: createPR getRefSha via ghApi + base64 encoding)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -790,7 +790,7 @@
 | getFileMetadata | 🟢 | Linjetall og størrelse |
 | getFileChunk | 🟢 | Linje-basert chunking, 1-basert, maks 500 linjer |
 | findRelevantFiles | 🟢 | Keyword-scoring av filnavn |
-| createPR | 🟢 | Branch → blobs → tree → commit → PR. Tomme repoer: initial commit → feature-branch → PR |
+| createPR | 🟢 | getRefSha helper (ghApi + try/catch 404/409), tomme repoer: initial commit (base64 README) → feature-branch → PR |
 | listRepos | 🟢 | Liste org-repos (sortert push-dato, filtrert ikke-arkiverte) |
 
 ### Users-service

@@ -331,21 +331,16 @@ export const findRelevantFiles = api(
   }
 );
 
-// Fetch a git ref, returning null instead of throwing on 404/409 (empty repo)
+// Helper: get SHA of a ref, returns null if ref doesn't exist (404/409)
 async function getRefSha(owner: string, repo: string, branch: string): Promise<string | null> {
-  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/${branch}`, {
-    headers: {
-      Authorization: `Bearer ${githubToken()}`,
-      Accept: "application/vnd.github.v3+json",
-    },
-  });
-  if (res.status === 404 || res.status === 409) return null;
-  if (!res.ok) {
-    const error = await res.text();
-    throw APIError.internal(`GitHub API error ${res.status}: ${error}`);
+  try {
+    const data = await ghApi(`/repos/${owner}/${repo}/git/ref/heads/${branch}`);
+    return data.object.sha;
+  } catch (error: any) {
+    const msg = error?.message || "";
+    if (msg.includes("404") || msg.includes("409")) return null;
+    throw error;
   }
-  const data = await res.json();
-  return data.object.sha;
 }
 
 // Create a branch, commit files, and open a pull request
@@ -363,7 +358,7 @@ export const createPR = api(
     if (!baseSha) {
       const readmeBlob = await ghApi(`/repos/${req.owner}/${req.repo}/git/blobs`, {
         method: "POST",
-        body: { content: `# ${req.repo}\n\nInitialized by TheFold.\n`, encoding: "utf-8" },
+        body: { content: Buffer.from(`# ${req.repo}\n\nInitialized by TheFold`).toString("base64"), encoding: "base64" },
       });
 
       const initTree = await ghApi(`/repos/${req.owner}/${req.repo}/git/trees`, {
@@ -381,7 +376,7 @@ export const createPR = api(
       const initCommit = await ghApi(`/repos/${req.owner}/${req.repo}/git/commits`, {
         method: "POST",
         body: {
-          message: "Initial commit",
+          message: "Initial commit — TheFold",
           tree: initTree.sha,
           // No parents — this is the first commit
         },
