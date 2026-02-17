@@ -130,16 +130,56 @@ export const create = api(
     try {
       // Clone the repo into the sandbox
       const cloneUrl = `https://x-access-token:${githubToken()}@github.com/${req.repoOwner}/${req.repoName}.git`;
-      execSync(`git clone --depth 1 --branch ${ref} ${cloneUrl} ${dir}/repo`, {
-        timeout: 120_000,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-      });
 
-      // Install dependencies
-      execSync("npm install --ignore-scripts", {
-        cwd: `${dir}/repo`,
-        timeout: 120_000,
-      });
+      // Try clone with branch, fallback for empty repos
+      const repoPath = `${dir}/repo`;
+      try {
+        execSync(`git clone --depth 1 --branch ${ref} ${cloneUrl} ${repoPath}`, {
+          timeout: 120_000,
+          stdio: "pipe",
+          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+        });
+        console.log("[DEBUG-AJ] Clone with branch succeeded");
+      } catch {
+        console.warn(`[DEBUG-AJ] Clone with --branch ${ref} failed, cleaning up...`);
+
+        // Delete partial directory from failed clone
+        if (fs.existsSync(repoPath)) {
+          fs.rmSync(repoPath, { recursive: true, force: true });
+        }
+
+        try {
+          execSync(`git clone ${cloneUrl} ${repoPath}`, {
+            timeout: 120_000,
+            stdio: "pipe",
+            env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+          });
+          console.log("[DEBUG-AJ] Clone without branch succeeded");
+        } catch {
+          console.warn("[DEBUG-AJ] Clone without branch failed, creating empty repo...");
+
+          // Delete partial directory again
+          if (fs.existsSync(repoPath)) {
+            fs.rmSync(repoPath, { recursive: true, force: true });
+          }
+
+          fs.mkdirSync(repoPath, { recursive: true });
+          execSync("git init", { cwd: repoPath, stdio: "pipe" });
+          execSync(`git remote add origin ${cloneUrl}`, { cwd: repoPath, stdio: "pipe" });
+          fs.writeFileSync(path.join(repoPath, ".gitkeep"), "");
+          execSync("git add .", { cwd: repoPath, stdio: "pipe" });
+          execSync('git commit -m "Initial commit"', { cwd: repoPath, stdio: "pipe" });
+          console.log("[DEBUG-AJ] Empty repo created with git init");
+        }
+      }
+
+      // Install dependencies (if package.json exists)
+      if (fs.existsSync(`${dir}/repo/package.json`)) {
+        execSync("npm install --ignore-scripts", {
+          cwd: `${dir}/repo`,
+          timeout: 120_000,
+        });
+      }
     } catch (error) {
       // Clean up on failure
       fs.rmSync(dir, { recursive: true, force: true });

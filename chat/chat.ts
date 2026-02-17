@@ -27,6 +27,11 @@ export const agentReports = new Topic<AgentReport>("agent-reports", {
 // Subscribe to agent reports and UPDATE existing agent_status (not create new agent_report)
 const _ = new Subscription(agentReports, "store-agent-report", {
   handler: async (report) => {
+    console.log("[DEBUG-AF] === PUB/SUB agent report received ===");
+    console.log("[DEBUG-AF] taskId:", report.taskId, "status:", report.status);
+    console.log("[DEBUG-AF] conversationId:", report.conversationId);
+    console.log("[DEBUG-AF] content:", report.content?.substring(0, 200));
+
     // Check if content is structured JSON (from reportSteps)
     let statusContent: string;
 
@@ -569,6 +574,8 @@ async function processAIResponse(
   }, 10000);
 
   try {
+    console.log("[DEBUG-AF] processAIResponse started for conversation:", conversationId);
+
     const { ai } = await import("~encore/clients");
     const { memory } = await import("~encore/clients");
 
@@ -685,7 +692,9 @@ async function processAIResponse(
 
     if (isCancelled(conversationId)) return;
 
-    // Step 5: Call AI (try/catch — graceful error message on failure)
+    // Step 5: Call AI with tools (ALWAYS includes CHAT_TOOLS — AI decides whether to use them)
+    console.log("[DEBUG-AF] Calling ai.chat with", history.length, "messages, intent:", intent);
+    console.log("[DEBUG-AG] ai.chat always includes tools now, repoName:", repoName || "(none)");
     let aiResponse;
     try {
       aiResponse = await ai.chat({
@@ -710,9 +719,24 @@ async function processAIResponse(
       };
     }
 
+    console.log("[DEBUG-AH] ai.chat returned content length:", aiResponse.content?.length);
+    console.log("[DEBUG-AH] Tools used:", aiResponse.toolsUsed || "none");
+    console.log("[DEBUG-AH] Stop reason:", aiResponse.stopReason);
+
     // Handle truncated responses
     if (aiResponse.truncated) {
       aiResponse.content += "\n\n---\nSvaret ble avbrutt fordi maks antall tokens ble nådd. Prøv et mer spesifikt spørsmål, eller be om at svaret deles opp.";
+    }
+
+    // Handle empty content — when tools were used but AI returned no text
+    if (!aiResponse.content || !aiResponse.content.trim()) {
+      console.warn("[DEBUG-AH] AI returned empty content");
+      if (aiResponse.toolsUsed && aiResponse.toolsUsed.length > 0) {
+        aiResponse.content = `Utførte: ${aiResponse.toolsUsed.join(", ")}`;
+        console.log("[DEBUG-AH] Using tool summary as fallback:", aiResponse.content);
+      } else {
+        aiResponse.content = "Beklager, jeg fikk ikke generert et svar. Prøv igjen.";
+      }
     }
 
     console.log(`AI Response: ${aiResponse.usage.totalTokens} tokens (${aiResponse.usage.inputTokens} inn, ${aiResponse.usage.outputTokens} ut), kostnad: $${aiResponse.costUsd.toFixed(4)}, stop: ${aiResponse.stopReason}`);

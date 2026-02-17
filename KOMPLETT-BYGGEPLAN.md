@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.17 - Prompt AE (Skills Column Crash + Memory Migration Fix)
+> **Versjon:** 3.20 - Prompt AJ (Sandbox Fallback Cleanup + Frontend Timer Stopp)
 > **Sist oppdatert:** 16. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -147,6 +147,22 @@
 - **FIX 2 — ActivityIcon SVG-komponent:** Ny `ActivityIcon.tsx` med 12 animerte SVG-ikoner (created, completed, failed, pr, working, chat, auth, build, task, sync, heal, cost + default). Erstatter emojier i activity-tidslinjen. Ikoner har SVG-animasjoner (opacity pulse, rotate, scale)
 - **FIX 3 — AgentMode + Magic Header (BUG 5):** `tryParseAgentStatus` sjekker nå `metadata.taskId` — returnerer null for simple chat (ingen AgentStatus-boks for vanlige svar). `hasAgentStatus` filtrerer på taskId. Magic-indikator flyttet fra meldingsområdet til header-baren. Simple mode viser `{aiName} · {phrase} · tenker · {N}s`, agent mode viser bare `{phrase}`
 - **FIX 4 — Thinking Timer:** Ny `thinkingSeconds` teller i begge chat-sider. Starter ved `isWaitingForAI`, teller opp sekunder, vises i header for simple mode
+
+### ✅ Ferdig — Prompt AJ: Sandbox Fallback Cleanup + Frontend Timer Stopp (februar 2026)
+- **FIX 1 — Sandbox fallback crash (KRITISK):** `rmSync(repoPath, { recursive: true, force: true })` mellom hvert clone-forsøk. Level 1 lager partial mappe → slettes → level 2 prøver rent → slettes → level 3 git init rent. Også: `stdio: "pipe"` på alle execSync for å unngå console-støy
+- **FIX 2 — Timer stopper ikke (HØY):** `waitingForReply` returnerte true for ALLE agent_status meldinger, inkludert "Feilet". Nå: parser agent_status content, returnerer false for terminal phases (Ferdig/Feilet). Safety timeout: timer stopper ved 120s. Begge chat-sider oppdatert
+- **FIX 3 — AgentStatus feilvisning (MEDIUM):** AgentStatus-boksen forsvant ved "Feilet" fordi render-betingelsen var `agentActive && lastAgentStatus`. Endret til `lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet")`. Boksen viser nå feilmelding med retry/cancel-knapper
+
+### ✅ Ferdig — Prompt AI: Memory Crash + Sandbox Tomt Repo + Frontend UX (februar 2026)
+- **FIX 1 — memory.ts "pinned" crash (KRITISK):** Migrasjon 4 droppet opprinnelig 6 kolonner (pinned, superseded_by, ttl_days, consolidated_from + 2 andre). Ble korrigert i Prompt AE men DB hadde allerede mistet kolonnene. Ny migrasjon 5 (`5_readd_dropped_columns.up.sql`) re-legger til alle 4 kolonner med `ADD COLUMN IF NOT EXISTS`
+- **FIX 2 — Sandbox tomt repo (KRITISK):** `git clone --branch main` feiler for tomme repos. Lagt til 3-nivå fallback: prøv med branch → prøv uten branch → git init + .gitkeep. `npm install` kun hvis package.json finnes
+- **FIX 3a — Tom chat-boble (KRITISK):** Placeholder-melding (content='', role='assistant') forårsaket tom boble + stoppet polling + drepte tenker-indikator. Filter: tomme assistant-meldinger skjules. Polling: sjekker nå at content er ikke-tom før den stopper. `waitingForReply`: returnerer true for tomme placeholders og agent_status
+- **FIX 3b — AgentStatus-boks (KRITISK):** Verifisert at Pub/Sub handler lagrer korrekt message_type='agent_status' med metadata.taskId. Frontend lastAgentStatus/agentActive logikken er intakt
+
+### ✅ Ferdig — Prompt AH: Fix Tool-loop + Tom Melding + UX Arbeidsboks (februar 2026)
+- **FIX 1 — Tool-loop (KRITISK):** `callAnthropicWithTools` i ai/ai.ts omskrevet fra "two-call flow" til full tool-loop med `MAX_TOOL_LOOPS=10`. Nå looper: send → tool_use → execute → tool_result tilbake → gjenta til `stop_reason !== "tool_use"`. Muliggjør AI å kalle create_task OG start_task i sekvens. `lastCreatedTaskId` beholdt for task-ID hallusinering
+- **FIX 2 — Tom AI-melding (KRITISK):** chat.ts `processAIResponse` sjekker nå tom content etter AI-kall. Når tools ble brukt men content er tom: lagrer `"Utførte: tool1, tool2"` som fallback. Aldri tomme chat-bobler
+- **FIX 3 — AgentStatus-boks (HØY):** Verifisert at hele kjeden er intakt: agent.ts reportSteps() → agentReports Pub/Sub → chat.ts subscription → agent_status meldinger → frontend lastAgentStatus/agentActive. Fungerte aldri fordi tool-loopen stoppet ved create_task (FIX 1 løser dette)
 
 ### ✅ Ferdig — Prompt AA: Chat UX, Task Blocking, Voyage Rate Limit (februar 2026)
 - **FIX 1 — Ra JSON i chat (KRITISK):** agent_status og agent_report meldinger filtreres ut fra meldings-rendering i begge chat-sider. AgentStatus rendres separat via useMemo (lastAgentStatus + agentActive). tryParseAgentStatus og hasAgentStatus fjernet som dead code
@@ -832,7 +848,7 @@ Sider:
 **✅ Chat Tool-Use / Function Calling (DEL 1):**
 1. ✅ 5 tools i ai/ai.ts: create_task, start_task, list_tasks, read_file, search_code
 2. ✅ executeToolCall dispatcher til ekte services (tasks, github)
-3. ✅ callAnthropicWithTools two-call flow (tool_use → execute → final response)
+3. ✅ callAnthropicWithTools full tool-loop (MAX_TOOL_LOOPS=10, tool_use → execute → tool_result → loop til end_turn)
 4. ✅ System prompt oppdatert med verktoy-instruksjoner
 5. ✅ Dynamic AgentStatus: processAIResponse bygger steg basert pa intent-deteksjon
 6. ✅ Animated PhaseIcons: per-fase SVG-ikoner med CSS-animasjoner (grid-blink, pulse, clipboard, lightning, eye, gear)
@@ -1180,7 +1196,7 @@ Backend integrasjon: Linear state-mapping, secrets status API, Pub/Sub subscribe
 
 MCP Backend: mcp/ service, 6 endepunkter, pre-seeded 6 servere, agent-integrasjon (STEP 3.5), frontend koblet.
 
-Chat tool-use: 5 tools (create_task, start_task, list_tasks, read_file, search_code), callAnthropicWithTools two-call flow, executeToolCall dispatcher, dynamic AgentStatus med animated phase icons.
+Chat tool-use: 5 tools (create_task, start_task, list_tasks, read_file, search_code), callAnthropicWithTools full tool-loop (MAX_TOOL_LOOPS=10), executeToolCall dispatcher, dynamic AgentStatus med animated phase icons.
 Integrations: integrations/ service med integration_configs tabell, CRUD, Slack+Discord webhooks, frontend /tools/integrations.
 File upload: chat_files tabell, POST /chat/upload (500KB), frontend fil-velger, CodeBlock download.
 Chat source: source-kolonne i messages, SendRequest.source ("web"|"slack"|"discord"|"api").

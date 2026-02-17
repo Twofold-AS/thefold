@@ -104,7 +104,7 @@ Database: `builder_jobs` + `build_steps` tables
 ## Chat Tool-Use (Function Calling)
 Chat is connected to the agent system via Claude tool-use. When users ask for actions in chat, the AI can invoke tools directly:
 - **5 tools:** `create_task`, `start_task`, `list_tasks`, `read_file`, `search_code`
-- **Two-call flow:** `callAnthropicWithTools()` sends messages with tool definitions, handles tool_use responses, executes via `executeToolCall()`, returns final response
+- **Tool-loop flow:** `callAnthropicWithTools()` sends messages with tool definitions, loops on `stop_reason: tool_use` (MAX_TOOL_LOOPS=10): execute tools → send tool_result back → repeat until `end_turn`. Enables multi-tool sequences (e.g. create_task → start_task)
 - **create_task enhancements:** Uses `source: "chat"` (not "manual"), fire-and-forget `enrichTaskWithAI()` estimates complexity + tokens after creation
 - **start_task enhancements:** Verifies task exists via `tasks.getTaskInternal()` before starting agent, updates status to `in_progress`, sets `blocked` on failure. Propagates `conversationId` to agent
 - **Dynamic AgentStatus:** `processAIResponse` builds steps dynamically based on intent detection with phase names (Forbereder/Analyserer/Planlegger/Bygger/Reviewer/Utforer)

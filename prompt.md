@@ -1,180 +1,185 @@
-# Prompt AC — Tre Spesifikke Bugs
-
-Du skal fikse NØYAKTIG 3 bugs. Ingen andre endringer. Les filene, forstå koden, fiks kun det som er beskrevet.
+# Prompt AJ — Sandbox fallback cleanup + Frontend timer stopp
 
 `git pull` først.
 
----
+## ROTÅRSAK (fra debug-logg)
 
-## BUG 1: "missing field errorMessage" CRASH
-
-### Symptom
-Hele appen krasjer med: `unable to decode response body: task: missing field errorMessage at line 1 column 711`
-
-### Årsak
-`errorMessage` ble lagt til i Task-typen som REQUIRED (ikke optional). Men eksisterende tasks i DB har NULL i error_message-kolonnen. Encore sin JSON-dekoder krever at alle required felter finnes.
-
-### Fix — NØYAKTIG disse endringene:
-
-**Fil: tasks/types.ts**
-Finn `errorMessage` i Task interface. Endre fra:
-```typescript
-errorMessage: string;
 ```
-til:
-```typescript
-errorMessage?: string;
+[DEBUG-AI] Clone with --branch main failed, trying without branch...
+fatal: destination path '...\repo' already exists and is not an empty directory.
+[DEBUG-AI] Clone failed entirely, creating empty repo...
+error: remote origin already exists.
 ```
 
-**Fil: tasks/tasks.ts**
-Finn ALLE steder der Task-objekter bygges (parseTask, eller inline mapping). Sørg for at errorMessage ALLTID har en verdi (tom string, ikke undefined):
-```typescript
-errorMessage: row.error_message || ""
+3-level fallback feiler fordi mappen ikke slettes mellom forsøk. Level 1 oppretter partial mappe, level 2/3 feiler fordi den finnes.
+
+Les HELE sandbox/sandbox.ts FØR du endrer:
+```bash
+cat sandbox/sandbox.ts
 ```
 
-Kjør `grep -n "errorMessage\|error_message" tasks/tasks.ts tasks/types.ts` og fiks ALLE forekomster.
+## FIX 1: Slett repo-mappe mellom fallback-forsøk (KRITISK)
 
-Test: Appen skal ikke krasje når tasks hentes.
-
----
-
-## BUG 2: AgentStatus-boksen vises for ALLE svar — skal KUN vises for agent-oppgaver
-
-### Symptom
-Selv enkle spørsmål som "Hva er repo-navnet?" viser boksen med "Forstår forespørselen", "Henter filer", osv.
-
-### Årsak
-Backend oppretter `agent_status` meldinger for ALLE AI-kall, ikke bare agent-oppgaver.
-
-### Fix — Backend (chat.ts):
-
-Finn i `chat/chat.ts` ALLE steder der meldinger med `message_type = 'agent_status'` opprettes. Det er sannsynligvis i processAIResponse eller i send-endpointet.
-
-FJERN oppretting av agent_status for vanlige chat-svar. agent_status meldinger skal KUN opprettes:
-1. Av agenten via Pub/Sub subscription (reportSteps → handler)
-2. Ved start_task tool (initial "Forbereder" status)
-
-For å finne det: `grep -n "agent_status" chat/chat.ts`
-
-Du vil sannsynligvis finne en INSERT INTO messages med message_type = 'agent_status' som kjøres for ALLE svar. Fjern den eller legg til en betingelse:
+Finn git clone fallback-logikken i sandbox.ts. Legg til `rmSync`/`rm -rf` mellom hvert forsøk:
 
 ```typescript
-// KUN opprett agent_status hvis en agent-task faktisk ble startet
-if (agentTriggered) {
-  await db.exec`INSERT INTO messages ... message_type = 'agent_status' ...`;
+import { rmSync, existsSync, mkdirSync, writeFileSync } from "fs";
+import { execSync } from "child_process";
+import * as path from "path";
+
+// Level 1: Clone med branch
+try {
+  execSync(`git clone --depth 1 --branch ${ref} ${cloneUrl} ${repoPath}`, { stdio: "pipe" });
+  console.log("[DEBUG-AJ] Clone with branch succeeded");
+} catch (e1) {
+  console.warn("[DEBUG-AJ] Clone with --branch failed, cleaning up...");
+  
+  // SLETT partial mappe fra mislykket clone
+  if (existsSync(repoPath)) {
+    rmSync(repoPath, { recursive: true, force: true });
+  }
+  
+  // Level 2: Clone uten branch
+  try {
+    execSync(`git clone ${cloneUrl} ${repoPath}`, { stdio: "pipe" });
+    console.log("[DEBUG-AJ] Clone without branch succeeded");
+  } catch (e2) {
+    console.warn("[DEBUG-AJ] Clone without branch failed, creating empty repo...");
+    
+    // SLETT partial mappe igjen
+    if (existsSync(repoPath)) {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+    
+    // Level 3: Lag tom repo
+    mkdirSync(repoPath, { recursive: true });
+    execSync(`git init`, { cwd: repoPath, stdio: "pipe" });
+    execSync(`git remote add origin ${cloneUrl}`, { cwd: repoPath, stdio: "pipe" });
+    writeFileSync(path.join(repoPath, ".gitkeep"), "");
+    execSync(`git add .`, { cwd: repoPath, stdio: "pipe" });
+    execSync(`git commit -m "Initial commit"`, { cwd: repoPath, stdio: "pipe" });
+    console.log("[DEBUG-AJ] Empty repo created with git init");
+  }
 }
 ```
 
-Eller enda bedre: Fjern INSERT-en helt fra processAIResponse. La KUN agenten (via Pub/Sub) og start_task opprette agent_status.
+**Windows-kompatibilitet**: `rmSync` med `{ recursive: true, force: true }` fungerer på Windows. Alternativt bruk `execSync('rmdir /s /q "${repoPath}"')` men det er mindre portabelt.
 
-### Fix — Frontend (begge chat-sider):
-
-Som ekstra sikring, sjekk at agentActive KUN er true når det er en ekte task:
-
+**NB**: Sjekk om sandbox.ts bruker `exec` (async) eller `execSync` (sync). Tilpass koden deretter. Hvis async:
 ```typescript
-const agentActive = useMemo(() => {
-  if (!lastAgentStatus) return false;
-  // Sjekk metadata for taskId — uten taskId er det ikke en agent-oppgave
-  try {
-    const meta = typeof lastAgentStatus.metadata === "string" 
-      ? JSON.parse(lastAgentStatus.metadata) 
-      : lastAgentStatus.metadata;
-    if (!meta?.taskId) return false;
-  } catch { return false; }
-  return lastAgentStatus.phase !== "Ferdig" && lastAgentStatus.phase !== "Feilet";
-}, [lastAgentStatus]);
-```
+import { rm } from "fs/promises";
 
-Test: Still et enkelt spørsmål. INGEN boks skal vises. Bare tenker-indikatoren.
+// Mellom forsøk:
+await rm(repoPath, { recursive: true, force: true });
+```
 
 ---
 
-## BUG 3: AgentStatus-boksen sin TAB bruker spinner — skal bruke MagicIcon
+## FIX 2: Frontend — Timer stopper ikke ved feil (HØY)
 
-### Symptom  
-Bildet viser: Taben øverst i boksen sier "📋 Planlegger" med en loading-spinner (○). Skal vise MagicIcon + magisk frase.
+### Problem
+"Jørgen André · Forhekser · tenker · 100s" fortsetter å telle selv etter at agenten har krasjet og sendt "Feilet"-status.
 
-### Årsak
-AgentStatus.tsx bruker fase-tekst og spinner i taben, ikke MagicIcon.
-
-### Fix:
-
-**Fil: frontend/src/components/AgentStatus.tsx**
-
-1. Importer MagicIcon:
-```typescript
-import { MagicIcon, magicPhrases } from "./MagicIcon";
+Les frontend:
+```bash
+cat frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx
 ```
 
-2. Legg til state for magisk frase-rotasjon:
-```typescript
-const [phraseIndex, setPhraseIndex] = useState(0);
+### Sjekk
+```bash
+grep -n "agentActive\|Feilet\|thinkingSeconds\|showThinking\|setThinkingSeconds" frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx | head -20
+```
 
+### Problemet
+Tenker-indikatoren vises med `{showThinking && !agentActive && (...)}`. Men `agentActive` oppdateres bare når frontend poller og ser en agent_status melding med phase "Feilet". 
+
+Mulige årsaker:
+1. Polling henter ikke nye meldinger raskt nok → agent_status "Feilet" ikke sett
+2. `lastAgentStatus` oppdateres, men `agentActive` sjekker ikke riktig phase
+3. `showThinking` forblir true fordi `sending` eller `waitingForReply` er true
+
+### Fiks A: Sjekk at Feilet-status stopper timeren
+Verifiser at `agentActive` blir false når phase er "Feilet":
+```typescript
+const agentActive = useMemo(() => {
+  if (!lastAgentStatus) return false;
+  const phase = lastAgentStatus.phase;
+  if (phase === "Ferdig" || phase === "Feilet") return false; // ← SJEKK DETTE
+  if (!lastAgentStatus.meta?.taskId) return false;
+  return true;
+}, [lastAgentStatus]);
+```
+
+### Fiks B: showThinking må OGSÅ stoppe ved feil
+Sjekk om det er en agent-feilmelding i chat som gjør at `waitingForReply` forblir true. Feilmeldingen fra agenten lagres som vanlig melding, men den har kanskje `message_type: "agent_report"` som filtreres ut.
+
+Sjekk filteret i message-rendering:
+```typescript
+// Filtrer ut tomme + agent_status, men BEHOLD agent_report (feilmeldinger)
+messages.filter(m => 
+  m.content?.trim() &&
+  m.messageType !== "agent_status"
+  // agent_report BEHOLDES — dette er feilmeldinger som skal vises
+)
+```
+
+### Fiks C: Timeout-sikkerhet
+Legg til en timeout som stopper timeren etter 120 sekunder uansett:
+```typescript
 useEffect(() => {
+  if (!showThinking) {
+    setThinkingSeconds(0);
+    return;
+  }
   const interval = setInterval(() => {
-    setPhraseIndex(prev => {
-      let next;
-      do { next = Math.floor(Math.random() * magicPhrases.length); } while (next === prev && magicPhrases.length > 1);
-      return next;
+    setThinkingSeconds(prev => {
+      if (prev >= 120) {
+        // Safety timeout — stopp etter 2 minutter
+        return prev; // Stopp telleren men hold indikatoren
+      }
+      return prev + 1;
     });
-  }, 3000);
+  }, 1000);
   return () => clearInterval(interval);
-}, []);
+}, [showThinking]);
 ```
 
-3. Finn TAB-delen av komponenten. Det er den øverste raden som viser fase-navn. Den ser ut som noe à la:
+---
 
-```tsx
-<div>
-  <span>{icon}</span> {phase}
-</div>
+## FIX 3: AgentStatus-boks ved feil — vis feilmelding (MEDIUM)
+
+Når agenten feiler, bør AgentStatus-boksen vise "Feilet" med feilmeldingen, ikke bare forsvinne.
+
+Pub/Sub sender allerede: `{"type":"agent_status","phase":"Feilet","steps":[{"label":"an internal error occurred","status":"error"}]}`
+
+Sjekk at `AgentStatus.tsx` håndterer `phase: "Feilet"`:
+```bash
+grep -n "Feilet\|error\|failed" frontend/src/components/AgentStatus.tsx
 ```
 
-ERSTATT hele tab-raden med:
-```tsx
-<div className="flex items-center gap-2 px-3 py-2"
-  style={{ borderBottom: "1px solid var(--border)" }}>
-  <span style={{ color: "var(--text-muted)" }}>
-    <MagicIcon phrase={magicPhrases[phraseIndex]} />
-  </span>
-  <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-    {magicPhrases[phraseIndex]}
-  </span>
-</div>
-```
-
-4. BEHOLD innholdet i boksen (stegene med "Forstår forespørselen ✓", "Henter filer ○", osv). Bare TABEN endres.
-
-5. FJERN header-indikatoren for enkel modus. I BEGGE chat-sider, finn headeren som viser magisk frase. Den skal KUN vises i agent modus OG den trenger den ikke lenger fordi AgentStatus-boksen har MagicIcon i taben. FJERN header-indikatoren helt:
-
-Finn og SLETT:
-```tsx
-{isGenerating && ... && (
-  <div className="flex items-center gap-2 px-3" style={{ ... borderRight ... }}>
-    <MagicIcon .../>
-    <span ...>{magicPhrases[...]}</span>
-  </div>
-)}
-```
-
-Test: Start en agent-oppgave. Boksen viser magisk ikon + "Glitrer"/"Tryller"/etc i taben, med stegene under. Headeren viser INGENTING.
+AgentStatus-boksen bør:
+1. Vise "Feilet" i header
+2. Vise error-steget med rød farge
+3. IKKE forsvinne umiddelbart (gi brukeren tid til å se feilen)
 
 ---
 
 ## OPPSUMMERING
 
-| Bug | Hva | Fil(er) |
-|-----|-----|---------|
-| 1 | errorMessage optional + default tom string | tasks/types.ts, tasks/tasks.ts |
-| 2 | agent_status KUN for agent-tasks, ikke vanlige svar | chat/chat.ts, begge chat-sider |
-| 3 | MagicIcon i AgentStatus tab, fjern header-indikator | AgentStatus.tsx, begge chat-sider |
+| # | Hva | Rotårsak | Prioritet |
+|---|-----|----------|-----------|
+| 1 | Sandbox fallback crash | Mappe ikke slettet mellom clone-forsøk | KRITISK |
+| 2 | Timer stopper ikke | Feilet-status ikke mottatt/prosessert | HØY |
+| 3 | AgentStatus feilvisning | Boks forsvinner ved Feilet i stedet for å vise feil | MEDIUM |
 
-INGEN andre endringer. Ikke endre noe annet.
+## Oppdater dokumentasjon
+- GRUNNMUR-STATUS.md
+- KOMPLETT-BYGGEPLAN.md
 
 ## Rapport
-
-Svar NØYAKTIG på:
-1. Hva endret du i tasks/types.ts? (vis gammel → ny linje)
-2. Hvilken INSERT/kode i chat.ts opprettet agent_status for alle svar? (vis linjenummer og koden du fjernet/endret)
-3. Hva var i AgentStatus.tsx sin tab FØR endringen? (vis gammel kode)
-4. Hvilke linjer i chat-sidene fjernet du header-indikatoren? (vis linjenummer)
+Svar på:
+1. Slettes repo-mappen nå mellom fallback-forsøk? Hvordan?
+2. Hva skjer med `agentActive` når phase er "Feilet"?
+3. Stopper `showThinking`/timeren korrekt ved agent-feil?
+4. Viser AgentStatus-boksen feilmeldingen?
+5. Test: "Lag index.html med h1 Test" — krasjer sandbox fortsatt?

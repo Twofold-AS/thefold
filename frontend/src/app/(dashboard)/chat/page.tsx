@@ -116,8 +116,8 @@ export default function ChatPage() {
 
         const lastMsg = res.messages[res.messages.length - 1];
 
-        // AI is done
-        if (lastMsg && lastMsg.role === "assistant" && lastMsg.messageType !== "agent_status") {
+        // AI is done — only stop when assistant message has ACTUAL content (not empty placeholder)
+        if (lastMsg && lastMsg.role === "assistant" && lastMsg.messageType !== "agent_status" && lastMsg.content && lastMsg.content.trim()) {
           if (pollMode === "waiting") {
             setPollMode("cooldown");
           } else {
@@ -360,8 +360,29 @@ export default function ChatPage() {
   const lastMsg = messages[messages.length - 1];
   const isWaitingForAI = pollMode === "waiting" && (!lastMsg || lastMsg.role === "user" || lastMsg.messageType === "agent_status");
 
+  // Thinking indicator: show until AI response with actual content appears
+  const waitingForReply = useMemo(() => {
+    if (messages.length === 0) return false;
+    const last = messages[messages.length - 1];
+    // User message = still waiting
+    if (last.role === "user") return true;
+    // Empty assistant placeholder = still waiting
+    if (last.role === "assistant" && (!last.content || !last.content.trim())) return true;
+    // Agent status = still waiting, UNLESS terminal phase (Ferdig/Feilet)
+    if (last.messageType === "agent_status") {
+      try {
+        const parsed = JSON.parse(last.content);
+        if (parsed.phase === "Ferdig" || parsed.phase === "Feilet") return false;
+      } catch {}
+      return true;
+    }
+    return false;
+  }, [messages]);
+
+  const showThinking = sending || waitingForReply;
+
   useEffect(() => {
-    if (!sending) return;
+    if (!showThinking) return;
     const interval = setInterval(() => {
       setPhraseIndex((prev) => {
         let next: number;
@@ -370,16 +391,18 @@ export default function ChatPage() {
       });
     }, 3000);
     return () => clearInterval(interval);
-  }, [sending]);
+  }, [showThinking]);
 
   useEffect(() => {
-    if (!sending) { setThinkingSeconds(0); return; }
+    if (!showThinking) { setThinkingSeconds(0); return; }
     const start = Date.now();
     const interval = setInterval(() => {
-      setThinkingSeconds(Math.floor((Date.now() - start) / 1000));
+      const elapsed = Math.floor((Date.now() - start) / 1000);
+      // Safety timeout — stop counting at 120s
+      setThinkingSeconds(prev => elapsed >= 120 ? prev : elapsed);
     }, 1000);
     return () => clearInterval(interval);
-  }, [sending]);
+  }, [showThinking]);
 
 
   return (
@@ -541,6 +564,7 @@ export default function ChatPage() {
                 {messages.filter(m => {
                   if (m.messageType === "agent_status") return false;
                   if (m.messageType === "agent_report") return false;
+                  if (m.role === "assistant" && (!m.content || !m.content.trim())) return false;
                   return true;
                 }).map((msg) => {
                   const isUser = msg.role === "user";
@@ -639,8 +663,8 @@ export default function ChatPage() {
                 })}
 
                 {/* Heartbeat lost — backend stopped responding */}
-                {/* AgentStatus — rendered separately from messages */}
-                {agentActive && lastAgentStatus && (
+                {/* AgentStatus — rendered separately from messages, stays visible on failure */}
+                {lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet") && (
                   <div className="message-enter">
                     <AgentStatus
                       data={{
@@ -658,7 +682,7 @@ export default function ChatPage() {
                 )}
 
                 {/* Thinking indicator — MagicIcon + aiName + phrase + timer */}
-                {sending && !agentActive && (
+                {showThinking && !agentActive && (
                   <div className="flex items-center gap-3 px-4 py-3">
                     <div className="w-8 h-8 flex-shrink-0 flex items-center justify-center"
                       style={{ color: "var(--text-muted)" }}>

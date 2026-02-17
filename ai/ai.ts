@@ -785,6 +785,9 @@ async function executeToolCall(
 
   switch (name) {
     case "create_task": {
+      console.log("[DEBUG-AF] === CREATE_TASK TOOL ===");
+      console.log("[DEBUG-AF] Input:", JSON.stringify(input).substring(0, 300));
+
       const { tasks: tasksClient } = await import("~encore/clients");
       const taskRepo = (input.repoName as string) || repoName || undefined;
 
@@ -796,6 +799,7 @@ async function executeToolCall(
           !["deleted", "done", "blocked", "failed"].includes(t.status)
         );
         if (duplicate) {
+          console.log("[DEBUG-AF] Duplicate found:", duplicate.id);
           return { success: false, taskId: duplicate.id, message: `Oppgave "${input.title}" finnes allerede (ID: ${duplicate.id})` };
         }
       } catch { /* non-critical — proceed with creation */ }
@@ -808,6 +812,8 @@ async function executeToolCall(
         source: "chat",
       });
 
+      console.log("[DEBUG-AF] Task created with ID:", result.task.id);
+
       // Fire-and-forget: enrich task with AI complexity assessment
       enrichTaskWithAI(result.task.id, input.title as string, (input.description as string) || "", taskRepo).catch((e) =>
         log.error("Task enrichment failed:", { error: e instanceof Error ? e.message : String(e) })
@@ -817,14 +823,20 @@ async function executeToolCall(
     }
 
     case "start_task": {
+      console.log("[DEBUG-AF] === START_TASK TOOL ===");
+      console.log("[DEBUG-AF] Input taskId:", input.taskId);
+      console.log("[DEBUG-AF] conversationId:", conversationId);
+
       try {
         const { tasks: tasksClient } = await import("~encore/clients");
         const taskId = String(input.taskId || "").trim();
 
+        console.log("[DEBUG-AF] Using taskId:", taskId);
+
         // UUID validation
         const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         if (!taskId || !uuidRegex.test(taskId)) {
-          log.warn("start_task: Invalid taskId", { taskId });
+          console.log("[DEBUG-AF] ERROR: Invalid UUID format:", taskId);
           return { success: false, error: `Ugyldig task ID format: "${taskId}". Trenger UUID.` };
         }
 
@@ -834,52 +846,67 @@ async function executeToolCall(
           const result = await tasksClient.getTaskInternal({ id: taskId });
           if (result?.task) {
             taskData = { repo: result.task.repo, title: result.task.title, status: result.task.status, errorMessage: result.task.errorMessage };
+            console.log("[DEBUG-AF] Task found:", taskData.title, "status:", taskData.status, "repo:", taskData.repo);
           }
         } catch (e) {
-          log.warn("start_task: getTaskInternal failed", { taskId, error: e instanceof Error ? e.message : String(e) });
+          console.log("[DEBUG-AF] ERROR: getTaskInternal failed:", e instanceof Error ? e.message : String(e));
           taskData = null;
         }
 
         if (!taskData) {
-          log.warn("START_TASK: task not found", { taskId });
+          console.log("[DEBUG-AF] ERROR: Task not found:", taskId);
           return { success: false, error: `Fant ikke oppgave med ID ${taskId}` };
         }
 
         // Status guard — blocked/done/in_progress tasks cannot be started
         if (taskData.status === "blocked") {
+          console.log("[DEBUG-AF] Task is blocked:", taskData.errorMessage);
           return { success: false, error: `Oppgaven "${taskData.title}" er blokkert${taskData.errorMessage ? ": " + taskData.errorMessage : ""}. Opprett en ny oppgave.` };
         }
         if (taskData.status === "done") {
+          console.log("[DEBUG-AF] Task already done");
           return { success: false, error: "Oppgaven er allerede fullfort." };
         }
         if (taskData.status === "in_progress") {
+          console.log("[DEBUG-AF] Task already in_progress");
           return { success: false, error: "Oppgaven kjorer allerede." };
         }
 
         // Update status to in_progress
         try {
           await tasksClient.updateTaskStatus({ id: taskId, status: "in_progress" });
-        } catch { /* non-critical */ }
+          console.log("[DEBUG-AF] Task status updated to in_progress");
+        } catch (e) {
+          console.log("[DEBUG-AF] WARNING: Failed to update task status:", e);
+        }
 
         // Start agent with correct repo from task or chat context
         const { agent: agentClient } = await import("~encore/clients");
-        agentClient.startTask({
+        const startPayload = {
           conversationId: conversationId || "tool-" + Date.now(),
           taskId,
-          userMessage: "Startet via chat tool-use",
+          userMessage: "Start oppgave: " + taskData.title,
           thefoldTaskId: taskId,
           repoName: taskData.repo || repoName,
           repoOwner: "Twofold-AS",
+        };
+
+        console.log("[DEBUG-AF] Calling agent.startTask with:", JSON.stringify(startPayload).substring(0, 500));
+
+        agentClient.startTask(startPayload).then(() => {
+          console.log("[DEBUG-AF] agent.startTask promise resolved");
         }).catch(async (e: Error) => {
-          log.error("START_TASK agent execution failed", { error: e.message, taskId });
+          console.error("[DEBUG-AF] ERROR: agent.startTask FAILED:", e.message);
           try {
             await tasksClient.updateTaskStatus({ id: taskId, status: "blocked", errorMessage: e.message?.substring(0, 500) });
+            console.log("[DEBUG-AF] Task marked as blocked after agent failure");
           } catch { /* non-critical */ }
         });
 
+        console.log("[DEBUG-AF] agent.startTask fired (async)");
         return { success: true, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber nå.` };
       } catch (e) {
-        log.error("START_TASK FAILED", { error: e instanceof Error ? e.message : String(e), taskId: input.taskId });
+        console.error("[DEBUG-AF] START_TASK CRASHED:", e instanceof Error ? e.message : String(e));
         return { success: false, error: e instanceof Error ? e.message : String(e) };
       }
     }
@@ -961,83 +988,132 @@ async function callAnthropicWithTools(options: AICallOptions & {
     { type: "text", text: options.system, cache_control: { type: "ephemeral" } },
   ];
 
-  const response = await client.messages.create({
-    model: options.model,
-    max_tokens: options.maxTokens,
-    system: systemBlocks,
-    messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
-    tools: options.tools,
-  });
+  const allToolsUsed: string[] = [];
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let totalCost = 0;
+  let lastCreatedTaskId: string | null = null;
 
-  const toolsUsed: string[] = [];
-  let textContent = "";
-  const toolUseBlocks: Array<{ type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
+  // Mutable messages array for tool-loop
+  const messages: Array<{ role: "user" | "assistant"; content: string | any[] }> = [
+    ...options.messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+  ];
 
-  for (const block of response.content) {
-    if (block.type === "text") {
-      textContent += block.text;
-    } else if (block.type === "tool_use") {
-      toolUseBlocks.push(block as { type: "tool_use"; id: string; name: string; input: Record<string, unknown> });
-    }
-  }
+  const MAX_TOOL_LOOPS = 10;
 
-  let totalInputTokens = response.usage.input_tokens;
-  let totalOutputTokens = response.usage.output_tokens;
+  for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
+    console.log(`[DEBUG-AH] Tool loop iteration ${loop + 1}`);
 
-  // If tools were called, execute them and send results back
-  if (toolUseBlocks.length > 0) {
-    const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string }> = [];
-    let lastCreatedTaskId: string | null = null;
-
-    for (const block of toolUseBlocks) {
-      // For start_task, prefer lastCreatedTaskId over potentially hallucinated input
-      if (block.name === "start_task" && lastCreatedTaskId) {
-        log.info("start_task: overriding input taskId with lastCreatedTaskId", {
-          inputTaskId: block.input.taskId,
-          lastCreatedTaskId,
-        });
-        block.input.taskId = lastCreatedTaskId;
-      }
-
-      const result = await executeToolCall(block.name, block.input, options.repoName, options.conversationId);
-      toolsUsed.push(block.name);
-
-      // Track created task ID for subsequent start_task calls
-      if (block.name === "create_task" && result.taskId) {
-        lastCreatedTaskId = result.taskId as string;
-      }
-
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: JSON.stringify(result),
-      });
-    }
-
-    // Send tool results back to AI for final response
-    const followUp = await client.messages.create({
+    const response = await client.messages.create({
       model: options.model,
       max_tokens: options.maxTokens,
       system: systemBlocks,
-      messages: [
-        ...options.messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
-        { role: "assistant" as const, content: response.content },
-        { role: "user" as const, content: toolResults },
-      ],
+      messages,
       tools: options.tools,
     });
 
-    textContent = followUp.content
-      .filter((b): b is Anthropic.TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("");
+    totalInputTokens += response.usage.input_tokens;
+    totalOutputTokens += response.usage.output_tokens;
 
-    totalInputTokens += followUp.usage.input_tokens;
-    totalOutputTokens += followUp.usage.output_tokens;
+    console.log(`[DEBUG-AH] Stop reason: ${response.stop_reason}, content blocks: ${response.content.length}`);
+
+    // If end_turn or no tool_use — return final content
+    if (response.stop_reason !== "tool_use") {
+      const textContent = response.content
+        .filter((block: any) => block.type === "text")
+        .map((block: any) => block.text)
+        .join("");
+
+      console.log(`[DEBUG-AH] Final content length: ${textContent.length}`);
+
+      const cacheReadTokens = (response.usage as Record<string, number>).cache_read_input_tokens ?? 0;
+      const cacheCreationTokens = (response.usage as Record<string, number>).cache_creation_input_tokens ?? 0;
+
+      logTokenUsage({
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        cacheReadTokens,
+        cacheCreationTokens,
+        model: options.model,
+        endpoint: "anthropic-tools",
+      });
+
+      return {
+        content: textContent,
+        tokensUsed: totalInputTokens + totalOutputTokens,
+        stopReason: response.stop_reason || "end_turn",
+        modelUsed: options.model,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        cacheReadTokens,
+        cacheCreationTokens,
+        costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
+        toolsUsed: allToolsUsed,
+      };
+    }
+
+    // stop_reason === "tool_use" — execute tools
+    const toolUseBlocks = response.content.filter((block: any) => block.type === "tool_use");
+    const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }> = [];
+
+    for (const toolBlock of toolUseBlocks) {
+      const toolName = (toolBlock as any).name;
+      const toolInput = { ...(toolBlock as any).input } as Record<string, unknown>;
+
+      console.log(`[DEBUG-AH] Executing tool: ${toolName}, input: ${JSON.stringify(toolInput).substring(0, 300)}`);
+      allToolsUsed.push(toolName);
+
+      // For start_task, prefer lastCreatedTaskId over potentially hallucinated input
+      if (toolName === "start_task" && lastCreatedTaskId) {
+        console.log(`[DEBUG-AH] start_task: overriding taskId ${toolInput.taskId} → ${lastCreatedTaskId}`);
+        toolInput.taskId = lastCreatedTaskId;
+      }
+
+      try {
+        const result = await executeToolCall(toolName, toolInput, options.repoName, options.conversationId);
+
+        // Track lastCreatedTaskId
+        if (toolName === "create_task" && result?.taskId) {
+          lastCreatedTaskId = result.taskId as string;
+          console.log(`[DEBUG-AH] lastCreatedTaskId: ${lastCreatedTaskId}`);
+        }
+
+        console.log(`[DEBUG-AH] Tool ${toolName} result: ${JSON.stringify(result).substring(0, 200)}`);
+
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: (toolBlock as any).id,
+          content: JSON.stringify(result),
+        });
+      } catch (e) {
+        console.error(`[DEBUG-AH] Tool ${toolName} FAILED:`, e);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: (toolBlock as any).id,
+          content: JSON.stringify({ error: String(e) }),
+          is_error: true,
+        });
+      }
+    }
+
+    // CRITICAL: Append assistant response AND tool results to messages for next iteration
+    messages.push({
+      role: "assistant",
+      content: response.content as any, // Includes BOTH text and tool_use blocks
+    });
+    messages.push({
+      role: "user",
+      content: toolResults,
+    });
+
+    console.log(`[DEBUG-AH] Sent tool results back, looping... (tools so far: ${allToolsUsed.join(", ")})`);
   }
 
-  const cacheReadTokens = (response.usage as Record<string, number>).cache_read_input_tokens ?? 0;
-  const cacheCreationTokens = (response.usage as Record<string, number>).cache_creation_input_tokens ?? 0;
+  // Max loops reached
+  console.warn("[DEBUG-AH] Max tool loops reached!");
+
+  const cacheReadTokens = 0;
+  const cacheCreationTokens = 0;
 
   logTokenUsage({
     inputTokens: totalInputTokens,
@@ -1049,16 +1125,16 @@ async function callAnthropicWithTools(options: AICallOptions & {
   });
 
   return {
-    content: textContent,
+    content: "Beklager, for mange verktøy-kall. Prøv igjen med en enklere forespørsel.",
     tokensUsed: totalInputTokens + totalOutputTokens,
-    stopReason: response.stop_reason || "end_turn",
+    stopReason: "max_loops",
     modelUsed: options.model,
     inputTokens: totalInputTokens,
     outputTokens: totalOutputTokens,
     cacheReadTokens,
     cacheCreationTokens,
     costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
-    toolsUsed,
+    toolsUsed: allToolsUsed,
   };
 }
 
@@ -1100,58 +1176,33 @@ export const chat = api(
       });
     }
 
-    // Use tool-use when in repo-chat (AI can create tasks, read files, etc.)
-    if (req.repoName) {
-      const toolResponse = await callAnthropicWithTools({
-        model,
-        system,
-        messages: req.messages,
-        maxTokens: 8192,
-        tools: CHAT_TOOLS,
-        repoName: req.repoName,
-        conversationId: req.conversationId,
-      });
-
-      await logSkillResults(pipeline.skillIds, true, toolResponse.tokensUsed);
-
-      return {
-        content: toolResponse.content,
-        tokensUsed: toolResponse.tokensUsed,
-        stopReason: toolResponse.stopReason,
-        modelUsed: toolResponse.modelUsed,
-        costUsd: toolResponse.costEstimate.totalCost,
-        toolsUsed: toolResponse.toolsUsed.length > 0 ? toolResponse.toolsUsed : undefined,
-        usage: {
-          inputTokens: toolResponse.inputTokens,
-          outputTokens: toolResponse.outputTokens,
-          totalTokens: toolResponse.inputTokens + toolResponse.outputTokens,
-        },
-        truncated: toolResponse.stopReason === "max_tokens",
-      };
-    }
-
-    const response = await callAIWithFallback({
+    // ALWAYS use tool-use — AI decides whether to invoke tools (create_task, start_task, etc.)
+    console.log("[DEBUG-AG] ai.chat: using callAnthropicWithTools, repoName:", req.repoName || "(none)");
+    const toolResponse = await callAnthropicWithTools({
       model,
       system,
       messages: req.messages,
       maxTokens: 8192,
+      tools: CHAT_TOOLS,
+      repoName: req.repoName,
+      conversationId: req.conversationId,
     });
 
-    // Log skill usage
-    await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
+    await logSkillResults(pipeline.skillIds, true, toolResponse.tokensUsed);
 
     return {
-      content: response.content,
-      tokensUsed: response.tokensUsed,
-      stopReason: response.stopReason,
-      modelUsed: response.modelUsed,
-      costUsd: response.costEstimate.totalCost,
+      content: toolResponse.content,
+      tokensUsed: toolResponse.tokensUsed,
+      stopReason: toolResponse.stopReason,
+      modelUsed: toolResponse.modelUsed,
+      costUsd: toolResponse.costEstimate.totalCost,
+      toolsUsed: toolResponse.toolsUsed.length > 0 ? toolResponse.toolsUsed : undefined,
       usage: {
-        inputTokens: response.inputTokens,
-        outputTokens: response.outputTokens,
-        totalTokens: response.inputTokens + response.outputTokens,
+        inputTokens: toolResponse.inputTokens,
+        outputTokens: toolResponse.outputTokens,
+        totalTokens: toolResponse.inputTokens + toolResponse.outputTokens,
       },
-      truncated: response.stopReason === "max_tokens" || response.stopReason === "length",
+      truncated: toolResponse.stopReason === "max_tokens",
     };
   }
 );

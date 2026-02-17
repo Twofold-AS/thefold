@@ -56,6 +56,7 @@ interface ResolveResponse {
 export const resolve = api(
   { method: "POST", path: "/skills/resolve", expose: false },
   async (req: ResolveRequest): Promise<ResolveResponse> => {
+    console.log("[DEBUG-AF] skills.resolve called");
     const ctx = req.context;
 
     // 1. Fetch all enabled skills matching scope
@@ -102,6 +103,8 @@ export const resolve = api(
         routingRules: row.routing_rules ?? {},
       });
     }
+
+    console.log("[DEBUG-AF] skills.resolve found", allSkills.length, "enabled skills");
 
     // 2. Filter on routing rules (keywords, file patterns, labels)
     let matched = allSkills.filter((s) => matchesRoutingRules(s.routingRules, ctx));

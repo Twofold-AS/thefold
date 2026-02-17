@@ -246,6 +246,12 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
   let treeArray: Array<{ path: string; type: string; size?: number }> = [];
   let taskTitle = ctx.taskId;
 
+  console.log("[DEBUG-AF] === executeTask STARTED ===");
+  console.log("[DEBUG-AF] taskId:", ctx.taskId);
+  console.log("[DEBUG-AF] thefoldTaskId:", ctx.thefoldTaskId);
+  console.log("[DEBUG-AF] repoName:", ctx.repoName);
+  console.log("[DEBUG-AF] useCurated:", !!options?.curatedContext);
+
   try {
     if (useCurated) {
       // === CURATED PATH: Context already gathered by orchestrator ===
@@ -287,13 +293,16 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       // === STANDARD PATH: Full context gathering (steps 1-3) ===
 
       // === STEP 1: Understand the task ===
+      console.log("[DEBUG-AF] STEP 1: Reading task...");
       if (ctx.thefoldTaskId) {
+        console.log("[DEBUG-AF] STEP 1: TheFold path, thefoldTaskId:", ctx.thefoldTaskId);
         // TheFold task engine path — read from tasks service
         await report(ctx, `Leser task fra TheFold...`, "working");
 
         const tfTask = await auditedStep(ctx, "task_read", { taskId: ctx.thefoldTaskId, source: "thefold" }, async () => {
           const result = await tasks.getTaskInternal({ id: ctx.thefoldTaskId! });
           ctx.taskDescription = result.task.title + (result.task.description ? "\n\n" + result.task.description : "");
+          console.log("[DEBUG-AF] STEP 1: Found in tasks-service:", result.task.title, "status:", result.task.status);
           return result;
         });
         taskTitle = tfTask.task.title;
@@ -303,17 +312,20 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "in_progress" });
         } catch { /* non-critical */ }
       } else if (!options?.skipLinear) {
+        console.log("[DEBUG-AF] STEP 1: Standard path (no thefoldTaskId), taskId:", ctx.taskId);
         await report(ctx, `Leser task ${ctx.taskId}...`, "working");
 
         // Try tasks-service first (chat-created tasks), fallback to Linear
         let taskFound = false;
         try {
+          console.log("[DEBUG-AF] STEP 1: Trying tasks-service first...");
           const localTask = await tasks.getTaskInternal({ id: ctx.taskId });
           if (localTask?.task) {
             ctx.taskDescription = localTask.task.title + (localTask.task.description ? "\n\n" + localTask.task.description : "");
             ctx.repoName = localTask.task.repo || ctx.repoName;
             taskTitle = localTask.task.title;
             taskFound = true;
+            console.log("[DEBUG-AF] STEP 1: Found in tasks-service:", taskTitle, "repo:", ctx.repoName);
 
             // Mark as thefoldTaskId so completion/failure paths update status
             ctx.thefoldTaskId = ctx.taskId;
@@ -331,14 +343,16 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
               repoName: `${ctx.repoOwner}/${ctx.repoName}`,
             });
           }
-        } catch {
-          // Not found in tasks-service — try Linear
+        } catch (e) {
+          console.log("[DEBUG-AF] STEP 1: Not in tasks-service, trying Linear...", e instanceof Error ? e.message : "");
         }
 
         if (!taskFound) {
+          console.log("[DEBUG-AF] STEP 1: Trying Linear for taskId:", ctx.taskId);
           const taskDetail = await auditedStep(ctx, "task_read", { taskId: ctx.taskId, source: "linear" }, async () => {
             const detail = await linear.getTask({ taskId: ctx.taskId });
             ctx.taskDescription = detail.task.title + "\n\n" + detail.task.description;
+            console.log("[DEBUG-AF] STEP 1: Found in Linear:", detail.task.title);
             return detail;
           });
           taskTitle = taskDetail.task.title;
@@ -350,6 +364,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       }
 
       // === STEP 2: Read the project ===
+      console.log("[DEBUG-AF] STEP 2: Reading project tree for", ctx.repoOwner + "/" + ctx.repoName);
       await report(ctx, "Leser prosjektstruktur fra GitHub...", "working");
 
       let projectTree = { tree: [] as Array<{ path: string; type: string; size?: number }>, treeString: "(Tomt repo)", packageJson: {} as Record<string, unknown> };
@@ -365,6 +380,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       treeString = projectTree.treeString;
       treeArray = projectTree.tree;
       packageJson = projectTree.packageJson || {};
+      console.log("[DEBUG-AF] STEP 2: Tree loaded,", treeArray.length, "files");
 
       const relevantPaths = await auditedStep(ctx, "relevant_files_identified", {
         taskDescription: ctx.taskDescription.substring(0, 200),
@@ -465,6 +481,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       });
 
       // === STEP 3: Gather context ===
+      console.log("[DEBUG-AF] STEP 3: Gathering context (memory + docs)...");
       await reportSteps(ctx, "Analyserer", [
         { label: "Leser oppgave", status: "done" },
         { label: "Henter prosjektstruktur", status: "done" },
@@ -490,6 +507,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
       memoryStrings = memories.results.map((r) => r.content);
       docsStrings = docsResults.docs.map((d) => `[${d.source}] ${d.content}`);
+      console.log("[DEBUG-AF] STEP 3:", memories.results.length, "memories,", docsResults.docs.length, "docs");
 
       // === STEP 3.5: Fetch installed MCP tools ===
       try {
@@ -521,6 +539,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     }
 
     // === STEP 4: Assess Confidence (skip for curated — orchestrator handles this) ===
+    console.log("[DEBUG-AF] STEP 4: Assessing confidence...");
     if (!useCurated) {
       // Empty repo — no existing code to be uncertain about, skip AI assessment
       if (treeArray.length === 0) {
@@ -670,6 +689,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     }
 
     // === STEP 5: Plan the work ===
+    console.log("[DEBUG-AF] STEP 5: Planning task...");
     await reportSteps(ctx, "Planlegger", [
       { label: "Leser oppgave", status: "done" },
       { label: "Henter prosjektstruktur", status: "done" },
@@ -694,6 +714,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     ctx.totalTokensUsed += plan.tokensUsed;
 
     const planSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
+    console.log("[DEBUG-AF] STEP 5: Plan has", plan.plan.length, "steps");
     await report(
       ctx,
       `Plan:\n${planSummary}\n\nBegrunnelse: ${plan.reasoning}`,
@@ -826,6 +847,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
       try {
         // Delegate to Builder service for file-by-file generation with dependency analysis
+        console.log("[DEBUG-AF] STEP 6: Building in sandbox, attempt", ctx.totalAttempts, "/", ctx.maxAttempts);
         await reportSteps(ctx, "Bygger", [
           { label: "Plan klar", status: "done" },
           { label: "Builder kjører", status: "active" },
@@ -1289,6 +1311,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error("[DEBUG-AF] executeTask CRASHED:", errorMsg);
 
     await audit({
       sessionId: ctx.conversationId,
@@ -1314,6 +1337,20 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     await reportSteps(ctx, "Feilet", [
       { label: errorMsg.substring(0, 80), status: "error" },
     ]);
+
+    // Update TheFold task status to blocked
+    if (ctx.thefoldTaskId || ctx.taskId) {
+      try {
+        await tasks.updateTaskStatus({
+          id: ctx.thefoldTaskId || ctx.taskId,
+          status: "blocked",
+          errorMessage: errorMsg.substring(0, 500),
+        });
+        console.log("[DEBUG-AF] Task marked as blocked after crash");
+      } catch (e) {
+        console.warn("[DEBUG-AF] Failed to update task status after crash:", e);
+      }
+    }
 
     // Update Linear (skip for orchestrator tasks)
     if (!options?.skipLinear) {
@@ -1343,6 +1380,12 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 export const startTask = api(
   { method: "POST", path: "/agent/start", expose: false },
   async (req: StartTaskRequest): Promise<StartTaskResponse> => {
+    console.log("[DEBUG-AF] === AGENT startTask CALLED ===");
+    console.log("[DEBUG-AF] taskId:", req.taskId);
+    console.log("[DEBUG-AF] conversationId:", req.conversationId);
+    console.log("[DEBUG-AF] thefoldTaskId:", req.thefoldTaskId);
+    console.log("[DEBUG-AF] repoName:", req.repoName);
+
     // Hent brukerens modellpreferanse
     let modelMode: ModelMode = "auto";
     let subAgentsEnabled = false;
@@ -1390,9 +1433,10 @@ export const startTask = api(
 
     // Fire and forget — agent reports progress via pub/sub
     executeTask(ctx).catch((err) => {
-      console.error(`Agent task ${req.taskId} failed:`, err);
+      console.error("[DEBUG-AF] executeTask CRASHED:", err);
     });
 
+    console.log("[DEBUG-AF] executeTask fired (async)");
     return { status: "started", taskId: req.taskId };
   }
 );

@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 16. februar 2026 (Prompt AD v2: UX + Arkitektur-opprydding)
+> Sist oppdatert: 16. februar 2026 (Prompt AJ: Sandbox Fallback Cleanup + Frontend Timer Stopp)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -272,7 +272,7 @@
 | Feature | Status | Beskrivelse |
 |---------|--------|-------------|
 | Tool definitions | 🟢 | 5 tools: create_task, start_task, list_tasks, read_file, search_code |
-| callAnthropicWithTools | 🟢 | Two-call flow: send med tools → handle tool_use → execute → final response |
+| callAnthropicWithTools | 🟢 | Full tool-loop: send med tools → handle tool_use → execute → send tool_result tilbake → gjenta til end_turn (MAX_TOOL_LOOPS=10). Prompt AH |
 | executeToolCall | 🟢 | Dispatcher til ekte services (tasks, github) basert på tool-navn |
 | System prompt tool instructions | 🟢 | Oppdatert system prompt med verktoy-instruksjoner |
 | create_task source: "chat" | 🟢 | Tasks opprettet fra chat bruker `source: "chat"` i stedet for `"manual"` |
@@ -624,7 +624,7 @@
 | Tomt repo handling | 🟢 | Hvis repoContext er tom etter GitHub-kall, AI får eksplisitt beskjed om at repoet er tomt — ingen hallusinering |
 | Memory-prioritering over hallusinering | 🟢 | System prompt: minner kan komme fra andre repoer, fil-kontekst er sannheten, minner er hint |
 | Skills UUID[] fix | 🟢 | depends_on::text[] og conflicts_with::text[] cast i resolve() — fikser "unsupported type: UuidArray" |
-| Tool-use / Function Calling | 🟢 | 5 tools (create_task, start_task, list_tasks, read_file, search_code) i ai/ai.ts, callAnthropicWithTools two-call flow, executeToolCall dispatcher. create_task: source="chat" + AI-berikelse (complexity/tokens). start_task: verifiserer task, setter in_progress/blocked |
+| Tool-use / Function Calling | 🟢 | 5 tools (create_task, start_task, list_tasks, read_file, search_code) i ai/ai.ts, callAnthropicWithTools full tool-loop (MAX_TOOL_LOOPS=10, sender tool_result tilbake til Anthropic, looper til end_turn), executeToolCall dispatcher. create_task: source="chat" + AI-berikelse. start_task: verifiserer task, setter in_progress/blocked. Empty-content fallback i chat.ts |
 | Dynamic AgentStatus | 🟢 | processAIResponse bygger steg dynamisk basert på intent-deteksjon, conditional memory search, bedre fasenavn (Forbereder/Analyserer/Planlegger/Bygger/Reviewer/Utforer) |
 | Animated PhaseIcons | 🟢 | Per-fase SVG-ikoner med CSS-animasjoner (grid-blink, forstorrelsesglass-pulse, clipboard, lightning-swing, eye, gear-spin) |
 | File Upload | 🟢 | chat_files tabell (migrasjon 4), POST /chat/upload (500KB grense), frontend fil-velger via + meny |

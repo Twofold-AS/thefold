@@ -123,6 +123,7 @@ interface CreateTaskResponse {
 export const createTask = api(
   { method: "POST", path: "/tasks/create", expose: true, auth: true },
   async (req: CreateTaskRequest): Promise<CreateTaskResponse> => {
+    console.log("[DEBUG-AF] createTask:", req.title, "repo:", req.repo);
     if (!req.title || req.title.trim().length === 0) {
       throw APIError.invalidArgument("title is required");
     }
@@ -146,6 +147,7 @@ export const createTask = api(
     `;
 
     const task = parseTask(row!);
+    console.log("[DEBUG-AF] createTask result ID:", task.id);
 
     await taskEvents.publish({
       taskId: task.id,
@@ -337,8 +339,10 @@ export const getTask = api(
 export const getTaskInternal = api(
   { method: "POST", path: "/tasks/get-internal", expose: false },
   async (req: GetTaskRequest): Promise<GetTaskResponse> => {
+    console.log("[DEBUG-AF] getTaskInternal called with id:", req.id);
     if (!req.id) throw APIError.invalidArgument("id is required");
     const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, created_by, created_at, updated_at, completed_at FROM tasks WHERE id = ${req.id}::uuid`;
+    console.log("[DEBUG-AF] getTaskInternal result:", row ? "found: " + row.title : "NOT FOUND");
     if (!row) throw APIError.notFound("task not found");
     return { task: parseTask(row) };
   }
@@ -824,6 +828,7 @@ interface UpdateTaskStatusRequest {
 export const updateTaskStatus = api(
   { method: "POST", path: "/tasks/update-status", expose: false },
   async (req: UpdateTaskStatusRequest): Promise<{ success: boolean }> => {
+    console.log("[DEBUG-AF] updateTaskStatus:", req.id, "→", req.status, req.errorMessage || "");
     await db.exec`
       UPDATE tasks SET
         status = ${req.status},
