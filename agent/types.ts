@@ -165,6 +165,7 @@ export interface CodeReview {
   taskId: string;
   projectTaskId?: string;
   sandboxId: string;
+  repoName?: string;
   filesChanged: ReviewFile[];
   aiReview?: AIReviewData;
   status: 'pending' | 'approved' | 'changes_requested' | 'rejected';

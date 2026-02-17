@@ -10,19 +10,30 @@ export interface AgentStep {
   detail?: string;
 }
 
+export interface ReviewData {
+  reviewId: string;
+  quality: number;
+  filesChanged: number;
+  concerns: string[];
+  reviewUrl: string;
+}
+
 export interface AgentStatusData {
   phase: string;
   title: string;
   steps: AgentStep[];
   error?: string;
   questions?: string[];
+  reviewData?: ReviewData;
 }
 
 interface AgentStatusProps {
   data: AgentStatusData;
   onReply?: (answer: string) => void;
-  onRetry?: () => void;
-  onCancel?: () => void;
+  onDismiss?: () => void;
+  onApprove?: (reviewId: string) => void;
+  onRequestChanges?: (reviewId: string) => void;
+  onReject?: (reviewId: string) => void;
 }
 
 /** Phase-specific icon for the tab */
@@ -95,13 +106,15 @@ function PhaseIcon({ phase }: { phase: string }) {
   return <span className="inline-block agent-spinner-small" />;
 }
 
-export function AgentStatus({ data, onReply, onRetry, onCancel }: AgentStatusProps) {
+export function AgentStatus({ data, onReply, onDismiss, onApprove, onRequestChanges, onReject }: AgentStatusProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [phraseIndex, setPhraseIndex] = useState(0);
+  const [actionLoading, setActionLoading] = useState(false);
   const isFailed = data.phase === "Feilet";
   const isComplete = data.phase === "Ferdig";
   const isWaiting = data.phase === "Venter";
+  const isReviewWaiting = isWaiting && !!data.reviewData;
   const isWorking = !isComplete && !isFailed && !isWaiting;
 
   // Rotate magic phrases while working
@@ -145,7 +158,7 @@ export function AgentStatus({ data, onReply, onRetry, onCancel }: AgentStatusPro
               className="text-sm font-medium"
               style={{ color: isFailed ? "#ef4444" : isWaiting ? "#eab308" : "var(--text-primary)" }}
             >
-              {data.phase === "Venter" ? "Venter pa input" : data.phase}
+              {isReviewWaiting ? "Review" : data.phase === "Venter" ? "Venter pa input" : data.phase}
             </span>
           </>
         )}
@@ -208,8 +221,70 @@ export function AgentStatus({ data, onReply, onRetry, onCancel }: AgentStatusPro
             </div>
           ))}
 
-          {/* Questions (Venter phase) */}
-          {isWaiting && data.questions && data.questions.length > 0 && (
+          {/* Review waiting — structured review summary + action buttons */}
+          {isReviewWaiting && data.reviewData && (
+            <div className="px-4 py-3 space-y-3" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                Kvalitet: {data.reviewData.quality}/10 · {data.reviewData.filesChanged} fil{data.reviewData.filesChanged > 1 ? "er" : ""} endret
+              </p>
+              {data.reviewData.concerns.length > 0 && (
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+                  {data.reviewData.concerns[0].substring(0, 120)}
+                  {data.reviewData.concerns.length > 1 ? ` (+${data.reviewData.concerns.length - 1} til)` : ""}
+                </p>
+              )}
+              <a
+                href={data.reviewData.reviewUrl}
+                className="text-xs"
+                style={{ color: "var(--accent)", display: "block" }}
+              >
+                Se fullstendig review
+              </a>
+              <div className="flex items-center gap-2 pt-1">
+                {onApprove && (
+                  <button
+                    onClick={async () => {
+                      setActionLoading(true);
+                      await onApprove(data.reviewData!.reviewId);
+                      setActionLoading(false);
+                    }}
+                    disabled={actionLoading}
+                    className="text-xs px-3 py-1.5 font-medium"
+                    style={{ background: "var(--accent)", color: "#fff", border: "none", opacity: actionLoading ? 0.5 : 1 }}
+                  >
+                    Godkjenn
+                  </button>
+                )}
+                {onRequestChanges && (
+                  <button
+                    onClick={() => onRequestChanges(data.reviewData!.reviewId)}
+                    disabled={actionLoading}
+                    className="text-xs px-3 py-1.5"
+                    style={{ border: "1px solid var(--border)", color: "var(--text-muted)", background: "transparent" }}
+                  >
+                    Be om endringer
+                  </button>
+                )}
+                {onReject && (
+                  <button
+                    onClick={async () => {
+                      setActionLoading(true);
+                      await onReject(data.reviewData!.reviewId);
+                      setActionLoading(false);
+                    }}
+                    disabled={actionLoading}
+                    className="text-xs px-3 py-1.5"
+                    style={{ border: "1px solid #ef4444", color: "#ef4444", background: "transparent", opacity: actionLoading ? 0.5 : 1 }}
+                  >
+                    Avvis
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Questions (Venter phase, non-review) */}
+          {isWaiting && !isReviewWaiting && data.questions && data.questions.length > 0 && (
             <div className="px-4 py-3 space-y-2" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
               {data.questions.map((q, i) => (
                 <div key={i} className="flex items-start gap-2">
@@ -220,8 +295,8 @@ export function AgentStatus({ data, onReply, onRetry, onCancel }: AgentStatusPro
             </div>
           )}
 
-          {/* Reply input (Venter phase) */}
-          {isWaiting && onReply && (
+          {/* Reply input (Venter phase, non-review) */}
+          {isWaiting && !isReviewWaiting && onReply && (
             <div className="flex items-center gap-2 px-4 py-3" style={{ borderTop: "1px solid var(--border)" }}>
               <input
                 type="text"
@@ -261,35 +336,21 @@ export function AgentStatus({ data, onReply, onRetry, onCancel }: AgentStatusPro
             </div>
           )}
 
-          {/* Retry/Cancel buttons (Feilet phase) */}
-          {isFailed && (onRetry || onCancel) && (
+          {/* Dismiss button (Feilet phase) */}
+          {isFailed && onDismiss && (
             <div className="flex items-center gap-2 px-4 py-3" style={{ borderTop: "1px solid var(--border)" }}>
-              {onRetry && (
-                <button
-                  onClick={onRetry}
-                  className="text-xs px-3 py-1.5 font-medium"
-                  style={{
-                    background: "var(--accent)",
-                    color: "#fff",
-                    border: "none",
-                  }}
-                >
-                  Prov igjen
-                </button>
-              )}
-              {onCancel && (
-                <button
-                  onClick={onCancel}
-                  className="text-xs px-3 py-1.5"
-                  style={{
-                    border: "1px solid var(--border)",
-                    color: "var(--text-muted)",
-                    background: "transparent",
-                  }}
-                >
-                  Avbryt
-                </button>
-              )}
+              <button
+                onClick={onDismiss}
+                className="text-xs px-3 py-1.5"
+                style={{
+                  border: "1px solid var(--border)",
+                  color: "var(--text-secondary)",
+                  background: "transparent",
+                  cursor: "pointer",
+                }}
+              >
+                Lukk
+              </button>
             </div>
           )}
         </div>

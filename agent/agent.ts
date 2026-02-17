@@ -1130,6 +1130,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         conversationId: ctx.conversationId,
         taskId: ctx.taskId,
         sandboxId: sandboxId.id,
+        repoName: ctx.repoName,
         filesChanged: allFiles.map((f) => ({
           path: f.path,
           content: f.content,

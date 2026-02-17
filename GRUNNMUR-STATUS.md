@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 17. februar 2026 (Prompt AL: Review Godkjenn/Avvis + Chat Review UX)
+> Sist oppdatert: 17. februar 2026 (Prompt AP: Tomme GitHub-repoer + spinner fix + ferdig-garanti)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -211,6 +211,17 @@
 | reviewer_id kolonne | 🟢 | Endret fra UUID til TEXT (migrasjon 5) — root cause: auth?.email lagres som tekst, ikke UUID |
 | /review side | 🟢 | Liste med statusfilter-tabs |
 | /review/[id] side | 🟢 | Detaljer, filvisning, handlingsknapper. Alle emojier fjernet fra review-meldinger i chat |
+| Strukturert reviewData i agent_status | 🟢 | agent_status JSON med reviewData: quality, filesChanged, concerns, reviewUrl — AgentStatus renderer review-spesifikk UI |
+| Review action buttons i AgentStatus | 🟢 | Godkjenn/Be om endringer/Avvis-knapper direkte i AgentStatus-boksen under review-venting |
+| approveReview → task done | 🟢 | approveReview kaller tasks.updateTaskStatus("done"), publiserer strukturert agent_status (Ferdig-fase) |
+| rejectReview → task blocked | 🟢 | rejectReview kaller tasks.updateTaskStatus("blocked"), publiserer agent_status (Feilet-fase) |
+| repo_name kolonne | 🟢 | code_reviews lagrer repo_name (migrasjon 6). approveReview/requestChanges bruker korrekt repo for createPR (ikke hardkodet) |
+| Heartbeat fase-bevissthet | 🟢 | Frontend heartbeat-timeout: 5 min for "Venter"-fase, 30s ellers. Forhindrer "Mistet kontakt" under review-venting |
+| Feilet-boks UX | 🟢 | "Prøv igjen"/"Avbryt" fjernet fra Feilet-fase, erstattet med "Lukk" (onDismiss). Optimistisk oppdatering ved Godkjenn/Avvis |
+| Tomme repoer | 🟢 | createPR håndterer tomme repoer — pusher direkte til main med initial commit. directPush flag i response |
+| PR-feil garanti | 🟢 | approveReview sender Feilet agent_status + blokkerer task selv ved createPR-crash. Ferdig-melding garantert |
+| ⚪ Git-integrasjon i UI | ⚪ | Planlagt: commit-feed, branch-status, one-click merge, GitHub webhook, diff-visning |
+| ⚪ OpenAI embeddings | ⚪ | Planlagt: bytt Voyage → OpenAI text-embedding-3-small (512 dim, $0.02/M tokens, høyere rate limits) |
 
 ### Hva trengs for full aktivering
 1. Agent-loopen er **fullt implementert** — alle 13 steg fungerer

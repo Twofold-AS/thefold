@@ -1,233 +1,312 @@
-# Prompt AL — Review Godkjenn/Avvis + Chat Review UX
+# Prompt AP — Håndter tomme GitHub-repoer
 
 `git pull` først.
 
-## FEIL FRA LOGG
+## OVERSIKT
 
-**Godkjenn (linje 449):**
-```
-GitHub API error 403: Resource not accessible by personal access token
-endpoint=createPR → endpoint=approveReview FAILED
-```
-GitHub PAT har ikke write-tilgang til repoet.
+| # | Hva | Prioritet |
+|---|-----|-----------|
+| 1 | createPR feiler på tomt repo — push direkte til main | KRITISK |
+| 2 | "Jørgen André tenker" spinner forsvinner ikke etter Lukk | HØY |
+| 3 | Ferdig-melding sendes ikke etter godkjenning pga createPR-crash | HØY |
 
-**Avvis (linje 493):**
-```
-unable to parse uuid
-endpoint=rejectReview FAILED
-```
-Frontend sender ugyldig UUID til rejectReview.
+---
 
-## Les HELE disse filene FØR du endrer:
+## Les disse filene FØR du endrer:
+
 ```bash
-# Backend
-cat agent/agent.ts | head -50          # Se exports
-grep -rn "approveReview\|rejectReview\|requestChanges\|createPR" agent/
-cat agent/review.ts 2>/dev/null || grep -rn "Review\|review" agent/
+# GitHub createPR — hva feiler?
+cat github/github.ts
+grep -rn "createPR\|createRef\|getRef\|base.*main\|refs/heads" github/github.ts
 
-# Frontend review-side
-find frontend/src -name "*review*" -o -name "*Review*" | head -10
-cat frontend/src/app/(dashboard)/repo/[name]/reviews/[id]/page.tsx 2>/dev/null
+# Agent approve — hva skjer når createPR feiler?
+grep -rn "createPR\|approveReview" agent/review.ts | head -20
 
-# Frontend chat — review melding
-grep -rn "review\|Venter på input\|gjennomgang\|Bekymring" frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx | head -20
-
-# GitHub permissions
-grep -rn "github_pat\|GITHUB_TOKEN\|access.token" agent/ github/ | head -10
+# Frontend spinner
+grep -rn "tenker\|thinking\|sending\|waitingForReply\|agentActive" frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx | head -20
 ```
 
 ---
 
-## FIX 1: GitHub PAT permissions (KRITISK — DETTE ER IKKE EN KODEFEIL)
+## FIX 1: createPR håndterer tomt repo (KRITISK)
 
 ### Problem
-PAT-en brukt for å lage PRs har ikke `contents: write` scope. Den kan klone (read) men ikke pushe (write).
-
-### Fiks
-Dette er en KONFIGURASJON, ikke kode. Fortell brukeren:
-
-> GitHub PAT trenger `contents: write` og `pull_requests: write` scope for å lage PRs.
-> Gå til GitHub Settings → Developer settings → Personal access tokens → Oppdater tokenet.
-
-Men sjekk OGSÅ om koden håndterer denne feilen gracefully:
-
-```bash
-grep -rn "createPR\|403\|permissions\|accessible" agent/ github/
+Linje 411 i loggen:
+```
+GitHub API error 409: Git Repository is empty
+endpoint=createPR → get-a-reference
 ```
 
-I `approveReview`, wrap createPR med feilhåndtering som gir en forståelig melding:
+`createPR` prøver å hente `refs/heads/main` for å bruke som base for PR. Tomt repo har ingen branches → 409.
+
+### Løsning
+Når repo er tomt, push filer DIREKTE til main (ikke via PR). Flyten:
+
+1. Prøv normal PR-flyt (getRef → createBlob → createTree → createCommit → createRef → createPR)
+2. Hvis getRef feiler med 409 "Git Repository is empty":
+   - Lag initial commit direkte på main
+   - Returner `{ url: "direct-push", directPush: true }` i stedet for PR-URL
+
+### Implementasjon i `github/github.ts`
 
 ```typescript
-try {
-  await github.createPR(params);
-} catch (e: any) {
-  if (e?.message?.includes("403") || e?.message?.includes("not accessible")) {
-    throw new Error("GitHub-tokenet har ikke skrivetilgang til dette repoet. Oppdater PAT med 'contents: write' og 'pull_requests: write' scopes.");
+export const createPR = api(
+  { method: "POST", path: "/github/pr", expose: false },
+  async (req: CreatePRRequest): Promise<CreatePRResponse> => {
+    const token = githubToken();
+    const { owner, repo, branch, title, body, files } = req;
+    const baseUrl = `https://api.github.com/repos/${owner}/${repo}`;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/vnd.github.v3+json",
+    };
+
+    // STEG 1: Sjekk om repo er tomt ved å hente default branch ref
+    let baseSha: string;
+    let isEmptyRepo = false;
+
+    try {
+      const refRes = await fetch(`${baseUrl}/git/refs/heads/main`, { headers });
+      if (refRes.status === 409) {
+        // Repo er tomt — ingen branches
+        isEmptyRepo = true;
+      } else if (!refRes.ok) {
+        // Prøv "master" som fallback
+        const masterRes = await fetch(`${baseUrl}/git/refs/heads/master`, { headers });
+        if (masterRes.status === 409) {
+          isEmptyRepo = true;
+        } else if (!masterRes.ok) {
+          throw new Error(`Could not find base branch: ${refRes.status}`);
+        } else {
+          const masterData = await masterRes.json();
+          baseSha = masterData.object.sha;
+        }
+      } else {
+        const refData = await refRes.json();
+        baseSha = refData.object.sha;
+      }
+    } catch (e: any) {
+      if (e?.message?.includes("409") || e?.message?.includes("empty")) {
+        isEmptyRepo = true;
+      } else {
+        throw e;
+      }
+    }
+
+    // STEG 2: Lag blobs for alle filer
+    const blobPromises = files.map(async (file) => {
+      const blobRes = await fetch(`${baseUrl}/git/blobs`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          content: file.content,
+          encoding: "utf-8",
+        }),
+      });
+      if (!blobRes.ok) throw new Error(`Failed to create blob: ${blobRes.status}`);
+      const blobData = await blobRes.json();
+      return {
+        path: file.path,
+        mode: "100644" as const,
+        type: "blob" as const,
+        sha: blobData.sha,
+      };
+    });
+
+    const treeItems = await Promise.all(blobPromises);
+
+    if (isEmptyRepo) {
+      // === TOMT REPO: Push direkte til main ===
+      console.log(`[DEBUG-AP] Empty repo detected, pushing directly to main`);
+
+      // Lag tree UTEN base_tree (tomt repo)
+      const treeRes = await fetch(`${baseUrl}/git/trees`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ tree: treeItems }),
+      });
+      if (!treeRes.ok) throw new Error(`Failed to create tree: ${treeRes.status}`);
+      const treeData = await treeRes.json();
+
+      // Lag commit UTEN parent (initial commit)
+      const commitRes = await fetch(`${baseUrl}/git/commits`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          message: title || "Initial commit from TheFold",
+          tree: treeData.sha,
+          // INGEN parents — dette er initial commit
+        }),
+      });
+      if (!commitRes.ok) throw new Error(`Failed to create commit: ${commitRes.status}`);
+      const commitData = await commitRes.json();
+
+      // Lag refs/heads/main som peker til denne commit
+      const refCreateRes = await fetch(`${baseUrl}/git/refs`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          ref: "refs/heads/main",
+          sha: commitData.sha,
+        }),
+      });
+      if (!refCreateRes.ok) throw new Error(`Failed to create ref: ${refCreateRes.status}`);
+
+      return {
+        url: `https://github.com/${owner}/${repo}/commit/${commitData.sha}`,
+        number: 0,  // Ingen PR-nummer
+        directPush: true,
+      };
+    }
+
+    // === NORMAL FLYT: Lag PR ===
+    // ... eksisterende PR-logikk med baseSha ...
+    // (behold hele den eksisterende koden herfra)
   }
-  throw e;
+);
+```
+
+### Oppdater CreatePRResponse type
+
+```typescript
+interface CreatePRResponse {
+  url: string;
+  number: number;
+  directPush?: boolean;  // Ny: true hvis pushet direkte (tomt repo)
+}
+```
+
+### Oppdater approveReview for directPush
+
+I `agent/review.ts` — `approveReview`:
+
+```typescript
+const prResult = await github.createPR(prParams);
+
+if (prResult.directPush) {
+  // Tomt repo — pushet direkte, ingen PR å vise
+  console.log(`[DEBUG-AP] Direct push to empty repo: ${prResult.url}`);
+  
+  // Send melding om direkte push
+  await agentReports.publish({
+    taskId,
+    conversationId: review.conversationId,
+    status: "completed",
+    content: `Review godkjent — kode pushet direkte til main (nytt repo): ${prResult.url}`
+  });
+} else {
+  // Normal PR
+  await agentReports.publish({
+    taskId,
+    conversationId: review.conversationId,
+    status: "completed",
+    content: `Review godkjent — PR opprettet: ${prResult.url}`
+  });
 }
 ```
 
 ---
 
-## FIX 2: rejectReview UUID-feil (KRITISK)
+## FIX 2: "Jørgen André tenker" spinner etter Lukk (HØY)
 
 ### Problem
-Frontend sender noe som ikke er en gyldig UUID til rejectReview.
+Etter å lukke Feilet-boksen med "Lukk" vises fremdeles "Jørgen André · tenker · 57s".
 
-### Diagnose
-```bash
-# Se hva frontend sender
-grep -rn "rejectReview\|reject.*review\|avvis" frontend/src/app/(dashboard)/repo/[name]/reviews/
-grep -rn "reviewId\|review_id\|params.id" frontend/src/app/(dashboard)/repo/[name]/reviews/
-```
+### Rotårsak
+`statusDismissed` skjuler AgentStatus-boksen, men `showThinking` beregnes uavhengig og viser thinking-indikatoren.
 
-Mest sannsynlig bruker frontend `params.id` fra URL-en som er review-ID. Sjekk om det er en UUID eller en slug.
-
-```bash
-# Se review-URL format
-grep -rn "reviews/\[" frontend/src/app/ | head -5
-```
-
-Fiks: Sørg for at review-IDen som sendes er en gyldig UUID:
+### Fiks
+Når statusDismissed er true, skjul OGSÅ thinking-indikatoren:
 
 ```typescript
-// I frontend review action handler
-const handleReject = async () => {
-  const reviewId = params.id; // Kan dette være en slug?
-  console.log("[DEBUG-AL] rejectReview with id:", reviewId);
-  
-  // Sjekk at det er en gyldig UUID
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!uuidRegex.test(reviewId)) {
-    console.error("[DEBUG-AL] Invalid UUID for review:", reviewId);
-    // Kanskje reviewId er en slug — hent UUID fra review data
-    // ...
-    return;
-  }
-  
-  await rejectReview(reviewId, feedback);
+// I chat page
+const showThinking = useMemo(() => {
+  if (statusDismissed) return false;  // ← NYTT: Lukk fjerner alt
+  if (cancelled) return false;
+  return sending || waitingForReply;
+}, [sending, waitingForReply, cancelled, statusDismissed]);
+```
+
+ELLER bedre — når bruker trykker Lukk på en Feilet-boks, reset ALL agent-state:
+
+```typescript
+const handleDismissStatus = () => {
+  setLastAgentStatus(null);
+  setStatusDismissed(true);
+  setStatusOverride(null);
+  setSending(false);
+  setWaitingForReply(false);
+  // Reset polling
+  setPollMode?.("idle");
 };
 ```
 
-### Alternativ: Backend bruker feil parameter-type
-Sjekk backend:
-```bash
-grep -n "rejectReview" agent/review.ts agent/agent.ts
-```
-
-Kanskje endpointet forventer UUID men mottar streng. Sjekk API-definisjon og parametertyper.
-
 ---
 
-## FIX 3: Chat review-melding — forenkle UX (HØY)
+## FIX 3: Ferdig-melding garanti (HØY)
 
 ### Problem
-Bildet viser:
-1. Duplikat tekst (tittel = innhold)
-2. Emojier (👀, ❓) i meldingen — ser uprofesjonelt ut
-3. "Skriv svar her..." input som sender til hovedchat
-4. Teksten er for lang og detaljert
+Etter godkjenning, hvis createPR feiler, sendes ingen ferdig/feilet-melding til chat. Frontend viser "Feilet" via optimistisk oppdatering, men backend har ikke oppdatert noe.
 
 ### Fiks
-Finn hvor review-meldingen genereres i chatten. Det er sannsynligvis i:
-- `agent/agent.ts` — report() sender meldingen
-- `agent/review.ts` — review-resultat formateres
-- `chat/chat.ts` — Pub/Sub lagrer meldingen
-
-```bash
-grep -rn "gjennomgang\|Bekymring\|Venter på input\|Se review" agent/ chat/
-```
-
-### Ny format for review-melding i chat:
-Fjern emojier. Kort og konsist. Lenk til review-siden.
+I approveReview, wrap createPR i try/catch og ALLTID send status:
 
 ```typescript
-// I agent review report — fjern emojier, forenkle
-const reviewMessage = [
-  `Kode klar for gjennomgang — Kvalitet: ${score}/10, ${filesChanged} fil${filesChanged > 1 ? 'er' : ''} endret.`,
-  concerns.length > 0 ? `Bekymringer: ${concerns.join(', ')}` : '',
-  `Se detaljer og godkjenn: /repo/${repoName}/reviews/${reviewId}`,
-].filter(Boolean).join('\n');
-```
-
-### Fjern "Skriv svar her..." input i review-melding
-I frontend chat-side, IKKE vis et ekstra input-felt for review-meldinger. Brukeren kan svare i hovedchatten eller gå til review-siden.
-
-```bash
-grep -rn "Skriv svar\|input.*review\|review.*input" frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx
-```
-
-Hvis det finnes et eget input-felt for review-meldinger, fjern det. Legg heller til knapper:
-
-```tsx
-{msg.messageType === "review_waiting" && (
-  <div className="flex gap-2 mt-2">
-    <Link href={`/repo/${repoName}/reviews/${msg.meta?.reviewId}`}>
-      <button className="px-3 py-1.5 text-sm rounded" style={{ 
-        background: "var(--bg-tertiary)", 
-        color: "var(--text-primary)",
-        fontFamily: "var(--font-body)"
-      }}>
-        Se review
-      </button>
-    </Link>
-    <button onClick={() => handleApproveFromChat(msg.meta?.reviewId)} 
-      className="px-3 py-1.5 text-sm rounded"
-      style={{ background: "var(--accent-primary)", color: "#000" }}>
-      Godkjenn
-    </button>
-  </div>
-)}
+export const approveReview = async (req) => {
+  let prResult;
+  
+  try {
+    prResult = await github.createPR(prParams);
+  } catch (e: any) {
+    console.error("[DEBUG-AP] createPR failed:", e?.message);
+    
+    // Send feilet-status
+    await agentReports.publish({
+      taskId,
+      conversationId: review.conversationId,
+      status: "failed",
+      content: JSON.stringify({
+        type: "agent_status",
+        phase: "Feilet",
+        title: "PR-opprettelse feilet",
+        error: e?.message?.includes("409") 
+          ? "Repoet er tomt — kan ikke lage PR uten initial commit"
+          : e?.message || "Ukjent feil",
+        steps: [
+          { label: "Kode skrevet", status: "done" },
+          { label: "Validert", status: "done" },
+          { label: "Review godkjent", status: "done" },
+          { label: "PR opprettelse", status: "failed" }
+        ]
+      })
+    });
+    
+    // Sett task til blocked med tydelig feilmelding
+    await tasks.updateTaskStatus({ 
+      id: taskId, 
+      status: "blocked", 
+      errorMessage: `PR feilet: ${e?.message}` 
+    });
+    
+    throw e; // Re-throw så frontend får 500
+  }
+  
+  // Suksess — send ferdig
+  // ... resten av eksisterende kode
+};
 ```
 
 ---
-
-## FIX 4: Review-side font (MEDIUM)
-
-### Problem
-Noen tekst på review-siden bruker en annen font enn resten av appen.
-
-### VIKTIG: Font-regler
-- `TheFold Brand` (thefold.woff2) brukes KUN for "TheFold"-logoteksten. IKKE for vanlig tekst.
-- Resten av appen bruker de fontene som allerede er definert i globals.css / layout.tsx / tailwind config.
-
-### Fiks
-```bash
-# Finn hvilke fonter som brukes globalt
-grep -rn "fontFamily\|font-family\|--font" frontend/src/app/globals.css frontend/src/app/layout.tsx | head -20
-grep -rn "fontFamily\|font-family" frontend/src/components/ | head -10
-
-# Finn hva review-siden bruker
-grep -rn "fontFamily\|font-family\|font-sans\|font-mono\|TheFold" frontend/src/app/(dashboard)/repo/[name]/reviews/
-```
-
-Sørg for at review-siden bruker SAMME fonter som resten av dashboard-sidene (tasks, chat, settings osv). Ikke hardkod fonter — bruk CSS-variabler eller Tailwind-klasser som allerede er definert. Sjekk hva andre sider bruker og kopier det mønsteret.
-
-IKKE bruk `TheFold Brand` for vanlig tekst — den er kun for logo.
-
----
-
-## OPPSUMMERING
-
-| # | Hva | Rotårsak | Prioritet |
-|---|-----|----------|-----------|
-| 1 | Godkjenn feiler | GitHub PAT mangler write scope | KRITISK (config) |
-| 2 | Avvis feiler | Ugyldig UUID til rejectReview | KRITISK |
-| 3 | Chat review UX | Emojier, duplikat, ekstra input | HØY |
-| 4 | Review font | Feil font brukt | MEDIUM |
-
-## VIKTIG: GitHub PAT
-Skriv ut en tydelig melding til brukeren om at GitHub PAT trenger oppdaterte scopes. Koden kan ikke fikse dette.
 
 ## Oppdater dokumentasjon
-- GRUNNMUR-STATUS.md
-- KOMPLETT-BYGGEPLAN.md
+- GRUNNMUR-STATUS.md — legg til "Tomme repoer håndtert" 
+- KOMPLETT-BYGGEPLAN.md — changelog
 
 ## Rapport
 Svar på:
-1. Hva er GitHub PAT-feilen? Hvilke scopes trengs?
-2. Hva sendes som reviewId til rejectReview? Er det UUID eller slug?
-3. Hvor genereres review-meldingen i chat? Fjernes emojiene?
-4. Fjernes "Skriv svar her..." input i chat?
-5. Bruker review-siden nå riktig font overalt?
+1. Hva skjer nå når createPR kalles på et tomt repo?
+2. Har du testet extractRepoFromConversationId med ekte conversation_id format?
+3. Forsvinner "Jørgen André tenker" etter Lukk nå?
+4. Sendes feilet/ferdig Pub/Sub ALLTID etter approve, uansett createPR-resultat?
+5. Hva er response format for directPush vs normal PR?

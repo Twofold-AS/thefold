@@ -75,6 +75,7 @@ interface CreatePRRequest {
 interface CreatePRResponse {
   url: string;
   number: number;
+  directPush?: boolean;
 }
 
 // --- Endpoints ---
@@ -313,21 +314,42 @@ export const findRelevantFiles = api(
 );
 
 // Create a branch, commit files, and open a pull request
+// Handles empty repos by pushing directly to main
 export const createPR = api(
   { method: "POST", path: "/github/pr", expose: false },
   async (req: CreatePRRequest): Promise<CreatePRResponse> => {
-    // 1. Get the SHA of the base branch
-    const mainRef = await ghApi(
-      `/repos/${req.owner}/${req.repo}/git/ref/heads/main`
-    );
-    const baseSha = mainRef.object.sha;
+    // 1. Check if repo is empty by fetching the base branch ref
+    let baseSha: string | null = null;
 
-    // 2. Get the base tree
-    const baseCommit = await ghApi(
-      `/repos/${req.owner}/${req.repo}/git/commits/${baseSha}`
-    );
+    const refRes = await fetch(`https://api.github.com/repos/${req.owner}/${req.repo}/git/ref/heads/main`, {
+      headers: {
+        Authorization: `Bearer ${githubToken()}`,
+        Accept: "application/vnd.github.v3+json",
+      },
+    });
 
-    // 3. Create blobs for each file
+    if (refRes.status === 409 || refRes.status === 404) {
+      // 409 = empty repo, 404 = no main branch — try master
+      const masterRes = await fetch(`https://api.github.com/repos/${req.owner}/${req.repo}/git/ref/heads/master`, {
+        headers: {
+          Authorization: `Bearer ${githubToken()}`,
+          Accept: "application/vnd.github.v3+json",
+        },
+      });
+      if (masterRes.ok) {
+        const masterData = await masterRes.json();
+        baseSha = masterData.object.sha;
+      }
+      // else: both main and master missing — empty repo
+    } else if (refRes.ok) {
+      const refData = await refRes.json();
+      baseSha = refData.object.sha;
+    } else {
+      const error = await refRes.text();
+      throw APIError.internal(`GitHub API error ${refRes.status}: ${error}`);
+    }
+
+    // 2. Create blobs for all files
     const treeItems = await Promise.all(
       req.files
         .filter((f) => f.action !== "delete")
@@ -345,6 +367,42 @@ export const createPR = api(
         })
     );
 
+    if (!baseSha) {
+      // === EMPTY REPO: Push directly to main ===
+
+      // Create tree WITHOUT base_tree
+      const newTree = await ghApi(`/repos/${req.owner}/${req.repo}/git/trees`, {
+        method: "POST",
+        body: { tree: treeItems },
+      });
+
+      // Create commit WITHOUT parents (initial commit)
+      const commit = await ghApi(`/repos/${req.owner}/${req.repo}/git/commits`, {
+        method: "POST",
+        body: {
+          message: req.title || "Initial commit from TheFold",
+          tree: newTree.sha,
+        },
+      });
+
+      // Create refs/heads/main pointing to this commit
+      await ghApi(`/repos/${req.owner}/${req.repo}/git/refs`, {
+        method: "POST",
+        body: {
+          ref: "refs/heads/main",
+          sha: commit.sha,
+        },
+      });
+
+      return {
+        url: `https://github.com/${req.owner}/${req.repo}/commit/${commit.sha}`,
+        number: 0,
+        directPush: true,
+      };
+    }
+
+    // === NORMAL FLOW: Create PR ===
+
     // Handle deletions
     req.files
       .filter((f) => f.action === "delete")
@@ -353,17 +411,22 @@ export const createPR = api(
           path: f.path,
           mode: "100644" as const,
           type: "blob" as const,
-          sha: null as any, // null SHA = deletion
+          sha: null as any,
         });
       });
 
-    // 4. Create new tree
+    // Get the base tree
+    const baseCommit = await ghApi(
+      `/repos/${req.owner}/${req.repo}/git/commits/${baseSha}`
+    );
+
+    // Create new tree with base
     const newTree = await ghApi(`/repos/${req.owner}/${req.repo}/git/trees`, {
       method: "POST",
       body: { base_tree: baseCommit.tree.sha, tree: treeItems },
     });
 
-    // 5. Create commit
+    // Create commit
     const commit = await ghApi(`/repos/${req.owner}/${req.repo}/git/commits`, {
       method: "POST",
       body: {
@@ -373,7 +436,7 @@ export const createPR = api(
       },
     });
 
-    // 6. Create branch
+    // Create branch
     try {
       await ghApi(`/repos/${req.owner}/${req.repo}/git/refs`, {
         method: "POST",
@@ -387,7 +450,7 @@ export const createPR = api(
       });
     }
 
-    // 7. Create pull request
+    // Create pull request
     const pr = await ghApi(`/repos/${req.owner}/${req.repo}/pulls`, {
       method: "POST",
       body: {

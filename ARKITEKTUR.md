@@ -492,8 +492,8 @@ agent → ai, github, linear, memory, sandbox, users, docs, chat (pub/sub), task
 builder → ai, sandbox (for file generation and validation)
 tasks → linear (for sync), ai (for planTaskOrder)
 ai → skills (for prompt enrichment)
-memory → cache (for embedding caching)
-github → cache (for repo structure caching)
+memory → cache (for embedding caching) — planlagt: bytt Voyage → OpenAI text-embedding-3-small
+github → cache (for repo structure caching) — planlagt: webhook endpoint for auto-sync (PR merge → task done)
 monitor → sandbox (for running checks)
 registry → tasks (healing tasks), memory (code patterns)
 ```
@@ -510,3 +510,5 @@ registry → tasks (healing tasks), memory (code patterns)
 | Snapshot testing | sandbox VALIDATION_PIPELINE (snapshot step, enabled: false) |
 | Performance benchmarks | sandbox VALIDATION_PIPELINE (performance step, enabled: false) |
 | Token cost optimization | ai.cache_control, ai.logTokenUsage |
+| Git-integrasjon i UI | github/ service — commit-feed, branch-status, one-click merge, webhook for auto-sync |
+| OpenAI embeddings | memory/ service — bytt Voyage → text-embedding-3-small (512 dim, $0.02/M tokens) |

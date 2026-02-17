@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.22 - Prompt AL (Review Godkjenn/Avvis + Chat Review UX)
+> **Versjon:** 3.26 - Prompt AP (Tomme GitHub-repoer + spinner fix + ferdig-garanti)
 > **Sist oppdatert:** 17. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -147,6 +147,28 @@
 - **FIX 2 — ActivityIcon SVG-komponent:** Ny `ActivityIcon.tsx` med 12 animerte SVG-ikoner (created, completed, failed, pr, working, chat, auth, build, task, sync, heal, cost + default). Erstatter emojier i activity-tidslinjen. Ikoner har SVG-animasjoner (opacity pulse, rotate, scale)
 - **FIX 3 — AgentMode + Magic Header (BUG 5):** `tryParseAgentStatus` sjekker nå `metadata.taskId` — returnerer null for simple chat (ingen AgentStatus-boks for vanlige svar). `hasAgentStatus` filtrerer på taskId. Magic-indikator flyttet fra meldingsområdet til header-baren. Simple mode viser `{aiName} · {phrase} · tenker · {N}s`, agent mode viser bare `{phrase}`
 - **FIX 4 — Thinking Timer:** Ny `thinkingSeconds` teller i begge chat-sider. Starter ved `isWaitingForAI`, teller opp sekunder, vises i header for simple mode
+
+### ✅ Ferdig — Prompt AP: Tomme GitHub-repoer + spinner fix + ferdig-garanti (februar 2026)
+- **FIX 1 — createPR håndterer tomme repoer (KRITISK):** Sjekker om repo er tomt (409/404 på ref/heads/main). Tomt repo → push direkte til main (initial commit uten parent). Normal repo → vanlig PR-flyt. `directPush: true` i response. approveReview viser "Kode pushet til main" i stedet for "PR opprettet"
+- **FIX 2 — Spinner forsvinner etter Lukk:** `showThinking` inkluderer `&& !statusDismissed`. `handleDismissStatus` resetter også `pollMode` og `heartbeatLost`
+- **FIX 3 — Ferdig/feilet-melding garanti:** createPR catch-block sender Feilet agent_status + blokkerer task FØR re-throw. Frontend får 500 med optimistisk oppdatering allerede vist
+
+### ✅ Ferdig — Prompt AO: AgentStatus Feilet-boks + Approve fallback + UX (februar 2026)
+- **FIX 1 — Fjernet "Prøv igjen"/"Avbryt" fra Feilet-boks:** Erstattet med "Lukk"-knapp (onDismiss) som skjuler boksen. onRetry/onCancel fjernet fra AgentStatus props. handleAgentRetry fjernet (dead code)
+- **FIX 2 — Approve fallback for gamle reviews:** Allerede håndtert av Prompt AN — fallback-kjede: review.repoName → extractRepoFromConversationId → "thefold"
+- **FIX 3 — Optimistisk oppdatering ved Godkjenn/Avvis:** statusOverride + statusDismissed state. Approve viser "Godkjenner..." → "Ferdig" umiddelbart. Reject viser "Feilet" umiddelbart. Resets automatisk ved nye meldinger
+
+### ✅ Ferdig — Prompt AN: PR til riktig repo + ferdig-melding + heartbeat (februar 2026)
+- **FIX 1 — PR til riktig repo (KRITISK):** repo_name kolonne lagt til i code_reviews (migrasjon 6). submitReviewInternal lagrer repoName fra agent context. approveReview og requestChanges bruker review.repoName for createPR — ikke lenger hardkodet "thefold". Fallback: extractRepoFromConversationId parser "repo-{NAME}-{UUID}" format
+- **FIX 2 — Ferdig-melding alltid sendt:** Verifisert at alle steg etter createPR (Linear, memory, sandbox, task update) er wrappet i try/catch — "Ferdig" agent_status publiseres ALLTID uavhengig av downstream-feil
+- **FIX 3 — Heartbeat fase-bevissthet:** Frontend heartbeat-timeout: 5 minutter for "Venter"-fase, 30 sekunder ellers. Parser agent_status JSON for å detektere phase. Forhindrer "Mistet kontakt med {aiName}" under review-venting
+- **FIX 4 — Linear guard for chat-tasks:** Linear updateTask allerede i try/catch (fra Prompt AM) — feiler stille for chat-opprettede tasks uten gyldig Linear ID
+
+### ✅ Ferdig — Prompt AM: Review UX + Task-fullføring + AgentStatus + Byggeplan (februar 2026)
+- **FIX 1 — Strukturert review-melding via Pub/Sub:** agent_status JSON med reviewData (quality, filesChanged, concerns, reviewUrl). AgentStatus renderer review-spesifikk UI med Godkjenn/Be om endringer/Avvis-knapper. Tab-tekst "Review" under review-venting
+- **FIX 2 — approveReview oppdaterer task-status:** approveReview kaller nå tasks.updateTaskStatus("done"). rejectReview setter task til "blocked". Begge publiserer strukturert agent_status (Ferdig/Feilet-faser) for korrekte AgentStatus-overganger
+- **FIX 3 — AgentStatus synlig under review-venting:** AgentStatus forblir synlig under "Venter"-fase (review waiting). Review action handlers i begge chat-sider (handleApproveFromChat, handleRequestChangesFromChat → router.push, handleRejectFromChat)
+- **FIX 4 — Byggeplan oppdatert med planlagte faser:** Git-integrasjon i UI (commit-feed, branch-status, one-click merge, webhook) og OpenAI embeddings-bytte (Voyage → text-embedding-3-small)
 
 ### ✅ Ferdig — Prompt AL: Review Godkjenn/Avvis + Chat Review UX (februar 2026)
 - **FIX 1 — approveReview 403 error handling:** approveReview wrapper createPR med 403 error handling, kaster APIError.permissionDenied med klar PAT scope-melding
@@ -1154,6 +1176,19 @@ Basert på gjennomgang av `OWASP-2025-2026-Report.md` (OWASP Top 10:2025, ASVS 5
 
 **Lang sikt (Fase 5):**
 8. Component Marketplace
+
+### Planlagt — Git-integrasjon i UI
+- Commit-feed per repo (GET /github/commits)
+- Branch-status med PR-info
+- One-click merge etter godkjent review
+- GitHub webhook for auto-sync (PR merge → task done)
+- Diff-visning i review (polering)
+
+### Planlagt — Bytt Voyage → OpenAI embeddings
+- memory/memory.ts embed() bytter fra Voyage til OpenAI text-embedding-3-small
+- 512 dimensjoner, $0.02/million tokens
+- Ny secret: OpenAIKey, fjern VoyageAPIKey
+- Høyere rate limits, ingen 429
 
 ---
 

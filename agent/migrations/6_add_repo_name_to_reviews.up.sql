@@ -1,0 +1,1 @@
+ALTER TABLE code_reviews ADD COLUMN IF NOT EXISTS repo_name TEXT;

@@ -13,6 +13,8 @@ import {
   cancelTask,
   uploadChatFile,
   listSkills,
+  approveReview,
+  rejectReview,
   type Message,
   type ConversationSummary,
   type Skill,
@@ -55,6 +57,8 @@ export default function ChatPage() {
   const [phraseIndex, setPhraseIndex] = useState(0);
   const [thinkingSeconds, setThinkingSeconds] = useState(0);
   const [cancelled, setCancelled] = useState(false);
+  const [statusOverride, setStatusOverride] = useState<Record<string, unknown> | null>(null);
+  const [statusDismissed, setStatusDismissed] = useState(false);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -129,11 +133,17 @@ export default function ChatPage() {
           return;
         }
 
-        // Heartbeat check — if agent_status not updated in 30s, backend may be dead
+        // Heartbeat check — use longer timeout for "Venter" phase (review waiting)
         if (lastMsg?.messageType === "agent_status" && lastMsg.updatedAt) {
+          let isWaitingPhase = false;
+          try {
+            const parsed = JSON.parse(lastMsg.content);
+            isWaitingPhase = parsed?.phase === "Venter";
+          } catch {}
+          const timeout = isWaitingPhase ? 300000 : 30000; // 5 min for Venter, 30s otherwise
           const lastUpdate = new Date(lastMsg.updatedAt).getTime();
           const now = Date.now();
-          setHeartbeatLost(now - lastUpdate > 30000);
+          setHeartbeatLost(now - lastUpdate > timeout);
         }
       } catch {
         // Silent
@@ -298,6 +308,8 @@ export default function ChatPage() {
 
   // Agent status tracking for AgentStatus box (rendered separately from messages)
   const lastAgentStatus = useMemo(() => {
+    if (statusDismissed) return null;
+    if (statusOverride !== null) return statusOverride;
     const statusMsgs = messages.filter(m => m.messageType === "agent_status");
     if (statusMsgs.length === 0) return null;
     const last = statusMsgs[statusMsgs.length - 1];
@@ -306,7 +318,7 @@ export default function ChatPage() {
       if (parsed.type === "agent_status") return { ...parsed, messageId: last.id, metadata: last.metadata };
     } catch {}
     return null;
-  }, [messages]);
+  }, [messages, statusOverride, statusDismissed]);
 
   const agentActive = useMemo(() => {
     if (!lastAgentStatus) return false;
@@ -341,15 +353,6 @@ export default function ChatPage() {
     sendMessage(convId, answer, { chatOnly: true, modelOverride: selectedModel }).then(() => loadHistory()).catch(() => {});
   }
 
-  function handleAgentRetry() {
-    // Re-send the last user message
-    const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
-    if (lastUserMsg && activeConvId) {
-      setPollMode("waiting");
-      sendMessage(activeConvId, lastUserMsg.content, { chatOnly: true, modelOverride: selectedModel }).then(() => loadHistory()).catch(() => {});
-    }
-  }
-
   function handleAgentCancel() {
     setCancelled(true);
     if (activeConvId) {
@@ -368,6 +371,75 @@ export default function ChatPage() {
         }
       } catch {}
     }
+  }
+
+  // Review actions from AgentStatus
+  async function handleApproveFromChat(reviewId: string) {
+    try {
+      setStatusOverride({
+        type: "agent_status",
+        phase: "Bygger",
+        title: "Godkjenner...",
+        steps: [
+          { label: "Kode skrevet", status: "done" },
+          { label: "Validert", status: "done" },
+          { label: "Review godkjent", status: "done" },
+          { label: "Oppretter PR", status: "active" },
+        ],
+      });
+      await approveReview(reviewId);
+      setStatusOverride({
+        type: "agent_status",
+        phase: "Ferdig",
+        title: "PR opprettet",
+        steps: [
+          { label: "Kode skrevet", status: "done" },
+          { label: "Validert", status: "done" },
+          { label: "Review godkjent", status: "done" },
+          { label: "PR opprettet", status: "done" },
+        ],
+      });
+      loadHistory();
+    } catch (e: any) {
+      console.error("Approve failed:", e);
+      setStatusOverride({
+        type: "agent_status",
+        phase: "Feilet",
+        title: "Godkjenning feilet",
+        error: e?.message || "Ukjent feil",
+        steps: [],
+      });
+    }
+  }
+
+  function handleRequestChangesFromChat(reviewId: string) {
+    router.push(`/review/${reviewId}`);
+  }
+
+  async function handleRejectFromChat(reviewId: string) {
+    try {
+      await rejectReview(reviewId, "Avvist fra chat");
+      setStatusOverride({
+        type: "agent_status",
+        phase: "Feilet",
+        title: "Review avvist",
+        error: "Avvist fra chat",
+        steps: [
+          { label: "Kode skrevet", status: "done" },
+          { label: "Validert", status: "done" },
+          { label: "Review avvist", status: "error" },
+        ],
+      });
+    } catch (e: any) {
+      console.error("Reject failed:", e);
+    }
+  }
+
+  function handleDismissStatus() {
+    setStatusDismissed(true);
+    setStatusOverride(null);
+    setPollMode("idle");
+    setHeartbeatLost(false);
   }
 
   // Check if AI is still thinking (last message is agent_status or we're sending)
@@ -393,10 +465,10 @@ export default function ChatPage() {
     return false;
   }, [messages]);
 
-  const showThinking = (sending || waitingForReply) && !cancelled;
+  const showThinking = (sending || waitingForReply) && !cancelled && !statusDismissed;
 
   // Reset cancelled flag when new messages arrive
-  useEffect(() => { setCancelled(false); }, [messages.length]);
+  useEffect(() => { setCancelled(false); setStatusDismissed(false); setStatusOverride(null); }, [messages.length]);
 
   useEffect(() => {
     if (!showThinking) return;
@@ -690,10 +762,13 @@ export default function ChatPage() {
                         steps: lastAgentStatus.steps || [],
                         error: lastAgentStatus.error,
                         questions: lastAgentStatus.questions,
+                        reviewData: lastAgentStatus.reviewData,
                       }}
                       onReply={handleAgentReply}
-                      onRetry={handleAgentRetry}
-                      onCancel={handleAgentCancel}
+                      onDismiss={handleDismissStatus}
+                      onApprove={handleApproveFromChat}
+                      onRequestChanges={handleRequestChangesFromChat}
+                      onReject={handleRejectFromChat}
                     />
                   </div>
                 )}

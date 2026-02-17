@@ -1,10 +1,19 @@
 import { api, APIError } from "encore.dev/api";
 import { getAuthData } from "~encore/auth";
-import { github, linear, memory, sandbox } from "~encore/clients";
+import { github, linear, memory, sandbox, tasks } from "~encore/clients";
 import { agentReports } from "../chat/chat";
 import { db } from "./db";
 import { executeTask } from "./agent";
 import type { CodeReview, ReviewFile, AIReviewData, AgentExecutionContext } from "./types";
+
+// Extract repo name from conversation_id format: "repo-{REPONAME}-{UUID}"
+function extractRepoFromConversationId(convId: string): string {
+  if (!convId.startsWith("repo-")) return "thefold";
+  const withoutPrefix = convId.replace(/^repo-/, "");
+  const uuidPattern = /-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const repoName = withoutPrefix.replace(uuidPattern, "");
+  return repoName || "thefold";
+}
 
 // --- Internal function (same service, no API boundary) ---
 
@@ -13,20 +22,25 @@ export interface SubmitReviewParams {
   taskId: string;
   projectTaskId?: string;
   sandboxId: string;
+  repoName?: string;
   filesChanged: ReviewFile[];
   aiReview: AIReviewData;
 }
 
 export async function submitReviewInternal(params: SubmitReviewParams): Promise<{ reviewId: string }> {
+  // Extract repo name: explicit param > conversation_id pattern > fallback
+  const repoName = params.repoName || extractRepoFromConversationId(params.conversationId);
+
   const row = await db.queryRow<{ id: string }>`
     INSERT INTO code_reviews (
       conversation_id, task_id, project_task_id, sandbox_id,
-      files_changed, ai_review, status
+      repo_name, files_changed, ai_review, status
     ) VALUES (
       ${params.conversationId},
       ${params.taskId},
       ${params.projectTaskId ?? null},
       ${params.sandboxId},
+      ${repoName},
       ${JSON.stringify(params.filesChanged)}::jsonb,
       ${JSON.stringify(params.aiReview)}::jsonb,
       'pending'
@@ -36,17 +50,28 @@ export async function submitReviewInternal(params: SubmitReviewParams): Promise<
 
   if (!row) throw new Error("Failed to insert code review");
 
-  // Notify chat about pending review
+  // Notify chat about pending review — structured JSON for AgentStatus rendering
+  const firstFile = params.filesChanged[0]?.path || params.taskId;
   await agentReports.publish({
     conversationId: params.conversationId,
     taskId: params.taskId,
-    content: `Kode klar for gjennomgang\n\n` +
-      `Kvalitet: ${params.aiReview.qualityScore}/10\n` +
-      `Filer endret: ${params.filesChanged.length}\n` +
-      (params.aiReview.concerns.length > 0
-        ? `\nBekymringer:\n${params.aiReview.concerns.map((c) => `- ${c}`).join("\n")}\n`
-        : "") +
-      `\nSe detaljer og godkjenn: /review/${row.id}`,
+    content: JSON.stringify({
+      type: "agent_status",
+      phase: "Venter",
+      title: `Review: ${firstFile}`,
+      reviewData: {
+        reviewId: row.id,
+        quality: params.aiReview.qualityScore,
+        filesChanged: params.filesChanged.length,
+        concerns: params.aiReview.concerns,
+        reviewUrl: `/review/${row.id}`,
+      },
+      steps: [
+        { label: "Kode skrevet", status: "done" },
+        { label: "Validert", status: "done" },
+        { label: "Venter pa godkjenning", status: "active" },
+      ],
+    }),
     status: "needs_input",
   });
 
@@ -74,6 +99,7 @@ interface CodeReviewRow {
   task_id: string;
   project_task_id: string | null;
   sandbox_id: string;
+  repo_name: string | null;
   files_changed: string | ReviewFile[];
   ai_review: string | AIReviewData | null;
   status: string;
@@ -91,6 +117,7 @@ function rowToCodeReview(row: CodeReviewRow): CodeReview {
     taskId: row.task_id,
     projectTaskId: row.project_task_id ?? undefined,
     sandboxId: row.sandbox_id,
+    repoName: row.repo_name ?? undefined,
     filesChanged: typeof row.files_changed === "string"
       ? JSON.parse(row.files_changed)
       : row.files_changed,
@@ -111,7 +138,7 @@ export const getReview = api(
   async (req: GetReviewRequest): Promise<{ review: CodeReview }> => {
     const row = await db.queryRow<CodeReviewRow>`
       SELECT id, conversation_id, task_id, project_task_id, sandbox_id,
-             files_changed, ai_review, status, reviewer_id, feedback,
+             repo_name, files_changed, ai_review, status, reviewer_id, feedback,
              created_at, reviewed_at, pr_url
       FROM code_reviews WHERE id = ${req.reviewId}
     `;
@@ -239,7 +266,7 @@ export const approveReview = api(
 
     const row = await db.queryRow<CodeReviewRow>`
       SELECT id, conversation_id, task_id, project_task_id, sandbox_id,
-             files_changed, ai_review, status, reviewer_id, feedback,
+             repo_name, files_changed, ai_review, status, reviewer_id, feedback,
              created_at, reviewed_at, pr_url
       FROM code_reviews WHERE id = ${req.reviewId}
     `;
@@ -251,14 +278,15 @@ export const approveReview = api(
 
     const review = rowToCodeReview(row);
 
-    // STEP 9: Create PR
+    // STEP 9: Create PR — use repo from review (extracted from conversation_id at submit time)
+    const targetRepo = review.repoName || extractRepoFromConversationId(review.conversationId);
     const branchName = `thefold/${review.taskId.toLowerCase().replace(/\s+/g, "-")}`;
 
-    let pr: { url: string };
+    let pr: { url: string; directPush?: boolean };
     try {
       pr = await github.createPR({
         owner: "Twofold-AS",
-        repo: "thefold",
+        repo: targetRepo,
         branch: branchName,
         title: `[TheFold] ${review.taskId}`,
         body: review.aiReview?.documentation || "Auto-generated by TheFold",
@@ -274,6 +302,29 @@ export const approveReview = api(
         throw APIError.permissionDenied(
           "GitHub-tokenet har ikke skrivetilgang. Oppdater PAT med 'contents: write' og 'pull_requests: write' scopes i GitHub Settings."
         );
+      }
+      // Send failure status to chat before re-throwing
+      try {
+        await agentReports.publish({
+          conversationId: review.conversationId,
+          taskId: review.taskId,
+          content: JSON.stringify({
+            type: "agent_status",
+            phase: "Feilet",
+            title: "PR-opprettelse feilet",
+            error: msg,
+            steps: [
+              { label: "Kode skrevet", status: "done" },
+              { label: "Validert", status: "done" },
+              { label: "Review godkjent", status: "done" },
+              { label: "PR opprettelse", status: "error" },
+            ],
+          }),
+          status: "failed",
+        });
+        await tasks.updateTaskStatus({ id: review.taskId, status: "blocked", errorMessage: `PR feilet: ${msg}` });
+      } catch {
+        // Best-effort notification
       }
       throw e;
     }
@@ -300,7 +351,7 @@ export const approveReview = api(
             category: "decision",
             linearTaskId: review.taskId,
             memoryType: "decision",
-            sourceRepo: "Twofold-AS/thefold",
+            sourceRepo: `Twofold-AS/${targetRepo}`,
           });
         } catch {
           // Memory storage is optional
@@ -325,11 +376,30 @@ export const approveReview = api(
       WHERE id = ${req.reviewId}
     `;
 
-    // Notify chat
+    // Update task status to done
+    try {
+      await tasks.updateTaskStatus({ id: review.taskId, status: "done" });
+    } catch {
+      // Task update is optional (task may be from Linear, not local)
+    }
+
+    // Notify chat — structured "Ferdig" status
+    const prLabel = pr.directPush ? "Kode pushet til main" : "PR opprettet";
+    const titleMsg = pr.directPush ? "Review godkjent — kode pushet direkte til main" : "Review godkjent — PR opprettet";
     await agentReports.publish({
       conversationId: review.conversationId,
       taskId: review.taskId,
-      content: `Review godkjent — PR: ${pr.url}`,
+      content: JSON.stringify({
+        type: "agent_status",
+        phase: "Ferdig",
+        title: titleMsg,
+        steps: [
+          { label: "Kode skrevet", status: "done" },
+          { label: "Validert", status: "done" },
+          { label: "Review godkjent", status: "done" },
+          { label: prLabel, status: "done" },
+        ],
+      }),
       status: "completed",
       prUrl: pr.url,
       filesChanged: review.filesChanged.map((f) => f.path),
@@ -353,7 +423,7 @@ export const requestChanges = api(
 
     const row = await db.queryRow<CodeReviewRow>`
       SELECT id, conversation_id, task_id, project_task_id, sandbox_id,
-             files_changed, ai_review, status, reviewer_id, feedback,
+             repo_name, files_changed, ai_review, status, reviewer_id, feedback,
              created_at, reviewed_at, pr_url
       FROM code_reviews WHERE id = ${req.reviewId}
     `;
@@ -374,6 +444,7 @@ export const requestChanges = api(
     `;
 
     const review = rowToCodeReview(row);
+    const targetRepo = review.repoName || extractRepoFromConversationId(review.conversationId);
 
     // Fire-and-forget: re-execute task with feedback
     const ctx: AgentExecutionContext = {
@@ -382,7 +453,7 @@ export const requestChanges = api(
       taskDescription: "",
       userMessage: req.feedback,
       repoOwner: "Twofold-AS",
-      repoName: "thefold",
+      repoName: targetRepo,
       branch: "main",
       modelMode: "auto",
       selectedModel: "claude-sonnet-4-5-20250929",
@@ -453,11 +524,28 @@ export const rejectReview = api(
       // Sandbox may already be destroyed
     }
 
-    // Notify chat
+    // Update task status to blocked
+    try {
+      await tasks.updateTaskStatus({ id: row.task_id, status: "blocked", errorMessage: req.reason || "Review avvist" });
+    } catch {
+      // Task update is optional
+    }
+
+    // Notify chat — structured "Feilet" status
     await agentReports.publish({
       conversationId: row.conversation_id,
       taskId: row.task_id,
-      content: `Review avvist${req.reason ? ` — ${req.reason}` : ""}`,
+      content: JSON.stringify({
+        type: "agent_status",
+        phase: "Feilet",
+        title: "Review avvist",
+        error: req.reason || "Avvist av bruker",
+        steps: [
+          { label: "Kode skrevet", status: "done" },
+          { label: "Validert", status: "done" },
+          { label: "Review avvist", status: "error" },
+        ],
+      }),
       status: "failed",
     });
 
