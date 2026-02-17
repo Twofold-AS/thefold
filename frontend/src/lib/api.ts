@@ -519,6 +519,7 @@ export interface CodeReview {
 export interface ReviewSummary {
   id: string;
   taskId: string;
+  repoName?: string;
   fileCount: number;
   qualityScore: number | null;
   status: string;
@@ -533,7 +534,7 @@ export async function getReview(reviewId: string) {
   });
 }
 
-export async function listReviews(options?: { status?: string; limit?: number; offset?: number }) {
+export async function listReviews(options?: { status?: string; repoName?: string; limit?: number; offset?: number }) {
   return apiFetch<{ reviews: ReviewSummary[]; total: number }>("/agent/review/list", {
     method: "POST",
     body: options || {},

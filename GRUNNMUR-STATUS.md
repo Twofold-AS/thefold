@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 17. februar 2026 (Prompt AU: createPR getRefSha via ghApi + base64 encoding)
+> Sist oppdatert: 17. februar 2026 (Prompt AV: createPR delay+retry, review repo-filter, AgentStatus plan-progress, completion-melding)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -202,7 +202,7 @@
 | pending_review status | 🟢 | Ny status på ProjectTask, pauser prosjekt |
 | POST /agent/review/submit | 🟢 | Intern: lagre review + notifiser chat |
 | POST /agent/review/get | 🟢 | Hent full review med filer |
-| POST /agent/review/list | 🟢 | Liste reviews med statusfilter |
+| POST /agent/review/list | 🟢 | Liste reviews med statusfilter + valgfri repoName-filtrering |
 | POST /agent/review/approve | 🟢 | Godkjenn → opprett PR → destroy sandbox. createPR wrappet med 403 error handling (klar PAT scope-melding) |
 | POST /agent/review/request-changes | 🟢 | Be om endringer → re-kjør agent med feedback |
 | POST /agent/review/reject | 🟢 | Avvis → destroy sandbox |
@@ -214,12 +214,12 @@
 | /review/[id] side | 🟢 | Detaljer, filvisning, handlingsknapper. Alle emojier fjernet fra review-meldinger i chat |
 | Strukturert reviewData i agent_status | 🟢 | agent_status JSON med reviewData: quality, filesChanged, concerns, reviewUrl — AgentStatus renderer review-spesifikk UI |
 | Review action buttons i AgentStatus | 🟢 | Godkjenn/Be om endringer/Avvis-knapper direkte i AgentStatus-boksen under review-venting |
-| approveReview → task done | 🟢 | approveReview kaller tasks.updateTaskStatus("done"), publiserer strukturert agent_status (Ferdig-fase) |
+| approveReview → task done | 🟢 | approveReview kaller tasks.updateTaskStatus("done"), publiserer strukturert agent_status (Ferdig-fase) + persistent completion-melding i chat (PR-URL, filer, kvalitet) |
 | rejectReview → task blocked | 🟢 | rejectReview kaller tasks.updateTaskStatus("blocked"), publiserer agent_status (Feilet-fase) |
 | repo_name kolonne | 🟢 | code_reviews lagrer repo_name (migrasjon 6). approveReview/requestChanges bruker korrekt repo for createPR (ikke hardkodet) |
 | Heartbeat fase-bevissthet | 🟢 | Frontend heartbeat-timeout: 5 min for "Venter"-fase, 30s ellers. Forhindrer "Mistet kontakt" under review-venting |
 | Feilet-boks UX | 🟢 | "Prøv igjen"/"Avbryt" fjernet fra Feilet-fase, erstattet med "Lukk" (onDismiss). Optimistisk oppdatering ved Godkjenn/Avvis |
-| Tomme repoer | 🟢 | createPR håndterer tomme repoer — oppretter initial commit på main, deretter normal feature-branch + PR. getTree returnerer `empty: true` for tomme repoer |
+| Tomme repoer | 🟢 | createPR håndterer tomme repoer via Contents API (Git Data API gir 409) — oppretter initial commit på main, deretter normal feature-branch + PR. getTree returnerer `empty: true` for tomme repoer |
 | PR-feil garanti | 🟢 | approveReview sender Feilet agent_status + blokkerer task selv ved createPR-crash. Ferdig-melding garantert |
 | directPush fjernet | 🟢 | Fjernet fra CreatePRResponse i github.ts og alle referanser i review.ts. createPR returnerer alltid ekte PR |
 | Samlet prosjekt-review | 🟢 | `ai.reviewProject()` reviewer HELE prosjektet, orchestrator sender ÉN review via submitReviewInternal. Token-trimming (MAX_FILE_TOKENS=60000) |
@@ -790,7 +790,7 @@
 | getFileMetadata | 🟢 | Linjetall og størrelse |
 | getFileChunk | 🟢 | Linje-basert chunking, 1-basert, maks 500 linjer |
 | findRelevantFiles | 🟢 | Keyword-scoring av filnavn |
-| createPR | 🟢 | getRefSha helper (ghApi + try/catch 404/409), tomme repoer: initial commit (base64 README) → feature-branch → PR |
+| createPR | 🟢 | getRefSha helper (ghApi + try/catch 404/409), støtter tomme repos via Contents API (Git Data API gir 409 på tomme repos) → feature-branch → PR |
 | listRepos | 🟢 | Liste org-repos (sortert push-dato, filtrert ikke-arkiverte) |
 
 ### Users-service
@@ -819,7 +819,7 @@
 | /settings | 🟢 | Ja (profil, preferanser med backend-sync, debug med ekte health checks) | — |
 | /settings/security | 🟢 | Ja (audit log, stats) | — |
 | /environments | 🟢 | Ja (listRepos fra GitHub-service) | — |
-| /review | 🟢 | Ja (listReviews med statusfilter) | — |
+| /review | 🟢 | Ja (listReviews med statusfilter + repoName) | — |
 | /review/[id] | 🟢 | Ja (getReview, approveReview, requestChanges, rejectReview) | — |
 | /tools (layout + redirect) | 🟢 | — (horisontal tab-navigasjon) | — |
 | /tools/ai-models | 🟢 | Ja (listModels, getMe, updateModelMode) | — |
@@ -849,7 +849,7 @@
 | ChatToolsMenu | 🟢 | Floating menu: create skill, create task, transfer |
 | InlineSkillForm | 🟢 | Rask skill-oppretting fra chat |
 | LivePreview | 🟡 | Placeholder for sandbox-preview | Koble til sandbox |
-| AgentStatus | 🟢 | Collapsible tab+boks, fase-spesifikke ikoner (spinner/forstørrelsesglass/wrench/check/X), agent-animasjoner |
+| AgentStatus | 🟢 | Collapsible tab+boks, fase-spesifikke ikoner, plan-progress (X/Y), activeTasks-liste, agent-animasjoner |
 | CodeBlock | 🟢 | Collapsible kodeblokk, filnavn-header, språk-badge, kopier-knapp, linjenumre, firkantede kanter |
 | ChatMessage | 🟢 | Markdown-parser for assistant-meldinger: kodeblokker, overskrifter, lister, bold/italic/inline-kode |
 | PageHeaderBar | 🟢 | Forenklet: fjernet cells/tabs prop, lagt til subtitle prop — brukes av alle repo-sider med per-page titler og actions |

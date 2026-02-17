@@ -188,26 +188,26 @@ export default function ReviewListPage() {
           Ingen reviews funnet
         </div>
       ) : (
-        <div className="overflow-hidden" style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}>
-          <table className="w-full text-sm">
+        <div className="overflow-hidden" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", minWidth: 0 }}>
+          <table className="w-full text-sm" style={{ tableLayout: "fixed" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                <th className="text-left px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+                <th className="text-left px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)", width: "40%" }}>
                   Task
                 </th>
-                <th className="text-center px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+                <th className="text-center px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)", width: "10%" }}>
                   Filer
                 </th>
-                <th className="text-center px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+                <th className="text-center px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)", width: "12%" }}>
                   Kvalitet
                 </th>
-                <th className="text-center px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+                <th className="text-center px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)", width: "13%" }}>
                   Status
                 </th>
-                <th className="text-right px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)" }}>
+                <th className="text-right px-4 py-3 text-xs font-medium" style={{ color: "var(--text-muted)", width: "15%" }}>
                   Opprettet
                 </th>
-                <th className="w-10 px-2 py-3" />
+                <th className="px-2 py-3" style={{ width: "10%" }} />
               </tr>
             </thead>
             <tbody>
@@ -249,9 +249,9 @@ export default function ReviewListPage() {
                   <td className="px-4 py-3 text-right text-xs" style={{ color: "var(--text-muted)" }}>
                     {new Date(r.createdAt).toLocaleDateString("nb-NO")}
                   </td>
-                  <td className="px-2 py-3 text-center">
+                  <td className="px-2 py-3 text-center" style={{ overflow: "hidden" }}>
                     {confirmDelete === r.id ? (
-                      <div className="flex gap-1">
+                      <div className="flex gap-1 justify-center">
                         <button
                           onClick={() => handleDelete(r.id)}
                           className="px-1.5 py-0.5 text-[10px] font-medium"

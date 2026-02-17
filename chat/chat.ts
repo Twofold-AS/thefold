@@ -18,6 +18,7 @@ export interface AgentReport {
   status: "working" | "completed" | "failed" | "needs_input";
   prUrl?: string;
   filesChanged?: string[];
+  completionMessage?: string;
 }
 
 export const agentReports = new Topic<AgentReport>("agent-reports", {
@@ -76,6 +77,15 @@ const _ = new Subscription(agentReports, "store-agent-report", {
       await db.exec`
         INSERT INTO messages (conversation_id, role, content, message_type, metadata)
         VALUES (${report.conversationId}, 'assistant', ${statusContent}, 'agent_status', ${metadata}::jsonb)
+      `;
+    }
+
+    // Insert persistent completion message (visible in chat history, survives page refresh)
+    if (report.completionMessage) {
+      await db.exec`
+        INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+        VALUES (${report.conversationId}, 'assistant', ${report.completionMessage}, 'chat',
+                ${JSON.stringify({ taskId: report.taskId, type: "completion" })}::jsonb)
       `;
     }
   },

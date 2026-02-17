@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.30 - Prompt AT (createPR empty-repo fix + review-sletting)
+> **Versjon:** 3.31 - Prompt AV (createPR delay+retry, review repo-filter, AgentStatus plan-progress, completion-melding)
 > **Sist oppdatert:** 17. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -1319,6 +1319,14 @@ Filer endret: agent/agent.ts (collectOnly + dead code removal), agent/orchestrat
 **Prompt AT: createPR empty-repo fix + review-sletting (17. feb):**
 DEL 1 (createPR): Allerede implementert i Prompt AQ/AR — getRefSha helper, empty-repo initial commit, directPush fjernet. Stale test-assertion (directPush) ryddet opp.
 DEL 2 (Review-sletting): 3 nye endepunkter i review.ts: `POST /agent/review/delete` (slett enkelt review, destroyer sandbox, oppdaterer task), `POST /agent/review/cleanup` (slett pending >24h), `POST /agent/review/delete-all` (slett alle, dev/testing). Frontend: Slett-knapp (trash icon) per review med Ja/Nei bekreftelse, "Rydd opp"-knapp i PageHeaderBar med bekreftelsesdialog. 3 nye API-funksjoner i api.ts (deleteReview, cleanupReviews, deleteAllReviews).
+
+**Prompt AV: createPR delay+retry, review repo-filter, AgentStatus plan-progress, completion-melding (17. feb):**
+DEL 1 (createPR delay): 2s delay etter Contents API, retry med 3s ekstra delay hvis getRefSha returnerer null. Etter to mislykkede forsøk kastes feil med beskrivende melding.
+DEL 2 (Review repo-filter + UI): listReviews backend aksepterer valgfri `repoName` param (4 query-branches: status+repo, status, repo, alle). ReviewSummary inkluderer repoName. Frontend api.ts oppdatert. Review-tabellen bruker `table-layout: fixed` med eksplisitte kolonnebredder for stabil layout — bredden endres ikke ved navigering eller slett-bekreftelse.
+DEL 3 (AgentStatus forbedring): reportSteps() utvida med optional `title`, `planProgress` og `tasks` (activeTasks). Plan-rapportering endret fra plain `report()` til `reportSteps()` med planProgress {current, total}. Frontend viser "Utfører plan X/Y" som tittel. activeTasks-liste med status-ikoner per oppgave. autoInitRepo rapporterer init-task til AgentStatus. Begge chat-sider passer planProgress og activeTasks.
+DEL 4 (Completion-melding): AgentReport utvidet med `completionMessage` felt. chat.ts subscriber inserter persistent assistant-melding (message_type='chat') i tillegg til agent_status-oppdatering. approveReview sender completionMessage med PR-URL, antall filer, filliste, og kvalitetsscore. Meldingen overlever page refresh.
+
+Filer endret: github/github.ts (delay+retry), agent/review.ts (listReviews repoName + completionMessage), agent/agent.ts (reportSteps extra params + autoInitRepo reporting + plan report), chat/chat.ts (completionMessage handling), frontend: api.ts (ReviewSummary + listReviews), AgentStatus.tsx (planProgress + activeTasks), review/page.tsx (table-layout), chat/page.tsx + repo/[name]/chat/page.tsx (nye AgentStatus props).
 
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.
 

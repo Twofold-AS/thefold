@@ -737,6 +737,8 @@ export default function RepoChatPage() {
                           error: lastAgentStatus.error,
                           questions: lastAgentStatus.questions,
                           reviewData: lastAgentStatus.reviewData,
+                          planProgress: lastAgentStatus.planProgress,
+                          activeTasks: lastAgentStatus.activeTasks,
                         }}
                         onReply={handleAgentReply}
                         onDismiss={handleDismissStatus}

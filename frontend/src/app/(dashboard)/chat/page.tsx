@@ -763,6 +763,8 @@ export default function ChatPage() {
                         error: lastAgentStatus.error,
                         questions: lastAgentStatus.questions,
                         reviewData: lastAgentStatus.reviewData,
+                        planProgress: lastAgentStatus.planProgress,
+                        activeTasks: lastAgentStatus.activeTasks,
                       }}
                       onReply={handleAgentReply}
                       onDismiss={handleDismissStatus}

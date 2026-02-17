@@ -153,6 +153,7 @@ export const getReview = api(
 
 interface ListReviewsRequest {
   status?: string;
+  repoName?: string;
   limit?: number;
   offset?: number;
 }
@@ -160,11 +161,39 @@ interface ListReviewsRequest {
 interface ReviewSummary {
   id: string;
   taskId: string;
+  repoName?: string;
   fileCount: number;
   qualityScore: number | null;
   status: string;
   createdAt: string;
   prUrl?: string;
+}
+
+function rowToSummary(row: {
+  id: string;
+  task_id: string;
+  repo_name: string | null;
+  files_changed: string | ReviewFile[];
+  ai_review: string | AIReviewData | null;
+  status: string;
+  created_at: Date;
+  pr_url: string | null;
+}): ReviewSummary {
+  const files = typeof row.files_changed === "string"
+    ? JSON.parse(row.files_changed) : row.files_changed;
+  const aiReview = row.ai_review
+    ? (typeof row.ai_review === "string" ? JSON.parse(row.ai_review) : row.ai_review)
+    : null;
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    repoName: row.repo_name ?? undefined,
+    fileCount: Array.isArray(files) ? files.length : 0,
+    qualityScore: aiReview?.qualityScore ?? null,
+    status: row.status,
+    createdAt: row.created_at.toISOString(),
+    prUrl: row.pr_url ?? undefined,
+  };
 }
 
 export const listReviews = api(
@@ -175,77 +204,77 @@ export const listReviews = api(
 
     const reviews: ReviewSummary[] = [];
 
+    // Build query based on filters
+    if (req.status && req.repoName) {
+      const rows = db.query<{
+        id: string; task_id: string; repo_name: string | null;
+        files_changed: string | ReviewFile[]; ai_review: string | AIReviewData | null;
+        status: string; created_at: Date; pr_url: string | null;
+      }>`
+        SELECT id, task_id, repo_name, files_changed, ai_review, status, created_at, pr_url
+        FROM code_reviews
+        WHERE status = ${req.status} AND repo_name = ${req.repoName}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+      for await (const row of rows) reviews.push(rowToSummary(row));
+      const countRow = await db.queryRow<{ count: number }>`
+        SELECT COUNT(*)::int AS count FROM code_reviews
+        WHERE status = ${req.status} AND repo_name = ${req.repoName}
+      `;
+      return { reviews, total: countRow?.count || 0 };
+    }
+
     if (req.status) {
       const rows = db.query<{
-        id: string;
-        task_id: string;
-        files_changed: string | ReviewFile[];
-        ai_review: string | AIReviewData | null;
-        status: string;
-        created_at: Date;
-        pr_url: string | null;
+        id: string; task_id: string; repo_name: string | null;
+        files_changed: string | ReviewFile[]; ai_review: string | AIReviewData | null;
+        status: string; created_at: Date; pr_url: string | null;
       }>`
-        SELECT id, task_id, files_changed, ai_review, status, created_at, pr_url
+        SELECT id, task_id, repo_name, files_changed, ai_review, status, created_at, pr_url
         FROM code_reviews
         WHERE status = ${req.status}
         ORDER BY created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
-      for await (const row of rows) {
-        const files = typeof row.files_changed === "string"
-          ? JSON.parse(row.files_changed) : row.files_changed;
-        const aiReview = row.ai_review
-          ? (typeof row.ai_review === "string" ? JSON.parse(row.ai_review) : row.ai_review)
-          : null;
-        reviews.push({
-          id: row.id,
-          taskId: row.task_id,
-          fileCount: Array.isArray(files) ? files.length : 0,
-          qualityScore: aiReview?.qualityScore ?? null,
-          status: row.status,
-          createdAt: row.created_at.toISOString(),
-          prUrl: row.pr_url ?? undefined,
-        });
-      }
-
+      for await (const row of rows) reviews.push(rowToSummary(row));
       const countRow = await db.queryRow<{ count: number }>`
         SELECT COUNT(*)::int AS count FROM code_reviews WHERE status = ${req.status}
       `;
       return { reviews, total: countRow?.count || 0 };
     }
 
+    if (req.repoName) {
+      const rows = db.query<{
+        id: string; task_id: string; repo_name: string | null;
+        files_changed: string | ReviewFile[]; ai_review: string | AIReviewData | null;
+        status: string; created_at: Date; pr_url: string | null;
+      }>`
+        SELECT id, task_id, repo_name, files_changed, ai_review, status, created_at, pr_url
+        FROM code_reviews
+        WHERE repo_name = ${req.repoName}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+      for await (const row of rows) reviews.push(rowToSummary(row));
+      const countRow = await db.queryRow<{ count: number }>`
+        SELECT COUNT(*)::int AS count FROM code_reviews WHERE repo_name = ${req.repoName}
+      `;
+      return { reviews, total: countRow?.count || 0 };
+    }
+
     // Default: all reviews
     const rows = db.query<{
-      id: string;
-      task_id: string;
-      files_changed: string | ReviewFile[];
-      ai_review: string | AIReviewData | null;
-      status: string;
-      created_at: Date;
-      pr_url: string | null;
+      id: string; task_id: string; repo_name: string | null;
+      files_changed: string | ReviewFile[]; ai_review: string | AIReviewData | null;
+      status: string; created_at: Date; pr_url: string | null;
     }>`
-      SELECT id, task_id, files_changed, ai_review, status, created_at, pr_url
+      SELECT id, task_id, repo_name, files_changed, ai_review, status, created_at, pr_url
       FROM code_reviews
       ORDER BY created_at DESC
       LIMIT ${limit} OFFSET ${offset}
     `;
-    for await (const row of rows) {
-      const files = typeof row.files_changed === "string"
-        ? JSON.parse(row.files_changed) : row.files_changed;
-      const aiReview = row.ai_review
-        ? (typeof row.ai_review === "string" ? JSON.parse(row.ai_review) : row.ai_review)
-        : null;
-      reviews.push({
-        id: row.id,
-        taskId: row.task_id,
-        fileCount: Array.isArray(files) ? files.length : 0,
-        qualityScore: aiReview?.qualityScore ?? null,
-        status: row.status,
-        createdAt: row.created_at.toISOString(),
-        prUrl: row.pr_url ?? undefined,
-      });
-    }
-
+    for await (const row of rows) reviews.push(rowToSummary(row));
     const countRow = await db.queryRow<{ count: number }>`
       SELECT COUNT(*)::int AS count FROM code_reviews
     `;
@@ -383,9 +412,21 @@ export const approveReview = api(
       // Task update is optional (task may be from Linear, not local)
     }
 
-    // Notify chat — structured "Ferdig" status
+    // Notify chat — structured "Ferdig" status + persistent completion message
     const prLabel = "PR opprettet";
     const titleMsg = "Review godkjent — PR opprettet";
+    const qualityScore = review.aiReview?.qualityScore;
+    const fileCount = review.filesChanged.length;
+    const fileList = review.filesChanged.map((f) => `- \`${f.path}\` (${f.action})`).join("\n");
+    const completionMsg = [
+      `**Oppgave fullfort**`,
+      ``,
+      `**PR:** ${pr.url}`,
+      `**Filer endret:** ${fileCount}`,
+      fileList,
+      qualityScore != null ? `**Kvalitet:** ${qualityScore}/10` : "",
+    ].filter(Boolean).join("\n");
+
     await agentReports.publish({
       conversationId: review.conversationId,
       taskId: review.taskId,
@@ -403,6 +444,7 @@ export const approveReview = api(
       status: "completed",
       prUrl: pr.url,
       filesChanged: review.filesChanged.map((f) => f.path),
+      completionMessage: completionMsg,
     });
 
     return { prUrl: pr.url };

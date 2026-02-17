@@ -25,6 +25,8 @@ export interface AgentStatusData {
   error?: string;
   questions?: string[];
   reviewData?: ReviewData;
+  planProgress?: { current: number; total: number };
+  activeTasks?: Array<{ id: string; title: string; status: string }>;
 }
 
 interface AgentStatusProps {
@@ -167,15 +169,41 @@ export function AgentStatus({ data, onReply, onDismiss, onApprove, onRequestChan
       {/* BOKS — innhold */}
       {!collapsed && (
         <div style={{ border: "1px solid var(--border)" }}>
-          {/* Tittel */}
+          {/* Tittel + plan progress */}
           <div
             className="px-4 py-3"
-            style={{ borderBottom: data.steps.length > 0 || data.error || data.questions?.length ? "1px solid rgba(255,255,255,0.06)" : "none" }}
+            style={{ borderBottom: data.steps.length > 0 || data.error || data.questions?.length || data.activeTasks?.length ? "1px solid rgba(255,255,255,0.06)" : "none" }}
           >
             <span className="text-sm" style={{ color: "var(--text-primary)" }}>
-              {data.title}
+              {data.planProgress
+                ? `Utfører plan ${data.planProgress.current}/${data.planProgress.total}`
+                : data.title}
             </span>
           </div>
+
+          {/* Active tasks list */}
+          {data.activeTasks && data.activeTasks.length > 0 && (
+            <div className="px-4 py-2" style={{ borderBottom: data.steps.length > 0 ? "1px solid rgba(255,255,255,0.06)" : "none" }}>
+              {data.activeTasks.map((t) => (
+                <div key={t.id} className="flex items-center gap-2 py-1">
+                  <span className="w-4 text-center shrink-0">
+                    {t.status === "done" && <span className="text-green-500 text-xs">{"\u2713"}</span>}
+                    {t.status === "in_progress" && <span className="inline-block agent-spinner-small" style={{ width: 10, height: 10 }} />}
+                    {t.status === "failed" && <span className="text-red-500 text-xs">{"\u2715"}</span>}
+                    {(t.status === "pending" || t.status === "backlog") && <span className="text-xs" style={{ color: "rgba(255,255,255,0.2)" }}>{"\u25CB"}</span>}
+                  </span>
+                  <span className="text-xs" style={{
+                    color: t.status === "done" ? "var(--text-muted)"
+                      : t.status === "in_progress" ? "var(--text-primary)"
+                      : t.status === "failed" ? "#ef4444"
+                      : "rgba(255,255,255,0.3)",
+                  }}>
+                    {t.title}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Feilmelding */}
           {data.error && (

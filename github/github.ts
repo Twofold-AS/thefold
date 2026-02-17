@@ -356,41 +356,32 @@ export const createPR = api(
 
     // 2. If repo is empty, create an initial commit on main first
     if (!baseSha) {
-      const readmeBlob = await ghApi(`/repos/${req.owner}/${req.repo}/git/blobs`, {
-        method: "POST",
-        body: { content: Buffer.from(`# ${req.repo}\n\nInitialized by TheFold`).toString("base64"), encoding: "base64" },
-      });
+      // Empty repo — GitHub Git Data API doesn't work on empty repos.
+      // Must use Contents API for the initial commit.
+      console.log(`[createPR] Empty repo detected: ${req.owner}/${req.repo}, creating initial commit via Contents API`);
 
-      const initTree = await ghApi(`/repos/${req.owner}/${req.repo}/git/trees`, {
-        method: "POST",
-        body: {
-          tree: [{
-            path: "README.md",
-            mode: "100644",
-            type: "blob",
-            sha: readmeBlob.sha,
-          }],
-        },
-      });
-
-      const initCommit = await ghApi(`/repos/${req.owner}/${req.repo}/git/commits`, {
-        method: "POST",
+      await ghApi(`/repos/${req.owner}/${req.repo}/contents/README.md`, {
+        method: "PUT",
         body: {
           message: "Initial commit — TheFold",
-          tree: initTree.sha,
-          // No parents — this is the first commit
+          content: Buffer.from(`# ${req.repo}\n\nInitialized by TheFold\n`).toString("base64"),
         },
       });
 
-      await ghApi(`/repos/${req.owner}/${req.repo}/git/refs`, {
-        method: "POST",
-        body: {
-          ref: "refs/heads/main",
-          sha: initCommit.sha,
-        },
-      });
+      // GitHub needs a moment to propagate the new branch
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
-      baseSha = initCommit.sha;
+      baseSha = await getRefSha(req.owner, req.repo, "main");
+      if (!baseSha) {
+        // Retry once with extra delay
+        console.log(`[createPR] getRefSha returned null after 2s, retrying in 3s...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        baseSha = await getRefSha(req.owner, req.repo, "main");
+      }
+      if (!baseSha) {
+        throw APIError.internal("Failed to initialize empty repository — branch not propagated after 5s");
+      }
+      console.log(`[createPR] Initial commit created, baseSha: ${baseSha}`);
     }
 
     // 3. Create blobs for all files

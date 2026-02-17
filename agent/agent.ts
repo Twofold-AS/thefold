@@ -112,11 +112,15 @@ async function report(
 async function reportSteps(
   ctx: TaskContext,
   phase: string,
-  steps: Array<{ label: string; status: "active" | "done" | "error" | "info" }>
+  steps: Array<{ label: string; status: "active" | "done" | "error" | "info" }>,
+  extra?: { title?: string; planProgress?: { current: number; total: number }; tasks?: Array<{ id: string; title: string; status: string }> }
 ) {
   const statusContent = JSON.stringify({
     type: "agent_status",
     phase,
+    title: extra?.title,
+    planProgress: extra?.planProgress,
+    activeTasks: extra?.tasks,
     steps,
   });
 
@@ -331,6 +335,14 @@ export async function autoInitRepo(ctx: TaskContext): Promise<void> {
     },
   ];
 
+  // Report init task to AgentStatus
+  await reportSteps(ctx, "Forbereder", [
+    { label: "Initialiserer tomt repo", status: "active" },
+  ], {
+    title: "Initialiserer repo",
+    tasks: [{ id: initTask.task.id, title: `Initialiser repo: ${repoName}`, status: "in_progress" }],
+  });
+
   try {
     const pr = await githubBreaker.call(() =>
       github.createPR({
@@ -360,7 +372,12 @@ export async function autoInitRepo(ctx: TaskContext): Promise<void> {
       prUrl: pr.url,
     });
 
-    await report(ctx, `Repo initialisert — PR opprettet: ${pr.url}`, "working");
+    await reportSteps(ctx, "Forbereder", [
+      { label: "Repo initialisert", status: "done" },
+    ], {
+      title: "Repo initialisert",
+      tasks: [{ id: initTask.task.id, title: `Initialiser repo: ${repoName}`, status: "done" }],
+    });
   } catch (e) {
     // Mark init task as blocked if it fails
     const errorMsg = e instanceof Error ? e.message : String(e);
@@ -861,13 +878,18 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     ctx.totalCostUsd += plan.costUsd;
     ctx.totalTokensUsed += plan.tokensUsed;
 
-    const planSummary = plan.plan.map((s, i) => `${i + 1}. ${s.description}`).join("\n");
-    console.log("[DEBUG-AF] STEP 5: Plan has", plan.plan.length, "steps");
-    await report(
-      ctx,
-      `Plan:\n${planSummary}\n\nBegrunnelse: ${plan.reasoning}`,
-      "working"
-    );
+    const planStepCount = plan.plan.length;
+    console.log("[DEBUG-AF] STEP 5: Plan has", planStepCount, "steps");
+    await reportSteps(ctx, "Planlegger", [
+      { label: "Leser oppgave", status: "done" },
+      { label: "Henter prosjektstruktur", status: "done" },
+      { label: "Henter kontekst", status: "done" },
+      { label: `Plan klar: ${planStepCount} steg`, status: "done" },
+      ...plan.plan.map((s, i) => ({
+        label: `${i + 1}. ${s.description}`,
+        status: "pending" as const,
+      })),
+    ], { title: `Utfører plan 0/${planStepCount}`, planProgress: { current: 0, total: planStepCount } });
 
     // === STEP 5.5: Fetch error patterns from memory ===
     try {
@@ -965,9 +987,9 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       { label: "Leser oppgave", status: "done" },
       { label: "Henter prosjektstruktur", status: "done" },
       { label: "Henter kontekst", status: "done" },
-      { label: `Plan klar: ${plan.plan.length} steg`, status: "done" },
+      { label: `Plan klar: ${planStepCount} steg`, status: "done" },
       { label: "Oppretter sandbox", status: "active" },
-    ]);
+    ], { title: `Utfører plan 1/${planStepCount}`, planProgress: { current: 1, total: planStepCount } });
 
     // Cancel check before builder
     if (await checkCancelled(ctx)) {
