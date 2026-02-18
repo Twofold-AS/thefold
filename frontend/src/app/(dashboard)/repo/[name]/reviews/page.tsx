@@ -63,6 +63,7 @@ export default function RepoReviewsPage() {
     try {
       const res = await listReviews({
         status: statusFilter || undefined,
+        repoName: params.name,
         limit: 50,
       });
       setReviews(res.reviews);
@@ -131,7 +132,7 @@ export default function RepoReviewsPage() {
       />
 
       <div className="p-6">
-      <div className="max-w-5xl mx-auto space-y-6">
+      <div className="space-y-6">
       <p className="text-sm" style={{ color: "var(--text-muted)" }}>
         {total} review{total !== 1 ? "s" : ""} totalt
       </p>

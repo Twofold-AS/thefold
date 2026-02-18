@@ -45,11 +45,7 @@ export function PhaseTab({
       style={{
         border: "1px solid var(--border)",
         borderBottom: collapsed ? "1px solid var(--border)" : "none",
-        background: isFailed
-          ? "rgba(239,68,68,0.08)"
-          : isWaiting
-            ? "rgba(234,179,8,0.08)"
-            : "transparent",
+        background: "transparent",
       }}
       onClick={onToggle}
     >
@@ -111,14 +107,13 @@ function getTabLabel(phase: string): string {
   }
 }
 
-/** Phase-specific icon using motion-icons-react — color always matches parent text */
+/** Phase-specific icon — static, no animations */
 function PhaseIcon({ phase, color }: { phase: string; color?: string }) {
   switch (phase) {
     case "Ferdig":
       return (
         <MotionIcon
           name="PartyPopper"
-          animation="bounce"
           size={18}
           color={color || "#22c55e"}
         />
@@ -127,7 +122,6 @@ function PhaseIcon({ phase, color }: { phase: string; color?: string }) {
       return (
         <MotionIcon
           name="AlertTriangle"
-          animation="shake"
           size={18}
           color={color || "#ef4444"}
         />
@@ -136,7 +130,6 @@ function PhaseIcon({ phase, color }: { phase: string; color?: string }) {
       return (
         <MotionIcon
           name="MessageCircleQuestion"
-          animation="pulse"
           size={18}
           color={color || "#eab308"}
         />
@@ -145,7 +138,6 @@ function PhaseIcon({ phase, color }: { phase: string; color?: string }) {
       return (
         <MotionIcon
           name="StopCircle"
-          animation="pulse"
           size={18}
           color={color || "var(--text-muted)"}
         />
@@ -155,7 +147,6 @@ function PhaseIcon({ phase, color }: { phase: string; color?: string }) {
       return (
         <MotionIcon
           name="Hammer"
-          animation="bounce"
           size={18}
           color={color || "var(--text-primary)"}
         />
@@ -164,7 +155,6 @@ function PhaseIcon({ phase, color }: { phase: string; color?: string }) {
       return (
         <MotionIcon
           name="Eye"
-          animation="pulse"
           size={18}
           color={color || "var(--text-primary)"}
         />
@@ -173,7 +163,6 @@ function PhaseIcon({ phase, color }: { phase: string; color?: string }) {
       return (
         <MotionIcon
           name="Hammer"
-          animation="bounce"
           size={18}
           color={color || "var(--text-primary)"}
         />

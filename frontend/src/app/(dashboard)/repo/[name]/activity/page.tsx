@@ -14,6 +14,8 @@ import {
 } from "@/lib/api";
 import { PageHeaderBar } from "@/components/PageHeaderBar";
 import { ActivityIcon } from "@/components/ActivityIcon";
+import { useUser } from "@/contexts/UserPreferencesContext";
+import { Bot } from "lucide-react";
 
 /* ── Event types ── */
 
@@ -27,15 +29,15 @@ interface TimelineEvent {
 }
 
 const CATEGORY_STYLE: Record<string, { color: string }> = {
-  builder: { color: "#3b82f6" },
-  review_approved: { color: "#22c55e" },
-  review_rejected: { color: "#ef4444" },
-  healing: { color: "#a855f7" },
-  task: { color: "#eab308" },
-  sync: { color: "#06b6d4" },
-  chat: { color: "#8b5cf6" },
-  cost: { color: "#f97316" },
-  agent: { color: "#3b82f6" },
+  builder: { color: "#fff" },
+  review_approved: { color: "#fff" },
+  review_rejected: { color: "#fff" },
+  healing: { color: "#fff" },
+  task: { color: "#fff" },
+  sync: { color: "#fff" },
+  chat: { color: "#fff" },
+  cost: { color: "#fff" },
+  agent: { color: "#fff" },
 };
 
 /* ── Helpers ── */
@@ -138,6 +140,7 @@ function groupByDate(events: TimelineEvent[]): Map<string, TimelineEvent[]> {
 
 export default function RepoActivityPage() {
   const params = useParams<{ name: string }>();
+  const { aiName } = useUser();
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -218,7 +221,13 @@ export default function RepoActivityPage() {
                     onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-card)")}
                     onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                   >
-                    <span className="flex-shrink-0 mt-0.5" style={{ color: evt.color }}><ActivityIcon type={evt.category} /></span>
+                    <span className="flex-shrink-0 mt-0.5" style={{ color: "#fff" }}>
+                      {evt.category === "agent" || evt.category === "chat" ? (
+                        <Bot size={14} />
+                      ) : (
+                        <ActivityIcon type={evt.category} />
+                      )}
+                    </span>
                     <span
                       className="text-[11px] font-mono flex-shrink-0 mt-0.5"
                       style={{ color: "var(--text-muted)", minWidth: "40px" }}
@@ -227,6 +236,9 @@ export default function RepoActivityPage() {
                     </span>
                     <div className="flex-1 min-w-0">
                       <p className="text-xs" style={{ color: "var(--text-primary)" }}>
+                        {(evt.category === "agent" || evt.category === "chat") && (
+                          <span className="font-medium mr-1" style={{ color: "var(--text-secondary)" }}>{aiName}</span>
+                        )}
                         {evt.title}
                       </p>
                       {evt.detail && (

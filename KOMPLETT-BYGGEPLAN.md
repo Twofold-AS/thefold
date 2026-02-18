@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.35 - Prompt BB (memory fire-and-forget, tanke-feed, AgentComplete fix, review-deduplisering, UX-forbedringer)
+> **Versjon:** 3.36 - Prompt BC (agent_thought JSON, review-visning, polling-fix, repo-filter, prep-steg, sub-tasks, full-width, font, animasjoner)
 > **Sist oppdatert:** 17. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -1418,5 +1418,22 @@ ENDRING 5 (task-bekreftelse): Oppdatert AI system prompt: vis ALDRI Task UUID, o
 ENDRING 6 (review-knapper): 15s timeout med "Tar litt lenger enn vanlig...", actionDone state disabler alle knapper permanent etter handling, useRef for timeout-cleanup.
 
 Filer endret: agent/review.ts, agent/agent.ts, chat/chat.ts, ai/ai.ts, frontend (chat/page.tsx, repo/chat/page.tsx, AgentStatus.tsx, AgentWorking.tsx, AgentReview.tsx, types.ts, globals.css, api.ts, repo/reviews/page.tsx, review/[id]/page.tsx). Slettet: review/page.tsx.
+
+### Prompt BC — Agent-thought JSON + Review-visning + Polling-fix + UX-forbedringer (17. feb 2026)
+
+BUG 1 (agent_thought raa JSON): Frontend viste raa JSON (`{"thought":"..."}`) for agent_thought-meldinger. Lagt til JSON safety-parse i begge chat-sider: `try { parsed = JSON.parse(content); if (parsed.thought) thoughtText = parsed.thought } catch {}`. Fallback til ren tekst.
+BUG 2 (review-boks mangler): Review-boksen (Godkjenn/Avvis) dukket aldri opp i chat. Rot-arsak: polling stoppet for tidlig fordi `agent_thought`-meldinger matchet "AI is done"-sjekken (`role=assistant && content.trim()`). Fix: ekskluderer `agent_thought` fra polling-stopp-betingelsen. Lagt til `"Venter"` i AgentStatus render-condition.
+BUG 3 ("Mistet kontakt"): Samme rot-arsak som BUG 2. `waitingForReply` returnerte false pa agent_thought. Fix: returnerer `true` nar siste melding er agent_thought (polling fortsetter).
+BUG 4 (reviews alle repoer): `/repo/[name]/reviews` viste alle reviews uavhengig av repo. Fix: lagt til `repoName: params.name` i listReviews-kallet.
+
+ENDRING 1 (fjern prep-steg): Erstattet 3 reportSteps-kall (Leser oppgave, Henter prosjektstruktur, Henter kontekst) med think()-kall i agent.ts. Brukeren ser prep-info via tanke-feeden, ikke i status-boksen.
+ENDRING 2 (vis sub-tasks/filer): Bygger `planActiveTasks` fra plan.plan-entries med filePath. Sender som `tasks` til reportSteps under build-fasen. Viser filnavn med status (pending/in_progress/done) i AgentWorking.
+ENDRING 3 (full bredde reviews): Fjernet `max-w-5xl mx-auto` fra reviews-side-container.
+ENDRING 4 (TheFold Brand font): Lagt til `fontFamily: "'TheFold Brand', monospace"` pa code pre-blokk og fil-faner i review/[id].
+ENDRING 5 (aktivitetsside): Alle CATEGORY_STYLE farger satt til `"#fff"`. Bot-ikon for agent/chat-hendelser, ActivityIcon for andre. aiName-prefiks pa agent/chat-hendelser.
+ENDRING 6 (fjern animasjoner): Fjernet alle animation/trigger-props fra MotionIcon i StepList, PhaseTab, AgentWorking. Fjernet bakgrunnsfarger fra PhaseTab (alltid transparent). Statiske ikoner.
+ENDRING 7 (sidebar bot-ikon): Fjernet `className="sidebar-bot-icon"` fra Bot-ikoner i sidebar.
+
+Filer endret: agent/agent.ts, frontend (chat/page.tsx, repo/chat/page.tsx, repo/reviews/page.tsx, review/[id]/page.tsx, repo/activity/page.tsx, agent/StepList.tsx, agent/PhaseTab.tsx, agent/AgentWorking.tsx, sidebar.tsx).
 
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.

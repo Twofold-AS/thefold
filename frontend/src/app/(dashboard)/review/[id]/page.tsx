@@ -229,11 +229,12 @@ export default function ReviewDetailPage() {
             <button
               key={i}
               onClick={() => setSelectedFile(i)}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-mono whitespace-nowrap"
+              className="flex items-center gap-1.5 px-3 py-2 text-xs whitespace-nowrap"
               style={{
                 background: i === selectedFile ? "var(--bg-secondary)" : "transparent",
                 color: i === selectedFile ? "var(--text-primary)" : "var(--text-muted)",
                 borderBottom: i === selectedFile ? "2px solid var(--accent)" : "2px solid transparent",
+                fontFamily: "'TheFold Brand', monospace",
               }}
             >
               <FileIcon action={f.action} />
@@ -246,8 +247,9 @@ export default function ReviewDetailPage() {
         {currentFile && (
           <div className="overflow-x-auto">
             <pre
-              className="p-4 text-xs leading-5 font-mono"
+              className="p-4 text-xs leading-5"
               style={{
+                fontFamily: "'TheFold Brand', monospace",
                 color: "var(--text-secondary)",
                 background: currentFile.action === "delete" ? "rgba(239,68,68,0.05)" : "transparent",
               }}

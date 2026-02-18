@@ -19,13 +19,9 @@ export function StepList({ steps }: { steps: AgentStep[] }) {
               i < steps.length - 1
                 ? "1px solid rgba(255,255,255,0.04)"
                 : "none",
-            animation:
-              step.status === "active"
-                ? "none"
-                : `agent-step-enter 0.3s ease-out ${i * 0.08}s both`,
           }}
         >
-          {/* Status icon — motion-icons-react */}
+          {/* Status icon — static, no animations */}
           <span className="w-5 flex items-center justify-center shrink-0">
             <StepIcon status={step.status} />
           </span>
@@ -67,26 +63,20 @@ function StepIcon({ status }: { status: AgentStep["status"] }) {
   switch (status) {
     case "active":
       return (
-        <MotionIcon name="Loader2" animation="spin" size={16} />
+        <MotionIcon name="Loader2" size={16} />
       );
     case "done":
       return (
-        <span className="text-green-500">
-          <MotionIcon
-            name="CheckCircle2"
-            animation="pulse"
-            trigger="hover"
-            size={16}
-            color="#22c55e"
-          />
-        </span>
+        <MotionIcon
+          name="CheckCircle2"
+          size={16}
+          color="#22c55e"
+        />
       );
     case "error":
       return (
         <MotionIcon
           name="XCircle"
-          animation="shake"
-          trigger="hover"
           size={16}
           color="#ef4444"
         />
@@ -95,8 +85,6 @@ function StepIcon({ status }: { status: AgentStep["status"] }) {
       return (
         <MotionIcon
           name="Info"
-          animation="bounce"
-          trigger="hover"
           size={16}
           color="var(--text-secondary)"
         />

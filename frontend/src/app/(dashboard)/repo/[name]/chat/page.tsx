@@ -134,7 +134,8 @@ export default function RepoChatPage() {
         const lastMsg = res.messages[res.messages.length - 1];
 
         // AI is done — only stop when assistant message has ACTUAL content (not empty placeholder)
-        if (lastMsg && lastMsg.role === "assistant" && lastMsg.messageType !== "agent_status" && lastMsg.content && lastMsg.content.trim()) {
+        // Exclude agent_thought too — thoughts are intermediate, not completion signals
+        if (lastMsg && lastMsg.role === "assistant" && lastMsg.messageType !== "agent_status" && lastMsg.messageType !== "agent_thought" && lastMsg.content && lastMsg.content.trim()) {
           if (pollMode === "waiting") {
             setPollMode("cooldown");
           } else {
@@ -511,6 +512,8 @@ export default function RepoChatPage() {
       } catch {}
       return true;
     }
+    // Agent thought = still waiting (intermediate feed, not a final response)
+    if (last.messageType === "agent_thought") return true;
     return false;
   }, [messages]);
 
@@ -695,12 +698,18 @@ export default function RepoChatPage() {
                     const isContextTransfer = msg.messageType === "context_transfer";
 
                     if (msg.messageType === "agent_thought") {
+                      // Safety: if content is JSON (old messages), extract .thought field
+                      let thoughtText = msg.content;
+                      try {
+                        const parsed = JSON.parse(msg.content);
+                        if (parsed.thought) thoughtText = parsed.thought;
+                      } catch { /* already plain text */ }
                       return (
                         <div key={msg.id} className="flex items-start gap-1.5 animate-fadeIn max-w-4xl">
                           <span className="text-xs opacity-40 mt-0.5" style={{ color: "var(--text-muted)" }}>
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                           </span>
-                          <span className="text-xs italic opacity-40" style={{ color: "var(--text-muted)" }}>{msg.content}</span>
+                          <span className="text-xs italic opacity-40" style={{ color: "var(--text-muted)" }}>{thoughtText}</span>
                         </div>
                       );
                     }
@@ -797,7 +806,7 @@ export default function RepoChatPage() {
                   })}
 
                   {/* AgentStatus — rendered separately from messages, stays visible on failure/stopped */}
-                  {lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet" || lastAgentStatus.phase === "Stopped" || lastAgentStatus.phase === "Ferdig") && (
+                  {lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet" || lastAgentStatus.phase === "Stopped" || lastAgentStatus.phase === "Ferdig" || lastAgentStatus.phase === "Venter") && (
                     <div className="message-enter">
                       <AgentStatus
                         data={{

@@ -752,11 +752,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
       // === STEP 3: Gather context ===
       console.log("[DEBUG-AF] STEP 3: Gathering context (memory + docs)...");
-      await reportSteps(ctx, "Analyserer", [
-        { label: "Leser oppgave", status: "done" },
-        { label: "Henter prosjektstruktur", status: "done" },
-        { label: "Henter kontekst og dokumentasjon", status: "active" },
-      ]);
+      await think(ctx, "Henter kontekst og dokumentasjon...");
 
       let memories = { results: [] as { content: string; accessCount: number; createdAt: string }[] };
       try {
@@ -799,12 +795,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
     // Report context gathered
     if (!useCurated) {
-      await reportSteps(ctx, "Planlegger", [
-        { label: "Leser oppgave", status: "done" },
-        { label: "Henter prosjektstruktur", status: "done" },
-        { label: "Henter kontekst", status: "done" },
-        { label: "Vurderer oppgaven", status: "active" },
-      ]);
+      await think(ctx, "Kontekst hentet. Vurderer oppgaven...");
     }
 
     // Cancel check after context gathering
@@ -985,9 +976,6 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     // === STEP 5: Plan the work ===
     console.log("[DEBUG-AF] STEP 5: Planning task...");
     await reportSteps(ctx, "Planlegger", [
-      { label: "Leser oppgave", status: "done" },
-      { label: "Henter prosjektstruktur", status: "done" },
-      { label: "Henter kontekst", status: "done" },
       { label: "Planlegger arbeidet", status: "active" },
     ]);
 
@@ -1014,9 +1002,6 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     console.log("[DEBUG-AF] STEP 5: Plan has", planStepCount, "steps");
     await think(ctx, `Plan klar — ${planStepCount} steg.`);
     await reportSteps(ctx, "Planlegger", [
-      { label: "Leser oppgave", status: "done" },
-      { label: "Henter prosjektstruktur", status: "done" },
-      { label: "Henter kontekst", status: "done" },
       { label: `Plan klar: ${planStepCount} steg`, status: "done" },
     ], { title: `Utfører plan 0/${planStepCount}`, planProgress: { current: 0, total: planStepCount } });
 
@@ -1114,14 +1099,24 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     // Track plan progress — incremented after each major phase
     let completedPlanSteps = 0;
 
+    // Build activeTasks from plan steps for ENDRING 2 (show files being built)
+    const planActiveTasks = plan.plan
+      .filter((s: { filePath?: string }) => s.filePath)
+      .map((s: { filePath?: string; action?: string; description: string }, i: number) => ({
+        id: `plan-${i}`,
+        title: `${s.filePath} (${s.action || "create"})`,
+        status: "pending",
+      }));
+
     // Report plan ready
     await reportSteps(ctx, "Bygger", [
-      { label: "Leser oppgave", status: "done" },
-      { label: "Henter prosjektstruktur", status: "done" },
-      { label: "Henter kontekst", status: "done" },
       { label: `Plan klar: ${planStepCount} steg`, status: "done" },
       { label: "Oppretter sandbox", status: "active" },
-    ], { title: `Utfører plan ${completedPlanSteps}/${planStepCount}`, planProgress: { current: completedPlanSteps, total: planStepCount } });
+    ], {
+      title: `Utfører plan ${completedPlanSteps}/${planStepCount}`,
+      planProgress: { current: completedPlanSteps, total: planStepCount },
+      tasks: planActiveTasks,
+    });
 
     // Cancel/stop check before builder (DEL 7)
     if (await shouldStopTask(ctx, "pre_sandbox")) {
@@ -1153,10 +1148,14 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         // Delegate to Builder service for file-by-file generation with dependency analysis
         console.log("[DEBUG-AF] STEP 6: Building in sandbox, attempt", ctx.totalAttempts, "/", ctx.maxAttempts);
         await reportSteps(ctx, "Bygger", [
-          { label: "Plan klar", status: "done" },
           { label: "Builder kjører", status: "active" },
           { label: `Forsøk ${ctx.totalAttempts}/${ctx.maxAttempts}`, status: "info" },
-        ]);
+        ], {
+          tasks: planActiveTasks.map((t: { id: string; title: string }) => ({
+            ...t,
+            status: "in_progress",
+          })),
+        });
 
         const buildResult = await auditedStep(ctx, "builder_executed", {
           taskId: ctx.taskId,
@@ -1197,11 +1196,21 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         for (const f of buildResult.result.filesChanged) {
           await think(ctx, `Skriver ${f.path}... OK`);
         }
+        // Update activeTasks to show completed files
+        const completedTasks = planActiveTasks.map((t: { id: string; title: string }) => {
+          const filePath = t.title.split(" (")[0];
+          const isBuilt = allFiles.some((f: { path: string }) => f.path === filePath);
+          return { ...t, status: isBuilt ? "done" : "pending" };
+        });
+
         await reportSteps(ctx, "Bygger", [
-          { label: "Plan klar", status: "done" },
-          { label: `Builder ferdig (${allFiles.length} filer)`, status: "done" },
+          { label: `${allFiles.length} filer skrevet`, status: "done" },
           { label: "Validerer kode", status: "active" },
-        ], { title: `Utfører plan ${completedPlanSteps}/${planStepCount}`, planProgress: { current: completedPlanSteps, total: planStepCount } });
+        ], {
+          title: `Utfører plan ${completedPlanSteps}/${planStepCount}`,
+          planProgress: { current: completedPlanSteps, total: planStepCount },
+          tasks: completedTasks,
+        });
 
         // Record attempt
         ctx.attemptHistory.push({

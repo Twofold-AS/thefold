@@ -29,7 +29,7 @@ export function AgentWorking({ data, lastThought }: AgentPhaseProps) {
         </span>
       </div>
 
-      {/* Active tasks list */}
+      {/* Active tasks list (files being built) */}
       {data.activeTasks && data.activeTasks.length > 0 && (
         <div
           className="px-4 py-2"
@@ -44,13 +44,13 @@ export function AgentWorking({ data, lastThought }: AgentPhaseProps) {
             <div key={t.id} className="flex items-center gap-2 py-1">
               <span className="w-4 flex items-center justify-center shrink-0">
                 {t.status === "done" && (
-                  <MotionIcon name="CheckCircle2" size={12} color="#22c55e" animation="pulse" trigger="hover" />
+                  <MotionIcon name="CheckCircle2" size={12} color="#22c55e" />
                 )}
                 {t.status === "in_progress" && (
-                  <MotionIcon name="Loader2" animation="spin" size={12} />
+                  <MotionIcon name="Loader2" size={12} />
                 )}
                 {t.status === "failed" && (
-                  <MotionIcon name="XCircle" size={12} color="#ef4444" animation="shake" trigger="hover" />
+                  <MotionIcon name="XCircle" size={12} color="#ef4444" />
                 )}
                 {(t.status === "pending" || t.status === "backlog") && (
                   <MotionIcon name="Circle" size={12} color="rgba(255,255,255,0.2)" />
