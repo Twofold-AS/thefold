@@ -38,7 +38,7 @@ async function embed(text: string): Promise<number[]> {
       });
 
       if (res.status === 429) {
-        const waitMs = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+        const waitMs = Math.pow(2, attempt + 2) * 1000; // 4s, 8s, 16s
         console.warn(`Voyage 429 — waiting ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
         await new Promise(resolve => setTimeout(resolve, waitMs));
         continue;
@@ -54,7 +54,7 @@ async function embed(text: string): Promise<number[]> {
       return embedding;
     } catch (e) {
       if (attempt === maxRetries - 1) throw e;
-      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, attempt + 2) * 1000));
     }
   }
 

@@ -67,7 +67,13 @@ export function PhaseTab({
         </>
       ) : (
         <>
-          <PhaseIcon phase={phase} />
+          <PhaseIcon phase={phase} color={
+            isFailed ? "#ef4444"
+              : isWaiting ? "#eab308"
+              : phase === "Ferdig" ? "#22c55e"
+              : phase === "Stopped" ? "var(--text-muted)"
+              : "var(--text-primary)"
+          } />
           <span
             className="text-sm font-medium"
             style={{
@@ -105,8 +111,8 @@ function getTabLabel(phase: string): string {
   }
 }
 
-/** Phase-specific icon using motion-icons-react */
-function PhaseIcon({ phase }: { phase: string }) {
+/** Phase-specific icon using motion-icons-react — color always matches parent text */
+function PhaseIcon({ phase, color }: { phase: string; color?: string }) {
   switch (phase) {
     case "Ferdig":
       return (
@@ -114,7 +120,7 @@ function PhaseIcon({ phase }: { phase: string }) {
           name="PartyPopper"
           animation="bounce"
           size={18}
-          color="#22c55e"
+          color={color || "#22c55e"}
         />
       );
     case "Feilet":
@@ -123,7 +129,7 @@ function PhaseIcon({ phase }: { phase: string }) {
           name="AlertTriangle"
           animation="shake"
           size={18}
-          color="#ef4444"
+          color={color || "#ef4444"}
         />
       );
     case "Venter":
@@ -132,7 +138,7 @@ function PhaseIcon({ phase }: { phase: string }) {
           name="MessageCircleQuestion"
           animation="pulse"
           size={18}
-          color="#eab308"
+          color={color || "#eab308"}
         />
       );
     case "Stopped":
@@ -141,7 +147,7 @@ function PhaseIcon({ phase }: { phase: string }) {
           name="StopCircle"
           animation="pulse"
           size={18}
-          color="var(--text-muted)"
+          color={color || "var(--text-muted)"}
         />
       );
     case "Bygger":
@@ -151,6 +157,7 @@ function PhaseIcon({ phase }: { phase: string }) {
           name="Hammer"
           animation="bounce"
           size={18}
+          color={color || "var(--text-primary)"}
         />
       );
     case "Reviewer":
@@ -159,6 +166,7 @@ function PhaseIcon({ phase }: { phase: string }) {
           name="Eye"
           animation="pulse"
           size={18}
+          color={color || "var(--text-primary)"}
         />
       );
     default:
@@ -167,6 +175,7 @@ function PhaseIcon({ phase }: { phase: string }) {
           name="Hammer"
           animation="bounce"
           size={18}
+          color={color || "var(--text-primary)"}
         />
       );
   }

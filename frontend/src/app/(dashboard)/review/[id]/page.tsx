@@ -49,6 +49,13 @@ function FileIcon({ action }: { action: string }) {
   );
 }
 
+function extractRepoFromConversationId(convId: string): string {
+  if (!convId.startsWith("repo-")) return "";
+  const withoutPrefix = convId.replace(/^repo-/, "");
+  const uuidPattern = /-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  return withoutPrefix.replace(uuidPattern, "") || "";
+}
+
 export default function ReviewDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -147,7 +154,10 @@ export default function ReviewDetailPage() {
       <div className="flex items-center justify-between">
         <div>
           <button
-            onClick={() => router.push("/review")}
+            onClick={() => {
+              const repoName = review ? extractRepoFromConversationId(review.conversationId) : "";
+              router.push(repoName ? `/repo/${repoName}/reviews` : `/repo/thefold/reviews`);
+            }}
             className="text-xs mb-2 flex items-center gap-1"
             style={{ color: "var(--text-muted)" }}
           >
@@ -156,7 +166,7 @@ export default function ReviewDetailPage() {
             </svg>
             Tilbake til reviews
           </button>
-          <h2 className="text-xl font-semibold font-display" style={{ color: "var(--text-primary)" }}>
+          <h2 className="text-xl font-semibold page-title" style={{ color: "var(--text-primary)" }}>
             Review: {review.taskId.substring(0, 20)}
           </h2>
           <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>

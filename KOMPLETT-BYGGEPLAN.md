@@ -1,6 +1,6 @@
 # TheFold - Komplett Byggeplan
 
-> **Versjon:** 3.31 - Prompt AV (createPR delay+retry, review repo-filter, AgentStatus plan-progress, completion-melding)
+> **Versjon:** 3.35 - Prompt BB (memory fire-and-forget, tanke-feed, AgentComplete fix, review-deduplisering, UX-forbedringer)
 > **Sist oppdatert:** 17. februar 2026
 > **Status:** Fase 1-4 ferdig (KOMPLETT), Fase 5 pågår. Dynamic AI system med DB-backed modeller og providers. Se GRUNNMUR-STATUS.md for detaljert feature-status.
 
@@ -1354,3 +1354,69 @@ Filer endret: agent/agent.ts (6 endringer), frontend/src/lib/api.ts (getTask, re
 **Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.
 
 **Gjenstår:** Fase 5 Del 2 (AI auto-extraction, semantisk komponent-matching, healing propagation), MCP call routing.
+
+### Prompt AY — Kompileringsfeil + Polling-fix (17. feb 2026)
+
+FIX 1 (chat/chat.ts:432 messageId): Clarification-ruting returnerte `{ messageId: msg.id }` men SendResponse forventer `{ message: Message, agentTriggered: boolean }`. Endret til `{ message: msg, agentTriggered: false }`.
+FIX 2 (chat/chat.ts:804 null→undefined): `logRepoActivity` fikk `null` som description-argument, men parameter er `string | undefined`. Endret null til undefined.
+FIX 3 (chat/chat.ts:661 totalFound): `memories` ble deklarert med `totalFound: 0` men `SearchResponse` har bare `results`. Fjernet totalFound fra deklarasjonen.
+FIX 4 (stoppedStatuses + done): La til `"done"` i stoppedStatuses-arrayet i begge chat-sider for korrekt polling-stopp.
+
+EKSTRA FIKSER (oppdaget under kompilering):
+- chat/chat.ts: TreeResponse.tree er `string[]`, ikke `{ path, type }[]` — rettet lokale type-deklarasjoner (linje 677, 684).
+- chat/chat.ts: ResolveResponse preRunResults/postRunSkills typet som `never[]` → `any[]` (linje 640).
+- ai/ai.ts: taskData type endret til `string | null` (linje 844) for a matche Task-typen fra getTaskInternal.
+- ai/ai.ts: `input.status` castet via `as any` for TaskStatus-kompatibilitet (linje 918).
+- ai/ai.ts: `options.tools as any` for Anthropic SDK ToolUnion-kompatibilitet (linje 1012).
+- ai/ai.ts: `response.usage as unknown as Record<string, number>` for cache token access (linje 1029-1030).
+- ai/ai.ts: `response.costUsd` → `response.costEstimate.totalCost` i generateFile + fixFile (linje 2290, 2354).
+- agent/agent.ts: treeArray type `Array<{path,type}>` → `string[]` for a matche TreeResponse (linje 486).
+- agent/agent.ts: plan-steg status `"pending"` → `"info"` for gyldig AgentStatus step type (linje 986).
+- agent/e2e.test.ts, orchestrator.ts, review.ts: La til manglende `subAgentsEnabled: false` i AgentExecutionContext.
+- sandbox/docker.test.ts: Typet mock-parameter `cmd: any` (linje 97).
+
+Totalt: 0 kompileringsfeil (backend + frontend). Frontend build feiler pa Next.js SSR (useSearchParams Suspense) — pre-eksisterende, ikke relatert.
+
+Filer endret: chat/chat.ts (6 fixes), ai/ai.ts (6 fixes), agent/agent.ts (2 fixes), agent/e2e.test.ts, agent/orchestrator.ts, agent/review.ts (subAgentsEnabled), sandbox/docker.test.ts (type fix), frontend/.../chat/page.tsx (x2, stoppedStatuses).
+
+### Prompt AZ — Clarification-flow Fix (17. feb 2026)
+
+FIX 1 (stoppedStatuses): Fjernet 'blocked' fra stoppedStatuses i begge chat-siders polling. 'blocked' er en aktiv status (venter pa bruker). Ny liste: `['backlog', 'cancelled', 'done']`.
+FIX 2 (needs_input status): Ny TaskStatus 'needs_input' lagt til i tasks/types.ts. agent.ts bruker na 'needs_input' i stedet for 'blocked' ved clarification. Kanban-kolonne "Trenger avklaring" (gul, #eab308) lagt til i tasks-siden. statusToLinearState mapper needs_input → "In Progress". Error-melding pa tasks-kort viser gul farge for needs_input.
+FIX 3 (confidence threshold): Endret clarification-terskel fra `confidence.overall < 60 || recommended_action === "clarify"` til `confidence.overall < 90`. Fjernet recommended_action-override — kun overall-score bestemmer. 95% confidence vil na IKKE trigge clarification.
+FIX 4 (norsk assessConfidence prompt): Fullstendig omskrevet system prompt til norsk. Nye regler: tomme repoer = 100%, enkle fil-opprettelser = 100%, prosjekttype-usikkerhet irrelevant for statiske filer. Eksempler inkludert (index.html → 100%, OAuth → 70%, fiks bug → 50%).
+FIX 5 (questions i agent_status): reportSteps() far ny `questions`-parameter i extra-objektet. Clarification-koden sender na questions direkte i agent_status-meldingen (uncertainties + clarifying_questions). Frontend AgentClarification mottar questions uten a vaere avhengig av separat needs_input-melding. Fjernet `report(ctx, msg, "needs_input")` — alt gar gjennom reportSteps.
+FIX 6 (Voyage backoff): Okt eksponentiell backoff fra 1s/2s/4s til 4s/8s/16s (`Math.pow(2, attempt+2) * 1000`). Gjelder bade 429-spesifikk retry og generell error retry.
+
+Filer endret: tasks/types.ts (needs_input), tasks/tasks.ts (statusToLinearState), agent/agent.ts (threshold, needs_input, reportSteps questions), ai/ai.ts (norsk confidence prompt), memory/memory.ts (Voyage backoff), frontend/.../chat/page.tsx (x2, stoppedStatuses), frontend/.../tasks/page.tsx (needs_input kolonne + classifyStatus + error farger).
+
+### Prompt BA — Idempotent Review + Agent UI + Sub-tasks (17. feb 2026)
+
+BUG 1A (idempotent approveReview): Sjekker status ved toppen — hvis allerede 'approved', returnerer eksisterende PR-URL umiddelbart. Setter status='approved' TIDLIG (for createPR) med WHERE status IN ('pending','changes_requested') for a forhindre race condition fra dobbelt-klikk.
+BUG 1B (createPR 422): Wrapper PR-opprettelse i try/catch. Pa 422 "already exists", soker GitHub for eksisterende PR pa branch (open, deretter closed) og returnerer URL i stedet for a kaste feil.
+BUG 1C (Linear task-ID): Erstatter direkte `linear.updateTask(review.taskId)` med smart oppslag — sjekker tasks-service for `linearTaskId` forst, bruker den for Linear-oppdatering. Fallback til original taskId kun for rene Linear-tasks.
+BUG 2 (planProgress): Lagt til `completedPlanSteps` counter i agent.ts. Oppdaterer etter builder ferdig, slik at fremdriftsvisning viser korrekt X/N i stedet for alltid 0/1.
+ENDRING 1 (StepList font): Verifisert at done-steps IKKE har font-bold/font-semibold — allerede korrekt.
+ENDRING 2 (PhaseTab ikon-farger): Lagt til `color`-prop i PhaseIcon basert pa samme logikk som tekstfarge. Bygger/Reviewer/default ikoner far na eksplisitt farge.
+ENDRING 3 (AgentReview UX): `actionLoading` endret fra boolean til string|null for a spore hvilken knapp. Lagt til `actionResult` state, loading-spinnere pa knapper, "Se detaljer" link med target="_blank", og resultat-visning (gronn/rod).
+ENDRING 4 (Sub-tasks): TaskCard viser na build-steg nar utvidet. Henter fra `getBuilderJob` API. Filer vises med statusikoner (check/spinner/x-circle/circle) og fremgangslinje "X/Y steg fullfort".
+ENDRING 5 (page-title font): `.page-title` CSS-klasse med TheFold Brand font. Brukt pa PageHeaderBar h1 + 5 sider med standalone h1.
+ENDRING 6 (Bot-ikon): Chat-ikon i sidebar erstattet med `Bot` fra lucide-react + `.sidebar-bot-icon` CSS puls-animasjon.
+
+Filer endret: agent/review.ts, github/github.ts, agent/agent.ts, frontend AgentReview.tsx, PhaseTab.tsx, tasks/page.tsx, globals.css, PageHeaderBar.tsx, sidebar.tsx, api.ts, 5 dashboard-sider (home, chat, skills, repo/chat, review/[id]).
+
+### Prompt BB — Tanke-feed + Memory Fire-and-forget + UX-forbedringer (17. feb 2026)
+
+BUG 1 (memory.store blokkerer): Flyttet memory.store (Voyage 429 retries, opptil 66s) og sandbox.destroy til fire-and-forget Promise.all ETTER return. Frontend far svar innen 5s etter PR. La til log import for bakgrunn-feillogging.
+BUG 2 (review-duplikat): Slettet standalone `/review/page.tsx`. Lagt til delete/cleanup-funksjonalitet fra slettet side inn i `/repo/[name]/reviews/page.tsx`. Oppdatert "Tilbake til reviews"-lenke i review/[id] til a navigere til repo-scoped `/repo/{repoName}/reviews`.
+BUG 3 (AgentComplete): Lagt til `lastAgentStatus.phase === "Ferdig"` i render-condition i begge chat-sider. Rot-arsak: agentActive er false nar phase="Ferdig", og "Ferdig" manglet i OR-betingelsen.
+ENDRING 1 (tanke-feed): `think()` helper i agent.ts publiserer `agent_thought` via agentReports. 10 think()-kall pa strategiske steder med norske, uformelle meldinger. chat.ts subscriber lagrer som `message_type='agent_thought'`. Frontend viser som kompakte, italiske, halvtransparente bobler. AgentWorking viser siste thought under steps. fadeIn CSS-animasjon.
+ENDRING 2 (AgentWorking forenkling): Fjernet `plan.plan.map()` info-steg fra reportSteps — kun overordnede steg vises. Plan-detaljer synlige via tanke-feeden.
+ENDRING 3 (bold-fjerning): Fjernet `**` markdown fra completionMsg i review.ts (Oppgave fullfort, PR, Filer endret, Kvalitet).
+ENDRING 4 (page-title): Verifisert alle sider — alle bruker PageHeaderBar eller har page-title klasse allerede.
+ENDRING 5 (task-bekreftelse): Oppdatert AI system prompt: vis ALDRI Task UUID, oppsummer oppgaven, spor om start. Endret create_task tool-respons fra "ID: {uuid}" til "Oppgave opprettet: {title}".
+ENDRING 6 (review-knapper): 15s timeout med "Tar litt lenger enn vanlig...", actionDone state disabler alle knapper permanent etter handling, useRef for timeout-cleanup.
+
+Filer endret: agent/review.ts, agent/agent.ts, chat/chat.ts, ai/ai.ts, frontend (chat/page.tsx, repo/chat/page.tsx, AgentStatus.tsx, AgentWorking.tsx, AgentReview.tsx, types.ts, globals.css, api.ts, repo/reviews/page.tsx, review/[id]/page.tsx). Slettet: review/page.tsx.
+
+**Neste prioritet:** Fase 5 Del 2 (AI auto-extraction, semantisk matching), MCP call routing.

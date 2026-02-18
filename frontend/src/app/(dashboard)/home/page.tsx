@@ -109,7 +109,7 @@ export default function HomePage() {
       {/* Header bar */}
       <div className="flex items-stretch" style={{ borderBottom: "1px solid var(--border)", minHeight: "80px" }}>
         <div className="flex flex-col justify-center h-full px-5 py-3">
-          <h1 className="font-display text-xl" style={{ color: "var(--text-primary)" }}>
+          <h1 className="page-title text-xl" style={{ color: "var(--text-primary)" }}>
             Welcome, {user?.name || "..."}
           </h1>
           <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>

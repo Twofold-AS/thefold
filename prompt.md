@@ -1,163 +1,175 @@
 Se på følgende filer før du begynner:
-- agent/agent.ts (HELE filen — spesielt executeTask, planSummary, retry-loopen,
-  og curated vs standard path)
-- agent/review.ts (respondToClarification, forceContinue)
-- chat/chat.ts (send-endepunkt — der clarification-ruting skjer)
-- tasks/tasks.ts (shouldStopTask / isCancelled)
-- frontend/src/components/agent/AgentClarification.tsx
-- frontend/src/components/agent/AgentStopped.tsx
-- frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx (polling/status-logikk)
+- agent/agent.ts (executeTask — ALLE report/reportSteps-kall, think(),
+  hele flyten fra STEP 1 til STEP 12)
+- agent/review.ts (approveReview — sjekk at memory.store er
+  fire-and-forget etter BA/BB)
+- frontend/src/components/agent/AgentStatus.tsx (dispatcher)
+- frontend/src/components/agent/AgentWorking.tsx (steps-rendering,
+  plan-steg, lastThought)
+- frontend/src/components/agent/AgentReview.tsx (review-knapper,
+  timeout, agent_thought JSON-bug)
+- frontend/src/components/agent/AgentComplete.tsx
+- frontend/src/components/agent/types.ts (AgentStatusMessage)
+- frontend/src/components/agent/parseAgentMessage.ts
+- frontend/src/components/agent/StepList.tsx (ikon-animasjoner)
+- frontend/src/components/agent/PhaseTab.tsx (bakgrunnsfarge, animasjon)
+- frontend/src/app/(dashboard)/repo/[name]/reviews/page.tsx
+  (review-liste — bredde, repo-filter)
+- frontend/src/app/(dashboard)/review/[id]/page.tsx
+  (kode-font, "Tilbake"-lenke)
+- frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx
+  (agent_thought rendering, mistet kontakt, AgentComplete)
+- frontend/src/app/(dashboard)/chat/page.tsx (samme)
+- frontend/src/app/(dashboard)/layout.tsx (sidebar — robot-ikon animasjon)
+- frontend/src/app/(dashboard)/repo/[name]/activity/page.tsx
+  (aktivitet — ikon-farger, agent-navn, robot-ikon)
+- chat/chat.ts (PubSub subscriber — agent_thought lagring)
+- frontend/src/app/globals.css
 - GRUNNMUR-STATUS.md
 - KOMPLETT-BYGGEPLAN.md
 
-KONTEKST:
-Prompt AW implementerte komponent-splitting, animerte ikoner, shouldStopTask,
-og clarification-UX. Rapporten identifiserte 6 problemer som må fikses.
+=== BUG 1: agent_thought vises som rå JSON i chat ===
 
-=== FIX 1: planSummary undefined i curated path ===
+Tanke-meldingene vises som rå JSON i chatten i stedet for formaterte
+💭-bobler. Sjekk BEGGE chat-sider:
+1. Når agent_thought-melding mottas via SSE/polling, parser den content?
+2. Er det message_type som filtreres på, eller content.type?
+3. Sjekk chat.ts subscriber — lagres thought som:
+   a) content = JSON string med { type: "agent_thought", thought: "..." }
+   b) content = bare thought-teksten?
+   
+FIX: Sørg for at:
+- chat.ts subscriber lagrer BARE thought-teksten som content
+  (IKKE hele JSON-objektet)
+- Frontend sjekker messageType === "agent_thought" og rendrer som
+  💭-boble (text-xs, italic, opacity-50)
+- Hvis content er JSON, parse og vis bare .thought-feltet
 
-BUG: planSummary refereres i retry-loopen (previousAttempt: planSummary) men
-er bare definert i standard path. Når curated path kjører retry, krasjer den.
+=== BUG 2: Review-boksen i chat vises ikke ===
 
-Finn alle steder planSummary brukes i agent.ts. Det er definert som:
-  const planSummary = plan.plan.map((s, i) => `${i+1}. ${s.description}`).join("\n");
+Brukeren fikk IKKE review-boksen med Godkjenn/Avvis-knapper i chatten.
+Måtte gå til review-fanen for å godkjenne.
 
-I standard path er dette OK fordi plan defineres rett over.
+Sjekk i begge chat-sider:
+1. Kommer agent_status med phase:"Venter" og reviewData gjennom?
+2. AgentReview-komponenten — vises den når phase === "Venter"?
+3. Kanskje agent_thought-meldingene overskriver/erstatter agent_status?
 
-I curated path — sjekk om plan defineres FØR planSummary. Hvis curated path
-har en separat plan-variabel, lag planSummary der også. Hvis curated path
-deler samme plan-variabel, flytt planSummary-definisjonen til ETTER plan er
-satt, utenfor if/else-blokkene, slik at begge paths bruker den.
+FIX: Sørg for at:
+- agent_status (med phase/steps/reviewData) og agent_thought er
+  UAVHENGIGE strømmer — thoughts skal IKKE erstatte status
+- Når status er "Venter" med reviewData, vis AgentReview MED knapper
+- agent_thought-bobler vises I TILLEGG til status-boksen, ikke i stedet
 
-Mønsteret bør være:
-  let plan = ...; // settes i curated ELLER standard path
-  let planSummary = plan.plan.map((s, i) => `${i+1}. ${s.description}`).join("\n");
-  // retry-loop bruker planSummary trygt
+=== BUG 3: "Mistet kontakt" under review-ventetid ===
 
-Oppdater OGSÅ planSummary etter re-plan i retry-loopen:
-  plan = await ai.planTask({ ... previousAttempt: planSummary, errorMessage ... });
-  planSummary = plan.plan.map((s, i) => `${i+1}. ${s.description}`).join("\n");
+Når agenten venter på brukerens review-godkjenning, viser frontend
+"Mistet kontakt" etter en stund. Dette skjer sannsynligvis fordi:
+1. Polling-intervallet timer ut
+2. SSE-connection lukkes
+3. Frontend tror oppgaven er stoppet
 
-=== FIX 2: forceContinue bruker tom curated context ===
+FIX: Når task status er "needs_input" eller "in_review":
+- Polling skal FORTSETTE (ikke timeout)
+- Vis "Venter på godkjenning" — IKKE "Mistet kontakt"
+- Legg til i polling-logikken: if (status === 'needs_input' ||
+  status === 'in_review') → fortsett polling, vis "Venter på deg"
 
-BUG: Når brukeren trykker "Fortsett likevel", kalles executeTask med
-forceContinue=true og tom curated context. Agenten hopper over confidence-sjekk
-men har ingen fil-kontekst å jobbe med.
+=== BUG 4: Reviews viser reviews fra andre repoer ===
 
-Fiks: forceContinue skal IKKE bruke curated path. Den skal:
-  1. Sette status tilbake til in_progress
-  2. Kalle executeTask med useCurated=false (standard path)
-  3. Legge til forceContinue=true i options som gjør at assessConfidence
-     returnerer 100% confidence uansett (skip clarification-loopen)
+Review-listen på /repo/[name]/reviews/ viser ALLE reviews, ikke bare
+de for dette repoet.
 
-I agent.ts executeTask:
-  - Sjekk om options?.forceContinue === true
-  - Hvis ja: hopp over assessConfidence-kallet helt, gå rett til planning
-  - IKKE bruk curated path — la standard path samle kontekst normalt
+FIX: I reviews/page.tsx, send repoName til listReviews API-kallet:
+  const reviews = await agent.listReviews({ repoName: repo })
 
-I agent/review.ts forceContinue-endepunktet:
-  Endre fra:
-    executeTask(ctx, { useCurated: true, curatedContext: {} })
-  Til:
-    executeTask(ctx, { forceContinue: true })
+Backend listReviews har allerede repoName-parameter (ifølge BA-rapport).
+Sørg for at frontend sender den.
 
-=== FIX 3: respondToClarification conversationId-kobling ===
+=== ENDRING 1: Fjern "Leser oppgave" etc. fra status-boksen ===
 
-BUG: Hvis conversationId ikke sendes med, opprettes ny konversasjon og
-agenten mister konteksten fra den opprinnelige samtalen.
+Stegene "Leser oppgave", "Henter prosjektstruktur", "Henter kontekst",
+"Plan klar: N steg" er interne forberedelser som brukeren ikke trenger
+å se.
 
-Fiks i respondToClarification (agent/review.ts eller agent/agent.ts):
-  1. Krev conversationId som parameter: { taskId, response, conversationId }
-  2. Bruk conversationId til å sette riktig ctx.conversationId
-  3. I frontend: send alltid activeConvId med kallet
+FIX: I AgentWorking (eller reportSteps i agent.ts):
+- Fjern disse forberedelsesstegene fra steps-listen
+- Start med å vise steg FRA og MED bygge-fasen:
+  ● Builder kjører
+  ● Forsøk 1/5
+  ✓ 2 filer skrevet
+  ● Validerer kode
 
-I chat.ts send-endepunktet (der clarification-ruting skjer):
-  Når en melding rutes til respondToClarification, send med conversationId
-  fra den aktive samtalen.
+Brukeren ser forberedelsesfasen gjennom 💭 tanke-feeden i stedet.
 
-Sjekk at frontend sender conversationId:
-  - AgentClarification.tsx / chat page kaller respondToClarification
-  - Sørg for at activeConvId sendes med
+Alternativt: vis forberedelsessteg, men FADE dem ut etter 3 sekunder
+slik at de forsvinner fra listen.
 
-=== FIX 4: Frontend task-status polling ===
+=== ENDRING 2: Vis oppgavene (sub-tasks) i status-boksen ===
 
-Mangler: Frontend har ingen måte å oppdage at en oppgave er stoppet fra
-tasks-siden. Backend sjekker shouldStopTask, men frontend viser fortsatt
-"Venter på input" til neste agent_status-melding kommer.
+Brukeren ønsker å se OPPGAVENE (hva som bygges) i status-boksen:
+- index.html (create) ✓
+- style.css (create) ●
 
-Implementer enkel polling i chat-siden:
-  - Når AgentStatus viser en aktiv oppgave (working/waiting/clarification),
-    poll task-status hvert 5 sekunder
-  - Kall GET eller POST /tasks/get { id: activeTaskId }
-  - Hvis status er backlog/blocked/cancelled → oppdater AgentStatus til "Stopped"
-  - Stopp polling når oppgave er i terminal state (done/stopped/failed)
+Disse finnes i plan.plan som steg med filePath og action.
+Vis dem som en kompakt liste under progress-indikatoren.
 
-I frontend/src/app/(dashboard)/repo/[name]/chat/page.tsx:
-  useEffect(() => {
-    if (!activeTaskId || !agentActive) return;
-    
-    const interval = setInterval(async () => {
-      try {
-        const task = await getTask(activeTaskId);
-        const stoppedStatuses = ['backlog', 'blocked', 'cancelled'];
-        if (stoppedStatuses.includes(task.status)) {
-          // Oppdater agent status til stopped
-          setAgentPhase('Stopped');
-          setAgentContent('Oppgaven ble stoppet eksternt');
-          clearInterval(interval);
-        }
-      } catch { /* ignore */ }
-    }, 5000);
-    
-    return () => clearInterval(interval);
-  }, [activeTaskId, agentActive]);
+=== ENDRING 3: Review-listen skal strekke seg 100% ===
 
-Legg til getTask i api.ts hvis den ikke finnes:
-  export async function getTask(taskId: string) {
-    return apiFetch<{ id: string; status: string; ... }>("/tasks/get", {
-      method: "POST",
-      body: { id: taskId },
-    });
-  }
+Reviews-siden er plassert i midten og strekker seg ikke full bredde.
 
-=== FIX 5: Oppdater planSummary i retry-loopen ===
+FIX: I reviews/page.tsx, fjern max-width/center-constrainten.
+Tabellen skal bruke full bredde av innholdsområdet (w-full).
 
-Relatert til FIX 1 — etter at plan re-genereres i retry-loopen, oppdater
-planSummary slik at neste retry bruker den oppdaterte planen:
+=== ENDRING 4: Kode-visning i review skal bruke TheFold-font ===
 
-  while (attempt < MAX_RETRIES) {
-    // ... validation fails ...
-    plan = await ai.planTask({ ..., previousAttempt: planSummary, ... });
-    planSummary = plan.plan.map((s, i) => `${i+1}. ${s.description}`).join("\n");
-    continue;
-  }
+I review/[id]/page.tsx, kode-blokkene bruker standard monospace.
 
-Uten dette sender retry alltid den ORIGINALE planen som previousAttempt,
-og AI-en får ikke informasjon om hva den allerede prøvde å fikse.
+FIX: Legg til TheFold Brand font på kode-blokker i review:
+  font-family: 'TheFold Brand', monospace;
 
-=== FIX 6: forceContinue type i ExecuteTaskOptions ===
+Eller lag en CSS-klasse .code-thefold som brukes på pre/code-elementer
+i review-visningen.
 
-Legg til forceContinue i ExecuteTaskOptions type (agent/types.ts eller
-agent/agent.ts — der typen er definert):
+=== ENDRING 5: Aktivitet-fanen ===
 
-  interface ExecuteTaskOptions {
-    useCurated?: boolean;
-    curatedContext?: CuratedContext;
-    forceContinue?: boolean;     // <-- ny
-    userClarification?: string;  // <-- sjekk at denne finnes
-  }
+I activity/page.tsx:
+1. Ikon-farger: ALLE ikoner skal være HVITE. Fjern fargekodingen.
+2. "TheFold svarte" → skal bruke agent-navnet + robotikon:
+   Bruk Bot-ikonet fra lucide-react (samme som sidebar chat-ikon)
+   Vis "Jørgen André" (agent-navnet) i stedet for "TheFold"
+   ... eller vis det faktiske agent-displayname fra DB.
+3. Verktøy-ikoner: også hvite
+
+=== ENDRING 6: Agent status — fjern animasjoner og bakgrunnsfarge ===
+
+I StepList.tsx / PhaseTab.tsx:
+1. Fjern ALLE CSS-animasjoner på ikoner (bounce, pulse, spin, etc.)
+2. Fjern bakgrunnsfarge på PhaseTab uansett status (ingen grønn/rød/gul
+   bakgrunn). Bare tekst + ikon med riktig farge. Bakgrunnen skal
+   alltid være transparent eller standard card-bg.
+
+=== ENDRING 7: Sidebar — fjern animasjon på robot-ikon ===
+
+I layout.tsx sidebar:
+- Bot-ikonet for chat-knappene skal IKKE ha animasjon
+- Fjern CSS animation, hover-animation, og transition på ikonet
+- Ikonet skal bare være et statisk robot-ikon
 
 === IKKE GJØR ===
-- Ikke endre komponent-strukturen fra Prompt AW
-- Ikke endre motion-icons
-- Ikke endre PubSub-definisjoner
-- Ikke endre createPR, sandbox, eller builder
+- Ikke endre createPR-logikken
+- Ikke endre assessConfidence eller confidence-threshold
+- Ikke endre shouldStopTask-logikken
+- Ikke endre sandbox eller builder
+- Ikke endre sidebar-fonten (bare animasjonen)
+- Ikke endre approve-flyten (BA/BB fikset dette)
 
 === ETTER DU ER FERDIG ===
+- Kjør: cd frontend && npm run build (verifiser ingen feil)
 - Oppdater GRUNNMUR-STATUS.md
-- Oppdater KOMPLETT-BYGGEPLAN.md under Prompt AX
+- Oppdater KOMPLETT-BYGGEPLAN.md under Prompt BC
 - Gi meg rapport med:
-  1. Hva som ble fullført (filer endret, funksjoner fikset)
+  1. Hva som ble fullført
   2. Hva som IKKE ble gjort og hvorfor
-  3. Bugs, edge cases eller svakheter oppdaget
+  3. Bugs oppdaget
   4. Forslag til videre arbeid

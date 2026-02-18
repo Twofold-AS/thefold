@@ -27,6 +27,7 @@ export interface AgentStatusData {
 
 export interface AgentPhaseProps {
   data: AgentStatusData;
+  lastThought?: string;
   onReply?: (answer: string) => void;
   onDismiss?: () => void;
   onApprove?: (reviewId: string) => void;

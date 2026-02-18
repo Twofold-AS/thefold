@@ -115,7 +115,7 @@ async function reportSteps(
   ctx: TaskContext,
   phase: string,
   steps: Array<{ label: string; status: "active" | "done" | "error" | "info" }>,
-  extra?: { title?: string; planProgress?: { current: number; total: number }; tasks?: Array<{ id: string; title: string; status: string }> }
+  extra?: { title?: string; planProgress?: { current: number; total: number }; tasks?: Array<{ id: string; title: string; status: string }>; questions?: string[] }
 ) {
   // Use fixed phase title if no explicit title or plan progress, preventing title/content duplication
   const title = extra?.planProgress
@@ -128,6 +128,7 @@ async function reportSteps(
     title,
     planProgress: extra?.planProgress,
     activeTasks: extra?.tasks,
+    questions: extra?.questions,
     steps,
   });
 
@@ -136,6 +137,21 @@ async function reportSteps(
     taskId: ctx.taskId,
     content: statusContent,
     status: phase === "Ferdig" ? "completed" : phase === "Feilet" ? "failed" : "working",
+  });
+}
+
+// --- Helper: Publish a thought to chat (lightweight, non-blocking feed) ---
+
+async function think(ctx: TaskContext, thought: string) {
+  await agentReports.publish({
+    conversationId: ctx.conversationId,
+    taskId: ctx.taskId,
+    content: JSON.stringify({
+      type: "agent_thought",
+      thought,
+      timestamp: Date.now(),
+    }),
+    status: "working",
   });
 }
 
@@ -483,7 +499,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
   let memoryStrings: string[] = [];
   let docsStrings: string[] = [];
   let packageJson: Record<string, unknown> = {};
-  let treeArray: Array<{ path: string; type: string; size?: number }> = [];
+  let treeArray: string[] = [];
   let taskTitle = ctx.taskId;
 
   console.log("[DEBUG-AF] === executeTask STARTED ===");
@@ -549,6 +565,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           return result;
         });
         taskTitle = tfTask.task.title;
+        await think(ctx, `Leser oppgaven... "${taskTitle}". La meg se.`);
 
         // Update task status to in_progress
         try {
@@ -599,11 +616,13 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
             return detail;
           });
           taskTitle = taskDetail.task.title;
+          await think(ctx, `Leser oppgaven... "${taskTitle}". La meg se.`);
         }
       } else if (options?.taskDescription) {
         ctx.taskDescription = options.taskDescription;
         taskTitle = ctx.taskDescription.split("\n")[0].substring(0, 80);
         await report(ctx, `Starter oppgave: ${taskTitle}`, "working");
+        await think(ctx, `Leser oppgaven... "${taskTitle}". La meg se.`);
       }
 
       // === STEP 2: Read the project ===
@@ -626,6 +645,12 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       treeArray = projectTree.tree;
       packageJson = projectTree.packageJson || {};
       console.log("[DEBUG-AF] STEP 2: Tree loaded,", treeArray.length, "files");
+
+      if (treeArray.length === 0) {
+        await think(ctx, "Tomt repo — legger filene i roten.");
+      } else {
+        await think(ctx, `Fant ${treeArray.length} filer. Ser over strukturen.`);
+      }
 
       const relevantPaths = await auditedStep(ctx, "relevant_files_identified", {
         taskDescription: ctx.taskDescription.substring(0, 200),
@@ -754,6 +779,10 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       docsStrings = docsResults.docs.map((d) => `[${d.source}] ${d.content}`);
       console.log("[DEBUG-AF] STEP 3:", memories.results.length, "memories,", docsResults.docs.length, "docs");
 
+      if (memories.results.length > 0) {
+        await think(ctx, `Fant ${memories.results.length} relevante minner.`);
+      }
+
       // === STEP 3.5: Fetch installed MCP tools ===
       try {
         const mcpResult = await mcp.installed();
@@ -829,7 +858,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         repoName: `${ctx.repoOwner}/${ctx.repoName}`,
       });
 
-      if (confidence.overall < 60 || confidence.recommended_action === "clarify") {
+      if (confidence.overall < 90) {
         let msg = `Jeg er usikker (${confidence.overall}% sikker) og trenger avklaringer:\n\n`;
         msg += `**Usikkerheter:**\n`;
         confidence.uncertainties.forEach((u: string, i: number) => {
@@ -851,19 +880,24 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           taskId: ctx.taskId,
           repoName: `${ctx.repoOwner}/${ctx.repoName}`,
         });
-        // Send structured agent_status for rich frontend rendering
+        // Build questions list for frontend
+        const clarificationQuestions = [
+          ...(confidence.uncertainties || []),
+          ...(confidence.clarifying_questions || []),
+        ];
+
+        // Send structured agent_status with questions for AgentClarification
         await reportSteps(ctx, "Venter", [
           { label: `Konfidenssjekk: ${confidence.overall}%`, status: "done" },
         ], {
           title: "Trenger avklaring",
+          questions: clarificationQuestions.length > 0 ? clarificationQuestions : [msg],
         });
-        // The raw report triggers the legacy path which adds questions
-        await report(ctx, msg, "needs_input");
 
         // Also update task status to needs_input for chat routing
         if (ctx.thefoldTaskId) {
           try {
-            await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked", errorMessage: "Trenger avklaring" });
+            await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "needs_input", errorMessage: "Trenger avklaring" });
           } catch { /* non-critical */ }
         }
 
@@ -978,15 +1012,12 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
     const planStepCount = plan.plan.length;
     console.log("[DEBUG-AF] STEP 5: Plan has", planStepCount, "steps");
+    await think(ctx, `Plan klar — ${planStepCount} steg.`);
     await reportSteps(ctx, "Planlegger", [
       { label: "Leser oppgave", status: "done" },
       { label: "Henter prosjektstruktur", status: "done" },
       { label: "Henter kontekst", status: "done" },
       { label: `Plan klar: ${planStepCount} steg`, status: "done" },
-      ...plan.plan.map((s, i) => ({
-        label: `${i + 1}. ${s.description}`,
-        status: "pending" as const,
-      })),
     ], { title: `Utfører plan 0/${planStepCount}`, planProgress: { current: 0, total: planStepCount } });
 
     // === STEP 5.5: Fetch error patterns from memory ===
@@ -1080,6 +1111,9 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       }
     }
 
+    // Track plan progress — incremented after each major phase
+    let completedPlanSteps = 0;
+
     // Report plan ready
     await reportSteps(ctx, "Bygger", [
       { label: "Leser oppgave", status: "done" },
@@ -1087,7 +1121,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       { label: "Henter kontekst", status: "done" },
       { label: `Plan klar: ${planStepCount} steg`, status: "done" },
       { label: "Oppretter sandbox", status: "active" },
-    ], { title: `Utfører plan 1/${planStepCount}`, planProgress: { current: 1, total: planStepCount } });
+    ], { title: `Utfører plan ${completedPlanSteps}/${planStepCount}`, planProgress: { current: completedPlanSteps, total: planStepCount } });
 
     // Cancel/stop check before builder (DEL 7)
     if (await shouldStopTask(ctx, "pre_sandbox")) {
@@ -1158,6 +1192,17 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           allFiles.push(file);
         }
 
+        // Update plan progress — builder completed all plan steps
+        completedPlanSteps = planStepCount;
+        for (const f of buildResult.result.filesChanged) {
+          await think(ctx, `Skriver ${f.path}... OK`);
+        }
+        await reportSteps(ctx, "Bygger", [
+          { label: "Plan klar", status: "done" },
+          { label: `Builder ferdig (${allFiles.length} filer)`, status: "done" },
+          { label: "Validerer kode", status: "active" },
+        ], { title: `Utfører plan ${completedPlanSteps}/${planStepCount}`, planProgress: { current: completedPlanSteps, total: planStepCount } });
+
         // Record attempt
         ctx.attemptHistory.push({
           stepIndex: 0,
@@ -1181,6 +1226,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         if (!validation.success) {
           lastError = validation.output;
           previousErrors.push(validation.output.substring(0, 500));
+          await think(ctx, `Fant problemer, fikser... (forsok ${ctx.totalAttempts})`);
 
           await audit({
             sessionId: ctx.conversationId,
@@ -1351,6 +1397,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         }
 
         // Validation passed!
+        await think(ctx, "Ingen feil i koden!");
         break;
       } catch (error) {
         ctx.attemptHistory.push({
@@ -1409,6 +1456,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
     ctx.totalCostUsd += review.costUsd;
     ctx.totalTokensUsed += review.tokensUsed;
+    await think(ctx, `Kvalitet: ${review.qualityScore}/10.`);
 
     // Verify task wasn't stopped during review (DEL 7B)
     if (await shouldStopTask(ctx, "pre_submit_review", sandboxId.id)) {
@@ -1422,6 +1470,8 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       concerns: review.concerns,
       memoriesExtracted: review.memoriesExtracted,
     };
+
+    await think(ctx, "Sender til review — venter pa godkjenning.");
 
     const reviewResult = await submitReviewInternal({
       conversationId: ctx.conversationId,

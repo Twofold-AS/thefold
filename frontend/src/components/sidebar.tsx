@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { useRepoContext, type Repo } from "@/lib/repo-context";
 import { useUser } from "@/contexts/UserPreferencesContext";
+import { Bot } from "lucide-react";
 
 /* ============================================
    Navigation definitions
@@ -33,7 +34,7 @@ const TOP_NAV: NavItem[] = [
   {
     label: "Chat",
     href: "/chat",
-    icon: icon("M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076c1.14 0 2.274-.042 3.4-.124 1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"),
+    icon: <Bot size={16} className="sidebar-bot-icon" />,
   },
   {
     label: "Environments",
@@ -51,7 +52,7 @@ function getRepoNav(repoName: string): NavItem[] {
   const base = `/repo/${repoName}`;
   return [
     { label: "Oversikt", href: `${base}/overview`, icon: icon("M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 0 1 3 19.875v-6.75ZM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V8.625ZM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 0 1-1.125-1.125V4.125Z") },
-    { label: "Chat", href: `${base}/chat`, icon: icon("M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076c1.14 0 2.274-.042 3.4-.124 1.585-.233 2.708-1.626 2.708-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z") },
+    { label: "Chat", href: `${base}/chat`, icon: <Bot size={16} className="sidebar-bot-icon" /> },
     { label: "Oppgaver", href: `${base}/tasks`, icon: icon("M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z") },
     { label: "Reviews", href: `${base}/reviews`, icon: icon("M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z") },
     { label: "Aktivitet", href: `${base}/activity`, icon: icon("M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z") },

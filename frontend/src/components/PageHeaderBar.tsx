@@ -24,7 +24,7 @@ export function PageHeaderBar({ title, subtitle, cells, rightCells }: PageHeader
         style={{ borderRight: "1px solid var(--border)", minWidth: "180px" }}
       >
         <div>
-          <h1 className="font-display text-xl" style={{ color: "var(--text-primary)" }}>
+          <h1 className="page-title text-xl" style={{ color: "var(--text-primary)" }}>
             {title}
           </h1>
           {subtitle && (

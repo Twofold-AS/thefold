@@ -62,6 +62,7 @@ describe.skip("Test 1: Enkel task-flyt (uten review)", () => {
       maxAttempts: 5,
       planRevisions: 0,
       maxPlanRevisions: 2,
+      subAgentsEnabled: false,
     };
 
     const result = await executeTask(ctx, {
@@ -170,6 +171,7 @@ describe.skip("Test 2: Task med review-flyt", () => {
       maxAttempts: 5,
       planRevisions: 0,
       maxPlanRevisions: 2,
+      subAgentsEnabled: false,
     };
 
     // 1. Execute with review enabled (default, no skipReview)

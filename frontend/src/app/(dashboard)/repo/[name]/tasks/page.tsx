@@ -11,7 +11,9 @@ import {
   restoreTask,
   permanentDeleteTask,
   cancelTask,
+  getBuilderJob,
   type TheFoldTask,
+  type BuildStepInfo,
 } from "@/lib/api";
 import { PageHeaderBar } from "@/components/PageHeaderBar";
 
@@ -23,6 +25,7 @@ const COLUMNS = [
   { key: "in_progress", label: "P\u00e5g\u00e5r", color: "#3b82f6" },
   { key: "in_review", label: "Review", color: "#f97316" },
   { key: "done", label: "Ferdig", color: "#22c55e" },
+  { key: "needs_input", label: "Trenger avklaring", color: "#eab308" },
   { key: "blocked", label: "Blokkert", color: "#ef4444" },
 ] as const;
 
@@ -39,6 +42,7 @@ function classifyStatus(status: string): ColumnKey {
   if (s === "in_progress" || s.includes("progress") || s.includes("started")) return "in_progress";
   if (s === "in_review" || s === "pending_review") return "in_review";
   if (s === "done" || s.includes("complete")) return "done";
+  if (s === "needs_input") return "needs_input";
   if (s === "blocked") return "blocked";
   if (s === "planned" || s === "todo") return "planned";
   return "backlog";
@@ -365,6 +369,23 @@ function TaskCard({
   onDelete: () => void;
   onCancel: () => void;
 }) {
+  const [buildSteps, setBuildSteps] = useState<BuildStepInfo[] | null>(null);
+  const [stepsLoading, setStepsLoading] = useState(false);
+
+  // Fetch build steps when expanded and task has a buildJobId
+  useEffect(() => {
+    if (!expanded || !task.buildJobId || buildSteps !== null) return;
+    setStepsLoading(true);
+    getBuilderJob(task.buildJobId)
+      .then((res) => setBuildSteps(res.steps))
+      .catch(() => setBuildSteps([]))
+      .finally(() => setStepsLoading(false));
+  }, [expanded, task.buildJobId, buildSteps]);
+
+  // Count completed file steps
+  const fileSteps = buildSteps?.filter((s) => s.filePath) || [];
+  const doneFileSteps = fileSteps.filter((s) => s.status === "success" || s.status === "complete");
+
   return (
     <div
       className="p-2.5 cursor-pointer transition-colors"
@@ -385,6 +406,12 @@ function TaskCard({
             <span className="text-[10px]" style={{ color: "var(--text-muted)" }}>
               {SOURCE_ICONS[task.source] || "\uD83D\uDC64"} {task.source}
             </span>
+            {/* Show step progress if available */}
+            {fileSteps.length > 0 && (
+              <span className="text-[10px]" style={{ color: "var(--text-secondary)" }}>
+                {doneFileSteps.length}/{fileSteps.length} steg fullført
+              </span>
+            )}
             {task.labels.length > 0 && (
               <div className="flex gap-1">
                 {task.labels.slice(0, 2).map((l) => (
@@ -423,12 +450,12 @@ function TaskCard({
         </div>
       </div>
 
-      {/* Error message for blocked tasks */}
-      {task.status === "blocked" && task.errorMessage && (
+      {/* Error message for blocked/needs_input tasks */}
+      {(task.status === "blocked" || task.status === "needs_input") && task.errorMessage && (
         <div className="text-xs mt-2 px-2 py-1.5"
           style={{
-            color: "#ef4444",
-            background: "rgba(239,68,68,0.05)",
+            color: task.status === "needs_input" ? "#eab308" : "#ef4444",
+            background: task.status === "needs_input" ? "rgba(234,179,8,0.05)" : "rgba(239,68,68,0.05)",
             border: "1px solid rgba(239,68,68,0.1)",
           }}>
           {task.errorMessage}
@@ -443,6 +470,50 @@ function TaskCard({
               {task.description}
             </p>
           )}
+
+          {/* Sub-tasks / build steps */}
+          {task.buildJobId && (
+            <div className="space-y-1 pt-1">
+              {stepsLoading && (
+                <p className="text-[10px]" style={{ color: "var(--text-muted)" }}>Laster steg...</p>
+              )}
+              {fileSteps.map((step) => (
+                <div key={step.id} className="flex items-center gap-2 py-0.5">
+                  <span className="w-3 flex items-center justify-center shrink-0">
+                    {(step.status === "success" || step.status === "complete") ? (
+                      <svg className="w-3 h-3" viewBox="0 0 20 20" fill="#22c55e">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" />
+                      </svg>
+                    ) : step.status === "in_progress" || step.status === "running" ? (
+                      <span
+                        className="w-2.5 h-2.5 border rounded-full animate-spin"
+                        style={{ borderColor: "rgba(255,255,255,0.2)", borderTopColor: "var(--text-primary)" }}
+                      />
+                    ) : step.status === "failed" ? (
+                      <svg className="w-3 h-3" viewBox="0 0 20 20" fill="#ef4444">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" />
+                      </svg>
+                    ) : (
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ background: "rgba(255,255,255,0.15)" }} />
+                    )}
+                  </span>
+                  <span
+                    className="text-[10px]"
+                    style={{
+                      color: (step.status === "success" || step.status === "complete")
+                        ? "var(--text-muted)"
+                        : step.status === "failed"
+                          ? "#ef4444"
+                          : "var(--text-secondary)",
+                    }}
+                  >
+                    {step.filePath || step.action} ({step.action.replace("_", " ")})
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="flex items-center gap-3 text-[10px]" style={{ color: "var(--text-muted)" }}>
             <span>Prioritet: {PRIORITY_LABELS[task.priority] || "Normal"}</span>
             <span>Status: {task.status}</span>

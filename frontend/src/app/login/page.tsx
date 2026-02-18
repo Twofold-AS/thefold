@@ -6,9 +6,19 @@ import Image from "next/image";
 import { setToken } from "@/lib/auth";
 import { requestOtp, verifyOtp } from "@/lib/api";
 
+import { Suspense } from "react";
+
 type Step = "email" | "code";
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={<div>Laster...</div>}>
+      <LoginContent />
+    </Suspense>
+  );
+}
+
+function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirectTo = searchParams.get("from") || "/home";

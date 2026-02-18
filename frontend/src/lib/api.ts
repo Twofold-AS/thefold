@@ -61,7 +61,7 @@ export interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought";
   metadata: string | null;
   createdAt: string;
   updatedAt?: string;
@@ -817,6 +817,25 @@ export async function listBuilderJobs(options?: { taskId?: string; status?: stri
   });
 }
 
+export interface BuildStepInfo {
+  id: string;
+  stepNumber: number;
+  phase: string;
+  action: string;
+  filePath: string | null;
+  status: string;
+  tokensUsed: number;
+}
+
+export async function getBuilderJob(jobId: string) {
+  return apiFetch<{
+    job: BuilderJobSummary;
+    steps: BuildStepInfo[];
+  }>(`/builder/job?jobId=${encodeURIComponent(jobId)}`, {
+    method: "GET",
+  });
+}
+
 // --- Tasks (TheFold Task Engine) ---
 
 export interface TheFoldTask {
@@ -829,6 +848,9 @@ export interface TheFoldTask {
   labels: string[];
   source: string;
   assignedTo: string;
+  buildJobId: string | null;
+  prUrl: string | null;
+  reviewId: string | null;
   errorMessage: string | null;
   createdBy: string;
   createdAt: string;

@@ -342,6 +342,7 @@ export async function executeProject(
       maxAttempts: 5,
       planRevisions: 0,
       maxPlanRevisions: 2,
+      subAgentsEnabled: false,
     };
     await autoInitRepo(initCtx);
   }

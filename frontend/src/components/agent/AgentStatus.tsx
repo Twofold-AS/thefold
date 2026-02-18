@@ -17,6 +17,7 @@ export { parseAgentMessage } from "./parseAgentMessage";
 
 interface AgentStatusProps {
   data: AgentStatusData;
+  lastThought?: string;
   onReply?: (answer: string) => void;
   onDismiss?: () => void;
   onApprove?: (reviewId: string) => void;
@@ -28,6 +29,7 @@ interface AgentStatusProps {
 
 export function AgentStatus({
   data,
+  lastThought,
   onReply,
   onDismiss,
   onApprove,
@@ -48,6 +50,7 @@ export function AgentStatus({
 
   const phaseProps: AgentPhaseProps = {
     data,
+    lastThought,
     onReply,
     onDismiss,
     onApprove,

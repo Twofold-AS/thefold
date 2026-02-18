@@ -638,6 +638,7 @@ export const pushToLinear = api(
           in_review: "In Review",
           done: "Done",
           blocked: "Cancelled",
+          needs_input: "In Progress",
           deleted: "Cancelled",
         };
 

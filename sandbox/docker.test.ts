@@ -94,7 +94,7 @@ describe("Docker sandbox", () => {
     it("should clean up on failure", async () => {
       // First calls succeed, then git clone fails
       let callCount = 0;
-      mockExecSync.mockImplementation((cmd) => {
+      mockExecSync.mockImplementation((cmd: any) => {
         callCount++;
         const cmdStr = typeof cmd === "string" ? cmd : cmd.toString();
         if (cmdStr.includes("git clone")) {

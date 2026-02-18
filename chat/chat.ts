@@ -38,7 +38,15 @@ const _ = new Subscription(agentReports, "store-agent-report", {
 
     try {
       const parsed = JSON.parse(report.content);
-      if (parsed.type === "agent_status") {
+      if (parsed.type === "agent_thought") {
+        // Agent thought — store as separate message, don't update agent_status
+        await db.exec`
+          INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+          VALUES (${report.conversationId}, 'assistant', ${parsed.thought}, 'agent_thought',
+                  ${JSON.stringify({ taskId: report.taskId, timestamp: parsed.timestamp })}::jsonb)
+        `;
+        return;
+      } else if (parsed.type === "agent_status") {
         // Already structured — use directly
         statusContent = report.content;
       } else {
@@ -429,7 +437,7 @@ export const send = api(
               response: req.message,
               conversationId: req.conversationId,
             });
-            return { messageId: msg.id, conversationId: req.conversationId };
+            return { message: msg, agentTriggered: false };
           }
         }
       } catch {
@@ -637,7 +645,7 @@ async function processAIResponse(
     history.reverse();
 
     // Step 3: Resolve skills (try/catch — don't crash on failure)
-    let resolvedSkills = { result: { injectedPrompt: "", injectedSkillIds: [] as string[], tokensUsed: 0, preRunResults: [], postRunSkills: [] } };
+    let resolvedSkills = { result: { injectedPrompt: "", injectedSkillIds: [] as string[], tokensUsed: 0, preRunResults: [] as any[], postRunSkills: [] as any[] } };
     try {
       const { skills: skillsClient } = await import("~encore/clients");
       resolvedSkills = await skillsClient.resolve({
@@ -655,7 +663,7 @@ async function processAIResponse(
     if (isCancelled(conversationId)) return;
 
     // Step 4: Search memories — only for complex queries (saves tokens and time)
-    let memories = { results: [] as { content: string }[], totalFound: 0 };
+    let memories: { results: { content: string }[] } = { results: [] };
     if (intent === "task_request" || intent === "repo_review" || userContent.length > 100) {
       try {
         memories = await memory.search({ query: userContent, limit: 5 });
@@ -674,14 +682,14 @@ async function processAIResponse(
         const { github } = await import("~encore/clients");
 
         // Fetch file tree (try/catch — empty repos return fallback)
-        let tree: { tree: Array<{ path: string; type: string }>; treeString: string } = { tree: [], treeString: "" };
+        let tree: { tree: string[]; treeString: string; empty?: boolean } = { tree: [], treeString: "" };
         try {
           tree = await github.getTree({ owner: "Twofold-AS", repo: repoName });
         } catch (e) {
           console.warn(`getTree failed for ${repoName} (likely empty repo):`, e);
         }
         if (tree?.tree?.length > 0) {
-          repoContext += `\nFilstruktur for ${repoName} (${tree.tree.length} filer):\n${tree.treeString}`;
+          repoContext += `\nFilstruktur for ${repoName} (${tree.tree.length} filer):\n${tree.treeString || tree.tree.join("\n")}`;
         }
 
         // Find relevant files based on the user's message
@@ -801,7 +809,7 @@ async function processAIResponse(
       logRepoActivity(repoName, "chat", "Melding sendt", userContent.substring(0, 100), auth.userID);
       if (aiResponse.toolsUsed && aiResponse.toolsUsed.length > 0) {
         for (const tool of aiResponse.toolsUsed) {
-          logRepoActivity(repoName, "tool_use", `Verktoy: ${tool}`, null, undefined, { tool });
+          logRepoActivity(repoName, "tool_use", `Verktoy: ${tool}`, undefined, undefined, { tool });
         }
       }
       logRepoActivity(repoName, "ai_response", `${aiName || "TheFold"} svarte`, aiResponse.content.substring(0, 100), undefined, {

@@ -496,43 +496,48 @@ Each task description must include:
 
   confidence_assessment: `${BASE_RULES}
 
-You are assessing your own confidence in completing a task.
+Du vurderer din egen evne til a fullfare en oppgave. Svar ALLTID pa norsk.
 
-Be HONEST and CRITICAL. It's better to ask for clarification than to fail.
+Vurder oppgaven I KONTEKST av repoet:
+- Tomt repo = nye filer opprettes i roten, ingen eksisterende kode a ta hensyn til
+- Enkle oppgaver (lage statiske filer som HTML, CSS, README, config) = 100% confidence
+- Usikkerhet om prosjekttype (Encore, Next, etc.) er IKKE relevant for enkel fil-oppretting
 
-Analyze:
-1. **Task Understanding (0-100):**
-   - Is the task clearly defined?
-   - Are there ambiguous requirements?
-   - Do I understand the desired outcome?
+Analyser:
+1. **Oppgaveforstaelse (0-100):**
+   - Er oppgaven klart definert?
+   - Er det tvetydige krav?
+   - Forstar jeg onsket resultat?
 
-2. **Codebase Familiarity (0-100):**
-   - Have I seen this project structure before?
-   - Do I understand the existing patterns?
-   - Can I locate where changes should be made?
+2. **Kodebase-kjennskap (0-100):**
+   - For tomme repoer: gi 100 (ingen eksisterende kode a forholde seg til)
+   - For eksisterende repoer: forstar jeg monsteret og strukturen?
 
-3. **Technical Complexity (0-100):**
-   - Is this technically feasible?
-   - Do I have the right tools/libraries?
-   - Are there obvious blockers?
+3. **Teknisk kompleksitet (0-100):**
+   - Er dette teknisk gjennomforbart?
+   - Har jeg de riktige verktoyene?
 
-4. **Test Coverage Feasible (0-100):**
-   - Can I write tests for this?
-   - Are there existing test patterns to follow?
-   - Is the change testable?
+4. **Testbarhet (0-100):**
+   - Kan jeg skrive tester for dette?
+   - For enkle fil-opprettelser uten logikk: gi 100
 
-**Scoring Guidelines:**
-- 90-100: Very confident, proceed immediately
-- 70-89: Confident with minor uncertainties, proceed with caution
-- 50-69: Moderate confidence, clarify specific points first
-- Below 50: Low confidence, either clarify OR break into subtasks
+**Poengretningslinjer:**
+- 95-100: Helt trygg, start umiddelbart. Bruk dette for: enkle fil-opprettelser, klare oppgaver, tomme repoer
+- 80-94: Trygg med smaa usikkerheter, fortsett
+- 60-79: Moderat trygg, klargjor spesifikke punkter forst
+- Under 60: Lav trygghet, klargjor ELLER del opp i deloppgaver
 
-**Recommended Actions:**
-- "proceed": All scores >70, no major uncertainties
-- "clarify": Some scores <70, need specific questions answered
-- "break_down": Overall <60, task is too large/complex
+**Anbefalte handlinger:**
+- "proceed": Overall >= 90, ingen store usikkerheter
+- "clarify": Overall 60-89, trenger spesifikke svar
+- "break_down": Overall < 60, for stort/komplekst
 
-Respond with JSON only matching this exact shape:
+Eksempler:
+- "Lag index.html og style.css med heading og styling" i tomt repo -> 100% proceed
+- "Implementer OAuth med Google" uten redirect URL -> 70% clarify
+- "Fiks buggen" uten stacktrace eller kontekst -> 50% clarify
+
+Svar med KUN JSON i dette formatet:
 {
   "overall": 85,
   "breakdown": {
@@ -541,13 +546,13 @@ Respond with JSON only matching this exact shape:
     "technical_complexity": 85,
     "test_coverage_feasible": 80
   },
-  "uncertainties": ["specific thing I'm unsure about"],
+  "uncertainties": ["spesifikt hva jeg er usikker pa"],
   "recommended_action": "proceed",
   "clarifying_questions": [],
   "suggested_subtasks": []
 }
 
-Be specific about uncertainties and questions. Never say "I'm not sure" — say exactly WHAT you're not sure about.`,
+Vaer spesifikk om usikkerheter og sporsmal. Aldri si "Jeg er usikker" — si noyaktig HVA du er usikker pa.`,
 };
 
 /** Build the direct_chat system prompt with a configurable AI name */
@@ -585,7 +590,13 @@ NÅR BRUKEREN BER DEG GJØRE NOE: Bruk verktøyene. Ikke bare forklar — GJØR 
 - "Lag en plan for X" → bruk create_task for hvert steg
 - "Fiks denne buggen" → bruk create_task + start_task
 - "Hva er status?" → bruk list_tasks
-- "Se på filen X" → bruk read_file`;
+- "Se på filen X" → bruk read_file
+
+VIKTIG — Når du oppretter en oppgave med create_task:
+- Vis ALDRI Task ID / UUID til brukeren — de trenger ikke se det
+- Etter create_task, oppsummer hva oppgaven innebærer i 1-2 setninger
+- Spør deretter: "Vil du at jeg starter oppgaven nå?"
+- Hvis brukeren sier ja → bruk start_task med IDen du fikk fra create_task`;
 }
 
 // --- Skills Pipeline Integration ---
@@ -819,7 +830,7 @@ async function executeToolCall(
         log.error("Task enrichment failed:", { error: e instanceof Error ? e.message : String(e) })
       );
 
-      return { success: true, taskId: result.task.id, message: `Oppgave opprettet med ID ${result.task.id}. Bruk start_task med denne IDen for å starte den.` };
+      return { success: true, taskId: result.task.id, message: `Oppgave opprettet: "${input.title}". Bruk start_task for å starte den.` };
     }
 
     case "start_task": {
@@ -841,7 +852,7 @@ async function executeToolCall(
         }
 
         // Verify task exists and get repo info + status
-        let taskData: { repo?: string; title?: string; status?: string; errorMessage?: string } | null = null;
+        let taskData: { repo?: string | null; title?: string | null; status?: string | null; errorMessage?: string | null } | null = null;
         try {
           const result = await tasksClient.getTaskInternal({ id: taskId });
           if (result?.task) {
@@ -915,7 +926,7 @@ async function executeToolCall(
       const { tasks: tasksClient } = await import("~encore/clients");
       const result = await tasksClient.listTasks({
         repo: (input.repoName as string) || repoName || undefined,
-        status: input.status as string | undefined,
+        status: (input.status || undefined) as any,
       });
       return { tasks: result.tasks.map((t: { id: string; title: string; status: string; priority: number }) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority })), total: result.total };
     }
@@ -1009,7 +1020,7 @@ async function callAnthropicWithTools(options: AICallOptions & {
       max_tokens: options.maxTokens,
       system: systemBlocks,
       messages,
-      tools: options.tools,
+      tools: options.tools as any,
     });
 
     totalInputTokens += response.usage.input_tokens;
@@ -1026,8 +1037,8 @@ async function callAnthropicWithTools(options: AICallOptions & {
 
       console.log(`[DEBUG-AH] Final content length: ${textContent.length}`);
 
-      const cacheReadTokens = (response.usage as Record<string, number>).cache_read_input_tokens ?? 0;
-      const cacheCreationTokens = (response.usage as Record<string, number>).cache_creation_input_tokens ?? 0;
+      const cacheReadTokens = (response.usage as unknown as Record<string, number>).cache_read_input_tokens ?? 0;
+      const cacheCreationTokens = (response.usage as unknown as Record<string, number>).cache_creation_input_tokens ?? 0;
 
       logTokenUsage({
         inputTokens: totalInputTokens,
@@ -2287,7 +2298,7 @@ Oppgave: ${sanitize(req.task)}`;
       content,
       tokensUsed: response.tokensUsed,
       modelUsed: response.modelUsed,
-      costUsd: response.costUsd,
+      costUsd: response.costEstimate.totalCost,
     };
   }
 );
@@ -2351,7 +2362,7 @@ export const fixFile = api(
       content,
       tokensUsed: response.tokensUsed,
       modelUsed: response.modelUsed,
-      costUsd: response.costUsd,
+      costUsd: response.costEstimate.totalCost,
     };
   }
 );

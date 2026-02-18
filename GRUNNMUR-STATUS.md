@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 17. februar 2026 (Prompt AX: planSummary fix, forceContinue standard path, conversationId coupling, task-status polling, retry planSummary update)
+> Sist oppdatert: 17. februar 2026 (Prompt BB: memory.store fire-and-forget, review-deduplisering, AgentComplete fix, tanke-feed, AgentWorking-forenkling, bold-fjerning, task-UUID-skjuling, review-knapp timeout)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 

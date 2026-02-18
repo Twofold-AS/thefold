@@ -7,7 +7,7 @@ import { getPhaseTitle } from "./types";
 import { StepList } from "./StepList";
 
 /** Phase: working/building/planning/analysing — shows plan progress and active tasks */
-export function AgentWorking({ data }: AgentPhaseProps) {
+export function AgentWorking({ data, lastThought }: AgentPhaseProps) {
   const title = data.planProgress
     ? `Utfører plan ${data.planProgress.current}/${data.planProgress.total}`
     : getPhaseTitle(data.phase);
@@ -78,6 +78,15 @@ export function AgentWorking({ data }: AgentPhaseProps) {
 
       {/* Steps */}
       <StepList steps={data.steps} />
+
+      {/* Last thought */}
+      {lastThought && (
+        <div className="px-4 py-2" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+          <span className="text-xs italic opacity-40" style={{ color: "var(--text-muted)" }}>
+            {lastThought}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

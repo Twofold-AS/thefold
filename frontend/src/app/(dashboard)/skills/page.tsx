@@ -126,7 +126,7 @@ export default function SkillsPage() {
       {/* Cell-style header with phase tabs */}
       <div className="flex items-center" style={{ borderBottom: "1px solid var(--border)", minHeight: "80px" }}>
         <div className="px-5 flex items-center" style={{ borderRight: "1px solid var(--border)", minHeight: "80px" }}>
-          <h1 className="text-xl font-display" style={{ color: "var(--text-primary)" }}>Skills</h1>
+          <h1 className="text-xl page-title" style={{ color: "var(--text-primary)" }}>Skills</h1>
         </div>
 
         {PHASES.map((phase) => {

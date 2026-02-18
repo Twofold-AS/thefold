@@ -449,16 +449,38 @@ export const createPR = api(
       });
     }
 
-    // 8. Create pull request
-    const pr = await ghApi(`/repos/${req.owner}/${req.repo}/pulls`, {
-      method: "POST",
-      body: {
-        title: req.title,
-        body: req.body,
-        head: req.branch,
-        base: "main",
-      },
-    });
+    // 8. Create pull request (handle 422 "already exists" idempotently)
+    let pr: { html_url: string; number: number };
+    try {
+      pr = await ghApi(`/repos/${req.owner}/${req.repo}/pulls`, {
+        method: "POST",
+        body: {
+          title: req.title,
+          body: req.body,
+          head: req.branch,
+          base: "main",
+        },
+      });
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      if (msg.includes("422") && msg.toLowerCase().includes("already exists")) {
+        // PR already exists for this branch — find and return it
+        const existing = await ghApi(
+          `/repos/${req.owner}/${req.repo}/pulls?head=${req.owner}:${req.branch}&state=open`
+        );
+        if (Array.isArray(existing) && existing.length > 0) {
+          return { url: existing[0].html_url, number: existing[0].number };
+        }
+        // Also check closed PRs
+        const closed = await ghApi(
+          `/repos/${req.owner}/${req.repo}/pulls?head=${req.owner}:${req.branch}&state=closed`
+        );
+        if (Array.isArray(closed) && closed.length > 0) {
+          return { url: closed[0].html_url, number: closed[0].number };
+        }
+      }
+      throw e;
+    }
 
     return { url: pr.html_url, number: pr.number };
   }

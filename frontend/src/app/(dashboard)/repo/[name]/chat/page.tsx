@@ -322,6 +322,12 @@ export default function RepoChatPage() {
     return lastAgentStatus.phase !== "Ferdig" && lastAgentStatus.phase !== "Feilet" && lastAgentStatus.phase !== "Stopped";
   }, [lastAgentStatus]);
 
+  // Extract last agent thought for display in AgentWorking
+  const lastThought = useMemo(() => {
+    const thoughts = messages.filter(m => m.messageType === "agent_thought");
+    return thoughts.length > 0 ? thoughts[thoughts.length - 1].content : undefined;
+  }, [messages]);
+
   // Extract active task ID from agent status metadata
   const activeTaskId = useMemo(() => {
     if (!lastAgentStatus) return null;
@@ -340,7 +346,7 @@ export default function RepoChatPage() {
     const interval = setInterval(async () => {
       try {
         const result = await getTask(activeTaskId);
-        const stoppedStatuses = ["backlog", "blocked", "cancelled"];
+        const stoppedStatuses = ["backlog", "cancelled", "done"];
         if (stoppedStatuses.includes(result.task.status)) {
           setStatusOverride({
             type: "agent_status",
@@ -546,7 +552,7 @@ export default function RepoChatPage() {
           className="flex items-center px-5 shrink-0"
           style={{ borderRight: "1px solid var(--border)", width: "280px" }}
         >
-          <h1 className="font-display text-xl" style={{ color: "var(--text-primary)" }}>
+          <h1 className="page-title text-xl" style={{ color: "var(--text-primary)" }}>
             {params.name}
           </h1>
         </div>
@@ -682,11 +688,22 @@ export default function RepoChatPage() {
                   {messages.filter(m => {
                     if (m.messageType === "agent_status") return false;
                     if (m.messageType === "agent_report") return false;
-                    if (m.role === "assistant" && (!m.content || !m.content.trim())) return false;
+                    if (m.role === "assistant" && (!m.content || !m.content.trim()) && m.messageType !== "agent_thought") return false;
                     return true;
                   }).map((msg) => {
                     const isUser = msg.role === "user";
                     const isContextTransfer = msg.messageType === "context_transfer";
+
+                    if (msg.messageType === "agent_thought") {
+                      return (
+                        <div key={msg.id} className="flex items-start gap-1.5 animate-fadeIn max-w-4xl">
+                          <span className="text-xs opacity-40 mt-0.5" style={{ color: "var(--text-muted)" }}>
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                          </span>
+                          <span className="text-xs italic opacity-40" style={{ color: "var(--text-muted)" }}>{msg.content}</span>
+                        </div>
+                      );
+                    }
 
                     return (
                       <div
@@ -780,7 +797,7 @@ export default function RepoChatPage() {
                   })}
 
                   {/* AgentStatus — rendered separately from messages, stays visible on failure/stopped */}
-                  {lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet" || lastAgentStatus.phase === "Stopped") && (
+                  {lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet" || lastAgentStatus.phase === "Stopped" || lastAgentStatus.phase === "Ferdig") && (
                     <div className="message-enter">
                       <AgentStatus
                         data={{
@@ -794,6 +811,7 @@ export default function RepoChatPage() {
                           activeTasks: lastAgentStatus.activeTasks,
                           ...(lastAgentStatus.metadata?.taskId ? { taskId: lastAgentStatus.metadata.taskId } : {}),
                         }}
+                        lastThought={lastThought}
                         onReply={handleAgentReply}
                         onDismiss={handleDismissStatus}
                         onApprove={handleApproveFromChat}

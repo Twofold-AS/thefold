@@ -1,4 +1,5 @@
 import { api, APIError } from "encore.dev/api";
+import log from "encore.dev/log";
 import { getAuthData } from "~encore/auth";
 import { github, linear, memory, sandbox, tasks } from "~encore/clients";
 import { agentReports } from "../chat/chat";
@@ -301,9 +302,21 @@ export const approveReview = api(
     `;
 
     if (!row) throw APIError.notFound("review ikke funnet");
+
+    // Idempotent: if already approved, return existing PR URL immediately
+    if (row.status === "approved") {
+      return { prUrl: row.pr_url || "" };
+    }
+
     if (row.status !== "pending" && row.status !== "changes_requested") {
       throw APIError.failedPrecondition("review er allerede behandlet");
     }
+
+    // Set status to 'approved' EARLY to prevent race condition from double-clicks
+    await db.exec`
+      UPDATE code_reviews SET status = 'approved', reviewer_id = ${auth?.email ?? null}, reviewed_at = NOW()
+      WHERE id = ${req.reviewId} AND status IN ('pending', 'changes_requested')
+    `;
 
     const review = rowToCodeReview(row);
 
@@ -358,50 +371,42 @@ export const approveReview = api(
       throw e;
     }
 
-    // STEP 10: Update Linear if applicable
+    // STEP 10: Update Linear if applicable (skip for TheFold-local tasks and orchestrator tasks)
     if (!review.projectTaskId) {
+      // Check if this task actually exists in Linear by verifying it's not a TheFold UUID
+      let isLinearTask = false;
       try {
-        await linear.updateTask({
-          taskId: review.taskId,
-          state: "in_review",
-          comment: `## TheFold har fullført denne oppgaven\n\n${review.aiReview?.documentation || ""}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.aiReview?.qualityScore || "?"}/10`,
-        });
-      } catch {
-        // Linear update is optional
-      }
-    }
-
-    // STEP 11: Store memories
-    if (review.aiReview?.memoriesExtracted) {
-      for (const mem of review.aiReview.memoriesExtracted) {
-        try {
-          await memory.store({
-            content: mem,
-            category: "decision",
-            linearTaskId: review.taskId,
-            memoryType: "decision",
-            sourceRepo: `Twofold-AS/${targetRepo}`,
+        const taskResult = await tasks.getTaskInternal({ id: review.taskId });
+        // If task has linearTaskId, use that for the Linear update
+        if (taskResult.task.linearTaskId) {
+          isLinearTask = true;
+          await linear.updateTask({
+            taskId: taskResult.task.linearTaskId,
+            state: "in_review",
+            comment: `## TheFold har fullfort denne oppgaven\n\n${review.aiReview?.documentation || ""}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.aiReview?.qualityScore || "?"}/10`,
           });
-        } catch {
-          // Memory storage is optional
+        }
+      } catch {
+        // Task may not exist in tasks-service (pure Linear flow) or Linear update may fail — both OK
+        if (!isLinearTask) {
+          // Fallback: try with the original taskId (might be a real Linear ID)
+          try {
+            await linear.updateTask({
+              taskId: review.taskId,
+              state: "in_review",
+              comment: `## TheFold har fullfort denne oppgaven\n\n${review.aiReview?.documentation || ""}\n\n**PR:** ${pr.url}\n**Kvalitetsvurdering:** ${review.aiReview?.qualityScore || "?"}/10`,
+            });
+          } catch {
+            // Linear update is optional
+          }
         }
       }
     }
 
-    // STEP 12: Destroy sandbox
-    try {
-      await sandbox.destroy({ sandboxId: review.sandboxId });
-    } catch {
-      // Sandbox may already be destroyed
-    }
-
-    // Update review status
+    // Update review with PR URL (status already set to 'approved' above)
     await db.exec`
       UPDATE code_reviews
-      SET status = 'approved',
-          reviewer_id = ${auth?.email ?? null},
-          reviewed_at = NOW(),
-          pr_url = ${pr.url}
+      SET pr_url = ${pr.url}
       WHERE id = ${req.reviewId}
     `;
 
@@ -419,12 +424,12 @@ export const approveReview = api(
     const fileCount = review.filesChanged.length;
     const fileList = review.filesChanged.map((f) => `- \`${f.path}\` (${f.action})`).join("\n");
     const completionMsg = [
-      `**Oppgave fullfort**`,
+      `Oppgave fullfort`,
       ``,
-      `**PR:** ${pr.url}`,
-      `**Filer endret:** ${fileCount}`,
+      `PR: ${pr.url}`,
+      `Filer endret: ${fileCount}`,
       fileList,
-      qualityScore != null ? `**Kvalitet:** ${qualityScore}/10` : "",
+      qualityScore != null ? `Kvalitet: ${qualityScore}/10` : "",
     ].filter(Boolean).join("\n");
 
     await agentReports.publish({
@@ -446,6 +451,25 @@ export const approveReview = api(
       filesChanged: review.filesChanged.map((f) => f.path),
       completionMessage: completionMsg,
     });
+
+    // Fire-and-forget: memory storage + sandbox cleanup
+    // These are non-critical and can take 60+ seconds due to Voyage 429 rate limiting
+    const memoriesExtracted = review.aiReview?.memoriesExtracted;
+    const sandboxId = review.sandboxId;
+    Promise.all([
+      // Store memories in background
+      ...(memoriesExtracted || []).map((mem) =>
+        memory.store({
+          content: mem,
+          category: "decision",
+          linearTaskId: review.taskId,
+          memoryType: "decision",
+          sourceRepo: `Twofold-AS/${targetRepo}`,
+        }).catch((e) => log.warn("memory.store failed (background)", { error: String(e) }))
+      ),
+      // Destroy sandbox in background
+      sandbox.destroy({ sandboxId }).catch(() => { /* Sandbox may already be destroyed */ }),
+    ]);
 
     return { prUrl: pr.url };
   }
@@ -507,6 +531,7 @@ export const requestChanges = api(
       maxAttempts: 5,
       planRevisions: 0,
       maxPlanRevisions: 2,
+      subAgentsEnabled: false,
     };
 
     executeTask(ctx, {
