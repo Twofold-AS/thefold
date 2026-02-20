@@ -225,6 +225,37 @@ export const getStats = api(
   }
 );
 
+// --- Skills Resolve Cache (5 min TTL) ---
+
+interface SkillsResolveCacheRequest {
+  key: string;
+  result?: Record<string, unknown>;
+}
+
+interface SkillsResolveCacheResponse {
+  hit: boolean;
+  result?: Record<string, unknown>;
+}
+
+export const getOrSetSkillsResolve = api(
+  { method: "POST", path: "/cache/skills-resolve", expose: false },
+  async (req: SkillsResolveCacheRequest): Promise<SkillsResolveCacheResponse> => {
+    const cached = await cacheGet(req.key);
+    if (cached) {
+      await incrementStat("skills", true);
+      return { hit: true, result: cached as Record<string, unknown> };
+    }
+
+    await incrementStat("skills", false);
+
+    if (req.result) {
+      await cacheSet(req.key, "skills", req.result, 300); // 5 minutes
+    }
+
+    return { hit: false, result: req.result };
+  }
+);
+
 // --- Cache Invalidation ---
 
 interface InvalidateRequest {

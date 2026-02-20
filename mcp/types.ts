@@ -1,6 +1,12 @@
 export type MCPServerStatus = "available" | "installed" | "error";
 export type MCPCategory = "general" | "code" | "data" | "docs" | "ai";
 
+export interface MCPTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
 export interface MCPServer {
   id: string;
   name: string;
@@ -29,4 +35,7 @@ export interface MCPServerRow {
   installed_at: Date | null;
   created_at: Date;
   updated_at: Date;
+  discovered_tools: string | Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> | null;
+  last_health_check: Date | null;
+  health_status: string | null;
 }

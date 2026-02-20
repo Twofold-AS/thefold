@@ -4,6 +4,7 @@ import { secret } from "encore.dev/config";
 import { getAuthData } from "~encore/auth";
 import { gateway } from "~encore/clients";
 import * as crypto from "crypto";
+import log from "encore.dev/log";
 
 // --- Database ---
 
@@ -181,6 +182,28 @@ async function checkLockout(email: string): Promise<LockoutResult> {
   return { locked: false };
 }
 
+// --- Suspicious activity monitor (OWASP A09) ---
+
+async function checkSuspiciousActivity(email: string): Promise<void> {
+  const failedCount = await db.queryRow<{ count: number }>`
+    SELECT COUNT(*)::int as count
+    FROM login_audit
+    WHERE email = ${email}
+    AND success = false
+    AND created_at > NOW() - INTERVAL '1 hour'
+  `;
+
+  if ((failedCount?.count || 0) >= 10) {
+    log.error("suspicious login activity", {
+      email,
+      failedAttempts: failedCount?.count,
+      window: "1 hour",
+      action: "threshold_exceeded",
+    });
+    // Future: send Slack/Discord notification via integrations service
+  }
+}
+
 // --- Endpoints ---
 
 // POST /auth/request-otp — generate and send OTP code
@@ -296,6 +319,8 @@ export const verifyOtp = api(
     const inputHash = hashCode(req.code.trim());
     if (inputHash !== otp.code_hash) {
       await logAudit(email, false, user.id);
+      // Check for suspicious login activity (A09: Security logging)
+      await checkSuspiciousActivity(email);
       return { success: false, error: "Ugyldig kode" };
     }
 
@@ -485,5 +510,50 @@ export const updateProfile = api(
     }
 
     return { success: true };
+  }
+);
+
+// GET /users/security/login-report — suspicious login monitoring (OWASP A09)
+export const loginSecurityCheck = api(
+  { method: "GET", path: "/users/security/login-report", expose: true, auth: true },
+  async (): Promise<{
+    suspiciousAccounts: Array<{
+      email: string;
+      failedAttempts: number;
+      lastAttempt: string;
+    }>;
+    totalFailedLast24h: number;
+  }> => {
+    const suspiciousRows = await db.query<{ email: string; count: number; last_attempt: string }>`
+      SELECT email, COUNT(*)::int as count, MAX(created_at)::text as last_attempt
+      FROM login_audit
+      WHERE success = false
+      AND created_at > NOW() - INTERVAL '24 hours'
+      GROUP BY email
+      HAVING COUNT(*) >= 5
+      ORDER BY count DESC
+      LIMIT 20
+    `;
+
+    const suspicious: Array<{ email: string; count: number; last_attempt: string }> = [];
+    for await (const row of suspiciousRows) {
+      suspicious.push(row);
+    }
+
+    const total = await db.queryRow<{ count: number }>`
+      SELECT COUNT(*)::int as count
+      FROM login_audit
+      WHERE success = false
+      AND created_at > NOW() - INTERVAL '24 hours'
+    `;
+
+    return {
+      suspiciousAccounts: suspicious.map((r) => ({
+        email: r.email,
+        failedAttempts: r.count,
+        lastAttempt: r.last_attempt,
+      })),
+      totalFailedLast24h: total?.count || 0,
+    };
   }
 );

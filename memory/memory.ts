@@ -6,7 +6,12 @@ import log from "encore.dev/log";
 import { cache } from "~encore/clients";
 import { calculateImportanceScore, calculateDecayedRelevance } from "./decay";
 import type { MemoryType } from "./decay";
-import { sanitize } from "../ai/sanitize";
+import { sanitizeForMemory } from "../ai/sanitize";
+import { createHash } from "node:crypto";
+
+function hashContent(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
 
 const voyageKey = secret("VoyageAPIKey");
 
@@ -68,6 +73,7 @@ interface SearchRequest {
   sourceRepo?: string;
   tags?: string[];
   includeDecayed?: boolean;
+  minTrustLevel?: "user" | "agent" | "system";
 }
 
 interface SearchResult {
@@ -82,6 +88,7 @@ interface SearchResult {
   tags: string[];
   sourceRepo?: string;
   createdAt: string;
+  trustLevel: "user" | "agent" | "system";
 }
 
 interface SearchResponse {
@@ -98,6 +105,7 @@ interface StoreRequest {
   tags?: string[];
   ttlDays?: number;
   pinned?: boolean;
+  trustLevel?: "user" | "agent" | "system";
 }
 
 interface StoreResponse {
@@ -158,6 +166,7 @@ export const search = api(
       SELECT
         id, content, category, created_at, last_accessed_at, memory_type,
         relevance_score::float as relevance_score, access_count, tags, source_repo, pinned,
+        content_hash, trust_level,
         1 - (embedding <=> ${vec}::vector) as similarity
       FROM memories
       WHERE 1 - (embedding <=> ${vec}::vector) > 0.15
@@ -192,6 +201,25 @@ export const search = api(
         if (!hasMatch) continue;
       }
 
+      // Integrity check (ASI06): verify content hash if present
+      const storedHash = row.content_hash as string | null;
+      const rowContent = row.content as string;
+      if (storedHash) {
+        const computedHash = hashContent(rowContent);
+        if (computedHash !== storedHash) {
+          log.warn("memory integrity check failed — content may have been tampered with", { id });
+          continue; // Exclude compromised memory from results
+        }
+      }
+
+      const trustLevel = (row.trust_level as "user" | "agent" | "system") || "user";
+
+      // Filter by minimum trust level if specified
+      if (req.minTrustLevel) {
+        const trustOrder = { user: 0, agent: 1, system: 2 };
+        if (trustOrder[trustLevel] < trustOrder[req.minTrustLevel]) continue;
+      }
+
       const relevanceScore = Number(row.relevance_score) || 0;
       const accessCount = Number(row.access_count) || 0;
 
@@ -207,7 +235,7 @@ export const search = api(
 
       results.push({
         id,
-        content: row.content as string,
+        content: rowContent,
         category: row.category as string,
         similarity,
         memoryType: row.memory_type as MemoryType,
@@ -217,6 +245,7 @@ export const search = api(
         tags: (row.tags as string[]) || [],
         sourceRepo: (row.source_repo as string) || undefined,
         createdAt: String(row.created_at),
+        trustLevel,
       });
     }
 
@@ -239,27 +268,29 @@ export const store = api(
   { method: "POST", path: "/memory/store", expose: true, auth: true },
   async (req: StoreRequest): Promise<StoreResponse> => {
     // Sanitize content before storing (OWASP ASI06)
-    const content = sanitize(req.content);
+    const content = sanitizeForMemory(req.content);
+    const contentHash = hashContent(content);
     const embedding = await embed(content);
     const vec = `[${embedding.join(",")}]`;
     const memoryType = req.memoryType || "general";
     const ttlDays = req.ttlDays ?? 90;
     const pinned = req.pinned ?? false;
     const tags = req.tags ?? [];
+    const trustLevel = req.trustLevel ?? "user";
     const relevanceScore = calculateImportanceScore(memoryType as MemoryType, req.category, pinned);
 
     const row = await db.queryRow`
       INSERT INTO memories (
         content, category, conversation_id, linear_task_id, embedding,
         memory_type, source_repo,
-        tags, ttl_days, pinned, relevance_score
+        tags, ttl_days, pinned, relevance_score, content_hash, trust_level
       )
       VALUES (
         ${content}, ${req.category},
         ${req.conversationId || null}, ${req.linearTaskId || null},
         ${vec}::vector,
         ${memoryType}, ${req.sourceRepo || null},
-        ${tags}::text[], ${ttlDays}, ${pinned}, ${relevanceScore}
+        ${tags}::text[], ${ttlDays}, ${pinned}, ${relevanceScore}, ${contentHash}, ${trustLevel}
       )
       RETURNING id
     `;
@@ -276,13 +307,14 @@ export const extract = api(
     if (req.content.length < 50) return { stored: false };
 
     // Sanitize content before storing (OWASP ASI06)
-    const content = sanitize(req.content.substring(0, 5000));
+    const content = sanitizeForMemory(req.content.substring(0, 5000));
+    const contentHash = hashContent(content);
     const embedding = await embed(content);
     const vec = `[${embedding.join(",")}]`;
 
     await db.exec`
-      INSERT INTO memories (content, category, conversation_id, linear_task_id, embedding, memory_type)
-      VALUES (${content}, ${req.category}, ${req.conversationId}, ${req.linearTaskId || null}, ${vec}::vector, 'session')
+      INSERT INTO memories (content, category, conversation_id, linear_task_id, embedding, memory_type, content_hash, trust_level)
+      VALUES (${content}, ${req.category}, ${req.conversationId}, ${req.linearTaskId || null}, ${vec}::vector, 'session', ${contentHash}, 'agent')
     `;
 
     return { stored: true };
@@ -320,8 +352,10 @@ export const consolidate = api(
       for (const t of row.tags || []) allTags.add(t);
     }
 
-    // Combine content and generate new embedding
-    const combined = contents.join("\n\n---\n\n");
+    // Combine content, sanitize, and generate new embedding
+    const rawCombined = contents.join("\n\n---\n\n");
+    const combined = sanitizeForMemory(rawCombined.substring(0, 10000));
+    const contentHash = hashContent(combined);
     const embedding = await embed(combined);
     const vec = `[${embedding.join(",")}]`;
     const tags = Array.from(allTags);
@@ -330,12 +364,12 @@ export const consolidate = api(
     const newRow = await db.queryRow`
       INSERT INTO memories (
         content, category, embedding, memory_type, tags,
-        source_repo, consolidated_from, pinned
+        source_repo, consolidated_from, pinned, content_hash, trust_level
       )
       VALUES (
-        ${combined.substring(0, 10000)}, ${category}, ${vec}::vector,
+        ${combined}, ${category}, ${vec}::vector,
         'decision', ${tags}::text[], ${sourceRepo},
-        ${req.memoryIds}::uuid[], true
+        ${req.memoryIds}::uuid[], true, ${contentHash}, 'agent'
       )
       RETURNING id
     `;
@@ -549,8 +583,10 @@ interface SearchPatternsResponse {
 export const storePattern = api(
   { method: "POST", path: "/memory/store-pattern", expose: false },
   async (req: StorePatternRequest): Promise<StorePatternResponse> => {
-    const problemEmbedding = await embed(req.problemDescription);
-    const solutionEmbedding = await embed(req.solutionDescription);
+    const problemDescription = sanitizeForMemory(req.problemDescription);
+    const solutionDescription = sanitizeForMemory(req.solutionDescription);
+    const problemEmbedding = await embed(problemDescription);
+    const solutionEmbedding = await embed(solutionDescription);
     const problemVec = `[${problemEmbedding.join(",")}]`;
     const solutionVec = `[${solutionEmbedding.join(",")}]`;
     const tags = req.tags ?? [];
@@ -565,7 +601,7 @@ export const storePattern = api(
       )
       VALUES (
         ${req.patternType}, ${req.sourceRepo}, ${req.sourceTaskId || null},
-        ${req.problemDescription}, ${req.solutionDescription},
+        ${problemDescription}, ${solutionDescription},
         ${filesAffected}::text[], ${req.codeBefore || null}, ${req.codeAfter || null},
         ${problemVec}::vector, ${solutionVec}::vector, ${tags}::text[],
         ${req.componentId ?? null}::uuid

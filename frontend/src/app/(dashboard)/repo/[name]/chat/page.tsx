@@ -26,7 +26,7 @@ import { SkillsSelector, MessageSkillBadges } from "@/components/SkillsSelector"
 import { ChatToolsMenu } from "@/components/ChatToolsMenu";
 import { InlineSkillForm } from "@/components/InlineSkillForm";
 import { LivePreview } from "@/components/LivePreview";
-import { AgentStatus } from "@/components/AgentStatus";
+import { AgentStatus, parseAgentStatusContent } from "@/components/AgentStatus";
 import { ChatMessage } from "@/components/ChatMessage";
 import { usePreferences, useUser } from "@/contexts/UserPreferencesContext";
 import { MagicIcon, magicPhrases } from "@/components/MagicIcon";
@@ -304,10 +304,9 @@ export default function RepoChatPage() {
     const statusMsgs = messages.filter(m => m.messageType === "agent_status");
     if (statusMsgs.length === 0) return null;
     const last = statusMsgs[statusMsgs.length - 1];
-    try {
-      const parsed = JSON.parse(last.content);
-      if (parsed.type === "agent_status") return { ...parsed, messageId: last.id, metadata: last.metadata };
-    } catch {}
+    // Use typed parser — handles new contract + legacy format
+    const parsed = parseAgentStatusContent(last.content);
+    if (parsed) return { ...parsed, messageId: last.id, metadata: last.metadata };
     return null;
   }, [messages, statusOverride, statusDismissed]);
 

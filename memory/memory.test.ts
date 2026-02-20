@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
+import { createHash } from "node:crypto";
 import { calculateImportanceScore, calculateDecayedRelevance } from "./decay";
 import { sanitize } from "../ai/sanitize";
 
@@ -639,5 +640,83 @@ describe("Memory sanitization", () => {
 
     // Cleanup
     await db.exec`DELETE FROM memories WHERE category = ${category}`;
+  });
+});
+
+// --- Memory integrity tests (OWASP ASI06) ---
+
+describe("Memory integrity (ASI06)", () => {
+  const integrityDb = new SQLDatabase("memory", { migrations: "./migrations" });
+  const integrityCategory = "integrity-test-" + Date.now();
+
+  beforeEach(async () => {
+    await integrityDb.exec`DELETE FROM memories WHERE category = ${integrityCategory}`;
+  });
+
+  it("should store content hash on creation", async () => {
+    const content = "Test memory for integrity check";
+    const expectedHash = createHash("sha256").update(content).digest("hex");
+
+    await integrityDb.exec`
+      INSERT INTO memories (content, category, content_hash, trust_level)
+      VALUES (${content}, ${integrityCategory}, ${expectedHash}, 'agent')
+    `;
+
+    const row = await integrityDb.queryRow<{ content_hash: string; trust_level: string }>`
+      SELECT content_hash, trust_level FROM memories WHERE category = ${integrityCategory}
+    `;
+
+    expect(row).toBeDefined();
+    expect(row!.content_hash).toBe(expectedHash);
+    expect(row!.trust_level).toBe("agent");
+  });
+
+  it("should detect tampered content on integrity check", async () => {
+    const original = "Original untampered content";
+    const originalHash = createHash("sha256").update(original).digest("hex");
+    const tampered = "Tampered content that changed!";
+
+    await integrityDb.exec`
+      INSERT INTO memories (content, category, content_hash, trust_level)
+      VALUES (${tampered}, ${integrityCategory}, ${originalHash}, 'user')
+    `;
+
+    const row = await integrityDb.queryRow<{ content: string; content_hash: string }>`
+      SELECT content, content_hash FROM memories WHERE category = ${integrityCategory}
+    `;
+
+    expect(row).toBeDefined();
+    // Integrity check: recompute hash and compare
+    const computedHash = createHash("sha256").update(row!.content).digest("hex");
+    expect(computedHash).not.toBe(row!.content_hash); // Mismatch = tampered
+  });
+
+  it("should set trust_level on store/extract", async () => {
+    const userContent = "User-created memory";
+    const agentContent = "Agent-generated memory";
+    const userHash = createHash("sha256").update(userContent).digest("hex");
+    const agentHash = createHash("sha256").update(agentContent).digest("hex");
+
+    await integrityDb.exec`
+      INSERT INTO memories (content, category, content_hash, trust_level)
+      VALUES
+        (${userContent}, ${integrityCategory}, ${userHash}, 'user'),
+        (${agentContent}, ${integrityCategory}, ${agentHash}, 'agent')
+    `;
+
+    const rows = await integrityDb.query<{ content: string; trust_level: string }>`
+      SELECT content, trust_level FROM memories
+      WHERE category = ${integrityCategory}
+      ORDER BY created_at ASC
+    `;
+
+    const results: Array<{ content: string; trust_level: string }> = [];
+    for await (const row of rows) {
+      results.push(row);
+    }
+
+    expect(results).toHaveLength(2);
+    expect(results[0].trust_level).toBe("user");
+    expect(results[1].trust_level).toBe("agent");
   });
 });

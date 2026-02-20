@@ -25,6 +25,10 @@ export const agentReports = new Topic<AgentReport>("agent-reports", {
   deliveryGuarantee: "at-least-once",
 });
 
+// --- Agent Message Parser (cross-service boundary — types duplicated from agent/messages.ts) ---
+
+import { deserializeMessage, mapReportStatusToPhase, buildStatusContent } from "./agent-message-parser";
+
 // Subscribe to agent reports and UPDATE existing agent_status (not create new agent_report)
 const _ = new Subscription(agentReports, "store-agent-report", {
   handler: async (report) => {
@@ -33,28 +37,60 @@ const _ = new Subscription(agentReports, "store-agent-report", {
     console.log("[DEBUG-AF] conversationId:", report.conversationId);
     console.log("[DEBUG-AF] content:", report.content?.substring(0, 200));
 
-    // Check if content is structured JSON (from reportSteps)
     let statusContent: string;
+    const agentMsg = deserializeMessage(report.content);
 
-    try {
-      const parsed = JSON.parse(report.content);
-      if (parsed.type === "agent_thought") {
-        // Agent thought — store as separate message, don't update agent_status
-        await db.exec`
-          INSERT INTO messages (conversation_id, role, content, message_type, metadata)
-          VALUES (${report.conversationId}, 'assistant', ${parsed.thought}, 'agent_thought',
-                  ${JSON.stringify({ taskId: report.taskId, timestamp: parsed.timestamp })}::jsonb)
-        `;
-        return;
-      } else if (parsed.type === "agent_status") {
-        // Already structured — use directly
-        statusContent = report.content;
-      } else {
-        // JSON but not agent_status — treat as legacy
-        statusContent = buildLegacyStatusContent(report);
+    if (agentMsg) {
+      switch (agentMsg.type) {
+        case "thought":
+          // Store ONLY the text, not JSON — fixes raw JSON in chat bubbles
+          await db.exec`
+            INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+            VALUES (${report.conversationId}, 'assistant', ${agentMsg.text}, 'agent_thought',
+                    ${JSON.stringify({ taskId: report.taskId, timestamp: agentMsg.timestamp })}::jsonb)
+          `;
+          return;
+
+        case "status":
+          // Use full serialized message as agent_status content
+          statusContent = report.content;
+          break;
+
+        case "report":
+          // Plain text report — convert to status format for UI
+          statusContent = buildStatusContent(
+            mapReportStatusToPhase(agentMsg.status),
+            [{ label: agentMsg.text.substring(0, 80), status: agentMsg.status === "working" ? "active" : "done" }],
+          );
+          break;
+
+        case "clarification":
+          statusContent = report.content;
+          break;
+
+        case "review":
+          statusContent = report.content;
+          break;
+
+        case "completion":
+          // Store as persistent chat message + update status to "Ferdig"
+          await db.exec`
+            INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+            VALUES (${report.conversationId}, 'assistant', ${agentMsg.text}, 'chat',
+                    ${JSON.stringify({ taskId: report.taskId, type: "completion", prUrl: agentMsg.prUrl })}::jsonb)
+          `;
+          statusContent = buildStatusContent("Ferdig", [
+            { label: "Oppgave fullført", status: "done" },
+          ]);
+          break;
+
+        default:
+          // Unknown new type — fall through to legacy
+          statusContent = buildLegacyStatusContent(report);
+          break;
       }
-    } catch {
-      // Not JSON — legacy format, convert
+    } else {
+      // Legacy fallback — KEEP existing buildLegacyStatusContent()
       statusContent = buildLegacyStatusContent(report);
     }
 
@@ -74,7 +110,7 @@ const _ = new Subscription(agentReports, "store-agent-report", {
     `;
 
     if (existing) {
-      // UPDATE existing agent_status
+      // UPDATE existing agent_status (single update path — prevents duplicates)
       await db.exec`
         UPDATE messages
         SET content = ${statusContent}, metadata = ${metadata}::jsonb, updated_at = NOW()
@@ -384,6 +420,9 @@ async function verifyConversationAccess(conversationId: string): Promise<void> {
     SELECT owner_email FROM conversations WHERE id = ${conversationId}
   `;
 
+  // Null ownership = allow. System conversations (from Pub/Sub subscribers like
+  // agent_status, build-progress, task-events) don't have ownership records
+  // and need to be accessible for AgentStatus/activity rendering.
   if (existing && existing.owner_email !== auth.email) {
     throw APIError.permissionDenied("du har ikke tilgang til denne samtalen");
   }
@@ -427,9 +466,13 @@ export const send = api(
           ORDER BY created_at DESC LIMIT 1
         `;
         if (agentStatusMsg) {
-          const parsed = JSON.parse(agentStatusMsg.content);
+          const agentParsed = deserializeMessage(agentStatusMsg.content);
           const meta = typeof agentStatusMsg.metadata === "string" ? JSON.parse(agentStatusMsg.metadata) : agentStatusMsg.metadata;
-          if (parsed.phase === "Venter" && !parsed.reviewData && meta?.taskId) {
+          // Detect clarification: new format "clarification" type OR legacy "Venter" phase without reviewData
+          const isClarification = agentParsed?.type === "clarification"
+            || (agentParsed?.type === "status" && agentParsed.phase === "needs_input")
+            || (!agentParsed && (() => { try { const p = JSON.parse(agentStatusMsg.content); return p.phase === "Venter" && !p.reviewData; } catch { return false; } })());
+          if (isClarification && meta?.taskId) {
             // Route to agent as clarification response
             const { agent: agentClient } = await import("~encore/clients");
             await agentClient.respondToClarification({
@@ -541,12 +584,10 @@ export const send = api(
                 'task_start', ${JSON.stringify({ taskId: req.linearTaskId })})
       `;
 
-      // Create initial agent_status message for immediate frontend rendering
-      const initialStatus = JSON.stringify({
-        type: "agent_status",
-        phase: "Forbereder",
-        steps: [{ label: "Starter oppgave...", status: "active" }],
-      });
+      // Create initial agent_status message for immediate frontend rendering (new contract)
+      const initialStatus = buildStatusContent("Forbereder", [
+        { label: "Starter oppgave...", status: "active" },
+      ]);
       await db.exec`
         INSERT INTO messages (conversation_id, role, content, message_type, metadata)
         VALUES (${req.conversationId}, 'assistant', ${initialStatus}, 'agent_status',
@@ -935,8 +976,8 @@ export const conversations = api(
         GROUP BY conversation_id
       ) latest ON m.conversation_id = latest.conversation_id
                 AND m.created_at = latest.max_created
-      LEFT JOIN conversations c ON c.id = m.conversation_id
-      WHERE c.owner_email = ${auth.email} OR c.id IS NULL
+      INNER JOIN conversations c ON c.id = m.conversation_id
+      WHERE c.owner_email = ${auth.email}
       ORDER BY m.created_at DESC
       LIMIT 50
     `;
@@ -1269,7 +1310,7 @@ export const deleteConversation = api(
       SELECT owner_email FROM conversations WHERE id = ${req.conversationId}
     `;
 
-    if (conv && conv.owner_email !== auth.email) {
+    if (!conv || conv.owner_email !== auth.email) {
       throw APIError.permissionDenied("du har ikke tilgang til denne samtalen");
     }
 

@@ -1,4 +1,14 @@
-export type TemplateCategory = "auth" | "api" | "ui" | "database" | "payment" | "form";
+export type TemplateCategory =
+  | "auth"
+  | "api"
+  | "ui"
+  | "database"
+  | "payment"
+  | "form"
+  | "email"
+  | "devops"
+  | "notification"
+  | "storage";
 
 export interface TemplateFile {
   path: string;

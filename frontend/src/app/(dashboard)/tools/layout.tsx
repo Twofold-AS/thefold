@@ -14,6 +14,7 @@ const TABS = [
   { label: "Observability", href: "/tools/observability" },
   { label: "Secrets", href: "/tools/secrets" },
   { label: "Templates", href: "/tools/templates" },
+  { label: "Kostnader", href: "/tools/costs" },
 ];
 
 export default function ToolsLayout({ children }: { children: React.ReactNode }) {

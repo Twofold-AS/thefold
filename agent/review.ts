@@ -6,6 +6,13 @@ import { agentReports } from "../chat/chat";
 import { db } from "./db";
 import { executeTask } from "./agent";
 import type { CodeReview, ReviewFile, AIReviewData, AgentExecutionContext } from "./types";
+import {
+  serializeMessage,
+  buildReviewMessage,
+  buildStatusMessage,
+  buildReportMessage,
+  buildCompletionMessage,
+} from "./messages";
 
 // Extract repo name from conversation_id format: "repo-{REPONAME}-{UUID}"
 function extractRepoFromConversationId(convId: string): string {
@@ -51,28 +58,26 @@ export async function submitReviewInternal(params: SubmitReviewParams): Promise<
 
   if (!row) throw new Error("Failed to insert code review");
 
-  // Notify chat about pending review — structured JSON for AgentStatus rendering
-  const firstFile = params.filesChanged[0]?.path || params.taskId;
+  // Notify chat about pending review — typed review message
+  const reviewMsg = buildReviewMessage(
+    "pending_review",
+    {
+      reviewId: row.id,
+      quality: params.aiReview.qualityScore,
+      filesChanged: params.filesChanged.length,
+      concerns: params.aiReview.concerns,
+      reviewUrl: `/review/${row.id}`,
+    },
+    [
+      { label: "Kode skrevet", status: "done" },
+      { label: "Validert", status: "done" },
+      { label: "Venter pa godkjenning", status: "active" },
+    ],
+  );
   await agentReports.publish({
     conversationId: params.conversationId,
     taskId: params.taskId,
-    content: JSON.stringify({
-      type: "agent_status",
-      phase: "Venter",
-      title: `Review: ${firstFile}`,
-      reviewData: {
-        reviewId: row.id,
-        quality: params.aiReview.qualityScore,
-        filesChanged: params.filesChanged.length,
-        concerns: params.aiReview.concerns,
-        reviewUrl: `/review/${row.id}`,
-      },
-      steps: [
-        { label: "Kode skrevet", status: "done" },
-        { label: "Validert", status: "done" },
-        { label: "Venter pa godkjenning", status: "active" },
-      ],
-    }),
+    content: serializeMessage(reviewMsg),
     status: "needs_input",
   });
 
@@ -347,21 +352,16 @@ export const approveReview = api(
       }
       // Send failure status to chat before re-throwing
       try {
+        const failMsg = buildStatusMessage("failed", [
+          { label: "Kode skrevet", status: "done" },
+          { label: "Validert", status: "done" },
+          { label: "Review godkjent", status: "done" },
+          { label: "PR opprettelse", status: "error" },
+        ], { title: "PR-opprettelse feilet", error: msg });
         await agentReports.publish({
           conversationId: review.conversationId,
           taskId: review.taskId,
-          content: JSON.stringify({
-            type: "agent_status",
-            phase: "Feilet",
-            title: "PR-opprettelse feilet",
-            error: msg,
-            steps: [
-              { label: "Kode skrevet", status: "done" },
-              { label: "Validert", status: "done" },
-              { label: "Review godkjent", status: "done" },
-              { label: "PR opprettelse", status: "error" },
-            ],
-          }),
+          content: serializeMessage(failMsg),
           status: "failed",
         });
         await tasks.updateTaskStatus({ id: review.taskId, status: "blocked", errorMessage: `PR feilet: ${msg}` });
@@ -432,20 +432,16 @@ export const approveReview = api(
       qualityScore != null ? `Kvalitet: ${qualityScore}/10` : "",
     ].filter(Boolean).join("\n");
 
+    const doneMsg = buildStatusMessage("completed", [
+      { label: "Kode skrevet", status: "done" },
+      { label: "Validert", status: "done" },
+      { label: "Review godkjent", status: "done" },
+      { label: prLabel, status: "done" },
+    ], { title: titleMsg });
     await agentReports.publish({
       conversationId: review.conversationId,
       taskId: review.taskId,
-      content: JSON.stringify({
-        type: "agent_status",
-        phase: "Ferdig",
-        title: titleMsg,
-        steps: [
-          { label: "Kode skrevet", status: "done" },
-          { label: "Validert", status: "done" },
-          { label: "Review godkjent", status: "done" },
-          { label: prLabel, status: "done" },
-        ],
-      }),
+      content: serializeMessage(doneMsg),
       status: "completed",
       prUrl: pr.url,
       filesChanged: review.filesChanged.map((f) => f.path),
@@ -541,10 +537,14 @@ export const requestChanges = api(
     });
 
     // Notify chat
+    const changesMsg = buildReportMessage(
+      `Endringer etterspurt:\n\n${req.feedback}\n\nAgenten jobber med oppdateringer...`,
+      "working",
+    );
     await agentReports.publish({
       conversationId: review.conversationId,
       taskId: review.taskId,
-      content: `Endringer etterspurt:\n\n${req.feedback}\n\nAgenten jobber med oppdateringer...`,
+      content: serializeMessage(changesMsg),
       status: "working",
     });
 
@@ -598,21 +598,16 @@ export const rejectReview = api(
       // Task update is optional
     }
 
-    // Notify chat — structured "Feilet" status
+    // Notify chat — typed "failed" status
+    const rejectMsg = buildStatusMessage("failed", [
+      { label: "Kode skrevet", status: "done" },
+      { label: "Validert", status: "done" },
+      { label: "Review avvist", status: "error" },
+    ], { title: "Review avvist", error: req.reason || "Avvist av bruker" });
     await agentReports.publish({
       conversationId: row.conversation_id,
       taskId: row.task_id,
-      content: JSON.stringify({
-        type: "agent_status",
-        phase: "Feilet",
-        title: "Review avvist",
-        error: req.reason || "Avvist av bruker",
-        steps: [
-          { label: "Kode skrevet", status: "done" },
-          { label: "Validert", status: "done" },
-          { label: "Review avvist", status: "error" },
-        ],
-      }),
+      content: serializeMessage(rejectMsg),
       status: "failed",
     });
 

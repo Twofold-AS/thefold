@@ -5,6 +5,7 @@ import { execSync, exec } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+import log from "encore.dev/log";
 import {
   createDockerSandbox,
   execInDocker,
@@ -13,9 +14,11 @@ import {
   destroyDockerSandbox,
   cleanupOldContainers,
 } from "./docker";
+import { takeSnapshot, takeDockerSnapshot, compareSnapshots, type FileSnapshot, type SnapshotDiff } from "./snapshot";
 
 const githubToken = secret("GitHubToken");
 const sandboxMode = secret("SandboxMode"); // "docker" | "filesystem"
+const SandboxAdvancedPipeline = secret("SandboxAdvancedPipeline");
 
 // --- Mode helper ---
 
@@ -32,6 +35,9 @@ function getSandboxMode(): "docker" | "filesystem" {
 // Sandboxes are directories on the VPS, isolated by unique IDs
 // In production, use Docker containers for full isolation
 const SANDBOX_ROOT = "/tmp/thefold-sandboxes";
+
+// In-memory snapshot cache (sandboxId → before-snapshot)
+const snapshotCache = new Map<string, Map<string, FileSnapshot>>();
 
 // --- Types ---
 
@@ -117,6 +123,21 @@ export const create = api(
         ref: req.ref,
         githubToken: githubToken(),
       });
+
+      // Ta "before" snapshot for Docker mode
+      const advancedEnabled = SandboxAdvancedPipeline();
+      if (advancedEnabled === "true") {
+        try {
+          const runner = dockerRunner(id);
+          const snapshot = await takeDockerSnapshot(runner);
+          snapshotCache.set(id, snapshot);
+          log.info("docker snapshot taken", { sandboxId: id, fileCount: snapshot.size });
+        } catch (err) {
+          log.warn("docker snapshot capture failed", { sandboxId: id, error: String(err) });
+          // Non-critical — continue without snapshot
+        }
+      }
+
       return { id };
     }
 
@@ -179,6 +200,20 @@ export const create = api(
           cwd: `${dir}/repo`,
           timeout: 120_000,
         });
+      }
+
+      // Ta "before" snapshot for fremtidig sammenligning
+      const advancedEnabled = SandboxAdvancedPipeline();
+      if (advancedEnabled === "true") {
+        try {
+          const repoDir = path.join(dir, "repo");
+          const snapshot = takeSnapshot(repoDir);
+          snapshotCache.set(id, snapshot);
+          log.info("sandbox snapshot taken", { sandboxId: id, fileCount: snapshot.size });
+        } catch (err) {
+          log.warn("snapshot capture failed", { sandboxId: id, error: String(err) });
+          // Non-critical — continue without snapshot
+        }
       }
     } catch (error) {
       // Clean up on failure
@@ -455,26 +490,204 @@ async function runTests(run: CommandRunner, repoDir: string, isDocker: boolean):
   return { step: "test", success: errors.length === 0, errors, warnings, metrics };
 }
 
-async function runSnapshotComparison(): Promise<ValidationStepResult> {
-  return { step: "snapshot", success: true, errors: [], warnings: ["Snapshot comparison not yet enabled"] };
+async function runSnapshotComparison(
+  run: CommandRunner,
+  repoDir: string,
+  isDocker: boolean,
+  sandboxId: string,
+): Promise<ValidationStepResult> {
+  const advancedEnabled = SandboxAdvancedPipeline();
+  if (advancedEnabled !== "true") {
+    return { step: "snapshot", success: true, errors: [], warnings: ["Snapshot comparison disabled by feature flag"] };
+  }
+
+  const beforeSnapshot = snapshotCache.get(sandboxId);
+  if (!beforeSnapshot) {
+    return { step: "snapshot", success: true, errors: [], warnings: ["No before-snapshot available — skipped"] };
+  }
+
+  try {
+    // Ta "after" snapshot
+    let afterSnapshot: Map<string, FileSnapshot>;
+    if (isDocker) {
+      afterSnapshot = await takeDockerSnapshot(run);
+    } else {
+      afterSnapshot = takeSnapshot(repoDir);
+    }
+
+    const diff = compareSnapshots(beforeSnapshot, afterSnapshot);
+
+    // Rydd opp cached snapshot
+    snapshotCache.delete(sandboxId);
+
+    const warnings: string[] = [];
+
+    // Rapporter diff
+    if (diff.created.length > 0) {
+      warnings.push(`Created ${diff.created.length} files: ${diff.created.slice(0, 10).join(", ")}${diff.created.length > 10 ? ` (+${diff.created.length - 10} more)` : ""}`);
+    }
+    if (diff.modified.length > 0) {
+      warnings.push(`Modified ${diff.modified.length} files: ${diff.modified.slice(0, 10).join(", ")}${diff.modified.length > 10 ? ` (+${diff.modified.length - 10} more)` : ""}`);
+    }
+    if (diff.deleted.length > 0) {
+      warnings.push(`Deleted ${diff.deleted.length} files: ${diff.deleted.join(", ")}`);
+    }
+    warnings.push(`Unchanged: ${diff.unchanged} files. Net diff: ${(diff.totalDiffBytes / 1024).toFixed(1)}KB`);
+
+    // Stor diff = advarsel (men ikke feil)
+    const errors: string[] = [];
+    if (diff.created.length + diff.modified.length > 50) {
+      warnings.push("⚠️ Large change set (>50 files) — review carefully");
+    }
+
+    log.info("snapshot comparison complete", {
+      sandboxId,
+      created: diff.created.length,
+      modified: diff.modified.length,
+      deleted: diff.deleted.length,
+      unchanged: diff.unchanged,
+    });
+
+    return {
+      step: "snapshot",
+      success: true, // Snapshot er aldri en blokkerende feil
+      errors,
+      warnings,
+      metrics: {
+        filesCreated: diff.created.length,
+        filesModified: diff.modified.length,
+        filesDeleted: diff.deleted.length,
+        filesUnchanged: diff.unchanged,
+        totalDiffBytes: diff.totalDiffBytes,
+      },
+    };
+  } catch (err) {
+    log.warn("snapshot comparison failed", { sandboxId, error: String(err) });
+    return { step: "snapshot", success: true, errors: [], warnings: [`Snapshot failed: ${String(err)}`] };
+  }
 }
 
-async function runPerformanceBenchmark(): Promise<ValidationStepResult> {
-  return { step: "performance", success: true, errors: [], warnings: ["Performance benchmarks not yet enabled"] };
+async function runPerformanceBenchmark(
+  run: CommandRunner,
+  repoDir: string,
+  isDocker: boolean,
+): Promise<ValidationStepResult> {
+  const advancedEnabled = SandboxAdvancedPipeline();
+  if (advancedEnabled !== "true") {
+    return { step: "performance", success: true, errors: [], warnings: ["Performance benchmarks disabled by feature flag"] };
+  }
+
+  const warnings: string[] = [];
+  const metrics: Record<string, number> = {};
+
+  try {
+    // 1. Sjekk om build-script finnes
+    let hasBuildScript = false;
+    if (!isDocker) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(repoDir, "package.json"), "utf-8"));
+        hasBuildScript = !!pkg.scripts?.build;
+      } catch { /* no package.json */ }
+    } else {
+      const check = await run(`node -e "const p=require('./package.json'); process.exit(p.scripts?.build ? 0 : 1)"`, 5_000);
+      hasBuildScript = check.exitCode === 0;
+    }
+
+    // 2. Kjør build og mål tid
+    if (hasBuildScript) {
+      const buildStart = Date.now();
+      const buildResult = await run("npm run build", 120_000);
+      const buildDuration = Date.now() - buildStart;
+
+      metrics.buildDurationMs = buildDuration;
+
+      if (buildResult.exitCode === 0) {
+        warnings.push(`Build completed in ${(buildDuration / 1000).toFixed(1)}s`);
+
+        // 3. Mål bundle-størrelse (sjekk vanlige output-mapper)
+        const bundleDirs = ["dist", "build", ".next", "out"];
+        for (const dir of bundleDirs) {
+          try {
+            let sizeResult;
+            if (isDocker) {
+              sizeResult = await run(`du -sk /workspace/repo/${dir} 2>/dev/null | cut -f1`, 5_000);
+            } else {
+              sizeResult = await run(`du -sk ${path.join(repoDir, dir)} 2>/dev/null | cut -f1`, 5_000);
+            }
+
+            if (sizeResult.exitCode === 0 && sizeResult.stdout.trim()) {
+              const sizeKb = parseInt(sizeResult.stdout.trim());
+              if (!isNaN(sizeKb) && sizeKb > 0) {
+                metrics.bundleSizeKb = sizeKb;
+                warnings.push(`Bundle size (${dir}/): ${sizeKb}KB`);
+                break;
+              }
+            }
+          } catch {
+            // Dir finnes ikke — prøv neste
+          }
+        }
+      } else {
+        warnings.push(`Build failed after ${(buildDuration / 1000).toFixed(1)}s`);
+        metrics.buildFailed = 1;
+      }
+    } else {
+      warnings.push("No build script found — skipped build benchmark");
+    }
+
+    // 4. Mål antall filer og total kodelinjer (rask metrikk)
+    try {
+      let countResult;
+      if (isDocker) {
+        countResult = await run(
+          `find /workspace/repo -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' | ` +
+          `grep -v node_modules | grep -v .next | wc -l`,
+          10_000
+        );
+      } else {
+        countResult = await run(
+          `find ${repoDir} -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' | ` +
+          `grep -v node_modules | grep -v .next | wc -l`,
+          10_000
+        );
+      }
+
+      if (countResult.exitCode === 0) {
+        const fileCount = parseInt(countResult.stdout.trim());
+        if (!isNaN(fileCount)) {
+          metrics.sourceFileCount = fileCount;
+          warnings.push(`Source files: ${fileCount}`);
+        }
+      }
+    } catch { /* ignore count errors */ }
+
+    log.info("performance benchmark complete", { metrics });
+
+    return {
+      step: "performance",
+      success: true, // Benchmarks er aldri blokkerende
+      errors: [],
+      warnings,
+      metrics,
+    };
+  } catch (err) {
+    log.warn("performance benchmark failed", { error: String(err) });
+    return { step: "performance", success: true, errors: [], warnings: [`Benchmark failed: ${String(err)}`] };
+  }
 }
 
 interface PipelineStep {
   name: string;
   enabled: boolean;
-  run: (runner: CommandRunner, repoDir: string, isDocker: boolean) => Promise<ValidationStepResult>;
+  run: (runner: CommandRunner, repoDir: string, isDocker: boolean, sandboxId?: string) => Promise<ValidationStepResult>;
 }
 
 const VALIDATION_PIPELINE: PipelineStep[] = [
   { name: "typecheck", enabled: true, run: (r, d, docker) => runTypeCheck(r, d, docker) },
   { name: "lint", enabled: true, run: (r, d, docker) => runLint(r, d, docker) },
   { name: "test", enabled: true, run: (r, d, docker) => runTests(r, d, docker) },
-  { name: "snapshot", enabled: false, run: () => runSnapshotComparison() },
-  { name: "performance", enabled: false, run: () => runPerformanceBenchmark() },
+  { name: "snapshot", enabled: true, run: (r, d, docker, sid) => runSnapshotComparison(r, d, docker, sid!) },
+  { name: "performance", enabled: true, run: (r, d, docker) => runPerformanceBenchmark(r, d, docker) },
 ];
 
 // Validate the sandbox code via pipeline
@@ -493,12 +706,12 @@ export const validate = api(
 
     for (const step of VALIDATION_PIPELINE) {
       if (!step.enabled) {
-        const stub = await step.run(runner, repoDir, isDocker);
+        const stub = await step.run(runner, repoDir, isDocker, req.sandboxId);
         steps.push(stub);
         continue;
       }
 
-      const result = await step.run(runner, repoDir, isDocker);
+      const result = await step.run(runner, repoDir, isDocker, req.sandboxId);
       steps.push(result);
       allErrors.push(...result.errors);
     }
@@ -649,6 +862,9 @@ export const validateIncremental = api(
 export const destroy = api(
   { method: "POST", path: "/sandbox/destroy", expose: false },
   async (req: DestroyRequest): Promise<DestroyResponse> => {
+    // Rydd snapshot-cache
+    snapshotCache.delete(req.sandboxId);
+
     if (getSandboxMode() === "docker") {
       await destroyDockerSandbox(req.sandboxId);
       return { destroyed: true };

@@ -1,6 +1,6 @@
 # TheFold — Grunnmur-status og aktiveringsplan
 
-> Sist oppdatert: 17. februar 2026 (Prompt BC: agent_thought JSON-parse, review-boks polling-fix, repo-filter reviews, prep-steg fjernet, sub-tasks i status-boks, full-width reviews, TheFold Brand font, animasjoner fjernet)
+> Sist oppdatert: 20. februar 2026 (Prompt XS: E2E Mock Tests — 12 nye tester, totalt 490 tester hvorav 466 passerer, 20 feiler, 4 skippet)
 > Formål: Oversikt over alt som er bygget inn i arkitekturen, hva som er aktivt,
 > hva som er stubbet, og hva som trengs for å aktivere hver feature.
 
@@ -39,6 +39,8 @@
 | source_repo | TEXT | 🟢 | search-filter, consolidate | — |
 | ~~source_task_id~~ | ~~TEXT~~ | ❌ FJERNET | Droppet i migrasjon 4 (Prompt AE) | — |
 | tags | TEXT[] | 🟢 | search-filter (in-memory), consolidate | Flytt til SQL GIN-filter for ytelse |
+| content_hash | TEXT | 🟢 | search() integrity check (ASI06) | SHA-256 av innhold, NULL for eldre rader |
+| trust_level | TEXT | 🟢 | store/extract/search/consolidate (ASI06) | user/agent/system — satt automatisk, prefiks i AI-kontekst |
 
 ### Database-felter — code_patterns
 
@@ -129,6 +131,17 @@
 | collectOnly-modus | 🟢 | Når `collectOnly=true`: stopper etter validering, returnerer `filesContent` + `sandboxId`, ingen review/PR/cleanup | Brukes av orchestrator |
 | Auto-init tomme repos | 🟢 | `autoInitRepo()` — oppdager `empty: true` fra getTree, oppretter synlig init-task, pusher README/.gitignore/package.json/tsconfig.json via createPR, re-fetcher tree etterpå | Kjøres automatisk i STEP 2 |
 
+### Sikkerhet — ASI02 (Prompt XM)
+
+| Feature | Status | Fil | Beskrivelse |
+|---------|--------|-----|-------------|
+| GitHub scope-validering | 🟢 | agent/helpers.ts | `validateAgentScope()` — hard block på skriving til feil repo |
+| Rate limiting (timer) | 🟢 | agent/rate-limiter.ts | Maks 20 tasks/time per bruker |
+| Rate limiting (dag) | 🟢 | agent/rate-limiter.ts | Maks 100 tasks/dag per bruker |
+| GitHub write audit | 🟢 | agent/completion.ts | `auditedStep("github_write")` loggfører alle PR-opprettelser |
+| Rate limit cleanup cron | 🟢 | agent/rate-limiter.ts | Sletter records eldre enn 48t, kjører kl 03:00 |
+| Rate limit tabell | 🟢 | agent/migrations/9_create_rate_limits.up.sql | `agent_rate_limits (user_id, window_start, task_count)` |
+
 ### Retry-logikk
 
 | Parameter | Verdi | Beskrivelse |
@@ -136,6 +149,123 @@
 | MAX_RETRIES | 5 | Hovedloop-grense |
 | MAX_PLAN_REVISIONS | 2 | Maks plan-revisjoner ved bad_plan |
 | MAX_FILE_FIX_RETRIES | 2 | Maks fix-retries per fil (inkrementell validering) |
+
+### State Machine (Prompt XA)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| AgentPhase type | 🟢 | 14 eksplisitte faser: idle, preparing, context, confidence, needs_input, planning, building, validating, reviewing, pending_review, creating_pr, completed, failed, stopped |
+| VALID_TRANSITIONS map | 🟢 | Lovlige overgangsregler per fase, validert med 12 tester |
+| createStateMachine() | 🟢 | Factory med transitionTo(), canTransitionTo(), reset(), history tracking |
+| validateSequence() | 🟢 | Validerer en hel sekvens av faser mot overgangsreglene |
+| Feature flag | 🟢 | `AgentStateMachineStrict` Encore secret — "false": logg ulovlige overganger, "true": avvis dem |
+| agent.ts integrering | 🟢 | 23 sm.transitionTo()-kall i executeTask() — alle fase-overganger tracked |
+| ctx.phase | 🟢 | AgentExecutionContext.phase oppdateres etter hver overgang |
+
+### Meldingskontrakt (Prompt XB)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| AgentMessage union type | 🟢 | 6 typer: status, thought, report, clarification, review, completion — diskriminert union i agent/messages.ts |
+| serializeMessage() | 🟢 | Typesafe serialisering av alle meldingstyper til JSON string |
+| deserializeMessage() | 🟢 | Parsing med validering + legacy fallback (agent_status, agent_thought, plain text) |
+| Builder functions | 🟢 | buildStatusMessage, buildThoughtMessage, buildReportMessage, buildClarificationMessage, buildReviewMessage, buildCompletionMessage |
+| agent.ts integrering | 🟢 | report(), think(), reportSteps() bruker typed builders + serializeMessage() |
+| review.ts integrering | 🟢 | 5 agentReports.publish()-kall migrert til typed builders |
+| chat.ts subscriber | 🟢 | deserializeMessage() switch — thought som ren tekst, status/review/clarification som JSON, legacy fallback |
+| chat/agent-message-parser.ts | 🟢 | Dupliserte typer for cross-service grense (Encore-krav) |
+| Frontend parseAgentStatusContent | 🟢 | Unified parser i types.ts — handterer nytt + legacy format |
+| Legacy rollback | 🟢 | Automatisk — deserializeMessage() konverterer gamle formater til nye typer |
+| Tester | 🟢 | 11 tester: roundtrip alle typer, legacy konvertering, null for ugyldig, builders, mapReportStatusToPhase |
+
+### Concurrency Lock (Advisory Lock per Repo)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| acquireRepoLock / releaseRepoLock | 🟢 | pg_try_advisory_lock(hashtext(...)) — non-blocking, session-level |
+| startTask lock | 🟢 | Acquire lock before executeTask(), release in .finally(). Returns "repo_locked" if held |
+| respondToClarification lock | 🟢 | Same pattern — publishes failure via Pub/Sub if locked |
+| forceContinue lock | 🟢 | Same pattern |
+| startProject lock | 🟢 | Acquire lock, throws failedPrecondition if held |
+| Tester | 🟢 | 4 tester: acquire, reentrant, release+reacquire, simultane repos |
+
+### IDOR-fix (Chat Access Control)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| conversations INNER JOIN | 🟢 | LEFT JOIN → INNER JOIN, fjernet OR c.id IS NULL — kun eid conversations vises |
+| deleteConversation guard | 🟢 | !conv \|\| mismatch = deny — blokkerer sletting uten eierskap |
+| verifyConversationAccess kommentar | 🟢 | Forklart hvorfor null ownership = allow (system-samtaler fra Pub/Sub) |
+| Tester | 🟢 | 6 tester: owned list, excluded list, ownership pass/fail, delete guard block/allow |
+
+### Persistent Job Queue (agent_jobs)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| agent_jobs tabell | 🟢 | UUID PK, status-constraint (6 verdier), checkpoint JSONB, cost/tokens tracking |
+| 4 indekser | 🟢 | idx_agent_jobs_status, _task, _repo, _created |
+| AgentJob interface | 🟢 | Fullt typet, camelCase mapping fra snake_case SQL |
+| createJob / startJob | 🟢 | Opprett + sett running med attempts++ |
+| updateJobCheckpoint | 🟢 | Fase + minimal data + kostnadsdelta (akkumulert) |
+| completeJob / failJob | 🟢 | Terminal states med timestamps |
+| findResumableJobs | 🟢 | Finner running jobs <24h, <max_attempts |
+| expireOldJobs | 🟢 | Setter expired på pending/running >7 dager |
+| getActiveJobForRepo | 🟢 | Henter aktiv job per repo (debugging/UI) |
+| AgentPersistentJobs secret | 🟢 | Feature flag ("true"/"false") |
+| Checkpoints i executeTask | 🟢 | 3 steder: context (STEP 2), confidence (STEP 4), building (STEP 6) |
+| completeJob i success-path | 🟢 | Kalles etter review er submitted |
+| failJob i catch-blokk | 🟢 | Kalles ved enhver exception i executeTask |
+| cleanupExpiredJobs endpoint | 🟢 | POST /agent/jobs/cleanup (expose: false) |
+| Cleanup CronJob | 🟢 | "agent-jobs-cleanup", every: "6h" |
+| checkStaleJobs endpoint | 🟢 | POST /agent/jobs/check-stale (expose: true, auth: true) — fail-marker stale jobs |
+| Auto-resume | 🔴 | Bevisst utelatt — krever full context-rebuild (Fase X2) |
+| Tester | 🟢 | 8 tester: create, start, checkpoint, complete, fail, resumable, no-active, cost-akkumulering |
+
+### Token-tracking per fase (agent_phase_metrics)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| agent_phase_metrics tabell | 🟢 | UUID PK, job_id FK (ON DELETE SET NULL), phase/tokens/cost/duration per rad |
+| 4 indekser | 🟢 | idx_phase_metrics_task, _job, _phase, _created |
+| PhaseTracker (in-memory) | 🟢 | createPhaseTracker() — start(), recordAICall(), end(), getAll() |
+| Auto-end ved phase-skifte | 🟢 | start() kaller end() på aktiv fase automatisk |
+| getAll() inkluderer pågående fase | 🟢 | Returnerer snapshot av current phase uten å avslutte den |
+| savePhaseMetrics() | 🟢 | Batch-insert til agent_phase_metrics, ett kall per PhaseMetrics-objekt |
+| getPhaseMetricsSummary() | 🟢 | Aggregert per fase: AVG/SUM/p95 cost, AVG tokens/duration, taskCount |
+| getTaskCostBreakdown() | 🟢 | Full breakdown per task: alle faser med cost/tokens/duration |
+| Integration i executeTask | 🟢 | 6 tracker.start()-kall (preparing/context/confidence/planning/building/reviewing/completing) |
+| recordAICall() på AI-kall | 🟢 | 8 kall: assessConfidence, assessComplexity, planTask, builder, diagnose, revisePlan, planRetry, reviewCode |
+| Save i success-path | 🟢 | savePhaseMetrics() kalles før completeJob() |
+| Save i collectOnly-path | 🟢 | savePhaseMetrics() kalles før tidlig return i orchestrator-modus |
+| Save i catch-blokk | 🟢 | savePhaseMetrics() kalles i catch — kostnadsdata viktig for feilede tasks |
+| Feature-flagget | 🟢 | Persistering skjer bare når ctx.jobId finnes (fra AgentPersistentJobs=true) |
+| GET /agent/metrics/phases | 🟢 | Aggregert per fase, expose: true, auth: true |
+| POST /agent/metrics/task | 🟢 | Per-task kostnadsnedbrytning, expose: true, auth: true |
+| Tester | 🟢 | 8 tester: basic, multi-phase, auto-end, getAll-current, empty, cache-tokens, retry-akkumulering, DB save+retrieve |
+
+### Skills Caching (XF)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| getOrSetSkillsResolve endpoint | 🟢 | POST /cache/skills-resolve (expose: false), 5 min TTL |
+| hashResolveInput() | 🟢 | Stabil nøkkel fra taskType+repo+labels+files (IKKE task-tekst) |
+| Cache-first i resolve() | 🟢 | Try cache → på miss: DB-oppslag → cache-set |
+| Cache-invalidering ved createSkill | 🟢 | `cache.invalidate({ namespace: "skills" })` i try/catch |
+| Cache-invalidering ved updateSkill | 🟢 | `cache.invalidate({ namespace: "skills" })` i try/catch |
+| Cache-invalidering ved toggleSkill | 🟢 | `cache.invalidate({ namespace: "skills" })` i try/catch |
+| Cache-invalidering ved deleteSkill | 🟢 | `cache.invalidate({ namespace: "skills" })` i try/catch |
+| Tester | 🟢 | 3 tester: ulike nøkler, like nøkler (sort-stable), invalidate returnerer deleted-count |
+
+### Kostnads-dashboard (XF)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| /tools/costs side | 🟢 | Periodvelger (1/7/30d), 4 summary-kort, per-fase tabell, task-lookup |
+| getPhaseMetrics(days) | 🟢 | Kaller GET /agent/metrics/phases?days=N |
+| getTaskMetrics(taskId) | 🟢 | Kaller POST /agent/metrics/task med UUID |
+| PhaseMetricsSummary type | 🟢 | phase, totalCostUsd, avgCostUsd, p95CostUsd, totalAiCalls, avgDurationMs, taskCount |
+| TaskCostBreakdown type | 🟢 | taskId, totalCostUsd, totalTokens, totalDurationMs, phases[] |
+| "Kostnader" nav-tab | 🟢 | Lagt til i /tools layout TABS array |
 
 ### Crash Resilience
 
@@ -146,6 +276,66 @@
 | Outer try/catch i executeTask | 🟢 | Fanger alle uventede feil, bruker updateLinearIfExists + reportSteps for failure-rapport |
 | reportSteps helper | 🟢 | Ny funksjon for strukturert steg-rapportering via agentReports Pub/Sub med JSON-payload (step, status, detail) |
 | Agent reports EVERY step | 🟢 | 7 reportSteps-kall gjennom executeTask: start, context, planning, building, validation, review, completion/failure |
+
+### Agent Dekomponering (Fase X2)
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| AgentModular secret (feature flag) | 🟢 | "true" = modulær sti, "false" = legacy inline (default) |
+| agent/context-builder.ts | 🟢 | STEP 2+3+3.5 ekstrahert til egen fil |
+| AgentContext interface | 🟢 | treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings |
+| ContextHelpers interface | 🟢 | Dependency injection for testbarhet (report, think, auditedStep, audit, autoInitRepo, githubBreaker, checkCancelled) |
+| buildContext() funksjon | 🟢 | Kalles fra agent.ts når AgentModular=true |
+| STEP 2: GitHub tree + filer | 🟢 | getTree, autoInitRepo, findRelevantFiles, getFileMetadata/getFile/getFileChunk (context windowing) |
+| STEP 3: Memory + Docs | 🟢 | memory.search (Voyage 429-resilient) + docs.lookupForTask (graceful degradation) |
+| STEP 3.5: MCP tools | 🟢 | mcp.installed() appendet til docsStrings |
+| Konstanter eksportert | 🟢 | SMALL_FILE_THRESHOLD=100, MEDIUM_FILE_THRESHOLD=500, CHUNK_SIZE=100, MAX_CHUNKS_PER_FILE=5 |
+| Legacy sti bevart | 🟢 | if/else i agent.ts — gammel inline kode i else-grenen (fjernes i XK) |
+| State transition delt | 🟢 | sm.transitionTo("context") kjøres etter begge stier |
+| agent/confidence.ts | 🟢 | STEP 4+4.5 ekstrahert til assessAndRoute() |
+| ConfidenceResult interface | 🟢 | shouldContinue, selectedModel, confidenceScore, pauseReason, earlyReturn |
+| ConfidenceHelpers interface | 🟢 | Dependency injection (report, think, reportSteps, auditedStep, audit) |
+| assessAndRoute() funksjon | 🟢 | Kalles fra agent.ts (agentModular=true): empty repo shortcut, ai.assessConfidence, ai.assessComplexity, selectOptimalModel |
+| STEP 4: Confidence assessment | 🟢 | <90→clarification, ≥90+break_down→breakdown, ≥90→proceed |
+| STEP 4.5: Model selection | 🟢 | modelOverride→direkte, manual→pause, auto→assessComplexity+selectOptimalModel |
+| ctx.selectedModel satt | 🟢 | Mutert inne i assessAndRoute() før return |
+| treeArray type fikset | 🟢 | Array<{ path: string; type: string }> (var feilaktig string[] i agent.ts) |
+| Tester | 🟢 | 6 tester: happy path, GitHub-feil, memory-feil, docs-feil, auto-init, MCP tools |
+| agent/execution.ts | 🟢 | STEP 5+5.5+5.6+6+7+retry-loop ekstrahert til executePlan() |
+| ExecutionResult interface | 🟢 | success, filesChanged, sandboxId, planSummary, costUsd, tokensUsed, earlyReturn |
+| ExecutionHelpers interface | 🟢 | Dependency injection (report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker) |
+| executePlan() funksjon | 🟢 | Kalles fra agent.ts (agentModular=true): plan→error_patterns→sub-agents→build→validate→retry |
+| STEP 5: Planning | 🟢 | ai.planTask() via aiBreaker, cost/token tracking, planSummary generering |
+| STEP 5.5: Error patterns | 🟢 | memory.search(memoryType="error_pattern") → ctx.errorPatterns |
+| STEP 5.6: Sub-agents | 🟢 | planSubAgents+executeSubAgents+mergeResults når complexity≥5, audit events |
+| STEP 6: Builder | 🟢 | sandbox.create() eller gjenbruk via options.sandboxId, builder.start() via aiBreaker |
+| STEP 7: Validation | 🟢 | sandbox.validate() → success→break, failure→diagnose |
+| Retry-loop | 🟢 | while(totalAttempts < maxAttempts): diagnose→6 rootCause branches |
+| bad_plan branch | 🟢 | ai.revisePlan() + allFiles.length=0 + planRevisions++ |
+| impossible_task branch | 🟢 | earlyReturn med errorMessage="impossible_task", tasks.updateTaskStatus("blocked") |
+| stopped branch | 🟢 | shouldStopTask() sjekkes ved pre_sandbox og pre_builder checkpoints |
+| agentModular scope-fix | 🟢 | Flyttet til function-level scope (var inne i else-blokk, usynlig fra linje 893 og 1112) |
+| Tester (XI) | 🟢 | 7 tester: happy, retry-success, impossible, max-retries, stop, sub-agents, bad_plan |
+| agent/review-handler.ts | 🟢 | STEP 8+8.5: AI review + submit for user review, ekstrahert fra agent.ts |
+| ReviewResult interface | 🟢 | shouldPause, reviewId, documentation, qualityScore, concerns, memoriesExtracted, skipReview, earlyReturn |
+| ReviewHelpers interface | 🟢 | Dependency injection (report, think, reportSteps, auditedStep, audit, shouldStopTask) |
+| handleReview() funksjon | 🟢 | skipReview-path → earlyReturn → STEP 8 (ai.reviewCode) → earlyReturn → STEP 8.5 (submitReviewInternal) |
+| skipReview path | 🟢 | Returnerer shouldPause=false+skipReview=true uten AI-kall — for completeTask-path |
+| Stop-sjekk pre_review | 🟢 | shouldStopTask() før STEP 8 — earlyReturn med errorMessage="stopped" |
+| Stop-sjekk pre_submit_review | 🟢 | shouldStopTask() etter STEP 8 men før 8.5 — AI-review data bevart i return |
+| Tester (XJ review-handler) | 🟢 | 5 tester: AI review, submit-for-review, skipReview, pre_review stop, pre_submit_review stop |
+| agent/completion.ts | 🟢 | STEP 9-12: PR-opprettelse, Linear-oppdatering, memory-lagring, sandbox-cleanup |
+| CompletionResult interface | 🟢 | success, prUrl, filesChanged, costUsd, tokensUsed |
+| CompletionHelpers interface | 🟢 | Dependency injection (report, think, reportSteps, auditedStep, audit, updateLinearIfExists) |
+| completeTask() funksjon | 🟢 | STEP 9 (github.createPR) → STEP 10 (Linear+tasks) → STEP 11 (memory fire-and-forget) → STEP 12 (cleanup+rapport) |
+| PR non-fatal | 🟢 | try/catch rundt createPR — task fullføres selv uten PR, 403-melding spesifikk |
+| memory/sandbox fire-and-forget | 🟢 | .catch() på memory.store og sandbox.destroy — ikke-kritiske operasjoner |
+| Tester (XJ completion) | 🟢 | 4 tester: create PR, store memories, destroy sandbox, sandbox-feil graceful |
+| agent/helpers.ts | 🟢 | XK: Alle helpers ekstrahert (report, think, reportSteps, auditedStep, audit, shouldStopTask, checkCancelled, updateLinearIfExists, autoInitRepo, circuit breakers, konstanter) |
+| agent/token-policy.ts | 🟢 | XK: Token-budsjett per fase (confidence 2K, planning 8K, building 50K, diagnosis 4K, review 8K). Kun logging, ikke enforcement |
+| AgentModular fjernet | 🟢 | XK: Feature flag slettet — all kode kjører modulær sti. Ingen else-grener |
+| executeTask() tynn orchestrator | 🟢 | XK: 174 linjer (mål ≤200). readTaskDescription + setupCuratedContext + handleTaskError ekstrahert |
+| Tester (XK) | 🟢 | 10 helpers-tester + 6 token-policy-tester = 16 nye tester |
 
 ### Endepunkter
 
@@ -360,8 +550,8 @@
 | typecheck | 🟢 | true | `npx tsc --noEmit` — smart detection: skippes når ingen tsconfig.json eller TypeScript-dependency finnes (filesystem + Docker) | — |
 | lint | 🟢 | true | `npx eslint . --no-error-on-unmatched-pattern` — smart detection: skippes når ingen eslint-config eller eslint-dependency finnes (filesystem + Docker) | — |
 | test | 🟢 | true | `npm test --if-present` | — |
-| snapshot | 🟡 | false | Returnerer "not yet enabled" warning | Implementer snapshot-sammenligning |
-| performance | 🟡 | false | Returnerer "not yet enabled" warning | Implementer performance benchmarks |
+| snapshot | 🟢 | true | Før/etter file diff via SHA-256 hash + size comparison, metrics: filesCreated/Modified/Deleted/Unchanged, totalDiffBytes, SandboxAdvancedPipeline feature flag | — |
+| performance | 🟢 | true | Build time (npm run build), bundle size (dist/build/.next/out), source file count, metrics: buildDurationMs, bundleSizeKb, sourceFileCount, SandboxAdvancedPipeline feature flag | — |
 
 ### Endepunkter
 
@@ -388,8 +578,9 @@
 | Cleanup cron | 🟢 | Hvert 30. minutt: fjern Docker-containere eldre enn 30 min | — |
 
 ### Hva trengs for full aktivering
-1. Implementer snapshot-sammenligning (pipeline steg 4)
-2. Implementer performance benchmarks (pipeline steg 5)
+✅ Sandbox snapshot og performance pipeline er nå fullstendig implementert (20. februar 2026).
+
+Aktivering: Sett secret `SandboxAdvancedPipeline` til `"true"` for å aktivere snapshot + performance i validerings-pipeline.
 
 ---
 
@@ -581,9 +772,12 @@
 | 7-dagers token-utløp | 🟢 | Hardkodet i payload |
 | AuthData (userID, email, role) | 🟢 | Returnert til alle auth: true endpoints |
 | createToken (intern) | 🟢 | Kalles av users-service etter OTP |
-| Token-revokering | 🟢 | revoked_tokens-tabell, SHA256-hash, sjekk i auth handler, cleanup cron |
+| Token-revokering (OWASP A07) | 🟢 | revoked_tokens-tabell, SHA256-hash, sjekk i auth handler, cleanup cron |
 | Secrets status API | 🟢 | GET /gateway/secrets-status — sjekker 7 secrets (configured true/false) |
-| CORS-konfigurasjon | 🟢 | Eksplisitt global_cors i encore.app (localhost:3000/4000 + prod) |
+| CORS-konfigurasjon (OWASP A02) | 🟢 | Eksplisitt global_cors i encore.app (localhost:3000/4000 + prod) |
+| Security headers (OWASP A02) | 🟢 | next.config.ts: CSP, X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy, X-XSS-Protection, Permissions-Policy |
+| Silent error logging (OWASP A10) | 🟢 | log.warn på 9 tidligere stille catch-blokker i agent/execution, agent/completion, agent/review-handler, agent/helpers, github/github |
+| Login failure monitoring (OWASP A09) | 🟢 | checkSuspiciousActivity() log.error ved 10+ feilede forsøk/time, GET /users/security/login-report endpoint |
 
 ---
 
@@ -707,7 +901,7 @@
 | Embedding-cache (90d TTL) | 🟢 | `emb:{sha256}` → vector |
 | Repo-structure-cache (1h TTL) | 🟢 | `repo:{owner}/{repo}:{branch}` |
 | AI-plan-cache (24h TTL) | 🟢 | `plan:{sha256(task+repo)}` |
-| Skills-cache | 🔴 | Ingen skills caching — skills hentes direkte fra DB hver gang |
+| Skills-cache (5min TTL) | 🟢 | `skills:resolve:{hash(taskType+repo+labels+files)}` — invalidering ved CRUD |
 | Statistikk | 🟢 | Hit rate, per-namespace counts |
 | Hourly cleanup cron | 🟢 | Sletter utløpte entries |
 | Invalidering | 🟢 | Per key eller namespace |
@@ -921,6 +1115,9 @@
 | status | TEXT | 🟢 (available/installed/error) |
 | category | TEXT | 🟢 (general/code/data/docs/ai) |
 | config | JSONB | 🟢 |
+| discovered_tools | JSONB | 🟢 (XQ: tools cache fra startInstalledServers) |
+| last_health_check | TIMESTAMPTZ | 🟢 (XQ: sist server ble sjekket) |
+| health_status | TEXT | 🟢 (XQ: unknown/healthy/unhealthy) |
 | installed_at | TIMESTAMPTZ | 🟢 |
 | created_at | TIMESTAMPTZ | 🟢 |
 | updated_at | TIMESTAMPTZ | 🟢 |
@@ -946,14 +1143,20 @@
 | POST /mcp/uninstall | 🟢 | true | Ja | Marker som available |
 | POST /mcp/configure | 🟢 | true | Ja | Oppdater envVars/config |
 | GET /mcp/installed | 🟢 | false | Nei | Kun installerte (for agent) |
+| GET /mcp/routing-status | 🟢 | true | Ja | XQ: MCPRoutingEnabled status + aktive servere |
+| POST /mcp/call-tool | 🟢 | false | Nei | XQ: Internal routing endpoint for tool calls |
 
 ### Agent-integrasjon
 
 | Feature | Status | Beskrivelse |
 |---------|--------|-------------|
-| Fetch installed servers | 🟢 | agent.ts STEP 3.5: mcp.installed() |
-| Include in AI context | 🟢 | Lagt til i docsStrings som verktøyliste |
-| Actual MCP call routing | ⚪ | Planlagt for Fase 5 |
+| Fetch installed servers | 🟢 | agent.ts STEP 3.5: mcp.installed() (MCPRoutingEnabled=false) |
+| Start MCP servers | 🟢 | XQ: context-builder.ts STEP 3.5 starter servere via startInstalledServers() (MCPRoutingEnabled=true) |
+| Include in AI context | 🟢 | Lagt til i docsStrings med mcp_ prefix + server attribution |
+| MCPClient subprocess | 🟢 | XQ: JSON-RPC 2.0 via stdio, timeout 15s start / 30s tool calls |
+| Actual MCP call routing | 🟢 | XQ: ai.ts tool-use loop detekterer mcp_ prefix → router.callTool() |
+| Cleanup on completion | 🟢 | XQ: completion.ts STEP 12.5 stopAllServers() fire-and-forget |
+| MCPRoutingEnabled flag | 🟢 | XQ: Feature flag controls routing (true) vs info-mode (false) |
 
 ### Frontend
 
@@ -964,10 +1167,12 @@
 | Konfigurasjon UI | ⚪ | Fremtidig: envVars/config editor |
 
 ### Hva trengs for full aktivering
-1. Implementer faktisk MCP-kall routing i agent (Fase 5)
+1. ✅ ~~Implementer faktisk MCP-kall routing i agent~~ (XQ: Fullført 20.02.2026)
 2. Konfigurasjon UI for envVars og config
-3. Helsestatus-sjekk for installerte servere
-4. Legg til flere MCP-servere (Sentry, Slack, etc.)
+3. Persistent server pool (unngå restart per task)
+4. Network allowlist for trusted servers (github, brave-search)
+5. Helsestatus-sjekk for installerte servere (periodic ping)
+6. Legg til flere MCP-servere (Sentry, Slack, Linear, etc.)
 
 ---
 
@@ -1099,8 +1304,8 @@
 | Version chain | 🟢 | previous_version_id lenke | — |
 | Healing pipeline | 🟢 | trigger-healing → tasks.createTask per repo | — |
 | Healing notifications | 🟢 | Pub/Sub → chat subscriber | — |
-| Auto-extraction | 🟡 | extractor.ts stub (returnerer []) | Implementer AI-basert komponentdeteksjon |
-| AI component matching | 🟡 | find-for-task bruker keyword LIKE | Bruk memory.searchPatterns() for semantisk match |
+| Auto-extraction | 🟢 | AI-basert ekstraksjon via callForExtraction, maks 3 komponenter per build, feature-flagged via RegistryExtractionEnabled | Aktivert (XO, 19.02.2026) |
+| AI component matching | 🟢 | findForTask med keyword + kategori-matching (detectCategoryFromTask), combined results | Forbedret (XO, 19.02.2026) |
 | Marketplace frontend | 🟢 | /marketplace liste + /marketplace/[id] detalj | — |
 | Component signering | ⚪ | Ingen kryptering | OWASP ASI04 Supply Chain |
 
@@ -1224,9 +1429,9 @@
 
 | Kategori | Antall |
 |----------|--------|
-| 🟢 AKTIVE features | 295+ |
+| 🟢 AKTIVE features | 340+ |
 | 🟡 STUBBEDE features | 2 |
-| 🔴 GRUNNMUR features | 19 |
+| 🔴 GRUNNMUR features | 18 |
 | ⚪ PLANLAGTE features | 9 |
 
 **Nylig aktiverte (februar 2026):**
@@ -1249,3 +1454,10 @@
 - ✅ Bugfiks Runde 10: UX Polish — emoji-fjerning fra agent report()-kall (10+ emojier), ActivityIcon SVG-komponent (12 animerte ikoner erstatter emojier i aktivitetstidslinje), agentMode-deteksjon via metadata.taskId (AgentStatus-boks KUN for ekte agent-tasks, ikke simple chat), magic header-indikator (flyttet fra meldingsområde til header), thinking timer (sekunder teller opp i simple mode)
 - ✅ Bugfiks Runde 11: Tool-use Robusthet — lastCreatedTaskId tracking i callAnthropicWithTools (forhindrer Claude task-ID hallusinering), start_task tool description forbedret, debug console.log→structured log, SkillsSelector listSkills() uten "chat" filter (viser alle skills)
 - ✅ Prompt AW: AgentStatus Refaktorering — monolittisk AgentStatus splittet til 8 komponenter under frontend/src/components/agent/ (dispatcher + 6 fase-komponenter + types + StepList + PhaseTab + parseAgentMessage). motion-icons-react installert med animerte Lucide-ikoner i steg-lister og fase-tabs. Tittel/innhold-duplisering fikset (faste fase-titler i PHASE_TITLES). AgentClarification med strukturert spørsmål-parsing, "Besvar nedenfor"-hint, "Fortsett likevel"/"Avbryt"-knapper. AgentStopped ny fase for eksternt stoppede oppgaver. shouldStopTask() sjekker faktisk DB-status (ikke bare in-memory) før sandbox, builder, review og ferdig-rapport. respondToClarification + forceContinue API-endepunkter i agent.ts. chat.ts send-endepunkt detekterer aktive needs_input-oppgaver og ruter til agent. task_externally_modified audit-event. Begge chat-sider oppdatert med nye props (onForceContinue, onCancelTask). Stopped-fase vises i AgentStatus-boks.
+- ✅ Prompt XC: Concurrency Lock + IDOR-fix — acquireRepoLock/releaseRepoLock med pg_try_advisory_lock(hashtext(...)) i agent/db.ts. 3 entry points wrappet (startTask, respondToClarification, forceContinue) + startProject i orchestrator.ts. IDOR: conversations LEFT JOIN→INNER JOIN (fjernet OR c.id IS NULL), deleteConversation guard (!conv || mismatch = deny). 10 tester (4 concurrency + 6 IDOR).
+- ✅ Prompt XD: Persistent Job Queue — agent_jobs tabell (migrasjon 7) med status-constraint, checkpoint JSONB, cost/token tracking. 7 DB-funksjoner i agent/db.ts. AgentPersistentJobs secret (feature flag). 3 checkpoints i executeTask (context/confidence/building). completeJob i success-path, failJob i catch. cleanupExpiredJobs + CronJob (6h) + checkStaleJobs (stale→failed). 8 tester.
+- ✅ Prompt XE: Token-tracking per fase — agent_phase_metrics tabell (migrasjon 8, nullable job_id FK ON DELETE SET NULL). PhaseTracker (in-memory) i agent/metrics.ts: start/recordAICall/end/getAll. Integrert i executeTask() med 6 phase-transitions + 8 AI-kall tracked (confidence, complexity, planTask, builder, diagnose, revisePlan, planRetry, reviewCode). savePhaseMetrics() i success/collectOnly/catch paths. 2 API-endepunkter: GET /agent/metrics/phases (aggregert) og POST /agent/metrics/task (per-task). 8 tester.
+- ✅ Prompt XF: Skills Caching + Kostnads-dashboard — getOrSetSkillsResolve endpoint i cache.ts (5min TTL). hashResolveInput() i engine.ts (taskType+repo+labels+files, IKKE task-tekst). Cache-first i resolve() med cache-set på miss. Cache-invalidering (namespace="skills") i alle 4 CRUD-operasjoner (create/update/toggle/delete). Frontend: getPhaseMetrics/getTaskMetrics + typer i api.ts, "Kostnader" tab i tools layout, ny /tools/costs side (periodvelger, 4 summary-kort, per-fase tabell, task-lookup). 3 tester.
+- ✅ Prompt XG: Agent Dekomponering Del 1 — agent/context-builder.ts (NY): AgentContext + ContextHelpers interfaces, buildContext() med STEP 2+3+3.5 logikk (GitHub tree/filer, memory.search, docs.lookupForTask, mcp.installed). AgentModular secret (feature flag). agent.ts: import buildContext, if/else branch rundt STEP 2-3-3.5 (legacy path bevart i else). Konstanter eksportert fra context-builder.ts. treeArray-type fikset (var string[]). State transition delt mellom begge stier. 6 tester.
+- ✅ Prompt XH: Agent Dekomponering Del 2 — agent/confidence.ts (NY): ConfidenceResult + ConfidenceHelpers interfaces, assessAndRoute() med STEP 4+4.5 logikk (ai.assessConfidence, ai.assessComplexity, selectOptimalModel, modelOverride, manual modus, forceContinue/useCurated shortcut, empty repo shortcut). agent.ts: import assessAndRoute, agentModular if/else rundt STEP 4+4.5 (legacy path bevart i else). ctx.selectedModel mutert inne i assessAndRoute. State transition (needs_input) i agent.ts ved pause. 6 tester.
+- ✅ Prompt XI: Agent Dekomponering Del 3 — agent/execution.ts (NY): ExecutionResult + ExecutionHelpers interfaces, executePlan() med STEP 5+5.5+5.6+6+7+retry-loop (ai.planTask, memory.search error_pattern, sub-agents, sandbox.create, builder.start, sandbox.validate, diagnoseFailure → 6 rootCause branches: bad_plan/implementation_error/missing_context/impossible_task/environment_error/default). agent.ts: import executePlan, agentModular if/else rundt STEP 5-7, let allFiles/sandboxId/planSummary pre-deklarert for STEP 8+ tilgang, agentModular scope-fix (var inne i else-blokk → function-level). 7 tester (happy, retry, impossible, max-retries, stop, sub-agents, bad_plan).

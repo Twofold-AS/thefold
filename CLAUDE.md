@@ -43,20 +43,25 @@ Key files:
 - `templates/db.ts` — SQLDatabase reference
 
 ## MCP Service
-MCP (Model Context Protocol) server management. Registry of external tool servers the agent can use.
+MCP (Model Context Protocol) server management with actual call routing.
 
 Key concepts:
 - **Servers:** Pre-seeded MCP servers (filesystem, github, postgres, context7, brave-search, puppeteer)
 - **Status:** `available` (not active), `installed` (active, included in agent context), `error`
 - **Categories:** general, code, data, docs, ai
-- **Agent integration:** At task start, agent fetches installed servers via `mcp.installed()` and includes them in AI context
-- **Actual MCP call routing:** Not yet implemented — comes in Fase 5
+- **Agent integration:** STEP 3.5 starts installed servers via `startInstalledServers()`, includes tools in AI context with `mcp_` prefix
+- **Call routing:** AI tool-use loop detects `mcp_` prefix, parses server/tool name, routes to `mcp.callTool()`
+- **Cleanup:** STEP 12.5 calls `stopAllServers()` after task completion
+- **Feature flag:** MCPRoutingEnabled secret controls routing (true) vs info-mode (false)
+- **Protocol:** JSON-RPC 2.0 over stdio with subprocess spawning (15s start timeout, 30s tool call timeout)
 
-Endpoints: `/mcp/list` (auth), `/mcp/get` (auth), `/mcp/install` (auth), `/mcp/uninstall` (auth), `/mcp/configure` (auth), `/mcp/installed` (internal)
-Database: `mcp_servers` table with JSONB env_vars and config
+Endpoints: `/mcp/list` (auth), `/mcp/get` (auth), `/mcp/install` (auth), `/mcp/uninstall` (auth), `/mcp/configure` (auth), `/mcp/installed` (internal), `/mcp/routing-status` (auth), `/mcp/call-tool` (internal)
+Database: `mcp_servers` table with JSONB env_vars, config, discovered_tools
 
-```
-```
+Key files:
+- `mcp/client.ts` — MCPClient class with JSON-RPC 2.0 subprocess communication (285 lines)
+- `mcp/router.ts` — Server lifecycle (startInstalledServers, routeToolCall, stopAllServers), routing endpoints (244 lines)
+- `mcp/migrations/2_add_tools_cache.up.sql` — discovered_tools, last_health_check, health_status columns
 
 ## Critical Rules
 - ALL APIs: `api()` from "encore.dev/api"
@@ -215,7 +220,7 @@ Key files:
 - `chat/chat.ts` — send endpoint with project detection integration
 
 Endpoints: `/agent/project/start`, `/status`, `/pause`, `/resume`, `/store`
-Database: `project_plans` + `project_tasks` tables (in agent service)
+Database: `project_plans` + `project_tasks` + `agent_jobs` tables (in agent service)
 
 ## Code Review System
 Two review modes depending on context:
@@ -237,6 +242,14 @@ Database: `code_reviews` table (in agent service) — JSONB for files_changed an
 ### ai.reviewProject()
 Dedicated endpoint for reviewing entire projects. Receives all files, tasks, and phases. Token-trimming sorts files by size — smaller files included in full, larger ones as summaries (MAX_FILE_TOKENS = 60000). Returns: documentation, qualityScore (1-10), concerns, architecturalDecisions, memoriesExtracted.
 Endpoint: `POST /ai/review-project` (internal)
+
+## GitHub Scope + Rate Limiting (OWASP ASI02)
+- `validateAgentScope(ctx, owner, repo)` in `agent/helpers.ts` — hard block if write targets wrong repo
+- Rate limiting in `agent/rate-limiter.ts`: 20 tasks/hour, 100 tasks/day per userId
+- `checkRateLimit(userId)` / `recordTaskStart(userId)` — called in `startTask()` before lock acquired
+- `github_write` audit via `auditedStep()` in `completion.ts` — all PR operations logged
+- Migration: `agent/migrations/9_create_rate_limits.up.sql`
+- Cleanup cron: deletes records older than 48h, runs at 03:00
 
 ## Circuit Breaker (OWASP ASI08)
 Agent wraps critical service calls with circuit breakers to prevent cascading failures:
@@ -282,6 +295,31 @@ Gateway maintains `revoked_tokens` table (SHA256 hash of token → expires_at).
 - `POST /gateway/revoke-token` (internal) — revoke specific token
 - Daily cron cleans up expired entries
 
+## Security Headers (OWASP A02)
+Next.js security headers configured in `frontend/next.config.ts`:
+- `X-Frame-Options: DENY` — prevents clickjacking
+- `X-Content-Type-Options: nosniff` — prevents MIME sniffing
+- `Content-Security-Policy` — restricts resource loading, includes `frame-ancestors 'none'`
+- `Referrer-Policy: strict-origin-when-cross-origin` — controls referrer information
+- `X-XSS-Protection: 1; mode=block` — legacy XSS protection
+- `Permissions-Policy` — restricts browser features (camera, microphone, geolocation)
+
+## Silent Error Logging (OWASP A10)
+All backend silent `catch {}` blocks now use structured logging:
+- `agent/execution.ts` — 2 fixes: error pattern fallback comment, impossible_task log
+- `agent/completion.ts` — 3 fixes: updateTaskStatus, savePhaseMetrics, completeJob
+- `agent/review-handler.ts` — 3 fixes: updateTaskStatus, savePhaseMetrics, completeJob
+- `agent/helpers.ts` — 2 fixes: isCancelled log, sandbox.destroy comment
+- `github/github.ts` — 2 comments: package.json optional
+- Pattern: `catch (err) { log.warn("operation failed", { error: err instanceof Error ? err.message : String(err) }); }`
+
+## Login Failure Monitoring (OWASP A09)
+Suspicious login activity monitoring in `users/users.ts`:
+- `checkSuspiciousActivity(email)` — fires `log.error` at 10+ failed attempts/hour
+- `GET /users/security/login-report` (auth: true) — returns suspicious accounts (5+ failures/24h) and total failures
+- Integrated with existing `login_audit` table and `checkLockout()` exponential backoff
+- Future: Slack/Discord notifications via integrations service
+
 ## Memory Types
 | Type | When to use |
 |------|-------------|
@@ -305,15 +343,19 @@ Controlled by `SandboxMode` secret (`"docker"` or `"filesystem"`). Default: `"fi
 
 All sandbox endpoints (`create`, `writeFile`, `deleteFile`, `runCommand`, `validate`, `validateIncremental`, `destroy`) support both modes transparently.
 
-Key files: `sandbox/sandbox.ts` (mode switching, pipeline), `sandbox/docker.ts` (Docker operations)
+**Advanced Pipeline Feature Flag:** `SandboxAdvancedPipeline` secret controls snapshot and performance pipeline steps:
+- `"true"` → Snapshot comparison and performance benchmarks enabled
+- `"false"` or unset → Steps return "disabled by feature flag" warning (non-blocking)
+
+Key files: `sandbox/sandbox.ts` (mode switching, pipeline), `sandbox/snapshot.ts` (snapshot logic), `sandbox/docker.ts` (Docker operations)
 
 ## Validation Pipeline
-The sandbox runs a 5-step pipeline (3 enabled, 2 stubbed for future):
+The sandbox runs a 5-step pipeline (5 enabled, feature-flagged):
 1. **typecheck** ✅ — `npx tsc --noEmit`
 2. **lint** ✅ — `npx eslint . --no-error-on-unmatched-pattern`
 3. **test** ✅ — `npm test --if-present`
-4. **snapshot** ⬜ — Snapshot comparison (future)
-5. **performance** ⬜ — Performance benchmarks (future)
+4. **snapshot** ✅ — Snapshot comparison: før/etter file diff via SHA-256 hash + size (SandboxAdvancedPipeline flag)
+5. **performance** ✅ — Performance benchmarks: build time, bundle size, source file count (SandboxAdvancedPipeline flag)
 
 ## Skills Pipeline
 Skills are active components in a three-phase pipeline:
@@ -355,7 +397,6 @@ i stedet for å bygge noe nytt.
 Eksempler på stubbede features klare for aktivering:
 - `skills/engine.ts` executePreRun/executePostRun (returnerer passthrough)
 - `monitor/monitor.ts` code_quality/doc_freshness (returnerer "not implemented")
-- `sandbox/sandbox.ts` snapshot/performance pipeline-steg (enabled: false)
 
 ## Running
 ```bash
@@ -364,17 +405,28 @@ encore run              # all services + local infra
 ```
 
 ## Key Files
-- `agent/agent.ts` — The autonomous loop with meta-reasoning (most critical file)
+- `agent/agent.ts` — Thin orchestrator (174 lines): executeTask() calls buildContext → assessAndRoute → executePlan → handleReview → completeTask. API endpoints: startTask, respondToClarification, forceContinue, job management, metrics, audit log queries
+- `agent/helpers.ts` — All shared helper functions: report(), think(), reportSteps(), auditedStep(), audit(), shouldStopTask(), checkCancelled(), updateLinearIfExists(), autoInitRepo(), validateAgentScope(). Re-exports circuit breakers. Constants: REPO_OWNER, REPO_NAME, MAX_RETRIES, MAX_PLAN_REVISIONS
+- `agent/rate-limiter.ts` — Rate limiting: checkRateLimit(), recordTaskStart(), cleanupRateLimits cron. 20/h + 100/day per userId
+- `agent/token-policy.ts` — Per-phase token budget limits (confidence 2K, planning 8K, building 50K, diagnosis 4K, review 8K). isOverTokenBudget(), warnIfOverBudget(). Logging only, no hard enforcement
+- `agent/state-machine.ts` — Explicit state machine for agent lifecycle: 14 phases, VALID_TRANSITIONS, createStateMachine(), validateSequence(), feature-flagged strict mode (AgentStateMachineStrict secret)
+- `agent/messages.ts` — Typed Pub/Sub message contract: AgentMessage union (6 types: status/thought/report/clarification/review/completion), serializeMessage/deserializeMessage with legacy fallback, builder functions
 - `agent/orchestrator.ts` — Project orchestrator: curateContext, executeProject, project endpoints
 - `agent/review.ts` — Code review system: submit, get, list, approve, request-changes, reject
-- `agent/types.ts` — DiagnosisResult, AgentExecutionContext, AttemptRecord, ErrorPattern, ProjectPlan, ProjectTask, CuratedContext, CodeReview, ReviewFile, AIReviewData
-- `agent/db.ts` — Shared SQLDatabase reference for agent service
+- `agent/types.ts` — DiagnosisResult, AgentExecutionContext (with phase?: AgentPhase), AttemptRecord, ErrorPattern, ProjectPlan, ProjectTask, CuratedContext, CodeReview, ReviewFile, AIReviewData
+- `agent/db.ts` — Shared SQLDatabase reference + acquireRepoLock/releaseRepoLock (advisory lock) + createJob/startJob/updateJobCheckpoint/completeJob/failJob/findResumableJobs/expireOldJobs/getActiveJobForRepo (persistent job queue)
+- `agent/metrics.ts` — PhaseTracker (in-memory per-task): createPhaseTracker(), recordAICall(), getAll(). DB: savePhaseMetrics(), getPhaseMetricsSummary(), getTaskCostBreakdown(). Uses SQLDatabase.named("agent")
+- `agent/context-builder.ts` — STEP 2+3+3.5: buildContext(ctx, tracker, helpers) → AgentContext. GitHub tree, relevant files, memory search, docs lookup, MCP tools
+- `agent/confidence.ts` — STEP 4+4.5: assessAndRoute(ctx, contextData, tracker, helpers, options) → ConfidenceResult. Confidence assessment, complexity assessment, model selection
+- `agent/execution.ts` — STEP 5-7+retry: executePlan(ctx, contextData, tracker, helpers, options) → ExecutionResult. Plan, error patterns, sub-agents, build, validate, retry loop with 6 diagnosis branches
+- `agent/review-handler.ts` — STEP 8-8.5: handleReview(ctx, executionData, tracker, helpers, options) → ReviewResult. AI review, submit for user review, two stop-checkpoints, skipReview path
+- `agent/completion.ts` — STEP 9-12: completeTask(ctx, completionData, tracker, helpers) → CompletionResult. PR creation, Linear update, memory storage (fire-and-forget), sandbox destroy, final report
 - `tasks/tasks.ts` — Task engine: CRUD, Linear sync, AI planning, Pub/Sub events, statistics
 - `tasks/types.ts` — Task, TaskStatus, TaskSource types
 - `builder/builder.ts` — Builder service core: 5 endpoints, build orchestration
 - `builder/phases.ts` — 6 build phases: init, scaffold, dependencies, implement, integrate, finalize
 - `builder/graph.ts` — Dependency analysis, topological sort, import extraction
-- `ai/ai.ts` — System prompts, multi-model routing, diagnosis, prompt caching, reviseProjectPhase, planTaskOrder, generateFile, fixFile
+- `ai/ai.ts` — System prompts, multi-model routing, diagnosis, prompt caching, reviseProjectPhase, planTaskOrder, generateFile, fixFile, callForExtraction (for registry auto-extraction)
 - `ai/db.ts` — SQLDatabase("ai") for providers + models tables
 - `ai/providers.ts` — 5 CRUD endpoints for dynamic provider/model system
 - `ai/router.ts` — DB-backed model cache, selectOptimalModel, getUpgradeModel, tag-based selection, tier-based upgrade
@@ -382,20 +434,26 @@ encore run              # all services + local infra
 - `ai/orchestrate-sub-agents.ts` — Sub-agent planning, parallel execution, result merging, cost estimation
 - `ai/sanitize.ts` — OWASP A03 input sanitization for AI calls (null bytes, control chars, max length)
 - `chat/chat.ts` — Chat service with project detection integration, file uploads, source tracking
+- `chat/agent-message-parser.ts` — Duplicated agent message types for cross-service boundary (Encore prohibition), deserializeMessage + buildStatusContent
 - `chat/detection.ts` — detectProjectRequest heuristics
-- `sandbox/sandbox.ts` — Validation pipeline, dual-mode (filesystem/Docker) switching
+- `sandbox/sandbox.ts` — Validation pipeline, dual-mode (filesystem/Docker) switching, snapshot cache, SandboxAdvancedPipeline flag
+- `sandbox/snapshot.ts` — File snapshots: takeSnapshot, takeDockerSnapshot, compareSnapshots
 - `sandbox/docker.ts` — Docker container sandbox: create, exec, write, delete, destroy, cleanup
-- `memory/memory.ts` — Semantic search with decay, code patterns, consolidation
+- `memory/memory.ts` — Semantic search with decay, code patterns, consolidation. ASI06: sanitizeForMemory() on all writes, SHA-256 content_hash integrity check in search(), trust_level segmentation (user/agent/system)
 - `skills/skills.ts` — CRUD + prompt enrichment
 - `skills/engine.ts` — Pipeline engine: resolve, pre-run, post-run, scoring
 - `monitor/monitor.ts` — Health checks and cron
 - `github/github.ts` — Repository operations with context windowing
 - `registry/registry.ts` — Component marketplace: CRUD, use-tracking, useComponent (exposed), healing pipeline, Pub/Sub
 - `registry/types.ts` — Component, HealingEvent, request/response types
-- `registry/extractor.ts` — Stub for AI-based component auto-extraction
+- `registry/extractor.ts` — AI-based component auto-extraction with extractComponents(), extractAndRegister(), callForExtraction endpoint, feature-flagged via RegistryExtractionEnabled
 - `templates/templates.ts` — Template library: list, get, useTemplate, categories
 - `templates/types.ts` — Template, TemplateFile, TemplateVariable types
 - `mcp/mcp.ts` — MCP server registry: list, get, install, uninstall, configure, installed
 - `integrations/integrations.ts` — External service webhooks (Slack, Discord), CRUD config
 - `agent/e2e.test.ts` — End-to-end integration tests (25 tests across 10 groups)
+- `agent/e2e-mock.test.ts` — E2E mock tests (12 tests, 10 passing): full agent flow with mock AI provider, no external API keys required
+- `agent/test-helpers/mock-ai.ts` — Mock AI provider: deterministisk AI responses, call logging for assertions
+- `agent/test-helpers/mock-services.ts` — Mock services: GitHub, Memory, Docs, MCP, Sandbox, Builder mocks
+- `registry/extractor.test.ts` — Component extraction tests (8 tests: feature flag, filtering, limits, errors, quality score, enrichment, language detection)
 - `ARKITEKTUR.md` — Full architecture documentation with all schemas and endpoints

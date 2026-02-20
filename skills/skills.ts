@@ -1,5 +1,6 @@
 import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
+import { cache } from "~encore/clients";
 
 // --- Database ---
 
@@ -16,6 +17,8 @@ export interface Skill {
   scope: string;
   enabled: boolean;
   taskPhase: string;
+  category: string;
+  tags: string[];
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -26,6 +29,8 @@ export interface Skill {
 interface ListSkillsRequest {
   context?: string; // filter by applies_to context (e.g. "coding", "review", "planning", "chat")
   enabledOnly?: boolean;
+  category?: string; // filter by category (e.g. "framework", "security", "quality")
+  tags?: string[]; // filter by tags (e.g. ["encore", "typescript"])
 }
 
 interface ListSkillsResponse {
@@ -37,45 +42,26 @@ export const listSkills = api(
   async (req: ListSkillsRequest): Promise<ListSkillsResponse> => {
     const skills: Skill[] = [];
 
-    if (req.context && req.enabledOnly) {
-      const rows = db.query<SkillRow>`
-        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
-        FROM skills
-        WHERE ${req.context} = ANY(applies_to) AND enabled = TRUE
-        ORDER BY name
-      `;
-      for await (const row of rows) {
-        skills.push(rowToSkill(row));
-      }
-    } else if (req.context) {
-      const rows = db.query<SkillRow>`
-        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
-        FROM skills
-        WHERE ${req.context} = ANY(applies_to)
-        ORDER BY name
-      `;
-      for await (const row of rows) {
-        skills.push(rowToSkill(row));
-      }
-    } else if (req.enabledOnly) {
-      const rows = db.query<SkillRow>`
-        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
-        FROM skills
-        WHERE enabled = TRUE
-        ORDER BY name
-      `;
-      for await (const row of rows) {
-        skills.push(rowToSkill(row));
-      }
-    } else {
-      const rows = db.query<SkillRow>`
-        SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
-        FROM skills
-        ORDER BY name
-      `;
-      for await (const row of rows) {
-        skills.push(rowToSkill(row));
-      }
+    // Nullify empty values for SQL IS NULL checks
+    const contextFilter = req.context ?? null;
+    const categoryFilter = req.category ?? null;
+    const tagsFilter = req.tags && req.tags.length > 0 ? req.tags : null;
+    const enabledFilter = req.enabledOnly ?? false;
+
+    const rows = db.query<SkillRow>`
+      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled,
+             task_phase, category, tags, created_by, created_at, updated_at
+      FROM skills
+      WHERE
+        (${contextFilter}::text IS NULL OR ${contextFilter} = ANY(applies_to))
+        AND (NOT ${enabledFilter} OR enabled = TRUE)
+        AND (${categoryFilter}::text IS NULL OR category = ${categoryFilter})
+        AND (${tagsFilter}::text[] IS NULL OR tags && ${tagsFilter})
+      ORDER BY name
+    `;
+
+    for await (const row of rows) {
+      skills.push(rowToSkill(row));
     }
 
     return { skills };
@@ -96,7 +82,8 @@ export const getSkill = api(
   { method: "POST", path: "/skills/get", expose: true, auth: true },
   async (req: GetSkillRequest): Promise<GetSkillResponse> => {
     const row = await db.queryRow<SkillRow>`
-      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
+      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled,
+             task_phase, category, tags, created_by, created_at, updated_at
       FROM skills
       WHERE id = ${req.id}
     `;
@@ -148,12 +135,16 @@ export const createSkill = api(
     const row = await db.queryRow<SkillRow>`
       INSERT INTO skills (name, description, prompt_fragment, applies_to, scope, task_phase)
       VALUES (${req.name}, ${req.description}, ${req.promptFragment}, ${req.appliesTo}, ${scope}, ${taskPhase})
-      RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
+      RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled,
+                task_phase, category, tags, created_by, created_at, updated_at
     `;
 
     if (!row) {
       throw APIError.internal("failed to create skill");
     }
+
+    // Invalidate skills cache so resolve picks up the new skill
+    try { await cache.invalidate({ namespace: "skills" }); } catch { /* non-critical */ }
 
     return { skill: rowToSkill(row) };
   }
@@ -216,7 +207,8 @@ export const updateSkill = api(
     }
 
     const row = await db.queryRow<SkillRow>`
-      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
+      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled,
+             task_phase, category, tags, created_by, created_at, updated_at
       FROM skills
       WHERE id = ${req.id}
     `;
@@ -224,6 +216,9 @@ export const updateSkill = api(
     if (!row) {
       throw APIError.internal("failed to fetch updated skill");
     }
+
+    // Invalidate skills cache so resolve picks up the change
+    try { await cache.invalidate({ namespace: "skills" }); } catch { /* non-critical */ }
 
     return { skill: rowToSkill(row) };
   }
@@ -246,12 +241,16 @@ export const toggleSkill = api(
     const row = await db.queryRow<SkillRow>`
       UPDATE skills SET enabled = ${req.enabled}, updated_at = NOW()
       WHERE id = ${req.id}
-      RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
+      RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled,
+                task_phase, category, tags, created_by, created_at, updated_at
     `;
 
     if (!row) {
       throw APIError.notFound("skill not found");
     }
+
+    // Invalidate skills cache so resolve picks up enabled/disabled state
+    try { await cache.invalidate({ namespace: "skills" }); } catch { /* non-critical */ }
 
     return { skill: rowToSkill(row) };
   }
@@ -278,6 +277,9 @@ export const deleteSkill = api(
       throw APIError.notFound("skill not found");
     }
 
+    // Invalidate skills cache so resolve no longer returns deleted skill
+    try { await cache.invalidate({ namespace: "skills" }); } catch { /* non-critical */ }
+
     return { success: true };
   }
 );
@@ -299,7 +301,8 @@ export const getActiveSkills = api(
     const skills: Skill[] = [];
 
     const rows = db.query<SkillRow>`
-      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled, task_phase, created_by, created_at, updated_at
+      SELECT id, name, description, prompt_fragment, applies_to, scope, enabled,
+             task_phase, category, tags, created_by, created_at, updated_at
       FROM skills
       WHERE enabled = TRUE AND ${req.context} = ANY(applies_to)
       ORDER BY name
@@ -364,6 +367,8 @@ interface SkillRow {
   scope: string;
   enabled: boolean;
   task_phase: string;
+  category: string;
+  tags: string[];
   created_by: string | null;
   created_at: Date;
   updated_at: Date;
@@ -379,6 +384,8 @@ function rowToSkill(row: SkillRow): Skill {
     scope: row.scope,
     enabled: row.enabled,
     taskPhase: row.task_phase || "all",
+    category: row.category || "general",
+    tags: row.tags || [],
     createdBy: row.created_by,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),

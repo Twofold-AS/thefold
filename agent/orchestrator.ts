@@ -2,9 +2,10 @@ import { api, APIError } from "encore.dev/api";
 import { github, memory, docs, ai, tasks, sandbox } from "~encore/clients";
 import log from "encore.dev/log";
 import { agentReports } from "../chat/chat";
-import { executeTask, autoInitRepo } from "./agent";
+import { executeTask } from "./agent";
+import { autoInitRepo } from "./helpers";
 import { submitReviewInternal } from "./review";
-import { db } from "./db";
+import { db, acquireRepoLock, releaseRepoLock } from "./db";
 import type {
   ProjectTask,
   CuratedContext,
@@ -771,10 +772,18 @@ export const startProject = api(
       throw APIError.failedPrecondition("prosjektet kjører allerede");
     }
 
+    // Acquire advisory lock — prevent concurrent execution on same repo
+    const locked = await acquireRepoLock(REPO_OWNER, REPO_NAME);
+    if (!locked) {
+      throw APIError.failedPrecondition(`Repo ${REPO_OWNER}/${REPO_NAME} er allerede låst av en annen oppgave`);
+    }
+
     // Fire and forget
-    executeProject(req.projectId, req.conversationId, REPO_OWNER, REPO_NAME).catch((err) => {
-      console.error(`Project ${req.projectId} failed:`, err);
-    });
+    executeProject(req.projectId, req.conversationId, REPO_OWNER, REPO_NAME)
+      .catch((err) => {
+        console.error(`Project ${req.projectId} failed:`, err);
+      })
+      .finally(() => releaseRepoLock(REPO_OWNER, REPO_NAME));
 
     return { status: "started", projectId: req.projectId };
   }

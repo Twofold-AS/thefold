@@ -247,30 +247,82 @@ export const findForTask = api(
   async (req: FindForTaskRequest): Promise<{ components: Component[] }> => {
     const limit = req.limit ?? 5;
 
-    // Simple keyword search on component name/description/tags
-    // In the future, this will use memory.searchPatterns() for semantic matching
-    const queryPattern = `%${req.taskDescription.trim().toLowerCase().substring(0, 100)}%`;
+    // 1. Keyword-basert søk
+    const keywords = req.taskDescription
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length > 3)
+      .slice(0, 5);
 
-    const rows = await db.query`
-      SELECT * FROM components
-      WHERE validation_status != 'failed'
-        AND (
-          LOWER(name) LIKE ${queryPattern}
-          OR LOWER(COALESCE(description, '')) LIKE ${queryPattern}
-          OR EXISTS (SELECT 1 FROM unnest(tags) t WHERE LOWER(t) LIKE ${queryPattern})
+    const keywordResults: Component[] = [];
+    if (keywords.length > 0) {
+      const pattern = `%${keywords.join("%")}%`;
+      const rows = await db.query`
+        SELECT * FROM components
+        WHERE (
+          LOWER(name) LIKE ${pattern}
+          OR LOWER(COALESCE(description, '')) LIKE ${pattern}
+          OR EXISTS (SELECT 1 FROM unnest(tags) t WHERE LOWER(t) = ANY(${keywords}))
         )
-      ORDER BY times_used DESC, created_at DESC
-      LIMIT ${limit}
-    `;
+        AND validation_status != 'rejected'
+        ORDER BY times_used DESC, created_at DESC
+        LIMIT ${limit}
+      `;
 
-    const components: Component[] = [];
-    for await (const row of rows) {
-      components.push(parseComponent(row));
+      for await (const row of rows) {
+        keywordResults.push(parseComponent(row));
+      }
     }
 
-    return { components };
+    // 2. Kategori-matching basert på oppgavebeskrivelse
+    const categoryHints = detectCategoryFromTask(req.taskDescription);
+    const categoryResults: Component[] = [];
+    if (categoryHints.length > 0 && keywordResults.length < limit) {
+      const remaining = limit - keywordResults.length;
+      const existingIds = keywordResults.map((c) => c.id);
+
+      const rows = await db.query`
+        SELECT * FROM components
+        WHERE category = ANY(${categoryHints})
+        AND validation_status != 'rejected'
+        AND id != ALL(${existingIds}::uuid[])
+        ORDER BY times_used DESC
+        LIMIT ${remaining}
+      `;
+
+      for await (const row of rows) {
+        categoryResults.push(parseComponent(row));
+      }
+    }
+
+    const combined = [...keywordResults, ...categoryResults].slice(0, limit);
+
+    log.info("find-for-task results", {
+      task: req.taskDescription.substring(0, 100),
+      keywordHits: keywordResults.length,
+      categoryHits: categoryResults.length,
+      total: combined.length,
+    });
+
+    return { components: combined };
   }
 );
+
+function detectCategoryFromTask(task: string): string[] {
+  const lower = task.toLowerCase();
+  const categories: string[] = [];
+
+  if (lower.includes("auth") || lower.includes("login") || lower.includes("otp")) categories.push("auth");
+  if (lower.includes("pay") || lower.includes("stripe") || lower.includes("billing")) categories.push("payments");
+  if (lower.includes("pdf") || lower.includes("document")) categories.push("pdf");
+  if (lower.includes("email") || lower.includes("mail") || lower.includes("resend")) categories.push("email");
+  if (lower.includes("api") || lower.includes("endpoint") || lower.includes("rest")) categories.push("api");
+  if (lower.includes("database") || lower.includes("sql") || lower.includes("migration")) categories.push("database");
+  if (lower.includes("ui") || lower.includes("component") || lower.includes("frontend")) categories.push("ui");
+  if (lower.includes("test") || lower.includes("mock") || lower.includes("fixture")) categories.push("testing");
+
+  return categories;
+}
 
 // ============================================
 // Healing Endpoints

@@ -1,3 +1,6 @@
+import type { AgentPhase } from "./state-machine";
+export type { AgentPhase };
+
 // === Status Constants & Mapping ===
 
 export const TASK_STATUS = {
@@ -71,6 +74,10 @@ export interface AgentExecutionContext {
   // Sub-agents
   subAgentsEnabled: boolean;
   subAgentResults?: import("../ai/sub-agents").SubAgentResult[];
+  // State machine
+  phase?: AgentPhase;
+  // Persistent job queue (XD)
+  jobId?: string;
 }
 
 export interface AttemptRecord {

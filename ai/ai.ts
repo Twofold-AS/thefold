@@ -1081,21 +1081,73 @@ async function callAnthropicWithTools(options: AICallOptions & {
       }
 
       try {
-        const result = await executeToolCall(toolName, toolInput, options.repoName, options.conversationId);
+        // Check if this is an MCP tool call
+        if (toolName.startsWith("mcp_")) {
+          // Parse: mcp_{serverName}_{toolName}
+          const parts = toolName.split("_");
+          if (parts.length >= 3) {
+            const serverName = parts[1];
+            const actualToolName = parts.slice(2).join("_");
 
-        // Track lastCreatedTaskId
-        if (toolName === "create_task" && result?.taskId) {
-          lastCreatedTaskId = result.taskId as string;
-          console.log(`[DEBUG-AH] lastCreatedTaskId: ${lastCreatedTaskId}`);
+            console.log(`[DEBUG-AH] MCP tool call: ${serverName}/${actualToolName}`);
+
+            try {
+              const { mcp } = await import("~encore/clients");
+              const mcpResult = await mcp.callTool({
+                serverName,
+                toolName: actualToolName,
+                args: toolInput,
+              });
+
+              // Konverter MCP-resultat til Anthropic tool_result format
+              const resultText = mcpResult.result.content
+                .map((c: any) => c.text ?? "")
+                .filter(Boolean)
+                .join("\n");
+
+              toolResults.push({
+                type: "tool_result",
+                tool_use_id: (toolBlock as any).id,
+                content: resultText || "OK",
+                is_error: mcpResult.result.isError ?? false,
+              });
+
+              console.log(`[DEBUG-AH] MCP tool result: ${resultText.substring(0, 200)}`);
+            } catch (mcpErr) {
+              console.error(`[DEBUG-AH] MCP tool ${toolName} FAILED:`, mcpErr);
+              toolResults.push({
+                type: "tool_result",
+                tool_use_id: (toolBlock as any).id,
+                content: `MCP tool call failed: ${String(mcpErr)}`,
+                is_error: true,
+              });
+            }
+          } else {
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: (toolBlock as any).id,
+              content: `Invalid MCP tool name format: ${toolName}`,
+              is_error: true,
+            });
+          }
+        } else {
+          // Regular tool call
+          const result = await executeToolCall(toolName, toolInput, options.repoName, options.conversationId);
+
+          // Track lastCreatedTaskId
+          if (toolName === "create_task" && result?.taskId) {
+            lastCreatedTaskId = result.taskId as string;
+            console.log(`[DEBUG-AH] lastCreatedTaskId: ${lastCreatedTaskId}`);
+          }
+
+          console.log(`[DEBUG-AH] Tool ${toolName} result: ${JSON.stringify(result).substring(0, 200)}`);
+
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: (toolBlock as any).id,
+            content: JSON.stringify(result),
+          });
         }
-
-        console.log(`[DEBUG-AH] Tool ${toolName} result: ${JSON.stringify(result).substring(0, 200)}`);
-
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: (toolBlock as any).id,
-          content: JSON.stringify(result),
-        });
       } catch (e) {
         console.error(`[DEBUG-AH] Tool ${toolName} FAILED:`, e);
         toolResults.push({
@@ -2364,5 +2416,102 @@ export const fixFile = api(
       modelUsed: response.modelUsed,
       costUsd: response.costEstimate.totalCost,
     };
+  }
+);
+
+// --- Component Extraction (for registry service) ---
+
+interface ExtractionRequest {
+  task: string;
+  repo: string;
+  files: Array<{ path: string; content: string; lines: number }>;
+}
+
+interface ExtractionResponse {
+  components: Array<{
+    name: string;
+    description: string;
+    category: string;
+    files: Array<{ path: string; content: string }>;
+    entryPoint: string;
+    dependencies: string[];
+    tags: string[];
+    qualityScore: number;
+  }>;
+}
+
+export const callForExtraction = api(
+  { method: "POST", path: "/ai/call-for-extraction", expose: false },
+  async (req: ExtractionRequest): Promise<ExtractionResponse> => {
+    const systemPrompt = `Du er en kode-analytiker som identifiserer gjenbrukbare komponenter.
+
+Analyser filene og identifiser MAKS 3 selvstendige, gjenbrukbare komponenter.
+
+En god komponent har:
+- Klart definert interface (eksporter)
+- Lav kobling til resten av prosjektet
+- Minst 50 linjer kode (ikke trivielt)
+- Gjenbruksverdi i andre prosjekter
+- Tydelig kategori
+
+Kategorier: auth, payments, pdf, email, api, database, ui, utility, testing, devops
+
+Returner KUN gyldig JSON uten markdown-blokker. Format:
+{
+  "components": [
+    {
+      "name": "kebab-case-navn",
+      "description": "Kort beskrivelse",
+      "category": "kategori",
+      "files": [{"path": "sti", "content": ""}],
+      "entryPoint": "hovedfil.ts",
+      "dependencies": ["npm-pakke"],
+      "tags": ["tag1", "tag2"],
+      "qualityScore": 75
+    }
+  ]
+}
+
+Hvis ingen gjenbrukbare komponenter finnes, returner: {"components": []}`;
+
+    // Bygg bruker-prompt med filkontekst
+    let userPrompt = `Repo: ${sanitize(req.repo)}\nOppgave: ${sanitize(req.task)}\n\nFiler:\n`;
+    let tokenEstimate = 0;
+    for (const f of req.files) {
+      if (tokenEstimate > 15000) break; // Token-grense
+      userPrompt += `\n--- ${f.path} (${f.lines} linjer) ---\n${sanitize(f.content)}\n`;
+      tokenEstimate += f.content.length / 4;
+    }
+
+    userPrompt += "\n\nIdentifiser gjenbrukbare komponenter fra disse filene.";
+
+    const response = await callAIWithFallback({
+      model: "claude-sonnet-4-5-20250929", // Bruk rimelig modell
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+      maxTokens: 4096,
+    });
+
+    // Parse JSON-respons
+    try {
+      let content = response.content.trim();
+      // Strip eventuelle markdown code blocks
+      const jsonMatch = content.match(/```(?:json)?\n?([\s\S]*?)```/);
+      if (jsonMatch) content = jsonMatch[1].trim();
+
+      const parsed = JSON.parse(content);
+
+      if (!parsed.components || !Array.isArray(parsed.components)) {
+        return { components: [] };
+      }
+
+      return { components: parsed.components };
+    } catch (parseErr) {
+      log.warn("extraction AI response parse failed", {
+        error: String(parseErr),
+        contentPreview: response.content.substring(0, 200),
+      });
+      return { components: [] };
+    }
   }
 );

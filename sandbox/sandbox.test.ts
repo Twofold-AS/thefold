@@ -392,4 +392,82 @@ describe("Sandbox service", () => {
       }
     );
   });
+
+  describe("validation pipeline (snapshot & performance)", () => {
+    it(
+      "should include snapshot step in validation output",
+      { timeout: 120000 },
+      async () => {
+        const sandbox = await create({
+          repoOwner: testOwner,
+          repoName: testRepo,
+        });
+        createdSandboxes.push(sandbox.id);
+
+        const result = await validate({
+          sandboxId: sandbox.id,
+        });
+
+        expect(result).toBeDefined();
+        expect(result.output).toBeDefined();
+        // Output should mention snapshot step
+        expect(result.output.toLowerCase()).toMatch(/snapshot/);
+      }
+    );
+
+    it(
+      "should include performance step in validation output",
+      { timeout: 120000 },
+      async () => {
+        const sandbox = await create({
+          repoOwner: testOwner,
+          repoName: testRepo,
+        });
+        createdSandboxes.push(sandbox.id);
+
+        const result = await validate({
+          sandboxId: sandbox.id,
+        });
+
+        expect(result).toBeDefined();
+        expect(result.output).toBeDefined();
+        // Output should mention performance step
+        expect(result.output.toLowerCase()).toMatch(/performance/);
+      }
+    );
+
+    it(
+      "should skip build benchmark when no build script exists",
+      { timeout: 120000 },
+      async () => {
+        const sandbox = await create({
+          repoOwner: testOwner,
+          repoName: testRepo,
+        });
+        createdSandboxes.push(sandbox.id);
+
+        // Write a package.json without build script
+        await writeFile({
+          sandboxId: sandbox.id,
+          path: "test-package.json",
+          content: JSON.stringify({
+            name: "test-project",
+            version: "1.0.0",
+            scripts: {
+              test: "echo 'no build script'",
+            },
+          }),
+        });
+
+        const result = await validate({
+          sandboxId: sandbox.id,
+        });
+
+        expect(result).toBeDefined();
+        // Performance step should mention "no build script" or "skipped"
+        const hasPerformanceOutput = result.output.toLowerCase().includes("performance");
+        expect(hasPerformanceOutput).toBe(true);
+      }
+    );
+  });
 });

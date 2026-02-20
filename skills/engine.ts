@@ -1,4 +1,6 @@
 import { api, APIError } from "encore.dev/api";
+import log from "encore.dev/log";
+import { cache } from "~encore/clients";
 import { db } from "./skills";
 
 // --- Types ---
@@ -53,11 +55,32 @@ interface ResolveResponse {
   result: SkillPipelineResult;
 }
 
+function hashResolveInput(ctx: SkillPipelineContext): string {
+  // Include fields that affect the result — NOT task text (unique per message)
+  const parts = [
+    ctx.taskType || "all",
+    ctx.repo || "",
+    (ctx.labels || []).slice().sort().join(","),
+    (ctx.files || []).slice().sort().join(","),
+  ];
+  return parts.join("|").replace(/[^a-zA-Z0-9|,._-]/g, "_").substring(0, 200);
+}
+
 export const resolve = api(
   { method: "POST", path: "/skills/resolve", expose: false },
   async (req: ResolveRequest): Promise<ResolveResponse> => {
-    console.log("[DEBUG-AF] skills.resolve called");
+    log.info("skills.resolve called");
     const ctx = req.context;
+
+    // Try cache first (5 min TTL — skills rarely change)
+    const cacheKey = `skills:resolve:${hashResolveInput(ctx)}`;
+    try {
+      const cached = await cache.getOrSetSkillsResolve({ key: cacheKey });
+      if (cached.hit && cached.result) {
+        log.info("skills.resolve cache hit");
+        return { result: cached.result as unknown as SkillPipelineResult };
+      }
+    } catch { /* cache miss — continue with DB query */ }
 
     // 1. Fetch all enabled skills matching scope
     const rows = await db.query<{
@@ -131,15 +154,23 @@ export const resolve = api(
     const postRun = selected.filter((s) => s.phase === "post_run");
     const injectedPrompt = inject.map((s) => s.promptFragment).join("\n\n");
 
-    return {
-      result: {
-        preRunResults: [],
-        injectedPrompt,
-        injectedSkillIds: inject.map((s) => s.id),
-        tokensUsed,
-        postRunSkills: postRun.map(toResolvedSkill),
-      },
+    const result: SkillPipelineResult = {
+      preRunResults: [],
+      injectedPrompt,
+      injectedSkillIds: inject.map((s) => s.id),
+      tokensUsed,
+      postRunSkills: postRun.map(toResolvedSkill),
     };
+
+    // Store in cache for 5 minutes (non-critical)
+    try {
+      await cache.getOrSetSkillsResolve({
+        key: cacheKey,
+        result: result as unknown as Record<string, unknown>,
+      });
+    } catch { /* non-critical */ }
+
+    return { result };
   }
 );
 

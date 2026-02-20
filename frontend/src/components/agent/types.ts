@@ -13,7 +13,11 @@ export interface ReviewData {
   reviewUrl: string;
 }
 
+/** Message types from the backend AgentMessage contract */
+export type AgentMessageType = "status" | "thought" | "report" | "clarification" | "review" | "completion";
+
 export interface AgentStatusData {
+  type?: AgentMessageType;
   phase: string;
   title: string;
   steps: AgentStep[];
@@ -23,6 +27,66 @@ export interface AgentStatusData {
   planProgress?: { current: number; total: number };
   activeTasks?: Array<{ id: string; title: string; status: string }>;
   taskId?: string;
+}
+
+/** Parse agent_status content into AgentStatusData — supports new contract + legacy */
+export function parseAgentStatusContent(content: string): AgentStatusData | null {
+  try {
+    const parsed = JSON.parse(content);
+
+    // New format: { type: "status", phase, steps, meta }
+    if (parsed.type === "status") {
+      return {
+        type: "status",
+        phase: parsed.phase || "Bygger",
+        title: parsed.meta?.title || parsed.phase || "Bygger",
+        steps: parsed.steps || [],
+        error: parsed.meta?.error,
+        planProgress: parsed.meta?.planProgress,
+        activeTasks: parsed.meta?.activeTasks,
+      };
+    }
+
+    // New format: { type: "review", phase, reviewData, steps }
+    if (parsed.type === "review") {
+      return {
+        type: "review",
+        phase: "Venter",
+        title: "Review klar",
+        steps: parsed.steps || [],
+        reviewData: parsed.reviewData,
+      };
+    }
+
+    // New format: { type: "clarification", phase, questions, steps }
+    if (parsed.type === "clarification") {
+      return {
+        type: "clarification",
+        phase: "Venter",
+        title: "Trenger avklaring",
+        steps: parsed.steps || [],
+        questions: parsed.questions,
+      };
+    }
+
+    // Legacy format: { type: "agent_status", phase, title, steps, ... }
+    if (parsed.type === "agent_status") {
+      return {
+        phase: parsed.phase || "Bygger",
+        title: parsed.title || parsed.phase || "Bygger",
+        steps: parsed.steps || [],
+        error: parsed.error,
+        questions: parsed.questions,
+        reviewData: parsed.reviewData,
+        planProgress: parsed.planProgress,
+        activeTasks: parsed.activeTasks,
+      };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export interface AgentPhaseProps {

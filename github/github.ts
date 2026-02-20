@@ -105,6 +105,7 @@ export const getTree = api(
         });
         packageJson = JSON.parse(pkg.content);
       } catch {
+        // Intentionally silent: package.json is optional — many repos don't have one
         packageJson = undefined;
       }
       return {

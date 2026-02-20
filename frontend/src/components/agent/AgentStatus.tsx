@@ -12,8 +12,9 @@ import { AgentClarification } from "./AgentClarification";
 import { AgentStopped } from "./AgentStopped";
 
 // Re-export types for backward compatibility
-export type { AgentStep, ReviewData, AgentStatusData } from "./types";
+export type { AgentStep, ReviewData, AgentStatusData, AgentMessageType } from "./types";
 export { parseAgentMessage } from "./parseAgentMessage";
+export { parseAgentStatusContent } from "./types";
 
 interface AgentStatusProps {
   data: AgentStatusData;

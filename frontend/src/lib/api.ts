@@ -1250,6 +1250,51 @@ export async function getCostSummary() {
   return apiFetch<CostSummary>("/chat/costs");
 }
 
+// --- Phase Metrics (from XE agent metrics) ---
+
+export interface PhaseMetricsSummary {
+  phase: string;
+  avgCostUsd: number;
+  avgTokensInput: number;
+  avgTokensOutput: number;
+  avgDurationMs: number;
+  totalCostUsd: number;
+  totalAiCalls: number;
+  taskCount: number;
+  p95CostUsd: number;
+}
+
+export interface TaskPhaseBreakdown {
+  phase: string;
+  tokensInput: number;
+  tokensOutput: number;
+  cachedTokens: number;
+  costUsd: number;
+  durationMs: number;
+  model: string;
+  aiCalls: number;
+}
+
+export interface TaskCostBreakdown {
+  taskId: string;
+  jobId: string;
+  phases: TaskPhaseBreakdown[];
+  totalCostUsd: number;
+  totalTokens: number;
+  totalDurationMs: number;
+}
+
+export async function getPhaseMetrics(days: number = 7) {
+  return apiFetch<{ phases: PhaseMetricsSummary[] }>(`/agent/metrics/phases?days=${days}`);
+}
+
+export async function getTaskMetrics(taskId: string) {
+  return apiFetch<{ breakdown: TaskCostBreakdown | null }>(
+    "/agent/metrics/task",
+    { method: "POST", body: { taskId } }
+  );
+}
+
 // --- Repo Activity ---
 
 export interface RepoActivityEvent {
