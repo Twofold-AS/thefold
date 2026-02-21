@@ -41,6 +41,7 @@
 | tags | TEXT[] | 🟢 | search-filter (in-memory), consolidate | Flytt til SQL GIN-filter for ytelse |
 | content_hash | TEXT | 🟢 | search() integrity check (ASI06) | SHA-256 av innhold, NULL for eldre rader |
 | trust_level | TEXT | 🟢 | store/extract/search/consolidate (ASI06) | user/agent/system — satt automatisk, prefiks i AI-kontekst |
+| search_vector | tsvector | 🟢 | search() BM25 keyword matching (YC) | Auto-generert av trigger: setweight(content, 'A') \|\| setweight(category, 'B') \|\| setweight(tags, 'C'). GIN-indeks. |
 
 ### Database-felter — code_patterns
 
@@ -68,7 +69,7 @@
 | Endepunkt | Status | Beskrivelse | Hva mangler |
 |-----------|--------|-------------|-------------|
 | POST /memory/store | 🟢 | Lagrer minne med embedding, alle felter | — |
-| POST /memory/search | 🟢 | Semantic søk med full decay-scoring (similarity × temporal_decay × access_boost) | Tag-filtering skjer in-memory, bør flyttes til SQL |
+| POST /memory/search | 🟢 | Hybrid-søk (YC): 60% semantic (pgvector) + 40% keyword (BM25/tsvector) med decay-scoring. Inkluderer BM25-only resultater. | Tag-filtering skjer in-memory, bør flyttes til SQL |
 | POST /memory/extract | 🟢 | Auto-ekstraher fra samtaler, hardkodet memory_type='session' | — |
 | POST /memory/consolidate | 🟢 | Slår sammen 2+ minner, setter superseded_by, hardkodet memory_type='decision' + pinned=true | — |
 | POST /memory/cleanup | 🟢 | Sletter utløpte minner basert på TTL, pinned, last_accessed_at | — |
@@ -282,16 +283,29 @@
 | Feature | Status | Beskrivelse |
 |---------|--------|-------------|
 | AgentModular secret (feature flag) | 🟢 | "true" = modulær sti, "false" = legacy inline (default) |
-| agent/context-builder.ts | 🟢 | STEP 2+3+3.5 ekstrahert til egen fil |
-| AgentContext interface | 🟢 | treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings |
+| agent/context-builder.ts | 🟢 | STEP 2+3+3.5 ekstrahert til egen fil. YA: filterForPhase(), estimateTokens(), trimContext() for fase-spesifikk kontekst-filtrering |
+| AgentContext interface | 🟢 | treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools |
+| ContextProfile interface | 🟢 | YA: needsTree, needsTreeArray, needsFiles, needsMemory, needsDocs, needsMcpTools, needsPackageJson, maxContextTokens |
+| CONTEXT_PROFILES | 🟢 | YA: Per-fase profiler (confidence: 3K, planning: 20K, building: 50K, diagnosis: 5K, reviewing: 12K, completing: 2K) |
 | ContextHelpers interface | 🟢 | Dependency injection for testbarhet (report, think, auditedStep, audit, autoInitRepo, githubBreaker, checkCancelled) |
-| buildContext() funksjon | 🟢 | Kalles fra agent.ts når AgentModular=true |
+| buildContext() funksjon | 🟢 | Kalles fra agent.ts, returnerer full AgentContext |
+| filterForPhase() funksjon | 🟢 | YA: Filtrerer AgentContext basert på fase-profil, trimmer hvis over budsjett. Safe fallback for ukjente faser |
+| estimateTokens() funksjon | 🟢 | YA: Estimerer token-antall (1 token ≈ 4 chars). Konservativ estimering |
+| trimContext() funksjon | 🟢 | YA: Trimmer context (prioritet: docs → memory → files → tree). Enforcer maxContextTokens |
 | STEP 2: GitHub tree + filer | 🟢 | getTree, autoInitRepo, findRelevantFiles, getFileMetadata/getFile/getFileChunk (context windowing) |
+| STEP 2.5: Import-graf (YD) | 🟢 | buildImportGraph fra relevantFiles, getRelatedFiles (depth 2), hent maks 5 ekstra avhengigheter. Graceful degradation. |
 | STEP 3: Memory + Docs | 🟢 | memory.search (Voyage 429-resilient) + docs.lookupForTask (graceful degradation) |
 | STEP 3.5: MCP tools | 🟢 | mcp.installed() appendet til docsStrings |
 | Konstanter eksportert | 🟢 | SMALL_FILE_THRESHOLD=100, MEDIUM_FILE_THRESHOLD=500, CHUNK_SIZE=100, MAX_CHUNKS_PER_FILE=5 |
 | Legacy sti bevart | 🟢 | if/else i agent.ts — gammel inline kode i else-grenen (fjernes i XK) |
 | State transition delt | 🟢 | sm.transitionTo("context") kjøres etter begge stier |
+| agent/code-graph.ts | 🟢 | YD: Import-graf analyse for presis filvalg basert på avhengigheter (ikke filnavn). Kopierer logikk fra builder/graph.ts (cross-service regel). |
+| ImportGraph interface | 🟢 | YD: imports (fil→hva den importerer), importedBy (fil→hva som importerer den). Bidireksjonal graf. |
+| extractImports() | 🟢 | YD: Regex-parsing av ES6/CommonJS imports. Returnerer kun relative imports (starter med . eller ..). 4 patterns. |
+| resolveImport() | 🟢 | YD: Path resolution med extension candidates (.ts, .tsx, .js, .jsx, /index.ts, etc). Returnerer null for unresolvable. |
+| buildImportGraph() | 🟢 | YD: Bygger bidireksjonal graf fra filer med innhold. Parser imports, resolver stier, ignorerer self-references. |
+| getRelatedFiles() | 🟢 | YD: Traverserer BEGGE retninger (imports nedover, importedBy oppover) med maxDepth=2. Visited-tracking forhindrer loops. |
+| logGraphStats() | 🟢 | YD: Debug-logging (totalFiles, totalEdges, maxImports, orphanFiles) |
 | agent/confidence.ts | 🟢 | STEP 4+4.5 ekstrahert til assessAndRoute() |
 | ConfidenceResult interface | 🟢 | shouldContinue, selectedModel, confidenceScore, pauseReason, earlyReturn |
 | ConfidenceHelpers interface | 🟢 | Dependency injection (report, think, reportSteps, auditedStep, audit) |
@@ -301,10 +315,17 @@
 | ctx.selectedModel satt | 🟢 | Mutert inne i assessAndRoute() før return |
 | treeArray type fikset | 🟢 | Array<{ path: string; type: string }> (var feilaktig string[] i agent.ts) |
 | Tester | 🟢 | 6 tester: happy path, GitHub-feil, memory-feil, docs-feil, auto-init, MCP tools |
-| agent/execution.ts | 🟢 | STEP 5+5.5+5.6+6+7+retry-loop ekstrahert til executePlan() |
+| agent/execution.ts | 🟢 | STEP 5+5.5+5.6+6+7+retry-loop ekstrahert til executePlan(). YB: Delta-kontekst i retries |
 | ExecutionResult interface | 🟢 | success, filesChanged, sandboxId, planSummary, costUsd, tokensUsed, earlyReturn |
+| RetryContext interface | 🟢 | YB: taskSummary, planSummary, latestError, changedFiles (med diff), diagnosis, attemptNumber, estimatedTokens |
 | ExecutionHelpers interface | 🟢 | Dependency injection (report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker) |
 | executePlan() funksjon | 🟢 | Kalles fra agent.ts (agentModular=true): plan→error_patterns→sub-agents→build→validate→retry |
+| computeSimpleDiff() | 🟢 | YB: Linje-basert diff (maks 20 linjer, 500 chars). Detekterer +/~/- per linje |
+| computeRetryContext() | 🟢 | YB: Beregner delta mellom previousFiles og currentFiles. Truncates task (200 chars) + error (1000 chars) |
+| Delta-context retry | 🟢 | YB: implementation_error + default branches bruker retryCtx (taskSummary + changedFiles.diff). ~60-75% token-sparing |
+| missing_context preservation | 🟢 | YB: missing_context branch BEHOLDER full context-henting (hele poenget med branchen) |
+| previousFiles tracking | 🟢 | YB: Spores mellom retry-forsøk for delta-beregning |
+| Token-sparing logging | 🟢 | YB: Logg fullContextTokens vs deltaTokens, savedPercent, changedFilesCount per retry |
 | STEP 5: Planning | 🟢 | ai.planTask() via aiBreaker, cost/token tracking, planSummary generering |
 | STEP 5.5: Error patterns | 🟢 | memory.search(memoryType="error_pattern") → ctx.errorPatterns |
 | STEP 5.6: Sub-agents | 🟢 | planSubAgents+executeSubAgents+mergeResults når complexity≥5, audit events |

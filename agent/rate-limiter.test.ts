@@ -96,12 +96,14 @@ describe("Rate limiting (ASI02)", () => {
   });
 
   it("should block tasks over daily limit", async () => {
-    // Spread tasks across 11 hours with 10 tasks each = 110 total (over daily limit of 100)
-    // Each hour has 10 tasks — under hourly limit of 20, so only day-check triggers
-    const now = new Date();
-    now.setMinutes(0, 0, 0);
+    // Insert entries spread across hours within today, each under hourly limit (10 per hour)
+    // but totaling over daily limit (100). Use hours from midnight to ensure they're always in today.
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+
+    // 11 hours × 10 tasks = 110 > 100 daily limit, each under 20 hourly limit
     for (let i = 0; i < 11; i++) {
-      const hourStart = new Date(now.getTime() - i * 3600_000);
+      const hourStart = new Date(dayStart.getTime() + i * 3600_000);
       await db.exec`
         INSERT INTO agent_rate_limits (user_id, window_start, task_count)
         VALUES (${testUserId}, ${hourStart.toISOString()}::timestamptz, 10)

@@ -8,11 +8,47 @@ import {
   sumTokens,
 } from "../ai/orchestrate-sub-agents";
 import { updateJobCheckpoint } from "./db";
+import { estimateTokens } from "./context-builder";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 import type { BudgetMode } from "../ai/sub-agents";
 
 // --- Types ---
+
+/**
+ * Kompakt kontekst for retry-forsøk (YB: Delta-kontekst i retries).
+ * I stedet for å sende full context på nytt, sender vi kun delta.
+ */
+export interface RetryContext {
+  /** 1-2 setningers oppsummering av oppgaven */
+  taskSummary: string;
+
+  /** Plan-steg som korte titler (ikke full content) */
+  planSummary: string;
+
+  /** KUN siste feilmelding — ikke alle previousErrors */
+  latestError: string;
+
+  /** KUN filer som endret seg mellom forsøk */
+  changedFiles: Array<{
+    path: string;
+    /** Enkel diff: hva som ble endret. Ikke full filinnhold. */
+    diff: string;
+  }>;
+
+  /** Diagnose-resultat fra ai.diagnoseFailure */
+  diagnosis: {
+    rootCause: string;
+    reason?: string;
+    suggestedAction?: string;
+  };
+
+  /** Forsøksnummer */
+  attemptNumber: number;
+
+  /** Total context-størrelse i estimerte tokens */
+  estimatedTokens: number;
+}
 
 export interface ExecutionResult {
   success: boolean;
@@ -72,6 +108,100 @@ export interface ExecutionHelpers {
   sandboxBreaker: { call: <T>(fn: () => Promise<T>) => Promise<T> };
 }
 
+// --- Helper functions for YB (Delta-kontekst i retries) ---
+
+/**
+ * Enkel linje-basert diff mellom to strenger.
+ * Returnerer kun endrede/nye/fjernede linjer, maks 500 tegn.
+ */
+export function computeSimpleDiff(oldContent: string, newContent: string): string {
+  const oldLines = oldContent.split("\n");
+  const newLines = newContent.split("\n");
+  const changes: string[] = [];
+
+  const maxLines = Math.max(oldLines.length, newLines.length);
+  for (let i = 0; i < maxLines && changes.length < 20; i++) {
+    const oldLine = oldLines[i];
+    const newLine = newLines[i];
+
+    if (oldLine === undefined && newLine !== undefined) {
+      changes.push(`+${i + 1}: ${newLine}`);
+    } else if (newLine === undefined && oldLine !== undefined) {
+      changes.push(`-${i + 1}: ${oldLine}`);
+    } else if (oldLine !== newLine) {
+      changes.push(`~${i + 1}: ${newLine}`);
+    }
+  }
+
+  if (changes.length === 0) return "[no changes detected]";
+
+  const result = changes.join("\n");
+  return result.length > 500 ? result.substring(0, 497) + "..." : result;
+}
+
+/**
+ * Beregner delta-kontekst for retry.
+ * Sammenligner nåværende genererte filer med forrige forsøk.
+ */
+export function computeRetryContext(
+  ctx: AgentExecutionContext,
+  currentFiles: Array<{ path: string; content: string }>,
+  previousFiles: Array<{ path: string; content: string }>,
+  planSummary: string,
+  validationOutput: string,
+  diagnosis: { rootCause: string; reason?: string; suggestedAction?: string },
+): RetryContext {
+  // 1. Kort oppgave-oppsummering (maks 200 tegn)
+  const taskSummary = ctx.taskDescription.length > 200
+    ? ctx.taskDescription.substring(0, 197) + "..."
+    : ctx.taskDescription;
+
+  // 2. Finn endrede filer
+  const changedFiles: RetryContext["changedFiles"] = [];
+  const prevMap = new Map(previousFiles.map(f => [f.path, f.content]));
+
+  for (const file of currentFiles) {
+    const prev = prevMap.get(file.path);
+    if (!prev) {
+      // Ny fil — inkluder kort sammendrag (ikke full content)
+      changedFiles.push({
+        path: file.path,
+        diff: `[NEW FILE] ${file.content.substring(0, 500)}${file.content.length > 500 ? "..." : ""}`,
+      });
+    } else if (prev !== file.content) {
+      // Endret fil — beregn enkel diff
+      changedFiles.push({
+        path: file.path,
+        diff: computeSimpleDiff(prev, file.content),
+      });
+    }
+    // Uendrede filer: IKKE inkludert (det er hele poenget)
+  }
+
+  // 3. Kun siste feilmelding (maks 1000 tegn)
+  const latestError = validationOutput.length > 1000
+    ? validationOutput.substring(0, 997) + "..."
+    : validationOutput;
+
+  const retryCtx: RetryContext = {
+    taskSummary,
+    planSummary,
+    latestError,
+    changedFiles,
+    diagnosis,
+    attemptNumber: ctx.totalAttempts,
+    estimatedTokens: 0,
+  };
+
+  // Estimér token-størrelse
+  const totalChars = taskSummary.length + planSummary.length + latestError.length
+    + changedFiles.reduce((sum, f) => sum + f.path.length + f.diff.length, 0)
+    + JSON.stringify(diagnosis).length;
+  retryCtx.estimatedTokens = Math.ceil(totalChars / 4);
+
+  return retryCtx;
+}
+
 /**
  * STEP 5-8(retry): Plan, build, validate, retry.
  *
@@ -98,6 +228,37 @@ export async function executePlan(
   const { report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker } = helpers;
   const { treeString, relevantFiles, memoryStrings, docsStrings } = contextData;
 
+  // === STEP 4.9: Fetch strategy hints (YE) ===
+  log.info("STEP 4.9: Searching for similar strategies");
+  let strategyHint = "";
+
+  try {
+    const strategies = await memory.search({
+      query: ctx.taskDescription,
+      limit: 3,
+      memoryType: "strategy",
+    });
+
+    // Use top match if similarity > 0.3
+    if (strategies.results.length > 0 && strategies.results[0].similarity > 0.3) {
+      const topStrategy = strategies.results[0];
+      strategyHint = `\n\n[STRATEGY HINT]\nSimilar task solved before (${(topStrategy.similarity * 100).toFixed(0)}% match):\n${topStrategy.content.substring(0, 800)}\n[END STRATEGY HINT]\n`;
+
+      log.info("strategy hint found", {
+        similarity: topStrategy.similarity,
+        category: topStrategy.category,
+        length: topStrategy.content.length,
+      });
+
+      await think(ctx, `Fant lignende oppgave løst før (${(topStrategy.similarity * 100).toFixed(0)}% match). Bruker som hint.`);
+    } else {
+      log.info("no relevant strategy found", { resultCount: strategies.results.length });
+    }
+  } catch (err) {
+    // Non-critical — continue without strategy hint
+    log.warn("strategy search failed", { error: err instanceof Error ? err.message : String(err) });
+  }
+
   // === STEP 5: Plan the work ===
   log.info("STEP 5: Planning task");
   tracker.start("planning");
@@ -110,7 +271,7 @@ export async function executePlan(
     taskDescription: ctx.taskDescription.substring(0, 200),
     model: ctx.selectedModel,
   }, () => aiBreaker.call(() => ai.planTask({
-    task: `${ctx.taskDescription}\n\nUser context: ${ctx.userMessage}`,
+    task: `${ctx.taskDescription}\n\nUser context: ${ctx.userMessage}${strategyHint}`,
     projectStructure: treeString,
     relevantFiles,
     memoryContext: memoryStrings,
@@ -132,6 +293,11 @@ export async function executePlan(
 
   log.info("STEP 5: Plan created", { steps: planStepCount });
   await think(ctx, `Plan klar — ${planStepCount} steg.`);
+
+  // TODO (Y-prosjekt fremtidig): Etter planning, bruk import-graf til å:
+  // 1. Filtrere relevantFiles til KUN filer referert i plan-stegene
+  // 2. Hente avhengigheter for nye filer planen vil opprette
+  // Dette krever at buildImportGraph kjøres på plan-output, ikke bare på source.
   await reportSteps(ctx, "Planlegger", [
     { label: `Plan klar: ${planStepCount} steg`, status: "done" },
   ], { title: `Utfører plan 0/${planStepCount}`, planProgress: { current: 0, total: planStepCount } });
@@ -284,6 +450,9 @@ export async function executePlan(
   let lastError: string | null = null;
   const previousErrors: string[] = [];
 
+  // YB: Track previous files for delta computation
+  let previousFiles: Array<{ path: string; content: string }> = [];
+
   while (ctx.totalAttempts < ctx.maxAttempts) {
     // Cancel/stop check between retry attempts
     if (await shouldStopTask(ctx, "pre_builder", sandboxRef.id)) {
@@ -408,6 +577,9 @@ export async function executePlan(
           // === META-REASONING: Diagnose the failure ===
           await report(ctx, `Analyserer feil (forsøk ${ctx.totalAttempts}/${ctx.maxAttempts})...`, "working");
 
+          // YB: Take snapshot of current files BEFORE diagnosis (for delta computation)
+          const currentFiles = allFiles.map(f => ({ path: f.path, content: f.content }));
+
           const diagResult = await auditedStep(ctx, "failure_diagnosed", {
             attempt: ctx.totalAttempts,
             error: validation.output.substring(0, 500),
@@ -440,15 +612,50 @@ export async function executePlan(
             repoName: `${ctx.repoOwner}/${ctx.repoName}`,
           });
 
+          // YB: Compute delta-context for retry
+          const retryCtx = computeRetryContext(
+            ctx,
+            currentFiles,
+            previousFiles,
+            planSummary,
+            validation.output,
+            diagnosis,
+          );
+
+          // YB: Log token savings
+          const fullContextTokens = estimateTokens({
+            treeString,
+            treeArray: [],
+            packageJson: {},
+            relevantFiles,
+            memoryStrings,
+            docsStrings,
+            mcpTools: [],
+          });
+
+          log.info("retry using delta context", {
+            attempt: ctx.totalAttempts,
+            fullContextTokens,
+            deltaTokens: retryCtx.estimatedTokens,
+            savedTokens: fullContextTokens - retryCtx.estimatedTokens,
+            savedPercent: Math.round((1 - retryCtx.estimatedTokens / fullContextTokens) * 100),
+            changedFilesCount: retryCtx.changedFiles.length,
+            rootCause: retryCtx.diagnosis.rootCause,
+          });
+
+          // Update previousFiles for next iteration
+          previousFiles = currentFiles;
+
           if (diagnosis.rootCause === "bad_plan" && ctx.planRevisions < ctx.maxPlanRevisions) {
             await report(ctx, `Plan er feil — lager ny plan (revisjon ${ctx.planRevisions + 1})...`, "working");
             ctx.planRevisions++;
 
+            // YB: Use delta context (task summary instead of full description)
             plan = await auditedStep(ctx, "plan_revised", {
               revision: ctx.planRevisions,
               diagnosis: diagnosis.rootCause,
             }, () => ai.revisePlan({
-              task: ctx.taskDescription,
+              task: retryCtx.taskSummary,
               originalPlan: plan.plan,
               diagnosis,
               constraints: ["avoid_previous_approach", "simpler_solution"],
@@ -471,18 +678,23 @@ export async function executePlan(
           } else if (diagnosis.rootCause === "implementation_error" || diagnosis.suggestedAction === "fix_code") {
             await report(ctx, `Implementeringsfeil — fikser kode...`, "working");
 
+            // YB: Use delta context — send only changed files and error, not full context
+            const taskWithDiagnosis = retryCtx.diagnosis.suggestedAction
+              ? `${retryCtx.taskSummary}\n\n[RETRY ${retryCtx.attemptNumber}] Diagnose: ${retryCtx.diagnosis.rootCause} — ${retryCtx.diagnosis.reason || ""}. Forslag: ${retryCtx.diagnosis.suggestedAction}`
+              : retryCtx.taskSummary;
+
             plan = await auditedStep(ctx, "plan_retry", {
               attempt: ctx.totalAttempts,
               diagnosis: diagnosis.rootCause,
               model: ctx.selectedModel,
             }, () => ai.planTask({
-              task: ctx.taskDescription,
-              projectStructure: treeString,
-              relevantFiles,
-              memoryContext: memoryStrings,
-              docsContext: docsStrings,
-              previousAttempt: planSummary,
-              errorMessage: validation.output,
+              task: taskWithDiagnosis,
+              projectStructure: "",  // Not needed - plan already made
+              relevantFiles: retryCtx.changedFiles.map(f => ({ path: f.path, content: f.diff })),
+              memoryContext: [],
+              docsContext: [],
+              previousAttempt: retryCtx.planSummary,
+              errorMessage: retryCtx.latestError,
               model: ctx.selectedModel,
             }));
 
@@ -562,18 +774,22 @@ export async function executePlan(
             continue;
           }
 
-          // Default: standard retry
+          // Default: standard retry with delta context (YB)
+          const taskWithDiagnosis = retryCtx.diagnosis.suggestedAction
+            ? `${retryCtx.taskSummary}\n\n[RETRY ${retryCtx.attemptNumber}] Diagnose: ${retryCtx.diagnosis.rootCause} — ${retryCtx.diagnosis.reason || ""}. Forslag: ${retryCtx.diagnosis.suggestedAction}`
+            : retryCtx.taskSummary;
+
           plan = await auditedStep(ctx, "plan_retry", {
             attempt: ctx.totalAttempts,
             model: ctx.selectedModel,
           }, () => ai.planTask({
-            task: ctx.taskDescription,
-            projectStructure: treeString,
-            relevantFiles,
-            memoryContext: memoryStrings,
-            docsContext: docsStrings,
-            previousAttempt: planSummary,
-            errorMessage: validation.output,
+            task: taskWithDiagnosis,
+            projectStructure: "",
+            relevantFiles: retryCtx.changedFiles.map(f => ({ path: f.path, content: f.diff })),
+            memoryContext: [],
+            docsContext: [],
+            previousAttempt: retryCtx.planSummary,
+            errorMessage: retryCtx.latestError,
             model: ctx.selectedModel,
           }));
 

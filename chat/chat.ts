@@ -101,23 +101,25 @@ const _ = new Subscription(agentReports, "store-agent-report", {
       filesChanged: report.filesChanged,
     });
 
-    // Try to find existing agent_status message for this conversation
+    // Try to find existing agent_status message for this task (match by taskId in JSONB metadata)
+    // Each task gets its own agent_status message — prevents overwriting old task statuses
     const existing = await db.queryRow<{ id: string }>`
       SELECT id FROM messages
       WHERE conversation_id = ${report.conversationId}
         AND message_type = 'agent_status'
+        AND metadata->>'taskId' = ${report.taskId}
       ORDER BY created_at DESC LIMIT 1
     `;
 
     if (existing) {
-      // UPDATE existing agent_status (single update path — prevents duplicates)
+      // UPDATE existing agent_status for this task
       await db.exec`
         UPDATE messages
         SET content = ${statusContent}, metadata = ${metadata}::jsonb, updated_at = NOW()
         WHERE id = ${existing.id}::uuid
       `;
     } else {
-      // No agent_status exists — create one
+      // No agent_status for this task — create one
       await db.exec`
         INSERT INTO messages (conversation_id, role, content, message_type, metadata)
         VALUES (${report.conversationId}, 'assistant', ${statusContent}, 'agent_status', ${metadata}::jsonb)
@@ -835,7 +837,7 @@ async function processAIResponse(
     await updateMessageContent(placeholderId, aiResponse.content);
     await updateMessageType(placeholderId, "chat");
 
-    // Save token/cost metadata on the AI message
+    // Save token/cost metadata on the AI message (include lastCreatedTaskId for BUG 7 fix)
     await db.exec`UPDATE messages SET metadata = ${JSON.stringify({
       model: aiResponse.modelUsed,
       tokens: aiResponse.usage,
@@ -843,6 +845,7 @@ async function processAIResponse(
       stopReason: aiResponse.stopReason,
       truncated: aiResponse.truncated,
       toolsUsed: aiResponse.toolsUsed || [],
+      ...(aiResponse.lastCreatedTaskId ? { lastCreatedTaskId: aiResponse.lastCreatedTaskId } : {}),
     })}::jsonb WHERE id = ${placeholderId}::uuid`;
 
     // Log repo activity (fire-and-forget)

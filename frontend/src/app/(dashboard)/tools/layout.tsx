@@ -11,6 +11,7 @@ const TABS = [
   { label: "Minne", href: "/tools/memory" },
   { label: "MCP", href: "/tools/mcp" },
   { label: "Integrasjoner", href: "/tools/integrations" },
+  { label: "Inspector", href: "/tools/inspector" },
   { label: "Observability", href: "/tools/observability" },
   { label: "Secrets", href: "/tools/secrets" },
   { label: "Templates", href: "/tools/templates" },

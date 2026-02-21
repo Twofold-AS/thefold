@@ -203,6 +203,44 @@ export async function completeTask(
     }
   }
 
+  // === STEP 11.5: Store procedural memory (YE) ===
+  // Only store strategy when: first-attempt success + high quality
+  if (ctx.totalAttempts === 1 && allFiles.length >= 2) {
+    log.info("STEP 11.5: Storing procedural memory (strategy)");
+
+    // YE: Detect task pattern and extract successful steps
+    const taskPattern = detectTaskPattern(ctx.taskDescription, allFiles);
+    const successfulSteps = extractSuccessfulSteps(
+      ctx.attemptHistory.map((a, i) => ({
+        attemptNumber: i + 1,
+        result: a.result,
+        error: a.error,
+      }))
+    );
+
+    if (successfulSteps.length > 0) {
+      const strategyContent = [
+        `Task pattern: ${taskPattern}`,
+        `Repository: ${ctx.repoOwner}/${ctx.repoName}`,
+        `Task: ${ctx.taskDescription.substring(0, 300)}`,
+        `Successful approach (${successfulSteps.length} steps):`,
+        ...successfulSteps.map((step, i) => `${i + 1}. ${step}`),
+        `Files changed: ${allFiles.map((f) => f.path).join(", ")}`,
+      ].join("\n");
+
+      memory.store({
+        content: strategyContent,
+        category: taskPattern,
+        linearTaskId: ctx.taskId,
+        memoryType: "strategy",
+        sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
+        tags: [taskPattern, "first-attempt-success", "high-quality"],
+      }).catch((e) => log.warn("memory.store strategy failed", { error: String(e) }));
+
+      log.info("strategy memory stored", { pattern: taskPattern, steps: successfulSteps.length });
+    }
+  }
+
   // === STEP 12: Final report + sandbox cleanup ===
   log.info("STEP 12: Cleanup and final report");
 
@@ -256,6 +294,75 @@ export async function completeTask(
     costUsd: ctx.totalCostUsd,
     tokensUsed: ctx.totalTokensUsed,
   };
+}
+
+// --- Helper: Procedural memory (YE) ---
+
+/**
+ * YE: Detect task pattern from description and files.
+ * Returns category for strategy classification.
+ */
+export function detectTaskPattern(
+  taskDescription: string,
+  files: Array<{ path: string; content: string; action: string }>,
+): string {
+  const desc = taskDescription.toLowerCase();
+  const paths = files.map((f) => f.path.toLowerCase()).join(" ");
+
+  // Heuristikk-basert kategorisering
+  if (desc.includes("migrat") || paths.includes("migration") || paths.includes(".up.sql")) {
+    return "database_migration";
+  }
+  if (desc.includes("api") && (desc.includes("endpoint") || desc.includes("route"))) {
+    return "api_endpoint";
+  }
+  if (
+    desc.includes("component") || desc.includes("ui") || desc.includes("frontend")
+    || paths.includes("/components/") || paths.includes(".tsx")
+  ) {
+    return "frontend_component";
+  }
+  if (desc.includes("bug") || desc.includes("fix") || desc.includes("error")) {
+    return "bug_fix";
+  }
+  if (desc.includes("refactor") || desc.includes("clean") || desc.includes("improve")) {
+    return "refactoring";
+  }
+  if (desc.includes("test") || paths.includes(".test.") || paths.includes(".spec.")) {
+    return "testing";
+  }
+  if (desc.includes("security") || desc.includes("auth") || desc.includes("permission")) {
+    return "security";
+  }
+  if (desc.includes("performance") || desc.includes("optimize") || desc.includes("speed")) {
+    return "performance";
+  }
+  if (desc.includes("integrat") || desc.includes("connect") || desc.includes("webhook")) {
+    return "integration";
+  }
+  return "other";
+}
+
+/**
+ * YE: Extract successful steps from attempt history.
+ * Only includes steps that worked (based on first successful attempt).
+ */
+export function extractSuccessfulSteps(
+  attemptHistory: Array<{
+    attemptNumber: number;
+    result: "success" | "failure";
+    error?: string;
+    plan?: { steps: Array<{ title: string; description: string }> };
+  }>,
+): string[] {
+  // Find first successful attempt
+  const successfulAttempt = attemptHistory.find((a) => a.result === "success");
+  if (!successfulAttempt || !successfulAttempt.plan) {
+    return [];
+  }
+
+  // Extract step titles from successful plan
+  return successfulAttempt.plan.steps.map((s) => s.title);
 }
 
 // --- Helper: Extract and register components ---

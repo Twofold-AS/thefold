@@ -7,7 +7,11 @@
       "Bash(test:*)",
       "Bash(ls:*)",
       "Bash(npx tsc:*)",
-      "Bash(git pull:*)"
+      "Bash(git pull:*)",
+      "Bash(encore test:*)",
+      "Bash(curl:*)",
+      "Bash(npx vitest run:*)",
+      "Bash(echo:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

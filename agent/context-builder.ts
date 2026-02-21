@@ -3,6 +3,7 @@ import { github, memory, docs, mcp } from "~encore/clients";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 import { updateJobCheckpoint } from "./db";
+import { buildImportGraph, getRelatedFiles, logGraphStats } from "./code-graph";
 
 // --- File reading thresholds (re-exported so agent.ts can still reference them) ---
 
@@ -214,9 +215,68 @@ export async function buildContext(
     return files;
   });
 
+  // === STEP 2.5: Build import graph and expand dependencies ===
+  if (relevantFiles.length > 0) {
+    const importGraph = buildImportGraph(relevantFiles);
+    logGraphStats(importGraph);
+
+    // Find files in import chain that findRelevantFiles missed
+    const targetPaths = relevantFiles.map((f) => f.path);
+    const relatedPaths = getRelatedFiles(importGraph, targetPaths, 2);
+
+    // Find new files not already in relevantFiles
+    const existingPaths = new Set(relevantFiles.map((f) => f.path));
+    const missingPaths = relatedPaths.filter((p) => !existingPaths.has(p));
+
+    if (missingPaths.length > 0) {
+      log.info("import graph found additional dependencies", {
+        existingFiles: relevantFiles.length,
+        graphRelated: relatedPaths.length,
+        newFromGraph: missingPaths.length,
+        newPaths: missingPaths.slice(0, 10), // log max 10
+      });
+
+      // Fetch content for missing files (max 5 extra files)
+      for (const path of missingPaths.slice(0, 5)) {
+        try {
+          if (await checkCancelled(ctx)) break;
+
+          const meta = await github.getFileMetadata({
+            owner: ctx.repoOwner,
+            repo: ctx.repoName,
+            path,
+          });
+
+          if (meta.totalLines <= SMALL_FILE_THRESHOLD) {
+            const file = await github.getFile({
+              owner: ctx.repoOwner,
+              repo: ctx.repoName,
+              path,
+            });
+            relevantFiles.push({ path, content: file.content });
+          } else if (meta.totalLines <= MEDIUM_FILE_THRESHOLD) {
+            // Read first chunk for larger files
+            const chunk = await github.getFileChunk({
+              owner: ctx.repoOwner,
+              repo: ctx.repoName,
+              path,
+              startLine: 1,
+              maxLines: CHUNK_SIZE,
+            });
+            relevantFiles.push({ path, content: chunk.content });
+          }
+          // Files over MEDIUM_FILE_THRESHOLD are skipped (too large)
+        } catch (err) {
+          log.warn("failed to fetch import-graph dependency", { path, error: String(err) });
+          // Continue — graceful degradation
+        }
+      }
+    }
+  }
+
   // Check cancellation after heavy GitHub I/O
   if (await checkCancelled(ctx)) {
-    return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings };
+    return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools: [] };
   }
 
   // === STEP 3: Gather context (memory + docs) ===
@@ -301,4 +361,176 @@ export async function buildContext(
   }
 
   return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools };
+}
+
+// --- Context Filtering (YA: Phase-specific context filtering) ---
+
+/**
+ * Defines which context fields each phase needs.
+ * Used by filterForPhase() to reduce token consumption.
+ */
+export interface ContextProfile {
+  needsTree: boolean;         // treeString
+  needsTreeArray: boolean;    // treeArray (used separately from treeString in some places)
+  needsFiles: boolean;        // relevantFiles
+  needsMemory: boolean;       // memoryStrings
+  needsDocs: boolean;         // docsStrings
+  needsMcpTools: boolean;     // mcpTools
+  needsPackageJson: boolean;  // packageJson
+  maxContextTokens: number;   // hard limit for total context size
+}
+
+/**
+ * Phase-specific context profiles.
+ * Each phase gets only what it needs — reduces tokens by ~30-40%.
+ */
+export const CONTEXT_PROFILES: Record<string, ContextProfile> = {
+  confidence: {
+    needsTree: true,          // needs tree structure for assessment
+    needsTreeArray: false,
+    needsFiles: false,        // does NOT need file contents
+    needsMemory: false,       // does NOT need history
+    needsDocs: false,
+    needsMcpTools: false,
+    needsPackageJson: true,   // needs for technology assessment
+    maxContextTokens: 3_000,
+  },
+  planning: {
+    needsTree: true,
+    needsTreeArray: true,
+    needsFiles: true,         // needs file contents for plan
+    needsMemory: true,        // needs history for better plans
+    needsDocs: true,          // needs docs for conventions
+    needsMcpTools: true,
+    needsPackageJson: true,
+    maxContextTokens: 20_000,
+  },
+  building: {
+    needsTree: false,         // plan already made
+    needsTreeArray: false,
+    needsFiles: true,         // only files referenced in plan
+    needsMemory: false,
+    needsDocs: false,
+    needsMcpTools: false,
+    needsPackageJson: true,   // for dependencies
+    maxContextTokens: 50_000,
+  },
+  diagnosis: {
+    needsTree: false,
+    needsTreeArray: false,
+    needsFiles: false,        // diagnosis needs error output, not source
+    needsMemory: true,        // error patterns from memory
+    needsDocs: false,
+    needsMcpTools: false,
+    needsPackageJson: false,
+    maxContextTokens: 5_000,
+  },
+  reviewing: {
+    needsTree: false,
+    needsTreeArray: false,
+    needsFiles: false,        // reviews generated files, not source
+    needsMemory: true,        // to match conventions
+    needsDocs: false,
+    needsMcpTools: false,
+    needsPackageJson: false,
+    maxContextTokens: 12_000,
+  },
+  completing: {
+    needsTree: false,
+    needsTreeArray: false,
+    needsFiles: false,
+    needsMemory: false,
+    needsDocs: false,
+    needsMcpTools: false,
+    needsPackageJson: false,
+    maxContextTokens: 2_000,
+  },
+};
+
+/**
+ * Filters AgentContext based on phase profile.
+ * Returns a new AgentContext with only the fields the phase needs.
+ * Empty fields are replaced with empty values ([], "", {}).
+ */
+export function filterForPhase(
+  context: AgentContext,
+  phase: string,
+): AgentContext {
+  const profile = CONTEXT_PROFILES[phase];
+
+  // If unknown phase, return full context (safe fallback)
+  if (!profile) {
+    log.warn("unknown phase for context filtering, returning full context", { phase });
+    return context;
+  }
+
+  const filtered: AgentContext = {
+    treeString: profile.needsTree ? context.treeString : "",
+    treeArray: profile.needsTreeArray ? context.treeArray : [],
+    packageJson: profile.needsPackageJson ? context.packageJson : {},
+    relevantFiles: profile.needsFiles ? context.relevantFiles : [],
+    memoryStrings: profile.needsMemory ? context.memoryStrings : [],
+    docsStrings: profile.needsDocs ? context.docsStrings : [],
+    mcpTools: profile.needsMcpTools ? context.mcpTools : [],
+  };
+
+  // Enforce maxContextTokens — simple estimation: 1 token ≈ 4 chars
+  const estimatedTokens = estimateTokens(filtered);
+  if (estimatedTokens > profile.maxContextTokens) {
+    log.info("context exceeds phase budget, trimming", {
+      phase,
+      estimated: estimatedTokens,
+      budget: profile.maxContextTokens,
+    });
+    return trimContext(filtered, profile.maxContextTokens);
+  }
+
+  return filtered;
+}
+
+/**
+ * Estimates token count for an AgentContext.
+ * Simple heuristic: 1 token ≈ 4 characters.
+ */
+export function estimateTokens(context: AgentContext): number {
+  let chars = 0;
+  chars += context.treeString.length;
+  chars += context.relevantFiles.reduce((sum, f) => sum + f.path.length + f.content.length, 0);
+  chars += context.memoryStrings.reduce((sum, s) => sum + s.length, 0);
+  chars += context.docsStrings.reduce((sum, s) => sum + s.length, 0);
+  chars += context.mcpTools.reduce((sum, t) => sum + t.name.length + t.description.length, 0);
+  chars += JSON.stringify(context.packageJson).length;
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * Trims context to fit within token budget.
+ * Priority: relevantFiles (code) > memoryStrings > docsStrings > treeString
+ * Trims least important fields first.
+ */
+function trimContext(context: AgentContext, maxTokens: number): AgentContext {
+  const trimmed = { ...context };
+
+  // 1. Trim docs first (lowest priority)
+  while (estimateTokens(trimmed) > maxTokens && trimmed.docsStrings.length > 0) {
+    trimmed.docsStrings = trimmed.docsStrings.slice(0, -1);
+  }
+
+  // 2. Trim memory
+  while (estimateTokens(trimmed) > maxTokens && trimmed.memoryStrings.length > 0) {
+    trimmed.memoryStrings = trimmed.memoryStrings.slice(0, -1);
+  }
+
+  // 3. Trim files (remove those with lowest relevance — last in list)
+  while (estimateTokens(trimmed) > maxTokens && trimmed.relevantFiles.length > 1) {
+    trimmed.relevantFiles = trimmed.relevantFiles.slice(0, -1);
+  }
+
+  // 4. Trim tree (last resort)
+  if (estimateTokens(trimmed) > maxTokens && trimmed.treeString.length > 0) {
+    const targetChars = maxTokens * 4;
+    trimmed.treeString = trimmed.treeString.substring(0, targetChars);
+  }
+
+  return trimmed;
 }

@@ -17,6 +17,9 @@ const voyageKey = secret("VoyageAPIKey");
 
 const db = new SQLDatabase("memory", { migrations: "./migrations" });
 
+/** Hybrid search weighting: 60% semantic (vector), 40% keyword (BM25) */
+export const HYBRID_ALPHA = 0.6;
+
 // --- Embedding helper (with cache) ---
 
 async function embed(text: string): Promise<number[]> {
@@ -157,6 +160,30 @@ export const search = api(
     const repoFilter = req.sourceRepo ? req.sourceRepo : null;
     const minRelevance = req.includeDecayed ? 0.0 : 0.1;
 
+    // BM25 keyword search (only if query has searchable terms)
+    const bm25Query = req.query.trim();
+    const bm25Scores = new Map<string, number>();
+
+    if (bm25Query.length > 0) {
+      const bm25Rows = await db.query<{ id: string; bm25_score: number }>`
+        SELECT
+          id,
+          ts_rank_cd(search_vector, plainto_tsquery('english', ${bm25Query})) as bm25_score
+        FROM memories
+        WHERE search_vector @@ plainto_tsquery('english', ${bm25Query})
+          AND superseded_by IS NULL
+          AND (${typeFilter}::text IS NULL OR memory_type = ${typeFilter})
+          AND (${repoFilter}::text IS NULL OR source_repo = ${repoFilter})
+          AND relevance_score >= ${minRelevance}
+        ORDER BY bm25_score DESC
+        LIMIT ${limit * 2}
+      `;
+
+      for await (const row of bm25Rows) {
+        bm25Scores.set(row.id, row.bm25_score);
+      }
+    }
+
     // Decay scoring with type-based half-lives:
     //   half_life = 90 days for error_pattern/decision, 30 days for others
     //   recency = exp(-ln2 × age_days / half_life)
@@ -184,10 +211,10 @@ export const search = api(
               * LOG(1 + access_count) * 0.5)
         )
       ) DESC
-      LIMIT ${limit}
+      LIMIT ${limit * 2}
     `;
 
-    const results: SearchResult[] = [];
+    let results: SearchResult[] = [];
     const ids: string[] = [];
     for await (const row of rows) {
       const similarity = row.similarity as number;
@@ -248,6 +275,123 @@ export const search = api(
         trustLevel,
       });
     }
+
+    // Hybrid scoring: combine vector + BM25
+    const vectorResultCount = results.length;
+
+    // Normalize BM25 scores to 0-1 range
+    const maxBm25 = Math.max(...Array.from(bm25Scores.values()), 0.001);
+    const normalizedBm25 = new Map<string, number>();
+    for (const [id, score] of bm25Scores) {
+      normalizedBm25.set(id, score / maxBm25);
+    }
+
+    // Combine vector + BM25 for existing results
+    for (const result of results) {
+      const vectorScore = result.similarity;
+      const bm25Score = normalizedBm25.get(result.id) || 0;
+
+      // Hybrid score: α × vector + (1-α) × BM25
+      result.similarity = HYBRID_ALPHA * vectorScore + (1 - HYBRID_ALPHA) * bm25Score;
+    }
+
+    // Add BM25-only results that vector search missed
+    let bm25OnlyCount = 0;
+    for (const [id, score] of normalizedBm25) {
+      if (!results.find((r) => r.id === id)) {
+        // Fetch this memory from DB
+        const bm25OnlyRow = await db.queryRow<{
+          id: string;
+          content: string;
+          category: string;
+          created_at: string;
+          last_accessed_at: string | null;
+          memory_type: string;
+          relevance_score: number;
+          access_count: number;
+          tags: string[] | null;
+          source_repo: string | null;
+          pinned: boolean;
+          content_hash: string | null;
+          trust_level: string | null;
+        }>`
+          SELECT id, content, category, created_at, last_accessed_at, memory_type,
+            relevance_score::float as relevance_score, access_count, tags, source_repo, pinned,
+            content_hash, trust_level
+          FROM memories WHERE id = ${id}::uuid
+        `;
+
+        if (bm25OnlyRow) {
+          // Integrity check (ASI06)
+          const storedHash = bm25OnlyRow.content_hash;
+          if (storedHash) {
+            const computedHash = hashContent(bm25OnlyRow.content);
+            if (computedHash !== storedHash) {
+              log.warn("memory integrity check failed in BM25-only result", { id });
+              continue;
+            }
+          }
+
+          // Trust level filter
+          const trustLevel = (bm25OnlyRow.trust_level || "user") as "user" | "agent" | "system";
+          if (req.minTrustLevel) {
+            const trustOrder = { user: 0, agent: 1, system: 2 };
+            if (trustOrder[trustLevel] < trustOrder[req.minTrustLevel]) continue;
+          }
+
+          // Tag filter
+          if (req.tags && req.tags.length > 0) {
+            const rowTags = bm25OnlyRow.tags || [];
+            const hasMatch = req.tags.some((t) => rowTags.includes(t));
+            if (!hasMatch) continue;
+          }
+
+          const relevanceScore = Number(bm25OnlyRow.relevance_score) || 0;
+          const accessCount = Number(bm25OnlyRow.access_count) || 0;
+          const decayedScore = calculateDecayedRelevance(
+            relevanceScore,
+            new Date(bm25OnlyRow.created_at),
+            accessCount,
+            new Date(bm25OnlyRow.last_accessed_at ?? bm25OnlyRow.created_at),
+            bm25OnlyRow.memory_type as MemoryType,
+            bm25OnlyRow.pinned ?? false,
+          );
+
+          results.push({
+            id: bm25OnlyRow.id,
+            content: bm25OnlyRow.content,
+            category: bm25OnlyRow.category,
+            similarity: (1 - HYBRID_ALPHA) * score, // BM25-only component
+            memoryType: bm25OnlyRow.memory_type as MemoryType,
+            relevanceScore,
+            decayedScore: 0.7 * ((1 - HYBRID_ALPHA) * score) + 0.3 * decayedScore,
+            accessCount,
+            tags: bm25OnlyRow.tags || [],
+            sourceRepo: bm25OnlyRow.source_repo || undefined,
+            createdAt: String(bm25OnlyRow.created_at),
+            trustLevel,
+          });
+          bm25OnlyCount++;
+          ids.push(id);
+        }
+      }
+    }
+
+    // Re-sort by hybrid score
+    results.sort((a, b) => b.similarity - a.similarity);
+
+    // Trim to limit
+    results = results.slice(0, limit);
+
+    // Log hybrid search results
+    log.info("hybrid search completed", {
+      query: req.query.substring(0, 100),
+      vectorResults: vectorResultCount,
+      bm25Results: bm25Scores.size,
+      bm25OnlyResults: bm25OnlyCount,
+      hybridResults: results.length,
+      alpha: HYBRID_ALPHA,
+    });
 
     // Update access tracking for returned results
     if (ids.length > 0) {

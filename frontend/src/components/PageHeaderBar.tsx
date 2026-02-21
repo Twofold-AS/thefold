@@ -35,24 +35,23 @@ export function PageHeaderBar({ title, subtitle, cells, rightCells }: PageHeader
         </div>
       </div>
 
-      {/* Additional cells */}
-      {cells?.map((cell, i) => (
-        <div
-          key={i}
-          className={`flex items-center px-4 shrink-0 ${cell.onClick ? "cursor-pointer hover:bg-white/5 transition-colors" : ""} ${cell.className || ""}`}
-          style={{
-            borderRight: "1px solid var(--border)",
-            width: cell.width,
-            minWidth: cell.minWidth,
-          }}
-          onClick={cell.onClick}
-        >
-          {cell.content}
-        </div>
-      ))}
-
-      {/* Spacer */}
-      <div className="flex-1" />
+      {/* Additional cells — scrollable when overflowing */}
+      <div className="flex items-stretch overflow-x-auto flex-1 min-w-0">
+        {cells?.map((cell, i) => (
+          <div
+            key={i}
+            className={`flex items-center px-4 shrink-0 ${cell.onClick ? "cursor-pointer hover:bg-white/5 transition-colors" : ""} ${cell.className || ""}`}
+            style={{
+              borderRight: "1px solid var(--border)",
+              width: cell.width,
+              minWidth: cell.minWidth,
+            }}
+            onClick={cell.onClick}
+          >
+            {cell.content}
+          </div>
+        ))}
+      </div>
 
       {/* Right-aligned cells */}
       {rightCells?.map((cell, i) => (

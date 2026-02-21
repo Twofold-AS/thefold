@@ -7,6 +7,15 @@ import { db } from "./db";
 
 const MCPRoutingEnabled = secret("MCPRoutingEnabled");
 
+function isMCPRoutingEnabled(): boolean {
+  try {
+    return MCPRoutingEnabled() === "true";
+  } catch {
+    // Secret not set — default to disabled
+    return false;
+  }
+}
+
 // In-memory pool av aktive MCP-klienter, keyed by server name
 const activeClients = new Map<string, MCPClient>();
 
@@ -19,8 +28,7 @@ export async function startInstalledServers(): Promise<{
   startedServers: string[];
   failedServers: string[];
 }> {
-  const enabled = MCPRoutingEnabled();
-  if (enabled !== "true") {
+  if (!isMCPRoutingEnabled()) {
     return { tools: [], startedServers: [], failedServers: [] };
   }
 
@@ -108,8 +116,7 @@ export async function routeToolCall(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<MCPToolCallResult> {
-  const enabled = MCPRoutingEnabled();
-  if (enabled !== "true") {
+  if (!isMCPRoutingEnabled()) {
     return {
       content: [{ type: "text", text: "MCP routing is disabled" }],
       isError: true,
@@ -210,7 +217,7 @@ interface MCPRoutingStatusResponse {
 export const routingStatus = api(
   { method: "GET", path: "/mcp/routing-status", expose: true, auth: true },
   async (): Promise<MCPRoutingStatusResponse> => {
-    const enabled = MCPRoutingEnabled();
+    const enabled = isMCPRoutingEnabled();
 
     const activeServers: MCPRoutingStatusResponse["activeServers"] = [];
     for (const [name, client] of activeClients) {
@@ -222,7 +229,7 @@ export const routingStatus = api(
       });
     }
 
-    return { enabled: enabled === "true", activeServers };
+    return { enabled, activeServers };
   }
 );
 

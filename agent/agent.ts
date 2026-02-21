@@ -1,6 +1,7 @@
 import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
+import log from "encore.dev/log";
 import { github, linear, sandbox, users, tasks, mcp } from "~encore/clients";
 import { agentReports } from "../chat/chat";
 import { type ModelMode } from "../ai/router";
@@ -8,7 +9,7 @@ import type { AgentExecutionContext, CuratedContext } from "./types";
 import { createStateMachine } from "./state-machine";
 import { createPhaseTracker, savePhaseMetrics, getPhaseMetricsSummary, getTaskCostBreakdown } from "./metrics";
 import type { PhaseMetricsSummary, TaskCostBreakdown } from "./metrics";
-import { buildContext, type AgentContext } from "./context-builder";
+import { buildContext, filterForPhase, estimateTokens, type AgentContext } from "./context-builder";
 import { assessAndRoute, type ConfidenceResult } from "./confidence";
 import { executePlan, type ExecutionResult } from "./execution";
 import { handleReview, type ReviewResult } from "./review-handler";
@@ -206,6 +207,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
   let treeString = "", treeArray: string[] = [], memoryStrings: string[] = [], docsStrings: string[] = [];
   let relevantFiles: Array<{ path: string; content: string }> = [];
   let packageJson: Record<string, unknown> = {};
+  let mcpTools: Array<{ name: string; description: string; serverName: string }> = [];
   let taskTitle = ctx.taskId;
 
   try {
@@ -222,6 +224,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       const ctxResult: AgentContext = await buildContext(ctx, tracker, { report, think, auditedStep, audit, autoInitRepo, githubBreaker, checkCancelled });
       treeString = ctxResult.treeString; treeArray = ctxResult.treeArray; packageJson = ctxResult.packageJson;
       relevantFiles = ctxResult.relevantFiles; memoryStrings = ctxResult.memoryStrings; docsStrings = ctxResult.docsStrings;
+      mcpTools = ctxResult.mcpTools;
       sm.transitionTo("context"); ctx.phase = sm.current;
     }
 
@@ -236,9 +239,23 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     sm.transitionTo("confidence");
     ctx.phase = sm.current;
 
+    // Filter context for confidence phase (YA: Phase-specific context filtering)
+    const fullContext: AgentContext = { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools };
+    const fullTokens = estimateTokens(fullContext);
+    const confidenceContext = filterForPhase(fullContext, "confidence");
+    const filteredTokens = estimateTokens(confidenceContext);
+
+    log.info("context filtered for phase", {
+      phase: "confidence",
+      fullTokens,
+      filteredTokens,
+      savedTokens: fullTokens - filteredTokens,
+      savedPercent: Math.round((1 - filteredTokens / fullTokens) * 100),
+    });
+
     const confidenceOutcome: ConfidenceResult = await assessAndRoute(
       ctx,
-      { treeString, treeArray, relevantFiles, memoryStrings, docsStrings },
+      confidenceContext,
       tracker,
       { report, think, reportSteps, auditedStep, audit },
       { forceContinue: options?.forceContinue, useCurated },
@@ -261,9 +278,21 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     sm.transitionTo("planning");
     ctx.phase = sm.current;
 
+    // Filter context for planning phase (YA: Phase-specific context filtering)
+    const planningContext = filterForPhase(fullContext, "planning");
+    const planningTokens = estimateTokens(planningContext);
+
+    log.info("context filtered for phase", {
+      phase: "planning",
+      fullTokens,
+      filteredTokens: planningTokens,
+      savedTokens: fullTokens - planningTokens,
+      savedPercent: Math.round((1 - planningTokens / fullTokens) * 100),
+    });
+
     const executionOutcome: ExecutionResult = await executePlan(
       ctx,
-      { treeString, treeArray, relevantFiles, memoryStrings, docsStrings },
+      planningContext,
       tracker,
       { report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker },
       { sandboxId: options?.sandboxId },
@@ -305,9 +334,21 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     sm.transitionTo("reviewing");
     ctx.phase = sm.current;
 
+    // Filter context for reviewing phase (YA: Phase-specific context filtering)
+    const reviewingContext = filterForPhase(fullContext, "reviewing");
+    const reviewingTokens = estimateTokens(reviewingContext);
+
+    log.info("context filtered for phase", {
+      phase: "reviewing",
+      fullTokens,
+      filteredTokens: reviewingTokens,
+      savedTokens: fullTokens - reviewingTokens,
+      savedPercent: Math.round((1 - reviewingTokens / fullTokens) * 100),
+    });
+
     const reviewOutcome: ReviewResult = await handleReview(
       ctx,
-      { allFiles, sandboxId, memoryStrings },
+      { allFiles, sandboxId, memoryStrings: reviewingContext.memoryStrings },
       tracker,
       { report, think, reportSteps, auditedStep, audit, shouldStopTask },
       { skipReview: options?.skipReview },

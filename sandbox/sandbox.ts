@@ -32,6 +32,15 @@ function getSandboxMode(): "docker" | "filesystem" {
   return "filesystem";
 }
 
+function isAdvancedPipelineEnabled(): boolean {
+  try {
+    return SandboxAdvancedPipeline() === "true";
+  } catch {
+    // Secret not set — default to disabled
+    return false;
+  }
+}
+
 // Sandboxes are directories on the VPS, isolated by unique IDs
 // In production, use Docker containers for full isolation
 const SANDBOX_ROOT = "/tmp/thefold-sandboxes";
@@ -125,8 +134,7 @@ export const create = api(
       });
 
       // Ta "before" snapshot for Docker mode
-      const advancedEnabled = SandboxAdvancedPipeline();
-      if (advancedEnabled === "true") {
+      if (isAdvancedPipelineEnabled()) {
         try {
           const runner = dockerRunner(id);
           const snapshot = await takeDockerSnapshot(runner);
@@ -203,8 +211,7 @@ export const create = api(
       }
 
       // Ta "before" snapshot for fremtidig sammenligning
-      const advancedEnabled = SandboxAdvancedPipeline();
-      if (advancedEnabled === "true") {
+      if (isAdvancedPipelineEnabled()) {
         try {
           const repoDir = path.join(dir, "repo");
           const snapshot = takeSnapshot(repoDir);
@@ -496,8 +503,7 @@ async function runSnapshotComparison(
   isDocker: boolean,
   sandboxId: string,
 ): Promise<ValidationStepResult> {
-  const advancedEnabled = SandboxAdvancedPipeline();
-  if (advancedEnabled !== "true") {
+  if (!isAdvancedPipelineEnabled()) {
     return { step: "snapshot", success: true, errors: [], warnings: ["Snapshot comparison disabled by feature flag"] };
   }
 
@@ -572,8 +578,7 @@ async function runPerformanceBenchmark(
   repoDir: string,
   isDocker: boolean,
 ): Promise<ValidationStepResult> {
-  const advancedEnabled = SandboxAdvancedPipeline();
-  if (advancedEnabled !== "true") {
+  if (!isAdvancedPipelineEnabled()) {
     return { step: "performance", success: true, errors: [], warnings: ["Performance benchmarks disabled by feature flag"] };
   }
 

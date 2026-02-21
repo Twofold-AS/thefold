@@ -318,8 +318,13 @@ export default function ChatPage() {
     const last = statusMsgs[statusMsgs.length - 1];
     // Use typed parser — handles new contract + legacy format
     const parsed = parseAgentStatusContent(last.content);
-    if (parsed) return { ...parsed, messageId: last.id, metadata: last.metadata };
-    return null;
+    if (!parsed) return null;
+    // Track whether there are newer user/assistant messages after this status
+    const lastIdx = messages.indexOf(last);
+    const hasNewerConversation = messages.slice(lastIdx + 1).some(
+      m => m.role === "user" || (m.role === "assistant" && m.messageType !== "agent_status" && m.messageType !== "agent_report" && m.messageType !== "agent_thought")
+    );
+    return { ...parsed, messageId: last.id, metadata: last.metadata, hasNewerConversation };
   }, [messages, statusOverride, statusDismissed]);
 
   const agentActive = useMemo(() => {
@@ -331,7 +336,8 @@ export default function ChatPage() {
         : lastAgentStatus.metadata;
       if (!meta?.taskId) return false;
     } catch { return false; }
-    return lastAgentStatus.phase !== "Ferdig" && lastAgentStatus.phase !== "Feilet" && lastAgentStatus.phase !== "Stopped";
+    const terminalPhases = ["Ferdig", "Feilet", "Stopped", "completed", "failed"];
+    return !terminalPhases.includes(lastAgentStatus.phase);
   }, [lastAgentStatus]);
 
   // Extract last agent thought for display in AgentWorking
@@ -513,11 +519,12 @@ export default function ChatPage() {
     if (last.role === "user") return true;
     // Empty assistant placeholder = still waiting
     if (last.role === "assistant" && (!last.content || !last.content.trim())) return true;
-    // Agent status = still waiting, UNLESS terminal phase (Ferdig/Feilet)
+    // Agent status = still waiting, UNLESS terminal phase
     if (last.messageType === "agent_status") {
       try {
         const parsed = JSON.parse(last.content);
-        if (parsed.phase === "Ferdig" || parsed.phase === "Feilet") return false;
+        const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed"];
+        if (terminal.includes(parsed.phase)) return false;
       } catch {}
       return true;
     }
@@ -712,13 +719,44 @@ export default function ChatPage() {
             ) : (
               <div className="space-y-4 max-w-4xl mx-auto pt-4">
                 {messages.filter(m => {
-                  if (m.messageType === "agent_status") return false;
+                  // BUG 6 FIX: Allow terminal agent_status messages through for inline rendering
+                  if (m.messageType === "agent_status") {
+                    const parsed = parseAgentStatusContent(m.content);
+                    const terminalPhases = ["Ferdig", "Feilet", "Stopped", "completed", "failed"];
+                    if (parsed && terminalPhases.includes(parsed.phase)) {
+                      return true; // Render inline
+                    }
+                    return false; // Active statuses still filtered (rendered sticky at bottom)
+                  }
                   if (m.messageType === "agent_report") return false;
                   if (m.role === "assistant" && (!m.content || !m.content.trim()) && m.messageType !== "agent_thought") return false;
                   return true;
                 }).map((msg) => {
                   const isUser = msg.role === "user";
                   const isContextTransfer = msg.messageType === "context_transfer";
+
+                  // BUG 6 FIX: Render terminal agent_status inline as AgentStatus box
+                  if (msg.messageType === "agent_status") {
+                    const parsed = parseAgentStatusContent(msg.content);
+                    if (!parsed) return null;
+                    return (
+                      <div key={msg.id} className="message-enter">
+                        <AgentStatus
+                          data={{
+                            phase: parsed.phase,
+                            title: parsed.title || parsed.phase,
+                            steps: parsed.steps || [],
+                            error: parsed.error,
+                            questions: parsed.questions,
+                            reviewData: parsed.reviewData,
+                            planProgress: parsed.planProgress,
+                            activeTasks: parsed.activeTasks,
+                          }}
+                          onDismiss={() => {}}
+                        />
+                      </div>
+                    );
+                  }
 
                   if (msg.messageType === "agent_thought") {
                     // Safety: if content is JSON (old messages), extract .thought field
@@ -830,8 +868,9 @@ export default function ChatPage() {
                 })}
 
                 {/* Heartbeat lost — backend stopped responding */}
-                {/* AgentStatus — rendered separately from messages, stays visible on failure/stopped */}
-                {lastAgentStatus && (agentActive || lastAgentStatus.phase === "Feilet" || lastAgentStatus.phase === "Stopped" || lastAgentStatus.phase === "Ferdig" || lastAgentStatus.phase === "Venter") && (
+                {/* AgentStatus — sticky at bottom for active/in-progress status only */}
+                {/* Terminal statuses (Ferdig/Feilet/Stopped) are ALWAYS rendered inline in message flow (BUG 6 FIX) */}
+                {lastAgentStatus && !lastAgentStatus.hasNewerConversation && (agentActive || lastAgentStatus.phase === "Venter") && (
                   <div className="message-enter">
                     <AgentStatus
                       data={{

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   getPhaseMetrics,
   getTaskMetrics,
+  getAuditStats,
   type PhaseMetricsSummary,
   type TaskCostBreakdown,
 } from "@/lib/api";
@@ -33,11 +34,22 @@ export default function CostsDashboardPage() {
   const [breakdown, setBreakdown] = useState<TaskCostBreakdown | null>(null);
   const [lookupLoading, setLookupLoading] = useState(false);
   const [lookupError, setLookupError] = useState("");
+  const [auditStats, setAuditStats] = useState<{
+    totalTasks: number;
+    successRate: number;
+    actionTypeCounts: Record<string, number>;
+  } | null>(null);
 
   useEffect(() => {
     setLoading(true);
-    getPhaseMetrics(days)
-      .then((r) => setPhases(r.phases))
+    Promise.all([
+      getPhaseMetrics(days),
+      getAuditStats().catch(() => null),
+    ])
+      .then(([phaseRes, statsRes]) => {
+        setPhases(phaseRes.phases);
+        if (statsRes) setAuditStats(statsRes);
+      })
       .catch(() => setPhases([]))
       .finally(() => setLoading(false));
   }, [days]);
@@ -261,6 +273,187 @@ export default function CostsDashboardPage() {
           </div>
         )}
       </div>
+
+      {/* YG: Context Efficiency Dashboard */}
+      {!loading && (
+        <div style={{ marginTop: 40 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)", marginBottom: 12 }}>
+            Kontekst-effektivitet
+          </div>
+          {phases.length > 0 ? (
+            <ContextEfficiency phases={phases} auditStats={auditStats} />
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 1, border: "1px solid var(--border)", marginBottom: 24 }}>
+              {[
+                { label: "Kontekst-waste (est.)", value: "—" },
+                { label: "Retry-rate", value: "—" },
+                { label: "Suksessrate", value: "—" },
+                { label: "Strategi-treff", value: "—" },
+              ].map((card) => (
+                <div
+                  key={card.label}
+                  style={{
+                    padding: "16px 20px",
+                    background: "var(--bg-card)",
+                    borderRight: "1px solid var(--border)",
+                  }}
+                >
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                    {card.label}
+                  </div>
+                  <div style={{ fontSize: 20, fontWeight: 600, color: "var(--text-muted)", fontFamily: "var(--font-mono, monospace)" }}>
+                    {card.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- YG: Context Efficiency Section ---
+
+function ContextEfficiency({
+  phases,
+  auditStats,
+}: {
+  phases: PhaseMetricsSummary[];
+  auditStats: { totalTasks: number; successRate: number; actionTypeCounts: Record<string, number> } | null;
+}) {
+  // Compute derived metrics from phase data
+  const totalInputTokens = phases.reduce((s, p) => s + p.avgTokensInput * p.taskCount, 0);
+  const totalOutputTokens = phases.reduce((s, p) => s + p.avgTokensOutput * p.taskCount, 0);
+  const totalCachedTokens = phases.reduce((s, p) => {
+    // Cached tokens reduce waste — estimate from cost savings
+    // If we know p95 cost is significantly higher than avg, there's variance (potential waste)
+    return s;
+  }, 0);
+
+  // Context waste: input tokens that were sent but likely unused
+  // Heuristic: output/input ratio < 0.1 suggests most input was ignored
+  const phaseEfficiency = phases.map((p) => {
+    const ratio = p.avgTokensInput > 0 ? p.avgTokensOutput / p.avgTokensInput : 0;
+    // A healthy ratio is 0.1-0.3 (AI reads input and produces proportional output)
+    // Very low ratio (<0.05) suggests context waste
+    const wastePercent = Math.max(0, Math.round((1 - Math.min(ratio * 5, 1)) * 100));
+    return { phase: p.phase, ratio, wastePercent, avgInput: p.avgTokensInput, avgOutput: p.avgTokensOutput };
+  });
+
+  const avgWaste = phaseEfficiency.length > 0
+    ? Math.round(phaseEfficiency.reduce((s, p) => s + p.wastePercent, 0) / phaseEfficiency.length)
+    : 0;
+
+  // Retry rate from audit stats
+  const retryCount = auditStats?.actionTypeCounts?.["diagnosis_run"] || 0;
+  const taskCount = auditStats?.totalTasks || phases.reduce((s, p) => Math.max(s, p.taskCount), 0);
+  const retryRate = taskCount > 0 ? Math.round((retryCount / taskCount) * 100) : 0;
+
+  // Strategy hit rate
+  const strategyHits = auditStats?.actionTypeCounts?.["strategy_used"] || 0;
+  const strategyRate = taskCount > 0 ? Math.round((strategyHits / taskCount) * 100) : 0;
+
+  return (
+    <div>
+      {/* Summary cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 1, border: "1px solid var(--border)", marginBottom: 24 }}>
+        {[
+          {
+            label: "Kontekst-waste (est.)",
+            value: `${avgWaste}%`,
+            color: avgWaste > 50 ? "#ef4444" : avgWaste > 30 ? "#eab308" : "#22c55e",
+          },
+          {
+            label: "Retry-rate",
+            value: `${retryRate}%`,
+            color: retryRate > 40 ? "#ef4444" : retryRate > 20 ? "#eab308" : "#22c55e",
+          },
+          {
+            label: "Suksessrate",
+            value: auditStats ? `${auditStats.successRate.toFixed(0)}%` : "—",
+            color: (auditStats?.successRate ?? 0) > 80 ? "#22c55e" : "#eab308",
+          },
+          {
+            label: "Strategi-treff",
+            value: `${strategyRate}%`,
+            color: "var(--text-primary)",
+          },
+        ].map((card) => (
+          <div
+            key={card.label}
+            style={{
+              padding: "16px 20px",
+              background: "var(--bg-card)",
+              borderRight: "1px solid var(--border)",
+            }}
+          >
+            <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              {card.label}
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 600, color: card.color, fontFamily: "var(--font-mono, monospace)" }}>
+              {card.value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Per-phase efficiency table */}
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid var(--border)" }}>
+            {["Fase", "Snitt input", "Snitt output", "Ratio", "Est. waste"].map((h) => (
+              <th
+                key={h}
+                style={{
+                  textAlign: "left",
+                  padding: "8px 12px",
+                  color: "var(--text-muted)",
+                  fontWeight: 500,
+                  fontSize: 11,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {phaseEfficiency.map((p) => (
+            <tr key={p.phase} style={{ borderBottom: "1px solid var(--border)" }}>
+              <td style={{ padding: "10px 12px", color: "var(--text-primary)", fontWeight: 500 }}>{p.phase}</td>
+              <td style={{ padding: "10px 12px", color: "var(--text-secondary)", fontFamily: "var(--font-mono, monospace)" }}>
+                {p.avgInput.toLocaleString()}
+              </td>
+              <td style={{ padding: "10px 12px", color: "var(--text-secondary)", fontFamily: "var(--font-mono, monospace)" }}>
+                {p.avgOutput.toLocaleString()}
+              </td>
+              <td style={{ padding: "10px 12px", color: "var(--text-secondary)", fontFamily: "var(--font-mono, monospace)" }}>
+                {(p.ratio * 100).toFixed(1)}%
+              </td>
+              <td style={{ padding: "10px 12px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 60, height: 6, background: "var(--border)" }}>
+                    <div
+                      style={{
+                        width: `${p.wastePercent}%`,
+                        height: "100%",
+                        background: p.wastePercent > 50 ? "#ef4444" : p.wastePercent > 30 ? "#eab308" : "#22c55e",
+                      }}
+                    />
+                  </div>
+                  <span style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono, monospace)" }}>
+                    {p.wastePercent}%
+                  </span>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

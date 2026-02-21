@@ -228,7 +228,7 @@ export default function HomePage() {
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Success rate</span>
-                <span className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>{((data?.auditSuccessRate ?? 0) * 100).toFixed(1)}%</span>
+                <span className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>{(data?.auditSuccessRate ?? 0).toFixed(1)}%</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Avg duration</span>
@@ -255,8 +255,8 @@ export default function HomePage() {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Hit rate</span>
-                <span className="text-sm font-mono font-medium" style={{ color: (data?.cacheHitRate ?? 0) > 0.5 ? "var(--success)" : "var(--text-primary)" }}>
-                  {((data?.cacheHitRate ?? 0) * 100).toFixed(1)}%
+                <span className="text-sm font-mono font-medium" style={{ color: (data?.cacheHitRate ?? 0) > 50 ? "var(--success)" : "var(--text-primary)" }}>
+                  {(data?.cacheHitRate ?? 0).toFixed(1)}%
                 </span>
               </div>
               <div className="flex items-center justify-between">

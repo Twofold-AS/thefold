@@ -44,6 +44,7 @@ export interface ChatResponse {
   modelUsed: string;
   costUsd: number;
   toolsUsed?: string[];
+  lastCreatedTaskId?: string; // BUG 7 FIX: Pass task ID across chat turns
   usage: {
     inputTokens: number;
     outputTokens: number;
@@ -581,22 +582,24 @@ Regler:
 
 Du har tilgang til verktøy for å gjøre handlinger:
 - create_task: Opprett en utviklingsoppgave
-- start_task: Start en task — agenten begynner å jobbe
+- start_task: Start en oppgave — agenten begynner å jobbe. Kan matche oppgave via query (tittel-søk) eller automatisk finne siste ustartet oppgave
 - list_tasks: Se status på tasks
 - read_file: Les en fil fra repoet
 - search_code: Søk i kodebasen
 
 NÅR BRUKEREN BER DEG GJØRE NOE: Bruk verktøyene. Ikke bare forklar — GJØR det.
 - "Lag en plan for X" → bruk create_task for hvert steg
-- "Fiks denne buggen" → bruk create_task + start_task
+- "Fiks denne buggen" → bruk create_task + start_task i SAMME tur
 - "Hva er status?" → bruk list_tasks
 - "Se på filen X" → bruk read_file
+- "Start oppgaven om index" → bruk start_task med query: "index"
+- "Kjør siste oppgave" → bruk start_task uten taskId (starter siste automatisk)
 
-VIKTIG — Når du oppretter en oppgave med create_task:
+VIKTIG — Oppgaveflyt:
 - Vis ALDRI Task ID / UUID til brukeren — de trenger ikke se det
-- Etter create_task, oppsummer hva oppgaven innebærer i 1-2 setninger
-- Spør deretter: "Vil du at jeg starter oppgaven nå?"
-- Hvis brukeren sier ja → bruk start_task med IDen du fikk fra create_task`;
+- Etter create_task: oppsummer i 1-2 setninger, spør "Vil du at jeg starter oppgaven nå?"
+- Når brukeren bekrefter (ja/start/kjør): bruk start_task. Du trenger IKKE taskId — start_task finner riktig oppgave automatisk
+- ALLTID bruk start_task når brukeren bekrefter — ALDRI bruk create_task på nytt for samme oppgave`;
 }
 
 // --- Skills Pipeline Integration ---
@@ -740,13 +743,14 @@ const CHAT_TOOLS: Array<{
   },
   {
     name: "start_task",
-    description: "Start en eksisterende oppgave — agenten begynner å jobbe. Bruk dette når brukeren sier 'start', 'kjør', 'begynn'. VIKTIG: Bruk NØYAKTIG samme taskId som ble returnert fra create_task. Bruk ALDRI en ID du husker fra tidligere — bruk ID fra siste create_task respons.",
+    description: "Start en oppgave — agenten begynner å jobbe. Bruk dette når brukeren sier 'start', 'kjør', 'begynn', 'ja'. Tre måter å identifisere oppgaven: (1) oppgi taskId (UUID), (2) oppgi query for å matche oppgavetittel, (3) utelat begge for å starte siste ustartet oppgave. Foretrekk å kalle start_task direkte etter create_task i samme tur.",
     input_schema: {
       type: "object",
       properties: {
-        taskId: { type: "string", description: "Task UUID fra create_task responsen — KOPIER NØYAKTIG" },
+        taskId: { type: "string", description: "Task UUID — eksakt ID" },
+        query: { type: "string", description: "Søketekst for å matche oppgavetittel, f.eks. 'index' eller 'style.css'" },
       },
-      required: ["taskId"],
+      required: [],
     },
   },
   {
@@ -840,16 +844,55 @@ async function executeToolCall(
 
       try {
         const { tasks: tasksClient } = await import("~encore/clients");
-        const taskId = String(input.taskId || "").trim();
-
-        console.log("[DEBUG-AF] Using taskId:", taskId);
+        let taskId = String(input.taskId || "").trim();
 
         // UUID validation
         const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+        // BUG 7 FIX: If taskId is missing/invalid, find task by query match or latest unstarted
         if (!taskId || !uuidRegex.test(taskId)) {
-          console.log("[DEBUG-AF] ERROR: Invalid UUID format:", taskId);
-          return { success: false, error: `Ugyldig task ID format: "${taskId}". Trenger UUID.` };
+          console.log("[DEBUG-AF] No valid taskId provided, searching for task...");
+          const taskRepo = repoName || undefined;
+          const query = String(input.query || "").trim().toLowerCase();
+          try {
+            const existing = await tasksClient.listTasks({ repo: taskRepo, limit: 20 });
+            const unstarted = existing.tasks
+              .filter((t: { status: string }) =>
+                ["backlog", "planned"].includes(t.status)
+              )
+              .sort((a: { createdAt: string }, b: { createdAt: string }) =>
+                new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+              );
+
+            if (unstarted.length === 0) {
+              return { success: false, error: "Ingen ustartet oppgave funnet. Opprett en oppgave først med create_task." };
+            }
+
+            if (query) {
+              // Match by query — find best title match
+              const matched = unstarted.find((t: { title: string }) =>
+                t.title.toLowerCase().includes(query)
+              );
+              if (matched) {
+                taskId = matched.id;
+                console.log(`[DEBUG-AF] Query "${query}" matched task:`, taskId, `"${matched.title}"`);
+              } else {
+                // No match — list available tasks for AI to report
+                const available = unstarted.slice(0, 5).map((t: { title: string; id: string }) => `• "${t.title}" (${t.id})`).join("\n");
+                return { success: false, error: `Ingen oppgave matcher "${input.query}". Tilgjengelige oppgaver:\n${available}` };
+              }
+            } else {
+              // No query — use latest unstarted
+              taskId = unstarted[0].id;
+              console.log("[DEBUG-AF] Auto-resolved to latest unstarted task:", taskId, `"${unstarted[0].title}"`);
+            }
+          } catch (e) {
+            console.log("[DEBUG-AF] Task search failed:", e);
+            return { success: false, error: `Kunne ikke søke etter oppgaver: ${e instanceof Error ? e.message : String(e)}` };
+          }
         }
+
+        console.log("[DEBUG-AF] Using taskId:", taskId);
 
         // Verify task exists and get repo info + status
         let taskData: { repo?: string | null; title?: string | null; status?: string | null; errorMessage?: string | null } | null = null;
@@ -992,7 +1035,7 @@ async function callAnthropicWithTools(options: AICallOptions & {
   tools: typeof CHAT_TOOLS;
   repoName?: string;
   conversationId?: string;
-}): Promise<AICallResponse & { toolsUsed: string[] }> {
+}): Promise<AICallResponse & { toolsUsed: string[]; lastCreatedTaskId?: string }> {
   const client = new Anthropic({ apiKey: anthropicKey() });
 
   const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
@@ -1060,6 +1103,7 @@ async function callAnthropicWithTools(options: AICallOptions & {
         cacheCreationTokens,
         costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
         toolsUsed: allToolsUsed,
+        lastCreatedTaskId: lastCreatedTaskId || undefined,
       };
     }
 
@@ -1198,6 +1242,7 @@ async function callAnthropicWithTools(options: AICallOptions & {
     cacheCreationTokens,
     costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
     toolsUsed: allToolsUsed,
+    lastCreatedTaskId: lastCreatedTaskId || undefined,
   };
 }
 
@@ -1260,6 +1305,7 @@ export const chat = api(
       modelUsed: toolResponse.modelUsed,
       costUsd: toolResponse.costEstimate.totalCost,
       toolsUsed: toolResponse.toolsUsed.length > 0 ? toolResponse.toolsUsed : undefined,
+      lastCreatedTaskId: toolResponse.lastCreatedTaskId,
       usage: {
         inputTokens: toolResponse.inputTokens,
         outputTokens: toolResponse.outputTokens,

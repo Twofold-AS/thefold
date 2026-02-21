@@ -34,12 +34,22 @@ export function parseAgentStatusContent(content: string): AgentStatusData | null
   try {
     const parsed = JSON.parse(content);
 
+    // Normalize backend phase names to Norwegian UI phases
+    const PHASE_MAP: Record<string, string> = {
+      completed: "Ferdig",
+      failed: "Feilet",
+      pending_review: "Venter",
+      working: "Bygger",
+    };
+    const normalizePhase = (p: string) => PHASE_MAP[p] || p;
+
     // New format: { type: "status", phase, steps, meta }
     if (parsed.type === "status") {
+      const phase = normalizePhase(parsed.phase || "Bygger");
       return {
         type: "status",
-        phase: parsed.phase || "Bygger",
-        title: parsed.meta?.title || parsed.phase || "Bygger",
+        phase,
+        title: parsed.meta?.title || phase,
         steps: parsed.steps || [],
         error: parsed.meta?.error,
         planProgress: parsed.meta?.planProgress,
@@ -71,9 +81,10 @@ export function parseAgentStatusContent(content: string): AgentStatusData | null
 
     // Legacy format: { type: "agent_status", phase, title, steps, ... }
     if (parsed.type === "agent_status") {
+      const phase = normalizePhase(parsed.phase || "Bygger");
       return {
-        phase: parsed.phase || "Bygger",
-        title: parsed.title || parsed.phase || "Bygger",
+        phase,
+        title: parsed.title || phase,
         steps: parsed.steps || [],
         error: parsed.error,
         questions: parsed.questions,

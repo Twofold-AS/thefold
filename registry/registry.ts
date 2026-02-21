@@ -1,5 +1,6 @@
 import { api, APIError } from "encore.dev/api";
 import { Topic, Subscription } from "encore.dev/pubsub";
+import log from "encore.dev/log";
 import { db } from "./db";
 import { tasks } from "~encore/clients";
 import type {

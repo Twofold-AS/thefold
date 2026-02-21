@@ -1,7 +1,7 @@
 // --- Memory Decay Functions ---
 // Extracted to separate file to avoid ~encore/clients dependency in tests
 
-export type MemoryType = 'skill' | 'task' | 'session' | 'error_pattern' | 'decision' | 'general';
+export type MemoryType = 'skill' | 'task' | 'session' | 'error_pattern' | 'decision' | 'general' | 'strategy';
 
 /** Calculate importance score (0.0–1.0) based on memory type and category */
 export function calculateImportanceScore(
@@ -16,6 +16,7 @@ export function calculateImportanceScore(
   switch (memoryType) {
     case "error_pattern": score = 0.9; break;
     case "decision":      score = 0.85; break;
+    case "strategy":      score = 0.8; break;
     case "skill":         score = 0.7; break;
     case "task":          score = 0.6; break;
     case "session":       score = 0.4; break;
@@ -62,7 +63,7 @@ export function calculateDecayedRelevance(
   const currentTime = (now ?? new Date()).getTime();
 
   // Half-life: longer-lived types decay slower
-  const halfLife = (memoryType === "error_pattern" || memoryType === "decision") ? 90 : 30;
+  const halfLife = (memoryType === "error_pattern" || memoryType === "decision" || memoryType === "strategy") ? 90 : 30;
 
   // Recency factor: exponential decay based on age
   const ageDays = (currentTime - createdAt.getTime()) / 86_400_000;

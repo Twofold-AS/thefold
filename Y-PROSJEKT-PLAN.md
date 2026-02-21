@@ -112,7 +112,9 @@ const CONTEXT_PROFILES: Record<AgentPhase, ContextProfile> = {
 
 **Estimert sparing:** ~30% reduksjon i snitt-tokens per task.
 
-**Status:** ⬜ Ikke startet
+**Status:** ✅ Fullført
+- **Filer endret:** agent/context-builder.ts (3 nye funksjoner: filterForPhase, estimateTokens, trimContext), agent/agent.ts (filtering integrert), agent/context-builder.test.ts (9 nye tester)
+- **Resultat:** 15/15 tester passerer. Hver fase får kun den konteksten den faktisk trenger.
 
 ---
 
@@ -154,7 +156,9 @@ interface RetryContext {
 
 **Estimert sparing:** ~60% færre tokens per retry. Med 2 retries: ~40K spart.
 
-**Status:** ⬜ Ikke startet
+**Status:** ✅ Fullført
+- **Filer endret:** agent/execution.ts (RetryContext interface, computeRetryContext(), computeSimpleDiff(), retry-loop modifisert), agent/execution.test.ts (11 nye tester)
+- **Resultat:** 18/18 execution tester passerer. Delta-context reduserer tokens med 60-75% per retry.
 
 ---
 
@@ -221,7 +225,7 @@ const combined = mergeAndRerank(vectorResults, bm25Results, HYBRID_ALPHA);
 - Eksakt nøkkelord-match rangeres høyere enn kun semantisk lik
 - BM25 fanger termer som vector-søk misser
 
-**Status:** ⬜ Ikke startet
+**Status:** ✅ Fullført (21. feb 2026)
 
 ---
 
@@ -282,7 +286,7 @@ export function getRelatedFiles(
 - Ignorerer node_modules og eksterne pakker
 - Returnerer unike filer (ingen duplikater)
 
-**Status:** ⬜ Ikke startet
+**Status:** ✅ Fullført (21. feb 2026)
 
 ---
 
@@ -357,7 +361,9 @@ if (strategies.results.length > 0) {
 - Strategi påvirker plan (hint, ikke override)
 - Dårlige strategier forfaller via eksisterende decay
 
-**Status:** ⬜ Ikke startet
+**Status:** ✅ Fullført (21. feb 2026)
+- **Filer endret:** agent/completion.ts (STEP 11.5: detectTaskPattern, extractSuccessfulSteps, memory.store strategy), agent/execution.ts (STEP 4.9: strategy search + hint injection), agent/strategy.test.ts (11 tester)
+- **Resultat:** 11/11 tester passerer. Strategi lagres etter vellykket førstegangskjøring, hentes som hint i planning-fasen.
 
 ---
 
@@ -394,7 +400,10 @@ if (strategies.results.length > 0) {
 - `frontend/src/lib/api.ts` — ny getTaskAuditLog() funksjon
 - `frontend/tools/layout.tsx` — "Inspector" tab i nav
 
-**Status:** ⬜ Ikke startet
+**Status:** ✅ Fullført (21. feb 2026)
+- **Filer opprettet:** frontend/src/app/(dashboard)/tools/inspector/page.tsx (3 paneler: Kontekst, Tidslinje, Kostnadsfordeling)
+- **Filer endret:** frontend/src/app/(dashboard)/tools/layout.tsx (Inspector tab lagt til)
+- **Resultat:** Bruker getTaskTrace() + getTaskMetrics() for visualisering. Sammendragslinje med status, varighet, suksess/feil, konfidens, kostnad. Klikk på tidslinje-entries for detaljvisning.
 
 ---
 
@@ -413,7 +422,9 @@ if (strategies.results.length > 0) {
 
 **Data-kilder:** phase_metrics + audit_log (allerede tilgjengelig)
 
-**Status:** ⬜ Ikke startet
+**Status:** ✅ Fullført (21. feb 2026)
+- **Filer endret:** frontend/src/app/(dashboard)/tools/costs/page.tsx (ContextEfficiency komponent, 4 summary-kort, per-fase effektivitetstabell med waste-bars)
+- **Resultat:** Viser kontekst-waste %, retry-rate, suksessrate, strategi-treff. Tom-tilstand med "—" når ingen data. Bruker phase_metrics + audit_stats.
 
 ---
 

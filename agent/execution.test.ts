@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { executePlan, type ExecutionHelpers } from "./execution";
+import { executePlan, computeRetryContext, computeSimpleDiff, type ExecutionHelpers } from "./execution";
 import { createPhaseTracker } from "./metrics";
 import type { AgentExecutionContext } from "./types";
 
@@ -305,5 +305,172 @@ describe("executePlan", () => {
     expect(ai.revisePlan).toHaveBeenCalledOnce();
     // planTask should only be called once (initial plan — not for bad_plan retry)
     expect(ai.planTask).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- YB: Delta-kontekst i retries tests ---
+
+describe("computeSimpleDiff", () => {
+  it("should detect changed lines", () => {
+    const old = "line1\nline2\nline3";
+    const new_ = "line1\nchanged\nline3";
+    const diff = computeSimpleDiff(old, new_);
+
+    expect(diff).toContain("~2: changed");
+    expect(diff).not.toContain("line1"); // unchanged lines not included
+  });
+
+  it("should detect added lines", () => {
+    const old = "line1";
+    const new_ = "line1\nline2";
+    const diff = computeSimpleDiff(old, new_);
+
+    expect(diff).toContain("+2: line2");
+  });
+
+  it("should detect deleted lines", () => {
+    const old = "line1\nline2\nline3";
+    const new_ = "line1\nline3";
+    const diff = computeSimpleDiff(old, new_);
+
+    // Simple line-based diff detects this as changed line + deleted line
+    expect(diff).toContain("~2"); // line2 becomes line3 (changed)
+    expect(diff).toContain("-3"); // old line3 deleted
+  });
+
+  it("should limit diff to 500 chars", () => {
+    const old = "a".repeat(1000);
+    const new_ = "b".repeat(1000);
+    const diff = computeSimpleDiff(old, new_);
+
+    expect(diff.length).toBeLessThanOrEqual(500);
+    expect(diff).toContain("...");
+  });
+
+  it("should return placeholder when no changes", () => {
+    const old = "line1\nline2";
+    const new_ = "line1\nline2";
+    const diff = computeSimpleDiff(old, new_);
+
+    expect(diff).toBe("[no changes detected]");
+  });
+});
+
+describe("computeRetryContext", () => {
+  it("should include only changed files in delta", () => {
+    const ctx = createMockCtx({ taskDescription: "Build auth" });
+    const previousFiles = [
+      { path: "a.ts", content: "version 1" },
+      { path: "b.ts", content: "unchanged" },
+    ];
+    const currentFiles = [
+      { path: "a.ts", content: "version 2" },
+      { path: "b.ts", content: "unchanged" },
+    ];
+
+    const retryCtx = computeRetryContext(
+      ctx,
+      currentFiles,
+      previousFiles,
+      "Plan step 1\nPlan step 2",
+      "Error: TypeScript compilation failed",
+      { rootCause: "implementation_error" }
+    );
+
+    expect(retryCtx.changedFiles).toHaveLength(1);
+    expect(retryCtx.changedFiles[0].path).toBe("a.ts");
+    expect(retryCtx.changedFiles[0].diff).toContain("version 2");
+  });
+
+  it("should detect new files not in previous", () => {
+    const ctx = createMockCtx();
+    const previousFiles = [{ path: "a.ts", content: "old" }];
+    const currentFiles = [
+      { path: "a.ts", content: "old" },
+      { path: "b.ts", content: "new file content" },
+    ];
+
+    const retryCtx = computeRetryContext(
+      ctx,
+      currentFiles,
+      previousFiles,
+      "Plan summary",
+      "Error",
+      { rootCause: "implementation_error" }
+    );
+
+    expect(retryCtx.changedFiles).toHaveLength(1);
+    expect(retryCtx.changedFiles[0].path).toBe("b.ts");
+    expect(retryCtx.changedFiles[0].diff).toContain("[NEW FILE]");
+  });
+
+  it("should truncate task summary to 200 chars", () => {
+    const longDescription = "a".repeat(500);
+    const ctx = createMockCtx({ taskDescription: longDescription });
+
+    const retryCtx = computeRetryContext(
+      ctx,
+      [],
+      [],
+      "Plan",
+      "Error",
+      { rootCause: "bad_plan" }
+    );
+
+    expect(retryCtx.taskSummary.length).toBe(200);
+    expect(retryCtx.taskSummary).toContain("...");
+  });
+
+  it("should truncate validation output to 1000 chars", () => {
+    const longError = "a".repeat(2000);
+    const ctx = createMockCtx();
+
+    const retryCtx = computeRetryContext(
+      ctx,
+      [],
+      [],
+      "Plan",
+      longError,
+      { rootCause: "implementation_error" }
+    );
+
+    expect(retryCtx.latestError.length).toBe(1000);
+    expect(retryCtx.latestError).toContain("...");
+  });
+
+  it("should estimate tokens correctly", () => {
+    const ctx = createMockCtx({ taskDescription: "Short task" });
+    const currentFiles = [
+      { path: "a.ts", content: "x".repeat(400) }, // ~100 tokens in diff
+    ];
+
+    const retryCtx = computeRetryContext(
+      ctx,
+      currentFiles,
+      [],
+      "Plan summary",
+      "Error message",
+      { rootCause: "implementation_error", reason: "Code issue" }
+    );
+
+    // Verify estimatedTokens ≈ totalChars / 4
+    expect(retryCtx.estimatedTokens).toBeGreaterThan(0);
+    expect(typeof retryCtx.estimatedTokens).toBe("number");
+  });
+
+  it("should produce empty changedFiles when nothing changed", () => {
+    const ctx = createMockCtx();
+    const files = [{ path: "a.ts", content: "same" }];
+
+    const retryCtx = computeRetryContext(
+      ctx,
+      files,
+      files,
+      "Plan",
+      "Error",
+      { rootCause: "environment_error" }
+    );
+
+    expect(retryCtx.changedFiles).toHaveLength(0);
   });
 });

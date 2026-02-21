@@ -30,7 +30,8 @@ export async function extractComponents(params: {
   taskDescription: string;
 }): Promise<ExtractedComponent[]> {
   // Feature flag check
-  const enabled = RegistryExtractionEnabled();
+  let enabled = "false";
+  try { enabled = RegistryExtractionEnabled(); } catch { /* not set */ }
   if (enabled !== "true") {
     log.info("registry extraction disabled by feature flag");
     return [];
