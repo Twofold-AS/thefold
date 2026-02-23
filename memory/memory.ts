@@ -13,14 +13,23 @@ function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-const voyageKey = secret("VoyageAPIKey");
+// ZI: Switched from Voyage AI to OpenAI text-embedding-3-small (1536 dimensions)
+// Previous provider kept commented out for rollback capability:
+// const voyageKey = secret("VoyageAPIKey");
+// NOTE: OpenAIApiKey secret must be configured in Encore secrets for this to work.
+const OpenAIApiKey = secret("OpenAIApiKey");
 
 const db = new SQLDatabase("memory", { migrations: "./migrations" });
 
 /** Hybrid search weighting: 60% semantic (vector), 40% keyword (BM25) */
 export const HYBRID_ALPHA = 0.6;
 
+/** Embedding dimension for OpenAI text-embedding-3-small */
+export const EMBEDDING_DIMENSION = 1536;
+
 // --- Embedding helper (with cache) ---
+// ZI: Using OpenAI text-embedding-3-small (1536 dimensions)
+// Previously: Voyage AI voyage-3-lite (1024 dimensions)
 
 async function embed(text: string): Promise<number[]> {
   const truncated = text.substring(0, 8000);
@@ -31,30 +40,37 @@ async function embed(text: string): Promise<number[]> {
     return cached.embedding;
   }
 
-  // Cache miss — call Voyage API with retry for 429
+  // Cache miss — call OpenAI API with retry for 429
   const maxRetries = 3;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const res = await fetch("https://api.voyageai.com/v1/embeddings", {
+      const res = await fetch("https://api.openai.com/v1/embeddings", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${voyageKey()}`,
+          Authorization: `Bearer ${OpenAIApiKey()}`,
         },
-        body: JSON.stringify({ input: truncated, model: "voyage-3-lite" }),
+        body: JSON.stringify({
+          input: truncated,
+          model: "text-embedding-3-small",
+        }),
       });
 
       if (res.status === 429) {
         const waitMs = Math.pow(2, attempt + 2) * 1000; // 4s, 8s, 16s
-        console.warn(`Voyage 429 — waiting ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
+        log.warn(`OpenAI 429 — waiting ${waitMs}ms (attempt ${attempt + 1}/${maxRetries})`);
         await new Promise(resolve => setTimeout(resolve, waitMs));
         continue;
       }
 
-      if (!res.ok) throw APIError.internal(`Voyage API error: ${res.status}`);
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw APIError.internal(`OpenAI embedding error ${res.status}: ${errorText}`);
+      }
+
       const data = await res.json();
-      const embedding: number[] = data.data[0].embedding;
+      const embedding: number[] = data.data[0].embedding; // 1536 dimensions
 
       // Store in cache for next time
       await cache.getOrSetEmbedding({ content: truncated, embedding });
@@ -66,7 +82,7 @@ async function embed(text: string): Promise<number[]> {
     }
   }
 
-  throw APIError.internal("Voyage API failed after retries");
+  throw APIError.internal("OpenAI embedding API failed after retries");
 }
 
 interface SearchRequest {
@@ -676,6 +692,71 @@ export const stats = api(
       avgRelevanceScore: avgRow?.avg ?? 0,
       expiringSoon: expiringRow?.count ?? 0,
     };
+  }
+);
+
+// --- Re-embed endpoint (ZI: after dimension migration, re-generate all embeddings) ---
+
+interface ReEmbedResponse {
+  processed: number;
+  failed: number;
+}
+
+export const reEmbed = api(
+  { method: "POST", path: "/memory/re-embed", expose: true, auth: true },
+  async (): Promise<ReEmbedResponse> => {
+    // Re-generate embeddings for memories with NULL embedding (set by migration)
+    const rows = db.query<{ id: string; content: string }>`
+      SELECT id, content FROM memories WHERE embedding IS NULL
+    `;
+
+    let processed = 0;
+    let failed = 0;
+    for await (const row of rows) {
+      try {
+        const embedding = await embed(row.content);
+        await db.exec`
+          UPDATE memories SET embedding = ${JSON.stringify(embedding)}::vector
+          WHERE id = ${row.id}::uuid
+        `;
+        processed++;
+      } catch (err) {
+        log.warn("re-embed failed for memory", {
+          id: row.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        failed++;
+      }
+    }
+
+    // Also re-embed code patterns with NULL embeddings
+    const patternRows = db.query<{ id: string; problem_description: string; solution_description: string }>`
+      SELECT id, problem_description, solution_description
+      FROM code_patterns WHERE problem_embedding IS NULL OR solution_embedding IS NULL
+    `;
+
+    for await (const row of patternRows) {
+      try {
+        const problemEmbedding = await embed(row.problem_description);
+        const solutionEmbedding = await embed(row.solution_description);
+        await db.exec`
+          UPDATE code_patterns
+          SET problem_embedding = ${JSON.stringify(problemEmbedding)}::vector,
+              solution_embedding = ${JSON.stringify(solutionEmbedding)}::vector
+          WHERE id = ${row.id}::uuid
+        `;
+        processed++;
+      } catch (err) {
+        log.warn("re-embed failed for code pattern", {
+          id: row.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        failed++;
+      }
+    }
+
+    log.info("re-embed completed", { processed, failed });
+    return { processed, failed };
   }
 );
 

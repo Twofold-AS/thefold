@@ -1,7 +1,9 @@
 // --- Component types ---
 
-export type ComponentCategory = "auth" | "api" | "ui" | "util" | "config";
-export type ValidationStatus = "pending" | "validated" | "failed";
+export type ComponentCategory = "auth" | "api" | "ui" | "util" | "config" | "database" | "infrastructure" | "security" | "payment" | "form" | "email" | "devops" | "notification" | "storage" | "testing";
+export type ComponentType = "component" | "pattern" | "template";
+export type ComponentSource = "manual" | "seeded" | "extracted" | "healing";
+export type ValidationStatus = "pending" | "validated" | "failed" | "rejected";
 export type HealingSeverity = "low" | "normal" | "high" | "critical";
 export type HealingTrigger = "update" | "bugfix" | "security";
 export type HealingStatus = "pending" | "in_progress" | "completed" | "failed";
@@ -10,6 +12,12 @@ export interface ComponentFile {
   path: string;
   content: string;
   language: string;
+}
+
+export interface ComponentVariable {
+  name: string;
+  description?: string;
+  defaultValue?: string;
 }
 
 export interface Component {
@@ -30,6 +38,10 @@ export interface Component {
   testCoverage: number | null;
   validationStatus: ValidationStatus;
   tags: string[];
+  qualityScore: number;
+  type: ComponentType;
+  variables: ComponentVariable[];
+  source: ComponentSource;
   createdAt: string;
   updatedAt: string;
 }
@@ -73,6 +85,8 @@ export interface ListComponentsRequest {
   category?: string;
   sourceRepo?: string;
   tags?: string[];
+  type?: string;
+  search?: string;
   limit?: number;
   offset?: number;
 }
@@ -113,4 +127,16 @@ export interface HealingNotification {
   severity: string;
   affectedRepos: string[];
   tasksCreated: number;
+}
+
+// --- Use component with variable substitution ---
+
+export interface UseComponentWithVarsRequest {
+  componentId: string;
+  targetRepo?: string;
+  variables?: Record<string, string>;
+}
+
+export interface UseComponentWithVarsResponse {
+  files: Array<{ path: string; content: string }>;
 }

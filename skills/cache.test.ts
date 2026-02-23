@@ -1,4 +1,22 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+vi.mock("encore.dev/storage/sqldb", () => ({
+  SQLDatabase: vi.fn().mockImplementation(function () {
+    return {
+      queryRow: vi.fn().mockResolvedValue(null),
+      exec: vi.fn(),
+      query: vi.fn(),
+    };
+  }),
+}));
+
+vi.mock("encore.dev/api", () => ({
+  api: (_opts: any, handler: any) => handler,
+}));
+
+vi.mock("encore.dev/cron", () => ({
+  CronJob: vi.fn(),
+}));
 
 // hashResolveInput is a module-level helper — we test its behavior via resolve()
 // since it's not exported. We test caching behavior via observable side effects.

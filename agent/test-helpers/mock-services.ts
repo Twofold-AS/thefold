@@ -77,13 +77,15 @@ export function mockSandboxDestroy() {
 
 export function mockBuilderStart() {
   return {
-    success: true,
-    filesChanged: [
-      { path: "agent/types.ts", action: "modify" },
-    ],
-    tokensUsed: 1500,
-    costUsd: 0.002,
-    buildIterations: 1,
+    result: {
+      success: true,
+      filesChanged: [
+        { path: "agent/types.ts", content: "/**\n * Agent types module.\n */\nexport interface AgentExecutionContext { /* ... */ }", action: "modify" },
+      ],
+      totalCostUsd: 0.002,
+      totalTokensUsed: 1500,
+      buildIterations: 1,
+    },
   };
 }
 

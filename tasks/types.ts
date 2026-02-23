@@ -20,6 +20,8 @@ export interface Task {
   prUrl: string | null;
   reviewId: string | null;
   errorMessage?: string;
+  externalId: string | null;
+  externalSource: string | null;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;

@@ -985,9 +985,10 @@ export interface MCPServer {
   command: string;
   args: string[];
   envVars: Record<string, string>;
-  status: "available" | "installed" | "error";
+  status: "available" | "installed" | "not_configured" | "error";
   category: "general" | "code" | "data" | "docs" | "ai";
   config: Record<string, unknown>;
+  configRequired: boolean;
   installedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1022,6 +1023,13 @@ export async function configureMCPServer(id: string, envVars?: Record<string, st
   return apiFetch<{ server: MCPServer }>("/mcp/configure", {
     method: "POST",
     body: { id, envVars, config },
+  });
+}
+
+export async function validateMCPServer(serverId: string) {
+  return apiFetch<{ status: "active" | "misconfigured" | "error"; message: string }>("/mcp/validate", {
+    method: "POST",
+    body: { serverId },
   });
 }
 

@@ -1,5 +1,6 @@
 import { api, APIError } from "encore.dev/api";
 import { getAuthData } from "~encore/auth";
+import log from "encore.dev/log";
 import { integrationsDB as db } from "./db";
 import type { IntegrationConfig, SlackEvent, DiscordInteraction } from "./types";
 
@@ -110,7 +111,8 @@ export const slackWebhook = api(
     // Handle message events
     if (req.event?.type === "message" && !req.event.bot_id && req.team_id) {
       const config = await db.queryRow<IntegrationConfig>`
-        SELECT id, user_id as "userId", platform, default_repo as "defaultRepo", enabled
+        SELECT id, user_id as "userId", platform, webhook_url as "webhookUrl",
+               default_repo as "defaultRepo", enabled
         FROM integration_configs
         WHERE team_id = ${req.team_id} AND platform = 'slack' AND enabled = true
       `;
@@ -127,7 +129,7 @@ export const slackWebhook = api(
           source: "slack",
         });
       } catch (e) {
-        console.error("Slack message processing failed:", e);
+        log.warn("Slack message processing failed", { error: e instanceof Error ? e.message : String(e) });
       }
     }
 
@@ -153,7 +155,8 @@ export const discordWebhook = api(
     // APPLICATION_COMMAND
     if (req.type === 2 && req.guild_id) {
       const config = await db.queryRow<IntegrationConfig>`
-        SELECT id, user_id as "userId", platform, default_repo as "defaultRepo", enabled
+        SELECT id, user_id as "userId", platform, webhook_url as "webhookUrl",
+               default_repo as "defaultRepo", enabled
         FROM integration_configs
         WHERE team_id = ${req.guild_id} AND platform = 'discord' AND enabled = true
       `;
@@ -185,6 +188,43 @@ async function processDiscordMessage(message: string, channelId: string, config:
       source: "discord",
     });
   } catch (e) {
-    console.error("Discord message processing failed:", e);
+    log.warn("Discord message processing failed", { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+// --- Outgoing Messages (Two-Way Communication) ---
+
+export async function sendToSlack(webhookUrl: string, message: string): Promise<void> {
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: message,
+        unfurl_links: false,
+      }),
+    });
+    if (!res.ok) {
+      log.warn("Slack webhook failed", { status: res.status });
+    }
+  } catch (err) {
+    log.warn("Failed to send to Slack", { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export async function sendToDiscord(webhookUrl: string, message: string): Promise<void> {
+  try {
+    // Discord has a 2000 char limit
+    const truncated = message.length > 1900 ? message.substring(0, 1900) + "..." : message;
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: truncated }),
+    });
+    if (!res.ok) {
+      log.warn("Discord webhook failed", { status: res.status });
+    }
+  } catch (err) {
+    log.warn("Failed to send to Discord", { error: err instanceof Error ? err.message : String(err) });
   }
 }

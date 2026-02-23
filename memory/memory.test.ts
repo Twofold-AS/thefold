@@ -52,8 +52,8 @@ describe("Memory database", () => {
     });
 
     it("should insert a memory with vector embedding", async () => {
-      // Create a simple 512-dimensional vector (normally this would come from Voyage AI)
-      const embedding = Array(512).fill(0).map((_, i) => i % 2 === 0 ? 0.1 : -0.1);
+      // Create a simple 1536-dimensional vector (OpenAI text-embedding-3-small)
+      const embedding = Array(1536).fill(0).map((_, i) => i % 2 === 0 ? 0.1 : -0.1);
       const vec = `[${embedding.join(",")}]`;
 
       const result = await db.queryRow<{
@@ -145,15 +145,15 @@ describe("Memory database", () => {
     it("should perform cosine similarity search", async () => {
       // Create three distinct embeddings
       // Embedding 1: mostly positive values
-      const embedding1 = Array(512).fill(0).map((_, i) => i < 256 ? 0.5 : 0.1);
+      const embedding1 = Array(1536).fill(0).map((_, i) => i < 256 ? 0.5 : 0.1);
       const vec1 = `[${embedding1.join(",")}]`;
 
       // Embedding 2: similar to embedding1 (high cosine similarity)
-      const embedding2 = Array(512).fill(0).map((_, i) => i < 256 ? 0.6 : 0.2);
+      const embedding2 = Array(1536).fill(0).map((_, i) => i < 256 ? 0.6 : 0.2);
       const vec2 = `[${embedding2.join(",")}]`;
 
       // Embedding 3: very different (low cosine similarity)
-      const embedding3 = Array(512).fill(0).map((_, i) => i < 256 ? -0.5 : 0.8);
+      const embedding3 = Array(1536).fill(0).map((_, i) => i < 256 ? -0.5 : 0.8);
       const vec3 = `[${embedding3.join(",")}]`;
 
       // Insert memories with embeddings
@@ -198,15 +198,15 @@ describe("Memory database", () => {
 
     it("should filter results by relevance threshold", async () => {
       // Create embeddings with known similarity
-      const queryEmbedding = Array(512).fill(0).map((_, i) => i % 2 === 0 ? 1.0 : 0.0);
+      const queryEmbedding = Array(1536).fill(0).map((_, i) => i % 2 === 0 ? 1.0 : 0.0);
       const queryVec = `[${queryEmbedding.join(",")}]`;
 
       // Similar embedding (high cosine similarity)
-      const similarEmbedding = Array(512).fill(0).map((_, i) => i % 2 === 0 ? 0.9 : 0.1);
+      const similarEmbedding = Array(1536).fill(0).map((_, i) => i % 2 === 0 ? 0.9 : 0.1);
       const similarVec = `[${similarEmbedding.join(",")}]`;
 
       // Different embedding (low cosine similarity)
-      const differentEmbedding = Array(512).fill(0).map((_, i) => i % 2 === 0 ? 0.1 : 0.9);
+      const differentEmbedding = Array(1536).fill(0).map((_, i) => i % 2 === 0 ? 0.1 : 0.9);
       const differentVec = `[${differentEmbedding.join(",")}]`;
 
       await db.exec`
@@ -243,7 +243,7 @@ describe("Memory database", () => {
 
     it("should calculate correct cosine distance", async () => {
       // Create identical embeddings (cosine distance should be 0, similarity 1)
-      const embedding = Array(512).fill(0).map((_, i) => Math.sin(i));
+      const embedding = Array(1536).fill(0).map((_, i) => Math.sin(i));
       const vec = `[${embedding.join(",")}]`;
 
       await db.exec`
@@ -272,11 +272,11 @@ describe("Memory database", () => {
     it("should calculate correct cosine distance for orthogonal vectors", async () => {
       // Create two orthogonal embeddings (cosine distance should be 0.5, similarity 0.5)
       // First half is [1, 0, 1, 0, ...], second half is [0, 0, 0, 0, ...]
-      const embedding1 = Array(512).fill(0).map((_, i) => i < 256 && i % 2 === 0 ? 1.0 : 0.0);
+      const embedding1 = Array(1536).fill(0).map((_, i) => i < 256 && i % 2 === 0 ? 1.0 : 0.0);
       const vec1 = `[${embedding1.join(",")}]`;
 
       // First half is [0, 0, 0, 0, ...], second half is [1, 0, 1, 0, ...]
-      const embedding2 = Array(512).fill(0).map((_, i) => i >= 256 && i % 2 === 0 ? 1.0 : 0.0);
+      const embedding2 = Array(1536).fill(0).map((_, i) => i >= 256 && i % 2 === 0 ? 1.0 : 0.0);
       const vec2 = `[${embedding2.join(",")}]`;
 
       await db.exec`
@@ -421,7 +421,7 @@ describe("Memory database", () => {
   describe("Memory search with combined filters", () => {
     it("should search with vector similarity and category filter", async () => {
       const otherCategory = "other-" + Date.now();
-      const embedding = Array(512).fill(0.5);
+      const embedding = Array(1536).fill(0.5);
       const vec = `[${embedding.join(",")}]`;
 
       // Insert memories in different categories
@@ -731,7 +731,7 @@ describe("Memory integrity (ASI06)", () => {
       // Store a memory with specific keyword
       const content = "checkRateLimit function handles API throttling";
       const contentHash = createHash("sha256").update(content).digest("hex");
-      const embedding = Array(512)
+      const embedding = Array(1536)
         .fill(0)
         .map((_, i) => Math.sin(i * 0.1));
       const vec = `[${embedding.join(",")}]`;
@@ -760,7 +760,7 @@ describe("Memory integrity (ASI06)", () => {
       const hashB = createHash("sha256").update(contentB).digest("hex");
 
       // Use identical embeddings so vector score is equal
-      const embedding = Array(512)
+      const embedding = Array(1536)
         .fill(0)
         .map((_, i) => Math.sin(i * 0.05));
       const vec = `[${embedding.join(",")}]`;
@@ -793,7 +793,7 @@ describe("Memory integrity (ASI06)", () => {
     it("should generate search_vector via trigger on INSERT", async () => {
       const content = "Encore TypeScript migration strategy for PostgreSQL databases";
       const hash = createHash("sha256").update(content).digest("hex");
-      const embedding = Array(512)
+      const embedding = Array(1536)
         .fill(0)
         .map(() => Math.random() * 0.1);
       const vec = `[${embedding.join(",")}]`;

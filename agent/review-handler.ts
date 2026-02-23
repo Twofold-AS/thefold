@@ -3,6 +3,8 @@ import { ai, sandbox, tasks } from "~encore/clients";
 import { submitReviewInternal } from "./review";
 import { savePhaseMetrics } from "./metrics";
 import { completeJob } from "./db";
+import { addStep, reportProgress, buildSteps } from "./helpers";
+import type { ProgressReport } from "./messages";
 import type { AgentExecutionContext, AIReviewData } from "./types";
 import type { PhaseTracker } from "./metrics";
 
@@ -213,6 +215,35 @@ export async function handleReview(
       log.warn("updateTaskStatus to in_review failed", { error: err instanceof Error ? err.message : String(err) });
     }
   }
+
+  // === ZD: Send AgentProgress with inline report for chat-based review ===
+  const allPhaseMetrics = tracker.getAll();
+  const totalDurationMs = allPhaseMetrics.reduce((sum, m) => sum + (m.durationMs || 0), 0);
+  const totalCostFromTracker = allPhaseMetrics.reduce((sum, m) => sum + (m.costUsd || 0), 0);
+
+  const progressReport: ProgressReport = {
+    filesChanged: allFiles.map((f) => ({
+      path: f.path,
+      action: f.action as "create" | "modify" | "delete",
+      diff: typeof f.content === "string" ? f.content.substring(0, 500) : undefined,
+    })),
+    costUsd: totalCostFromTracker || ctx.totalCostUsd,
+    duration: `${Math.round(totalDurationMs / 1000)}s`,
+    qualityScore: review.qualityScore,
+    concerns: review.concerns,
+    reviewId: reviewResult.reviewId,
+  };
+
+  addStep(ctx, { id: "review", label: "AI-review fullfort", detail: `${review.qualityScore}/10`, done: true });
+  addStep(ctx, { id: "waiting", label: "Venter pa godkjenning", done: false });
+
+  await reportProgress(ctx, {
+    status: "done",
+    phase: "reviewing",
+    summary: `Ferdig — ${allFiles.length} filer endret`,
+    steps: buildSteps(ctx),
+    report: progressReport,
+  });
 
   // Save phase metrics and mark job complete (non-critical)
   tracker.start("completing");

@@ -1,4 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+// Mock ~encore/clients (used by skills.ts)
+vi.mock("~encore/clients", () => ({
+  cache: { getOrSet: vi.fn(), del: vi.fn() },
+}));
+
 import { listSkills, createSkill, toggleSkill, db } from "./skills";
 
 describe("skills category and tags filtering", () => {

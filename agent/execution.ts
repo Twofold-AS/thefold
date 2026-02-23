@@ -1,7 +1,7 @@
 import log from "encore.dev/log";
 import { ai, memory, sandbox, builder, tasks } from "~encore/clients";
 import {
-  planSubAgents,
+  planSubAgentsDynamic,
   executeSubAgents,
   mergeResults,
   sumCosts,
@@ -9,6 +9,8 @@ import {
 } from "../ai/orchestrate-sub-agents";
 import { updateJobCheckpoint } from "./db";
 import { estimateTokens } from "./context-builder";
+import { addStep, reportProgress, buildSteps } from "./helpers";
+import { useNewContract } from "./messages";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 import type { BudgetMode } from "../ai/sub-agents";
@@ -330,9 +332,35 @@ export async function executePlan(
 
       const budgetMode: BudgetMode = ctx.modelMode === "manual" ? "quality_first" : "balanced";
       const subPlanSummary = plan.plan.map((s: { description: string }, i: number) => `${i + 1}. ${s.description}`).join("\n");
-      const subPlan = planSubAgents(ctx.taskDescription, subPlanSummary, estimatedComplexity, budgetMode);
+      const subPlan = await planSubAgentsDynamic(ctx.taskDescription, subPlanSummary, estimatedComplexity, budgetMode);
 
       if (subPlan.agents.length > 0) {
+        // ZO: Report sub-agent plan to chat (new contract)
+        if (useNewContract()) {
+          addStep(ctx, {
+            id: "sub-agents",
+            label: `${subPlan.agents.length} sub-agenter`,
+            detail: "Starter...",
+            done: false,
+          });
+
+          const subAgentDisplay = subPlan.agents.map((a) => ({
+            id: a.id,
+            role: a.role,
+            model: a.model ? a.model.split("-").slice(0, 2).join("-") : "auto",
+            status: "pending" as const,
+            label: (a.inputContext || "").substring(0, 60),
+          }));
+
+          await reportProgress(ctx, {
+            status: "working",
+            phase: "building",
+            summary: `Bygger med ${subPlan.agents.length} agenter`,
+            steps: buildSteps(ctx),
+            subAgents: subAgentDisplay,
+          });
+        }
+
         await audit({
           sessionId: ctx.conversationId,
           actionType: "sub_agent_started",
@@ -358,6 +386,32 @@ export async function executePlan(
 
         const successCount = subResults.filter((r) => r.success).length;
         const failCount = subResults.filter((r) => !r.success).length;
+
+        // ZO: Report sub-agent completion to chat (new contract)
+        if (useNewContract()) {
+          addStep(ctx, {
+            id: "sub-agents",
+            label: `${subPlan.agents.length} sub-agenter`,
+            detail: `${successCount}/${subResults.length} OK`,
+            done: true,
+          });
+
+          const completedSubAgentDisplay = subResults.map((r) => ({
+            id: r.id,
+            role: r.role,
+            model: r.model ? r.model.split("-").slice(0, 2).join("-") : "auto",
+            status: (r.success ? "done" : "failed") as "done" | "failed",
+            label: `${r.role} (${r.durationMs}ms, $${r.costUsd.toFixed(4)})`,
+          }));
+
+          await reportProgress(ctx, {
+            status: "working",
+            phase: "building",
+            summary: `Sub-agenter ferdig: ${successCount}/${subResults.length} OK`,
+            steps: buildSteps(ctx),
+            subAgents: completedSubAgentDisplay,
+          });
+        }
 
         await audit({
           sessionId: ctx.conversationId,

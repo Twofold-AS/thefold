@@ -171,7 +171,7 @@ describe("New templates from migration 2", () => {
 
     // Use separate variables to avoid escaping issues
     const cronJobFiles = JSON.stringify([
-      { path: "service.ts", content: "// Cron job code", language: "typescript" }
+      { path: "{{SERVICE_NAME}}/service.ts", content: "// Cron job code for {{SERVICE_NAME}}", language: "typescript" }
     ]);
     const cronJobVars = JSON.stringify([
       { name: "SERVICE_NAME", description: "Service name", defaultValue: "tasks" }

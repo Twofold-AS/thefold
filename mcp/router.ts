@@ -48,6 +48,7 @@ export async function startInstalledServers(): Promise<{
       status: row.status as "installed",
       category: row.category as any,
       config: typeof row.config === "string" ? JSON.parse(row.config) : (row.config as Record<string, unknown>) ?? {},
+      configRequired: (row.config_required as boolean) ?? true,
       installedAt: (row.installed_at as Date)?.toISOString() ?? null,
       createdAt: (row.created_at as Date).toISOString(),
       updatedAt: (row.updated_at as Date).toISOString(),

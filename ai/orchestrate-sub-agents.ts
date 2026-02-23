@@ -1,6 +1,7 @@
 // Sub-agent orchestration: planning, parallel execution, and result merging
 
 import log from "encore.dev/log";
+import { secret } from "encore.dev/config";
 import { callAIWithFallback } from "./ai";
 import { estimateCost } from "./router";
 import {
@@ -12,6 +13,14 @@ import {
   getSystemPromptForRole,
   getMaxTokensForRole,
 } from "./sub-agents";
+
+// --- Feature Flag ---
+
+const ZDynamicSubAgents = secret("ZDynamicSubAgents");
+
+export function isDynamicSubAgentsEnabled(): boolean {
+  try { return ZDynamicSubAgents() === "true"; } catch { return false; }
+}
 
 // --- Types ---
 
@@ -127,6 +136,154 @@ export function planSubAgents(
   });
 
   return { agents, mergeStrategy: "concatenate" };
+}
+
+// --- Dynamic Planning (ZN: AI-driven sub-agent setup) ---
+
+/**
+ * AI-driven sub-agent planning. Uses an AI call to decide which sub-agents
+ * to dispatch based on the actual task content, not just a complexity number.
+ *
+ * Feature-flagged via ZDynamicSubAgents secret. Falls back to planSubAgents()
+ * when disabled or on any error.
+ */
+export async function planSubAgentsDynamic(
+  taskDescription: string,
+  planSummary: string,
+  complexity: number,
+  budgetMode: BudgetMode,
+  userHint?: string,
+): Promise<SubAgentPlan> {
+  // If feature flag is off, fall back to old logic
+  if (!isDynamicSubAgentsEnabled()) {
+    return planSubAgents(taskDescription, planSummary, complexity, budgetMode);
+  }
+
+  try {
+    const plannerPrompt = `You are a planner that decides if a coding task needs sub-agents.
+Analyze the task and decide:
+1. Does this task need sub-agents? (simple bug fixes, single-file changes: no)
+2. If yes: which roles are needed, and what should each focus on?
+3. Dependencies between agents (e.g. tester depends on implementer)
+
+Available roles: planner, implementer, tester, reviewer, documenter, researcher
+
+Rules:
+- Only use sub-agents when the task genuinely benefits from parallel specialized work
+- Complexity 1-3 tasks almost never need sub-agents
+- A task with many files or systems benefits from planner + implementer + tester
+- Security-sensitive tasks benefit from a reviewer
+- Large new features benefit from a documenter
+- When in doubt, use fewer agents (cost efficiency)
+
+Respond with JSON only (no markdown fences):
+{
+  "useSubAgents": true/false,
+  "reason": "short explanation of why or why not",
+  "agents": [
+    { "role": "implementer", "task": "specific focus for this agent", "dependsOn": [] },
+    { "role": "tester", "task": "specific focus for this agent", "dependsOn": ["implementer"] }
+  ]
+}`;
+
+    const userMessage = [
+      `Task: ${taskDescription}`,
+      `\nPlan summary:\n${planSummary}`,
+      `\nComplexity: ${complexity}/10`,
+      userHint ? `\nUser preference: ${userHint}` : "",
+    ].filter(Boolean).join("\n");
+
+    const response = await callAIWithFallback({
+      model: getModelForRole("planner", budgetMode),
+      system: plannerPrompt,
+      messages: [{ role: "user", content: userMessage }],
+      maxTokens: 2048,
+    });
+
+    const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      log.warn("planSubAgentsDynamic: no JSON found in AI response, falling back", {
+        responseLength: response.content.length,
+      });
+      return planSubAgents(taskDescription, planSummary, complexity, budgetMode);
+    }
+
+    const decision = JSON.parse(jsonMatch[0]) as {
+      useSubAgents: boolean;
+      reason: string;
+      agents?: Array<{
+        role: string;
+        task: string;
+        dependsOn?: string[];
+      }>;
+    };
+
+    log.info("planSubAgentsDynamic: AI decision", {
+      useSubAgents: decision.useSubAgents,
+      reason: decision.reason,
+      agentCount: decision.agents?.length ?? 0,
+      complexity,
+    });
+
+    if (!decision.useSubAgents || !decision.agents?.length) {
+      return { agents: [], mergeStrategy: "concatenate" };
+    }
+
+    // Validate and map roles — only accept known roles
+    const validRoles: Set<string> = new Set(["planner", "implementer", "tester", "reviewer", "documenter", "researcher"]);
+    const validAgents = decision.agents.filter((a) => validRoles.has(a.role));
+
+    if (validAgents.length === 0) {
+      log.warn("planSubAgentsDynamic: no valid roles in AI response, falling back");
+      return planSubAgents(taskDescription, planSummary, complexity, budgetMode);
+    }
+
+    const agents: SubAgent[] = validAgents.map((a, i) => ({
+      id: `sub-${i + 1}`,
+      role: a.role as SubAgentRole,
+      model: getModelForRole(a.role as SubAgentRole, budgetMode),
+      systemPrompt: getSystemPromptForRole(a.role as SubAgentRole),
+      inputContext: `${a.task}\n\nTask: ${taskDescription}`,
+      maxTokens: getMaxTokensForRole(a.role as SubAgentRole),
+      dependsOn: (a.dependsOn || [])
+        .map((dep: string) => {
+          const idx = validAgents.findIndex((d) => d.role === dep);
+          return idx >= 0 ? `sub-${idx + 1}` : "";
+        })
+        .filter(Boolean),
+    }));
+
+    return {
+      agents,
+      mergeStrategy: agents.length > 3 ? "ai_merge" : "concatenate",
+    };
+  } catch (err) {
+    log.warn("planSubAgentsDynamic: error, falling back to static planning", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return planSubAgents(taskDescription, planSummary, complexity, budgetMode);
+  }
+}
+
+// --- User Hint Extraction ---
+
+/**
+ * Extract sub-agent preferences from a user message.
+ * Detects patterns like "bruk 3 agenter", "2 sub-agents", "uten sub-agent".
+ */
+export function extractSubAgentHint(message: string): string | undefined {
+  const patterns = [
+    /bruk\s+(\d+)\s+agent/i,
+    /(\d+)\s+sub-?agent/i,
+    /parallell.*?(\d+)/i,
+    /team.*?(\d+)/i,
+  ];
+  for (const p of patterns) {
+    const match = message.match(p);
+    if (match) return `User wants ${match[1]} agents`;
+  }
+  if (/uten sub-?agent/i.test(message)) return "User wants NO sub-agents";
+  return undefined;
 }
 
 // --- Execution ---

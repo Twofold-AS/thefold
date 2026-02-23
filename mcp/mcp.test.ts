@@ -18,9 +18,9 @@ describe("MCP Service", () => {
         "brave-search",
         "context7",
         "filesystem",
-        "github",
-        "postgres",
+        "linear-mcp",
         "puppeteer",
+        "sentry",
       ]);
     });
 
@@ -36,7 +36,6 @@ describe("MCP Service", () => {
       const result = await list();
       const categories = new Set(result.servers.map((s) => s.category));
       expect(categories).toContain("code");
-      expect(categories).toContain("data");
       expect(categories).toContain("docs");
       expect(categories).toContain("general");
     });

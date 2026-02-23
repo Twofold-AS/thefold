@@ -50,9 +50,9 @@ vi.mock("~encore/clients", () => ({
   github: {
     getTree: vi.fn(mockGitHubTree),
     getFile: vi.fn((req: { path: string }) => mockGitHubFile(req.path)),
-    getFileMetadata: vi.fn(() => ({ exists: true, size: 500 })),
+    getFileMetadata: vi.fn(() => ({ exists: true, size: 500, totalLines: 50 })),
     getFileChunk: vi.fn(() => ({ content: "// chunk", totalLines: 50, startLine: 1, endLine: 50 })),
-    findRelevantFiles: vi.fn(() => ({ files: ["agent/types.ts"] })),
+    findRelevantFiles: vi.fn(() => ({ paths: ["agent/types.ts"] })),
     createPR: vi.fn(mockGitHubCreatePR),
     createBranch: vi.fn(() => ({ success: true })),
     commitFiles: vi.fn(() => ({ sha: "mock-sha-123" })),
@@ -83,8 +83,9 @@ vi.mock("~encore/clients", () => ({
     getJob: vi.fn(() => ({ job: null })),
   },
   tasks: {
-    getTaskInternal: vi.fn(() => ({ task: { id: "mock", title: "Mock task", description: "", status: "backlog" } })),
+    getTaskInternal: vi.fn(() => ({ task: { id: "mock", title: "Mock task", description: "", status: "in_progress" } })),
     updateTaskStatus: vi.fn(() => ({ success: true })),
+    isCancelled: vi.fn(() => ({ cancelled: false })),
   },
   linear: {
     updateTask: vi.fn(() => ({ success: true })),

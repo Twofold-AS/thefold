@@ -60,7 +60,7 @@ export interface CompletionHelpers {
 /**
  * STEP 9-12: PR creation, Linear update, memory storage, sandbox cleanup.
  *
- * Called for the skipReview path (when AgentModular=true and options.skipReview=true).
+ * Called for the skipReview path (when options.skipReview=true).
  * In the future, approveReview() in review.ts can also call this instead of
  * duplicating the completion logic.
  */

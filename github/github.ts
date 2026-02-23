@@ -1,6 +1,7 @@
 import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
 import { cache } from "~encore/clients";
+import { isGitHubAppEnabled, getInstallationToken } from "./github-app";
 
 const githubToken = secret("GitHubToken");
 
@@ -533,5 +534,53 @@ export const listRepos = api(
       }));
 
     return { repos };
+  }
+);
+
+// --- Create a new repository (requires GitHub App) ---
+
+interface CreateRepoRequest {
+  org: string;
+  name: string;
+  description?: string;
+  isPrivate?: boolean;
+}
+
+interface CreateRepoResponse {
+  url: string;
+  cloneUrl: string;
+}
+
+export const createRepo = api(
+  { method: "POST", path: "/github/repo/create", expose: true, auth: true },
+  async (req: CreateRepoRequest): Promise<CreateRepoResponse> => {
+    if (!isGitHubAppEnabled()) {
+      throw APIError.failedPrecondition("GitHub App not enabled. Set ZGitHubApp=true");
+    }
+
+    const token = await getInstallationToken(req.org);
+
+    const res = await fetch(`https://api.github.com/orgs/${req.org}/repos`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: req.name,
+        description: req.description || "Created by TheFold",
+        private: req.isPrivate ?? true,
+        auto_init: true,
+      }),
+    });
+
+    if (!res.ok) {
+      const error = await res.text();
+      throw APIError.internal(`Failed to create repo: ${res.status} ${error}`);
+    }
+
+    const repo = await res.json();
+    return { url: repo.html_url, cloneUrl: repo.clone_url };
   }
 );

@@ -1,4 +1,5 @@
 import type { AgentPhase } from "./state-machine";
+import type { ProgressStep } from "./messages";
 export type { AgentPhase };
 
 // === Status Constants & Mapping ===
@@ -76,6 +77,8 @@ export interface AgentExecutionContext {
   subAgentResults?: import("../ai/sub-agents").SubAgentResult[];
   // State machine
   phase?: AgentPhase;
+  // Progress tracking (Z-project: new message contract)
+  progressSteps?: ProgressStep[];
   // Persistent job queue (XD)
   jobId?: string;
 }

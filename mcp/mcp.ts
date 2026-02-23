@@ -1,4 +1,5 @@
 import { api, APIError } from "encore.dev/api";
+import log from "encore.dev/log";
 import { db } from "./db";
 import type { MCPServer, MCPServerRow, MCPServerStatus, MCPCategory } from "./types";
 
@@ -27,10 +28,19 @@ function parseRow(row: MCPServerRow): MCPServer {
     status: row.status as MCPServerStatus,
     category: row.category as MCPCategory,
     config: parseJsonb<Record<string, unknown>>(row.config, {}),
+    configRequired: row.config_required ?? true,
     installedAt: row.installed_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
+}
+
+// --- Helpers ---
+
+async function getServerById(id: string): Promise<MCPServerRow | null> {
+  return await db.queryRow<MCPServerRow>`
+    SELECT * FROM mcp_servers WHERE id = ${id}::uuid
+  `;
 }
 
 // --- Endpoints ---
@@ -105,9 +115,20 @@ export const install = api(
     const envVars = req.envVars ? JSON.stringify(req.envVars) : existing.env_vars;
     const config = req.config ? JSON.stringify(req.config) : (typeof existing.config === "string" ? existing.config : JSON.stringify(existing.config ?? {}));
 
+    // Check if server requires config and env vars have empty values
+    const configRequired = existing.config_required ?? true;
+    const parsedEnvVars = req.envVars
+      ? req.envVars
+      : parseJsonb<Record<string, string>>(existing.env_vars, {});
+    const hasEmptyEnvVars = configRequired && Object.entries(parsedEnvVars).some(
+      ([_, value]) => !value || value === ""
+    );
+
+    const newStatus = hasEmptyEnvVars ? "not_configured" : "installed";
+
     const row = await db.queryRow<MCPServerRow>`
       UPDATE mcp_servers
-      SET status = 'installed',
+      SET status = ${newStatus},
           env_vars = ${envVars}::jsonb,
           config = ${config}::jsonb,
           installed_at = NOW(),
@@ -211,5 +232,82 @@ export const installed = api(
       servers.push(parseRow(row));
     }
     return { servers };
+  }
+);
+
+// --- Validation ---
+
+interface ValidateRequest {
+  serverId: string;
+}
+
+interface ValidateResponse {
+  status: "active" | "misconfigured" | "error";
+  message: string;
+}
+
+// Validate an MCP server: check config and try to start it
+export const validateServer = api(
+  { method: "POST", path: "/mcp/validate", expose: true, auth: true },
+  async (req: ValidateRequest): Promise<ValidateResponse> => {
+    const server = await getServerById(req.serverId);
+    if (!server) throw APIError.notFound("Server not found");
+
+    // Check if all required env vars are configured (non-empty)
+    const envVars = parseJsonb<Record<string, string>>(server.env_vars, {});
+    const missingVars = Object.entries(envVars)
+      .filter(([_, value]) => !value || value === "")
+      .map(([key]) => key);
+
+    if (missingVars.length > 0) {
+      return {
+        status: "misconfigured",
+        message: `Missing configuration: ${missingVars.join(", ")}`,
+      };
+    }
+
+    // Try to start the server and call tools/list
+    try {
+      const { MCPClient } = await import("./client");
+      const args = server.args
+        ? typeof server.args === "string" ? JSON.parse(server.args) : server.args
+        : [];
+      const client = new MCPClient(
+        server.command,
+        Array.isArray(args) ? args : [],
+        envVars,
+        server.name,
+        15000, // 15s timeout for validation
+      );
+      await client.start();
+      const tools = client.getTools();
+      client.kill();
+
+      // Update status to installed with discovered tools
+      await db.exec`
+        UPDATE mcp_servers SET status = 'installed',
+          discovered_tools = ${JSON.stringify(tools)}::jsonb,
+          last_health_check = NOW(),
+          health_status = 'healthy'
+        WHERE id = ${req.serverId}::uuid
+      `;
+
+      log.info("MCP server validated successfully", {
+        server: server.name,
+        toolCount: tools.length,
+      });
+
+      return { status: "active", message: `Server active with ${tools.length} tools` };
+    } catch (err) {
+      log.warn("MCP server validation failed", {
+        server: server.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+
+      return {
+        status: "error",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 );

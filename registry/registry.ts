@@ -6,6 +6,7 @@ import { tasks } from "~encore/clients";
 import type {
   Component,
   ComponentFile,
+  ComponentVariable,
   HealingEvent,
   RegisterComponentRequest,
   GetComponentRequest,
@@ -16,6 +17,8 @@ import type {
   TriggerHealingRequest,
   HealingStatusRequest,
   HealingNotification,
+  UseComponentWithVarsRequest,
+  UseComponentWithVarsResponse,
 } from "./types";
 
 // --- Pub/Sub ---
@@ -28,6 +31,7 @@ export const healingEvents = new Topic<HealingNotification>("healing-events", {
 
 function parseComponent(row: Record<string, unknown>): Component {
   const files = typeof row.files === "string" ? JSON.parse(row.files) : row.files;
+  const variables = typeof row.variables === "string" ? JSON.parse(row.variables) : row.variables;
   return {
     id: row.id as string,
     name: row.name as string,
@@ -46,6 +50,10 @@ function parseComponent(row: Record<string, unknown>): Component {
     testCoverage: (row.test_coverage as number) ?? null,
     validationStatus: (row.validation_status as Component["validationStatus"]) ?? "pending",
     tags: (row.tags as string[]) ?? [],
+    qualityScore: (row.quality_score as number) ?? 0,
+    type: (row.type as Component["type"]) ?? "component",
+    variables: (variables as ComponentVariable[]) ?? [],
+    source: (row.source as Component["source"]) ?? "manual",
     createdAt: (row.created_at as Date).toISOString(),
     updatedAt: (row.updated_at as Date).toISOString(),
   };
@@ -130,17 +138,29 @@ export const list = api(
     const offset = req.offset ?? 0;
     const categoryFilter = req.category ?? null;
     const repoFilter = req.sourceRepo ?? null;
+    const typeFilter = req.type ?? null;
+    const searchFilter = req.search ? `%${req.search.trim().toLowerCase()}%` : null;
 
     const countRow = await db.queryRow`
       SELECT COUNT(*)::int as count FROM components
       WHERE (${categoryFilter}::text IS NULL OR category = ${categoryFilter})
         AND (${repoFilter}::text IS NULL OR source_repo = ${repoFilter})
+        AND (${typeFilter}::text IS NULL OR type = ${typeFilter})
+        AND (${searchFilter}::text IS NULL OR (
+          LOWER(name) LIKE ${searchFilter}
+          OR LOWER(COALESCE(description, '')) LIKE ${searchFilter}
+        ))
     `;
 
     const rows = await db.query`
       SELECT * FROM components
       WHERE (${categoryFilter}::text IS NULL OR category = ${categoryFilter})
         AND (${repoFilter}::text IS NULL OR source_repo = ${repoFilter})
+        AND (${typeFilter}::text IS NULL OR type = ${typeFilter})
+        AND (${searchFilter}::text IS NULL OR (
+          LOWER(name) LIKE ${searchFilter}
+          OR LOWER(COALESCE(description, '')) LIKE ${searchFilter}
+        ))
       ORDER BY times_used DESC, created_at DESC
       LIMIT ${limit} OFFSET ${offset}
     `;
@@ -241,6 +261,68 @@ export const useComponent = api(
     return { success: true };
   }
 );
+
+// POST /registry/use-with-vars — Use a component with variable substitution (exposed)
+export const useComponentWithVars = api(
+  { method: "POST", path: "/registry/use-with-vars", expose: true, auth: true },
+  async (req: UseComponentWithVarsRequest): Promise<UseComponentWithVarsResponse> => {
+    if (!req.componentId || req.componentId.trim().length === 0) {
+      throw APIError.invalidArgument("componentId is required");
+    }
+
+    const row = await db.queryRow`
+      SELECT * FROM components WHERE id = ${req.componentId}::uuid
+    `;
+    if (!row) throw APIError.notFound("Component not found");
+
+    const component = parseComponent(row);
+    let files: Array<{ path: string; content: string }> = component.files.map((f) => ({
+      path: f.path,
+      content: f.content,
+    }));
+
+    // Substitute variables
+    if (req.variables) {
+      files = files.map((f) => ({
+        path: substituteVariables(f.path, req.variables!),
+        content: substituteVariables(f.content, req.variables!),
+      }));
+    }
+
+    // Track usage
+    if (req.targetRepo) {
+      await db.exec`
+        UPDATE components
+        SET used_by_repos = array_append(
+          COALESCE(used_by_repos, ARRAY[]::text[]), ${req.targetRepo}
+        ),
+        times_used = times_used + 1,
+        updated_at = NOW()
+        WHERE id = ${req.componentId}::uuid
+        AND NOT (${req.targetRepo} = ANY(COALESCE(used_by_repos, ARRAY[]::text[])))
+      `;
+      // If repo already tracked, still increment times_used
+      await db.exec`
+        UPDATE components
+        SET times_used = times_used + 1, updated_at = NOW()
+        WHERE id = ${req.componentId}::uuid
+        AND (${req.targetRepo} = ANY(COALESCE(used_by_repos, ARRAY[]::text[])))
+      `;
+    }
+
+    return { files };
+  }
+);
+
+// --- Variable substitution helper ---
+
+export function substituteVariables(text: string, vars: Record<string, string>): string {
+  let result = text;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replaceAll(`{{${key}}}`, value);
+  }
+  return result;
+}
 
 // POST /registry/find-for-task — AI-assisted: find components for a task
 export const findForTask = api(

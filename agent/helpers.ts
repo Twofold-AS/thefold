@@ -9,6 +9,10 @@ import {
   buildClarificationMessage,
   type StepInfo,
   type StatusMeta,
+  type AgentProgress,
+  type ProgressStep,
+  serializeProgress,
+  useNewContract,
 } from "./messages";
 import type { AgentPhase } from "./state-machine";
 import type { AgentExecutionContext } from "./types";
@@ -144,6 +148,43 @@ export async function think(ctx: AgentExecutionContext, thought: string) {
     content: serializeMessage(msg),
     status: "working",
   });
+}
+
+// --- Helper: Report progress using new AgentProgress contract (Z-project) ---
+
+export async function reportProgress(
+  ctx: AgentExecutionContext,
+  progress: AgentProgress,
+): Promise<void> {
+  if (!ctx.conversationId) return;
+
+  await agentReports.publish({
+    conversationId: ctx.conversationId,
+    taskId: ctx.taskId,
+    content: serializeProgress(progress),
+    status: progress.status === "done" ? "completed"
+          : progress.status === "failed" ? "failed"
+          : progress.status === "waiting" ? "needs_input"
+          : "working",
+  });
+}
+
+// --- Helper: Build the accumulated step list from context ---
+
+export function buildSteps(ctx: AgentExecutionContext): ProgressStep[] {
+  return ctx.progressSteps || [];
+}
+
+// --- Helper: Add or update a step in the context's progress step list ---
+
+export function addStep(ctx: AgentExecutionContext, step: ProgressStep): void {
+  if (!ctx.progressSteps) ctx.progressSteps = [];
+  const existing = ctx.progressSteps.findIndex(s => s.id === step.id);
+  if (existing >= 0) {
+    ctx.progressSteps[existing] = step;
+  } else {
+    ctx.progressSteps.push(step);
+  }
 }
 
 // --- Helper: Time an operation and audit it ---

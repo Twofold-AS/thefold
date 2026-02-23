@@ -1,6 +1,8 @@
 import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
+import log from "encore.dev/log";
+import { tasks } from "~encore/clients";
 
 const linearKey = secret("LinearAPIKey");
 
@@ -203,9 +205,81 @@ export const updateTask = api(
   }
 );
 
-// Cron: Check for new tasks every 5 minutes
+// --- Sync Linear tasks into the tasks service (ZF: tasks service is sole source) ---
+
+interface SyncToTasksResponse {
+  imported: number;
+  skipped: number;
+  errors: number;
+}
+
+// Map Linear state to TheFold status
+function mapLinearState(state: string): string {
+  const lower = state.toLowerCase();
+  if (lower === "done" || lower === "completed") return "done";
+  if (lower === "in progress" || lower === "started") return "in_progress";
+  if (lower === "in review") return "in_review";
+  if (lower === "blocked" || lower === "cancelled" || lower === "canceled") return "blocked";
+  return "backlog";
+}
+
+export const syncToTasksService = api(
+  { method: "POST", path: "/linear/sync-to-tasks", expose: false },
+  async (): Promise<SyncToTasksResponse> => {
+    // 1. Fetch tasks from Linear with "thefold" label
+    const linearResult = await getAssignedTasks();
+    const linearTasks = linearResult.tasks;
+
+    let imported = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const lt of linearTasks) {
+      if (!lt.labels.includes("thefold")) continue;
+
+      try {
+        // 2. Check if task already exists via externalId (duplicate detection in createTask)
+        // createTask returns the existing task if externalId + externalSource match
+        const result = await tasks.createTask({
+          title: lt.title,
+          description: lt.description || undefined,
+          labels: lt.labels,
+          priority: lt.priority || 3,
+          source: "linear",
+          linearTaskId: lt.id,
+          externalId: lt.id,
+          externalSource: "linear",
+        });
+
+        // Check if this was a new creation or existing (by comparing created_at and updated_at)
+        // A newly created task will have created_at very close to now
+        const createdAt = new Date(result.task.createdAt).getTime();
+        const now = Date.now();
+        if (now - createdAt < 5000) {
+          // Created within last 5 seconds — likely new
+          imported++;
+          log.info("linear task imported", { linearId: lt.id, taskId: result.task.id, title: lt.title });
+        } else {
+          skipped++;
+        }
+      } catch (err) {
+        errors++;
+        log.warn("failed to import linear task", {
+          linearId: lt.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    log.info("linear sync completed", { imported, skipped, errors, total: linearTasks.length });
+    return { imported, skipped, errors };
+  }
+);
+
+// Cron: Sync Linear tasks into tasks service every 5 minutes (ZF: tasks service is sole source)
+// Does NOT start the agent directly — only creates tasks in the tasks service
 const _cronCheck = new CronJob("check-thefold-tasks", {
-  title: "Check Linear for TheFold tasks",
+  title: "Sync Linear tasks into tasks service",
   schedule: "*/5 * * * *",
-  endpoint: getAssignedTasks,
+  endpoint: syncToTasksService,
 });

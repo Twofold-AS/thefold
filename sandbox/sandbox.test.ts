@@ -15,12 +15,12 @@ describe("Sandbox service", () => {
         // Ignore cleanup errors
       }
     }
-  });
+  }, 60_000);
 
   describe("create", () => {
     it(
       "should clone repository into a sandbox and return an ID",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const result = await create({
           repoOwner: testOwner,
@@ -50,7 +50,7 @@ describe("Sandbox service", () => {
   describe("writeFile", () => {
     it(
       "should write a new TypeScript file to the sandbox",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         // Create a sandbox
         const sandbox = await create({
@@ -80,7 +80,7 @@ describe("Sandbox service", () => {
   describe("validate", () => {
     it(
       "should run validation and return output",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         // Create a sandbox
         const sandbox = await create({
@@ -107,7 +107,7 @@ describe("Sandbox service", () => {
 
     it(
       "should detect type errors and return validation failure",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         // Create a sandbox
         const sandbox = await create({
@@ -159,7 +159,7 @@ describe("Sandbox service", () => {
   describe("path traversal protection", () => {
     it(
       "should reject attempts to write outside sandbox with ../../etc/passwd",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         // Create a sandbox
         const sandbox = await create({
@@ -181,7 +181,7 @@ describe("Sandbox service", () => {
 
     it(
       "should reject complex path traversal attempts",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,
@@ -204,7 +204,7 @@ describe("Sandbox service", () => {
   describe("validateIncremental", () => {
     it(
       "should validate a clean TypeScript file successfully",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,
@@ -237,7 +237,7 @@ describe("Sandbox service", () => {
 
     it(
       "should detect type errors in a single file",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,
@@ -272,7 +272,7 @@ describe("Sandbox service", () => {
 
     it(
       "should skip non-TypeScript files",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,
@@ -301,7 +301,7 @@ describe("Sandbox service", () => {
 
     it(
       "should return failure for non-existent file",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,
@@ -323,7 +323,7 @@ describe("Sandbox service", () => {
 
     it(
       "should return durationMs for performance tracking",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,
@@ -351,7 +351,7 @@ describe("Sandbox service", () => {
   describe("destroy", () => {
     it(
       "should clean up and destroy a sandbox",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         // Create a sandbox
         const sandbox = await create({
@@ -380,7 +380,7 @@ describe("Sandbox service", () => {
 
     it(
       "should handle destroying non-existent sandbox gracefully",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         // Try to destroy a sandbox that doesn't exist
         const result = await destroy({
@@ -396,7 +396,7 @@ describe("Sandbox service", () => {
   describe("validation pipeline (snapshot & performance)", () => {
     it(
       "should include snapshot step in validation output",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,
@@ -417,7 +417,7 @@ describe("Sandbox service", () => {
 
     it(
       "should include performance step in validation output",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,
@@ -438,7 +438,7 @@ describe("Sandbox service", () => {
 
     it(
       "should skip build benchmark when no build script exists",
-      { timeout: 120000 },
+      { timeout: 300_000 },
       async () => {
         const sandbox = await create({
           repoOwner: testOwner,

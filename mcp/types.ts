@@ -1,4 +1,4 @@
-export type MCPServerStatus = "available" | "installed" | "error";
+export type MCPServerStatus = "available" | "installed" | "not_configured" | "error";
 export type MCPCategory = "general" | "code" | "data" | "docs" | "ai";
 
 export interface MCPTool {
@@ -17,6 +17,7 @@ export interface MCPServer {
   status: MCPServerStatus;
   category: MCPCategory;
   config: Record<string, unknown>;
+  configRequired: boolean;
   installedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -32,6 +33,7 @@ export interface MCPServerRow {
   status: string;
   category: string;
   config: string | Record<string, unknown> | null;
+  config_required: boolean | null;
   installed_at: Date | null;
   created_at: Date;
   updated_at: Date;

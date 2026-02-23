@@ -25,9 +25,68 @@ export const agentReports = new Topic<AgentReport>("agent-reports", {
   deliveryGuarantee: "at-least-once",
 });
 
+// --- Pub/Sub: Chat response routing (two-way Slack/Discord) ---
+
+export interface ChatResponse {
+  conversationId: string;
+  content: string;
+  source: string;  // "web" | "slack" | "discord" | "api"
+  metadata: Record<string, string>;
+}
+
+export const chatResponses = new Topic<ChatResponse>("chat-responses", {
+  deliveryGuarantee: "at-least-once",
+});
+
+import log from "encore.dev/log";
+
+// Route responses back to originating platform (Slack/Discord)
+const _responseRouter = new Subscription(chatResponses, "route-response", {
+  handler: async (response) => {
+    if (response.source === "slack" && response.metadata.webhookUrl) {
+      await sendToSlackDirect(response.metadata.webhookUrl, response.content);
+    } else if (response.source === "discord" && response.metadata.webhookUrl) {
+      await sendToDiscordDirect(response.metadata.webhookUrl, response.content);
+    }
+    // "web" and "api" — no routing needed, frontend polls
+  },
+});
+
+async function sendToSlackDirect(webhookUrl: string, message: string): Promise<void> {
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: message, unfurl_links: false }),
+    });
+    if (!res.ok) {
+      log.warn("Slack response routing failed", { status: res.status });
+    }
+  } catch (err) {
+    log.warn("Failed to route response to Slack", { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function sendToDiscordDirect(webhookUrl: string, message: string): Promise<void> {
+  try {
+    // Discord has a 2000 char limit
+    const truncated = message.length > 1900 ? message.substring(0, 1900) + "..." : message;
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: truncated }),
+    });
+    if (!res.ok) {
+      log.warn("Discord response routing failed", { status: res.status });
+    }
+  } catch (err) {
+    log.warn("Failed to route response to Discord", { error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 // --- Agent Message Parser (cross-service boundary — types duplicated from agent/messages.ts) ---
 
-import { deserializeMessage, mapReportStatusToPhase, buildStatusContent } from "./agent-message-parser";
+import { deserializeMessage, mapReportStatusToPhase, buildStatusContent, deserializeProgress, useNewContract } from "./agent-message-parser";
 
 // Subscribe to agent reports and UPDATE existing agent_status (not create new agent_report)
 const _ = new Subscription(agentReports, "store-agent-report", {
@@ -37,6 +96,56 @@ const _ = new Subscription(agentReports, "store-agent-report", {
     console.log("[DEBUG-AF] conversationId:", report.conversationId);
     console.log("[DEBUG-AF] content:", report.content?.substring(0, 200));
 
+    // === NEW CONTRACT: AgentProgress → single agent_progress row per task ===
+    if (useNewContract()) {
+      const progress = deserializeProgress(report.content);
+      if (progress) {
+        const progressMetadata = JSON.stringify({
+          taskId: report.taskId,
+          status: report.status,
+          prUrl: report.prUrl,
+          filesChanged: report.filesChanged,
+        });
+
+        // Find existing agent_progress message for this taskId
+        const existingProgress = await db.queryRow<{ id: string }>`
+          SELECT id FROM messages
+          WHERE conversation_id = ${report.conversationId}
+            AND message_type = 'agent_progress'
+            AND metadata->>'taskId' = ${report.taskId}
+          ORDER BY created_at DESC LIMIT 1
+        `;
+
+        if (existingProgress) {
+          // UPDATE — always same row, never INSERT a second one
+          await db.exec`
+            UPDATE messages
+            SET content = ${report.content}, metadata = ${progressMetadata}::jsonb, updated_at = NOW()
+            WHERE id = ${existingProgress.id}::uuid
+          `;
+        } else {
+          // First progress message for this task — INSERT
+          await db.exec`
+            INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+            VALUES (${report.conversationId}, 'assistant', ${report.content}, 'agent_progress', ${progressMetadata}::jsonb)
+          `;
+        }
+
+        // Insert persistent completion message when done
+        if (report.completionMessage) {
+          await db.exec`
+            INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+            VALUES (${report.conversationId}, 'assistant', ${report.completionMessage}, 'chat',
+                    ${JSON.stringify({ taskId: report.taskId, type: "completion" })}::jsonb)
+          `;
+        }
+
+        return;
+      }
+      // If deserializeProgress returned null, fall through to legacy handling below
+    }
+
+    // === LEGACY CONTRACT: original handler ===
     let statusContent: string;
     const agentMsg = deserializeMessage(report.content);
 
@@ -303,7 +412,7 @@ interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress";
   metadata: string | null;
   createdAt: string;
   updatedAt: string;
@@ -461,6 +570,33 @@ export const send = api(
     // If so, route the message as a clarification response
     if (!req.chatOnly) {
       try {
+        // === NEW CONTRACT: Check agent_progress messages with status="waiting" ===
+        if (useNewContract()) {
+          const lastProgress = await db.queryRow<{ content: string; metadata: string }>`
+            SELECT content, metadata::text FROM messages
+            WHERE conversation_id = ${req.conversationId}
+              AND message_type = 'agent_progress'
+            ORDER BY updated_at DESC LIMIT 1
+          `;
+          if (lastProgress) {
+            const progress = deserializeProgress(lastProgress.content);
+            const progressMeta = typeof lastProgress.metadata === "string"
+              ? JSON.parse(lastProgress.metadata)
+              : lastProgress.metadata;
+            if (progress?.status === "waiting" && progressMeta?.taskId) {
+              // Route to agent as clarification response
+              const { agent: agentClient } = await import("~encore/clients");
+              await agentClient.respondToClarification({
+                taskId: progressMeta.taskId,
+                response: req.message,
+                conversationId: req.conversationId,
+              });
+              return { message: msg, agentTriggered: false };
+            }
+          }
+        }
+
+        // === LEGACY CONTRACT: Check agent_status messages ===
         const agentStatusMsg = await db.queryRow<{ content: string; metadata: string }>`
           SELECT content, metadata::text FROM messages
           WHERE conversation_id = ${req.conversationId}
@@ -1322,6 +1458,67 @@ export const deleteConversation = api(
     await db.exec`DELETE FROM messages WHERE conversation_id = ${req.conversationId}`;
     await db.exec`DELETE FROM conversations WHERE id = ${req.conversationId}`;
 
+    return { success: true };
+  }
+);
+
+// --- ZD: Chat-based review actions (approve/changes/reject from chat) ---
+
+export const approveFromChat = api(
+  { method: "POST", path: "/chat/review/approve", expose: true, auth: true },
+  async (req: { conversationId: string; reviewId: string }): Promise<{ prUrl: string }> => {
+    const authData = getAuthData();
+    if (!authData) throw APIError.unauthenticated("Not authenticated");
+
+    // Verify conversation ownership (OWASP A01)
+    const conv = await db.queryRow<{ owner_email: string }>`
+      SELECT owner_email FROM conversations WHERE id = ${req.conversationId}
+    `;
+    if (!conv || conv.owner_email !== authData.email) {
+      throw APIError.permissionDenied("Not your conversation");
+    }
+
+    const { agent } = await import("~encore/clients");
+    return agent.approveReview({ reviewId: req.reviewId });
+  }
+);
+
+export const requestChangesFromChat = api(
+  { method: "POST", path: "/chat/review/changes", expose: true, auth: true },
+  async (req: { conversationId: string; reviewId: string; feedback: string }): Promise<{ success: boolean }> => {
+    const authData = getAuthData();
+    if (!authData) throw APIError.unauthenticated("Not authenticated");
+
+    // Verify conversation ownership (OWASP A01)
+    const conv = await db.queryRow<{ owner_email: string }>`
+      SELECT owner_email FROM conversations WHERE id = ${req.conversationId}
+    `;
+    if (!conv || conv.owner_email !== authData.email) {
+      throw APIError.permissionDenied("Not your conversation");
+    }
+
+    const { agent } = await import("~encore/clients");
+    await agent.requestChanges({ reviewId: req.reviewId, feedback: req.feedback });
+    return { success: true };
+  }
+);
+
+export const rejectFromChat = api(
+  { method: "POST", path: "/chat/review/reject", expose: true, auth: true },
+  async (req: { conversationId: string; reviewId: string; feedback?: string }): Promise<{ success: boolean }> => {
+    const authData = getAuthData();
+    if (!authData) throw APIError.unauthenticated("Not authenticated");
+
+    // Verify conversation ownership (OWASP A01)
+    const conv = await db.queryRow<{ owner_email: string }>`
+      SELECT owner_email FROM conversations WHERE id = ${req.conversationId}
+    `;
+    if (!conv || conv.owner_email !== authData.email) {
+      throw APIError.permissionDenied("Not your conversation");
+    }
+
+    const { agent } = await import("~encore/clients");
+    await agent.rejectReview({ reviewId: req.reviewId, reason: req.feedback });
     return { success: true };
   }
 );

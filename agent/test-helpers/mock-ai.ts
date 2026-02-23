@@ -33,11 +33,17 @@ export function mockAssessConfidence(_input: Record<string, unknown>) {
   });
 
   return {
-    overallConfidence: 92,
-    reasoning: "Mock: Task is well-defined and straightforward",
-    missingContext: [],
-    suggestedApproach: "Direct implementation",
-    estimatedComplexity: "low",
+    confidence: {
+      overall: 92,
+      reasoning: "Mock: Task is well-defined and straightforward",
+      recommended_action: "proceed",
+      uncertainties: [],
+      clarifying_questions: [],
+      suggested_subtasks: [],
+    },
+    tokensUsed: 500,
+    costUsd: 0.001,
+    modelUsed: "mock",
   };
 }
 
@@ -48,16 +54,19 @@ export function mockAssessComplexity(_input: Record<string, unknown>) {
   mockCallLog.push({
     endpoint: "assessComplexity",
     input: _input,
-    response: { complexity: "low", filesAffected: 1 },
+    response: { complexity: 3, filesAffected: 1 },
     timestamp: Date.now(),
   });
 
   return {
-    complexity: "low",
+    complexity: 3,
     reasoning: "Mock: Simple single-file change",
     filesAffected: 1,
     estimatedTokens: 2000,
     suggestedModel: "claude-sonnet-4-5-20250929",
+    tokensUsed: 300,
+    costUsd: 0.0005,
+    modelUsed: "mock",
   };
 }
 
@@ -65,9 +74,8 @@ export function mockAssessComplexity(_input: Record<string, unknown>) {
  * Mock-svar for planTask
  */
 export function mockPlanTask(_input: Record<string, unknown>) {
-  const plan = {
-    description: "Mock plan: Add comment to file",
-    steps: [
+  const result = {
+    plan: [
       {
         action: "modify_file" as const,
         filePath: "agent/types.ts",
@@ -75,16 +83,19 @@ export function mockPlanTask(_input: Record<string, unknown>) {
         content: "/**\n * Agent types module.\n */\n\n// Original content preserved",
       },
     ],
+    costUsd: 0.003,
+    tokensUsed: 800,
+    modelUsed: "mock",
   };
 
   mockCallLog.push({
     endpoint: "planTask",
     input: _input,
-    response: plan,
+    response: result,
     timestamp: Date.now(),
   });
 
-  return plan;
+  return result;
 }
 
 /**

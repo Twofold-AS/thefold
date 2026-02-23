@@ -1,6 +1,134 @@
+import { secret } from "encore.dev/config";
 import type { AgentPhase } from "./state-machine";
 
-// === THE SINGLE MESSAGE TYPE PUBLISHED VIA PUB/SUB ===
+const ZNewMessageContract = secret("ZNewMessageContract");
+
+// ============================================================
+// NEW CONTRACT — AgentProgress (unified message type)
+// ============================================================
+
+export interface ProgressStep {
+  id: string;              // "context", "confidence", "plan", "build:1", "validate", etc.
+  label: string;           // "Analyserte repository", "gateway/auth.ts"
+  detail?: string;         // "14 filer, 3 minner"
+  done: boolean | null;    // true=done, false=in progress, null=waiting
+}
+
+export interface ProgressReport {
+  filesChanged: Array<{ path: string; action: "create" | "modify" | "delete"; diff?: string }>;
+  costUsd: number;
+  duration: string;
+  qualityScore?: number;   // 1-10 from AI review
+  concerns?: string[];
+  reviewId: string;        // reference to code_reviews table
+}
+
+export interface AgentProgress {
+  status: "thinking" | "working" | "waiting" | "done" | "failed";
+  phase: string;           // "context" | "confidence" | "planning" | "building" | "validating" | "reviewing" | "completing" | "clarification"
+  summary: string;         // "Bygger gateway/auth.ts (2/4)"
+  progress?: {
+    current: number;
+    total: number;
+    currentFile?: string;
+  };
+  steps: ProgressStep[];
+  report?: ProgressReport;           // only when done
+  question?: string;                 // only when waiting
+  subAgents?: Array<{                // only during sub-agent work
+    id: string;
+    role: string;
+    model: string;
+    status: "pending" | "working" | "done" | "failed";
+    label: string;
+  }>;
+  error?: string;                    // only when failed
+}
+
+export function serializeProgress(progress: AgentProgress): string {
+  return JSON.stringify({ type: "progress", ...progress });
+}
+
+export function deserializeProgress(raw: string): AgentProgress | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.type === "progress") return parsed as AgentProgress;
+    // Legacy fallback — convert old types
+    return convertLegacy(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function convertLegacy(parsed: any): AgentProgress | null {
+  if (!parsed?.type) return null;
+
+  switch (parsed.type) {
+    case "status":
+      return {
+        status: "working",
+        phase: parsed.phase || "building",
+        summary: parsed.meta?.title || parsed.phase || "Jobber...",
+        steps: (parsed.steps || []).map((s: any) => ({
+          id: s.label,
+          label: s.label,
+          detail: s.detail,
+          done: s.status === "done" ? true : s.status === "active" ? false : null,
+        })),
+      };
+    case "thought":
+      return null; // thoughts not shown in new UI
+    case "report":
+      return {
+        status: parsed.status === "completed" ? "done" : parsed.status === "failed" ? "failed" : "working",
+        phase: parsed.status === "completed" ? "completing" : "building",
+        summary: parsed.text?.substring(0, 100) || "",
+        steps: [],
+      };
+    case "clarification":
+      return {
+        status: "waiting",
+        phase: "clarification",
+        summary: "Trenger avklaring",
+        steps: (parsed.steps || []).map((s: any) => ({
+          id: s.label,
+          label: s.label,
+          done: null,
+        })),
+        question: parsed.questions?.[0] || "",
+      };
+    case "review":
+      return {
+        status: "waiting",
+        phase: "reviewing",
+        summary: "Venter pa godkjenning",
+        steps: [],
+        report: {
+          filesChanged: [],
+          costUsd: 0,
+          duration: "",
+          qualityScore: parsed.reviewData?.quality,
+          concerns: parsed.reviewData?.concerns,
+          reviewId: parsed.reviewData?.reviewId || "",
+        },
+      };
+    case "completion":
+      return {
+        status: "done",
+        phase: "completing",
+        summary: parsed.text || "Ferdig",
+        steps: [],
+      };
+    default:
+      return null;
+  }
+}
+
+// ============================================================
+// LEGACY EXPORTS — kept for backward compat when feature flag is false
+// These are the OLD types. When ZNewMessageContract is "true",
+// callers should use serializeProgress/deserializeProgress instead.
+// ============================================================
 
 export interface StepInfo {
   label: string;
@@ -34,13 +162,9 @@ export type AgentMessage =
 // Known message type strings for validation
 const KNOWN_TYPES = ["status", "thought", "report", "clarification", "review", "completion"] as const;
 
-// === SERIALIZATION ===
-
 export function serializeMessage(msg: AgentMessage): string {
   return JSON.stringify(msg);
 }
-
-// === DESERIALIZATION (with legacy fallback) ===
 
 export function deserializeMessage(raw: string): AgentMessage | null {
   try {
@@ -119,7 +243,16 @@ function convertLegacyStatus(parsed: Record<string, unknown>): AgentMessage {
   };
 }
 
-// === CONVENIENCE BUILDERS (replace report/think/reportSteps) ===
+// Feature flag helper
+export function useNewContract(): boolean {
+  try {
+    return ZNewMessageContract() === "true";
+  } catch {
+    return false;
+  }
+}
+
+// === CONVENIENCE BUILDERS (legacy, kept for backward compat) ===
 
 export function buildStatusMessage(
   phase: AgentPhase,
