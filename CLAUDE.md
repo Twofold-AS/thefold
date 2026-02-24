@@ -404,6 +404,57 @@ encore run              # all services + local infra
 # Dashboard: http://localhost:9400
 ```
 
+## Z-prosjekt nye filer og endringer
+
+### Nye services
+- `web/` — Web scraping via Firecrawl (web.ts, encore.service.ts)
+
+### Nye filer (backend)
+- `ai/provider-interface.ts` — AIProvider interface + StandardRequest/StandardResponse
+- `ai/provider-registry.ts` — Provider registry med fallback
+- `ai/providers/anthropic.ts` — Anthropic provider
+- `ai/providers/openrouter.ts` — OpenRouter provider
+- `ai/providers/fireworks.ts` — Fireworks provider
+- `ai/providers/openai.ts` — OpenAI provider
+- `github/github-app.ts` — GitHub App JWT auth + installation tokens
+- `gateway/email.ts` — E-post via Resend (jobb-fullføring, healing, feil)
+- `registry/healing.ts` — Healing pipeline (kvalitet + vedlikehold cron)
+
+### Endrede kontrakter
+- `agent/messages.ts` — AgentProgress erstatter 6 gamle AgentMessage-typer
+  - Typer: ProgressStep, ProgressReport, AgentProgress
+  - Funksjoner: serializeProgress(), deserializeProgress(), convertLegacy()
+- `agent/helpers.ts` — reportProgress() erstatter report() og think()
+  - addStep(), buildSteps() for progressiv steg-bygging
+- `chat/chat.ts` — Nye endpoints:
+  - POST /chat/review/approve
+  - POST /chat/review/changes
+  - POST /chat/review/reject
+  - Pub/Sub: chatResponses topic + responseRouter subscriber
+- `tasks/tasks.ts` — external_id + external_source for Linear import
+  - syncStatusToLinear() for toveis status-sync
+- `memory/memory.ts` — OpenAI embeddings (text-embedding-3-small, 1536 dim)
+  - POST /memory/re-embed endpoint
+- `github/github.ts` — POST /github/repo/create
+- `mcp/mcp.ts` — POST /mcp/validate
+- `registry/registry.ts` — useComponent, listComponents, substituteVariables
+
+### Nye secrets
+- OpenAIApiKey — OpenAI embeddings
+- GitHubAppId — GitHub App ID
+- GitHubAppPrivateKey — GitHub App private key (.pem)
+- FirecrawlApiKey — Firecrawl web scraping
+- OpenRouterApiKey — OpenRouter multi-model
+- FireworksApiKey — Fireworks inference
+- TheFoldEmail — Avsenderadresse for notifikasjoner
+
+### Feature flags (alle default false)
+- ProgressMessageEnabled — Ny meldingskontrakt
+- MultiProviderEnabled — Multi-provider AI
+- GitHubAppEnabled — GitHub App auth
+- DynamicSubAgentsEnabled — Dynamisk sub-agent oppsett
+- HealingPipelineEnabled — Healing pipeline
+
 ## Key Files
 - `agent/agent.ts` — Thin orchestrator (174 lines): executeTask() calls buildContext → assessAndRoute → executePlan → handleReview → completeTask. API endpoints: startTask, respondToClarification, forceContinue, job management, metrics, audit log queries
 - `agent/helpers.ts` — All shared helper functions: report(), think(), reportSteps(), auditedStep(), audit(), shouldStopTask(), checkCancelled(), updateLinearIfExists(), autoInitRepo(), validateAgentScope(). Re-exports circuit breakers. Constants: REPO_OWNER, REPO_NAME, MAX_RETRIES, MAX_PLAN_REVISIONS

@@ -16,10 +16,10 @@ import {
 
 // --- Feature Flag ---
 
-const ZDynamicSubAgents = secret("ZDynamicSubAgents");
+const DynamicSubAgentsEnabled = secret("DynamicSubAgentsEnabled");
 
 export function isDynamicSubAgentsEnabled(): boolean {
-  try { return ZDynamicSubAgents() === "true"; } catch { return false; }
+  try { return DynamicSubAgentsEnabled() === "true"; } catch { return false; }
 }
 
 // --- Types ---
@@ -144,7 +144,7 @@ export function planSubAgents(
  * AI-driven sub-agent planning. Uses an AI call to decide which sub-agents
  * to dispatch based on the actual task content, not just a complexity number.
  *
- * Feature-flagged via ZDynamicSubAgents secret. Falls back to planSubAgents()
+ * Feature-flagged via DynamicSubAgentsEnabled secret. Falls back to planSubAgents()
  * when disabled or on any error.
  */
 export async function planSubAgentsDynamic(

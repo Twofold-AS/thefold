@@ -1446,6 +1446,27 @@ Aktivering: Sett secret `SandboxAdvancedPipeline` til `"true"` for å aktivere s
 
 ---
 
+## Prosjekt Z — Ny funksjonalitet
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| AgentProgress meldingsformat | 🟢 | En oppdaterbar melding per task |
+| Review som rapport inline | 🟢 | Godkjenn/avvis fra chat |
+| Confidence som naturlig sporsmal | 🟢 | Ingen "clarification"-tilstand |
+| Tasks som master | 🟢 | Linear er importkilde, ikke trigger |
+| AI provider-abstraksjon | 🟢 | Anthropic, OpenRouter, Fireworks, OpenAI |
+| OpenAI embeddings | 🟢 | text-embedding-3-small, 1536 dim |
+| Hard token-budsjett per fase | 🟢 | 8 faser med limits, building=200K |
+| GitHub App auth | 🟢 | JWT + installation tokens, repo-oppretting |
+| Komponentbibliotek | 🟢 | Registry + templates merged, 5 seeded patterns |
+| Healing pipeline | 🟢 | Kvalitetshealing + fredag 03:00 cron |
+| Dynamisk sub-agent | 🟢 | AI planner bestemmer oppsett |
+| MCP fungerende | 🟢 | Config-krav, validering, sentry/linear servere |
+| Web scraping | 🟢 | Firecrawl API, ny web/ service |
+| Slack/Discord toveis | 🟢 | Response routing via Pub/Sub |
+| E-post notifikasjoner | 🟢 | Resend for jobb-fullføring, healing, feil |
+| DB performance indekser | 🟢 | 4 nye indekser, agent_progress type |
+
 ## Oppsummering
 
 | Kategori | Antall |

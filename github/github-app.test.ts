@@ -26,7 +26,7 @@ describe("github-app", () => {
   });
 
   it("createRepo requires GitHub App to be enabled", async () => {
-    // When ZGitHubApp is false, createRepo should throw
+    // When GitHubAppEnabled is false, createRepo should throw
     // This tests the feature flag guard
     const { createRepo } = await import("./github");
     // Can't actually call it without mocking, but verify it exists

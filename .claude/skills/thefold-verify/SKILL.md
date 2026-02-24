@@ -75,6 +75,29 @@ Kjør tester per service og verifiser at endepunktene finnes og har korrekte typ
 ### Monitor (monitor/)
 - `GET /monitor/health` → { repos: { [name]: checks[] } }
 
+### Chat (chat/) — NYE
+- `POST /chat/review/approve` → { prUrl }
+- `POST /chat/review/changes` → { success }
+- `POST /chat/review/reject` → { success }
+
+### Web (web/) — NY SERVICE
+- `POST /web/scrape` (internal) → { title, content, links, metadata }
+- `GET /web/health` → { status }
+
+### GitHub (github/) — NYE
+- `POST /github/repo/create` → { url, cloneUrl }
+
+### MCP (mcp/) — NYE
+- `POST /mcp/validate` → { status, message }
+
+### Memory (memory/) — NYE
+- `POST /memory/re-embed` → { processed, failed }
+
+### Registry (registry/) — NYE
+- `POST /registry/use` → { files[] }
+- `POST /registry/list` → { components[] }
+- `POST /registry/maintenance/run` → MaintenanceReport
+
 ### GitHub, AI, Sandbox, Builder, Registry, Templates, MCP, Users
 Kjør service-tester:
 ```bash
@@ -107,16 +130,19 @@ encore test ./agent/e2e-mock.test.ts
 
 Verifiser at alle feature flags er deklarert:
 
-| Flag | Default | Tjeneste |
-|------|---------|----------|
-| AgentStateMachineStrict | false | agent |
-| AgentModular | true | agent |
-| MonitorEnabled | false | monitor |
-| MCPRoutingEnabled | false | mcp |
-| SandboxAdvancedPipeline | false | sandbox |
-| SkillsPipelineEnabled | true | skills |
-| SubAgentsEnabled | false | agent |
-| RegistryAutoExtract | false | registry |
+| Flag | Default | Tjeneste | Beskrivelse |
+|------|---------|----------|-------------|
+| AgentStateMachineStrict | false | agent | Strikt state-validering |
+| MonitorEnabled | false | monitor | Monitoring cron-jobber |
+| MCPRoutingEnabled | false | mcp | MCP tool-routing til agent |
+| SandboxAdvancedPipeline | false | sandbox | Avansert sandbox-pipeline |
+| SubAgentsEnabled | false | agent | Sub-agent orkestrering (legacy toggle) |
+| RegistryExtractionEnabled | false | registry | Auto-extraction etter builds |
+| ProgressMessageEnabled | false | agent/chat | Ny meldingskontrakt |
+| MultiProviderEnabled | false | ai | Multi-provider AI |
+| GitHubAppEnabled | false | github | GitHub App auth |
+| DynamicSubAgentsEnabled | false | ai | AI-planner styrer sub-agent oppsett |
+| HealingPipelineEnabled | false | registry | Kvalitetshealing + vedlikehold |
 
 ---
 

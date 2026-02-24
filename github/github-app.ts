@@ -3,14 +3,14 @@ import log from "encore.dev/log";
 
 const GitHubAppId = secret("GitHubAppId");
 const GitHubAppPrivateKey = secret("GitHubAppPrivateKey");
-const ZGitHubApp = secret("ZGitHubApp");
+const GitHubAppEnabled = secret("GitHubAppEnabled");
 
 // Token cache: { [owner]: { token, expiresAt } }
 const tokenCache: Record<string, { token: string; expiresAt: number }> = {};
 
 export function isGitHubAppEnabled(): boolean {
   try {
-    return ZGitHubApp() === "true";
+    return GitHubAppEnabled() === "true";
   } catch {
     return false;
   }

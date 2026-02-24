@@ -7,7 +7,7 @@
 - Filer opprettet: agent/messages.test.ts
 - Filer endret: agent/messages.ts, chat/agent-message-parser.ts
 - Tester: 8 tester skrevet
-- Feature flag: ZNewMessageContract
+- Feature flag: ProgressMessageEnabled
 - Notater: Ny AgentProgress type erstatter 6 gamle AgentMessage-typer. Legacy fallback beholdt.
 
 ### ZB -- En oppdaterbar melding
@@ -59,7 +59,7 @@
 - Status: FULLFORT
 - Filer opprettet: ai/provider-interface.ts, ai/provider-registry.ts, ai/providers/anthropic.ts, ai/providers/openrouter.ts, ai/providers/fireworks.ts, ai/providers/openai.ts, ai/provider-abstraction.test.ts
 - Tester: 6 tester skrevet
-- Feature flag: ZMultiProvider
+- Feature flag: MultiProviderEnabled
 - Notater: AIProvider interface med 4 implementasjoner. StandardRequest/StandardResponse.
 
 ### ZI -- OpenAI Embeddings
@@ -81,7 +81,7 @@
 - Filer opprettet: github/github-app.ts, github/github-app.test.ts
 - Filer endret: github/github.ts (createRepo endpoint)
 - Tester: 5 tester skrevet
-- Feature flag: ZGitHubApp
+- Feature flag: GitHubAppEnabled
 - Notater: JWT via Node.js crypto, installation token caching, createRepo endpoint.
 
 ---
@@ -99,7 +99,7 @@
 - Status: FULLFORT
 - Filer opprettet: registry/healing.ts, registry/z-healing.test.ts
 - Tester: 6 tester skrevet
-- Feature flag: ZHealingEnabled
+- Feature flag: HealingPipelineEnabled
 - Notater: healComponent() for kvalitet under 60%. Weekly cron fredag 03:00.
 
 ### ZN -- Dynamisk planner-styrt sub-agent
@@ -107,7 +107,7 @@
 - Filer opprettet: ai/z-dynamic-sub-agents.test.ts
 - Filer endret: ai/orchestrate-sub-agents.ts (planSubAgentsDynamic, extractSubAgentHint)
 - Tester: 7 tester skrevet
-- Feature flag: ZDynamicSubAgents
+- Feature flag: DynamicSubAgentsEnabled
 - Notater: AI planner bestemmer sub-agent oppsett. Bruker-hint parsing.
 
 ### ZO -- Sub-agent visning i chat
@@ -168,11 +168,51 @@
 - Delvis: 0/21
 - Feilet: 0/21
 - Totalt tester skrevet: ~104
-- Feature flags introdusert: ZNewMessageContract, ZMultiProvider, ZGitHubApp, ZDynamicSubAgents, ZHealingEnabled
+- Feature flags introdusert: ProgressMessageEnabled, MultiProviderEnabled, GitHubAppEnabled, DynamicSubAgentsEnabled, HealingPipelineEnabled
 - Nye secrets: OpenAIApiKey, GitHubAppId, GitHubAppPrivateKey, FirecrawlApiKey, OpenRouterApiKey, FireworksApiKey, TheFoldEmail
 - Nye services: web/ (scraping)
 - Nye filer: ~35 opprettet
 - Filer endret: ~20 modifisert
 - Migrasjoner: 6 nye (chat, tasks, ai, memory, registry, mcp)
 - Kritiske bugs: Ingen oppdaget
-- Neste steg: Aktiver feature flags gradvis, test i staging, re-embed minner
+- Neste steg: Aktiver feature flags gradvis, test i staging
+
+---
+
+## Z-CLEANUP — Etterarbeid
+
+### Filer renamed: 14 testfiler
+- agent/z-confidence-question.test.ts → confidence-question.test.ts
+- agent/z-sub-agent-display.test.ts → sub-agent-display.test.ts
+- ai/z-dynamic-sub-agents.test.ts → dynamic-sub-agents.test.ts
+- chat/z-review-from-chat.test.ts → review-from-chat.test.ts
+- chat/z-performance.test.ts → performance.test.ts
+- chat/z-legacy-cleanup.test.ts → legacy-cleanup.test.ts
+- gateway/z-email.test.ts → email.test.ts
+- integrations/z-two-way.test.ts → two-way.test.ts
+- mcp/z-mcp-functional.test.ts → mcp-functional.test.ts
+- memory/z-openai-embeddings.test.ts → openai-embeddings.test.ts
+- registry/z-component-library.test.ts → component-library.test.ts
+- registry/z-healing.test.ts → healing.test.ts
+- tasks/z-tasks-master.test.ts → tasks-master.test.ts
+- tasks/z-linear-sync.test.ts → linear-sync.test.ts
+
+### Feature flags renamed: 5
+- ZNewMessageContract → ProgressMessageEnabled
+- ZMultiProvider → MultiProviderEnabled
+- ZGitHubApp → GitHubAppEnabled
+- ZDynamicSubAgents → DynamicSubAgentsEnabled
+- ZHealingEnabled → HealingPipelineEnabled
+
+### Feature flags fjernet: 2
+- AgentModular (ingen referanser)
+- SkillsPipelineEnabled (ingen referanser)
+
+### Docs oppdatert:
+- CLAUDE.md: Z-prosjekt seksjon med nye filer, kontrakter, secrets, flags
+- GRUNNMUR-STATUS.md: 16 nye Z-features med status
+- thefold-verify SKILL.md: Feature flag-tabell + nye endepunkter
+
+### Test-resultat etter cleanup:
+- Vitest: 169/169 passert
+- Nye feil etter cleanup: 0

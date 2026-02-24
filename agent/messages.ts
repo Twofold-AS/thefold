@@ -1,7 +1,7 @@
 import { secret } from "encore.dev/config";
 import type { AgentPhase } from "./state-machine";
 
-const ZNewMessageContract = secret("ZNewMessageContract");
+const ProgressMessageEnabled = secret("ProgressMessageEnabled");
 
 // ============================================================
 // NEW CONTRACT — AgentProgress (unified message type)
@@ -126,7 +126,7 @@ function convertLegacy(parsed: any): AgentProgress | null {
 
 // ============================================================
 // LEGACY EXPORTS — kept for backward compat when feature flag is false
-// These are the OLD types. When ZNewMessageContract is "true",
+// These are the OLD types. When ProgressMessageEnabled is "true",
 // callers should use serializeProgress/deserializeProgress instead.
 // ============================================================
 
@@ -246,7 +246,7 @@ function convertLegacyStatus(parsed: Record<string, unknown>): AgentMessage {
 // Feature flag helper
 export function useNewContract(): boolean {
   try {
-    return ZNewMessageContract() === "true";
+    return ProgressMessageEnabled() === "true";
   } catch {
     return false;
   }

@@ -47,7 +47,7 @@ describe("dynamic sub-agents (ZN)", () => {
 
   describe("isDynamicSubAgentsEnabled", () => {
     it("defaults to false when secret is not set", () => {
-      // In test environment, secret() throws since ZDynamicSubAgents is not set
+      // In test environment, secret() throws since DynamicSubAgentsEnabled is not set
       // isDynamicSubAgentsEnabled() catches and returns false
       const result = isDynamicSubAgentsEnabled();
       expect(result).toBe(false);

@@ -6,11 +6,11 @@ import { db } from "./db";
 
 // --- Feature flag ---
 
-const ZHealingEnabled = secret("ZHealingEnabled");
+const HealingPipelineEnabled = secret("HealingPipelineEnabled");
 
 function isHealingEnabled(): boolean {
   try {
-    return ZHealingEnabled() === "true";
+    return HealingPipelineEnabled() === "true";
   } catch {
     return false;
   }
@@ -143,7 +143,7 @@ export const runMaintenance = api(
 
     if (!isHealingEnabled()) {
       report.recommendations.push(
-        "Healing is disabled. Set ZHealingEnabled=true to enable."
+        "Healing is disabled. Set HealingPipelineEnabled=true to enable."
       );
       return report;
     }

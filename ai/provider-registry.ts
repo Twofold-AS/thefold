@@ -6,7 +6,7 @@ import { openrouterProvider } from "./providers/openrouter";
 import { fireworksProvider } from "./providers/fireworks";
 
 // --- Feature flag ---
-const ZMultiProvider = secret("ZMultiProvider");
+const MultiProviderEnabled = secret("MultiProviderEnabled");
 
 // --- API key secrets for each provider ---
 const AnthropicAPIKey = secret("AnthropicAPIKey");
@@ -45,7 +45,7 @@ const API_KEY_MAP: Record<string, () => string> = {
  */
 export function isMultiProviderEnabled(): boolean {
   try {
-    return ZMultiProvider() === "true";
+    return MultiProviderEnabled() === "true";
   } catch {
     return false;
   }
@@ -54,7 +54,7 @@ export function isMultiProviderEnabled(): boolean {
 /**
  * Get provider adapter by ID.
  *
- * When ZMultiProvider is disabled, only "anthropic" is allowed.
+ * When MultiProviderEnabled is disabled, only "anthropic" is allowed.
  * When enabled, all registered providers are available.
  *
  * @throws Error if provider ID is unknown or not enabled
@@ -63,7 +63,7 @@ export function getProvider(providerId: string): AIProviderAdapter {
   // When multi-provider is disabled, only Anthropic works
   if (!isMultiProviderEnabled() && providerId !== "anthropic") {
     throw new Error(
-      `Provider "${providerId}" is not available. Multi-provider support is disabled (ZMultiProvider = false). Only "anthropic" is available.`
+      `Provider "${providerId}" is not available. Multi-provider support is disabled (MultiProviderEnabled = false). Only "anthropic" is available.`
     );
   }
 

@@ -555,7 +555,7 @@ export const createRepo = api(
   { method: "POST", path: "/github/repo/create", expose: true, auth: true },
   async (req: CreateRepoRequest): Promise<CreateRepoResponse> => {
     if (!isGitHubAppEnabled()) {
-      throw APIError.failedPrecondition("GitHub App not enabled. Set ZGitHubApp=true");
+      throw APIError.failedPrecondition("GitHub App not enabled. Set GitHubAppEnabled=true");
     }
 
     const token = await getInstallationToken(req.org);
