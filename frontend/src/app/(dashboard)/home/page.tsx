@@ -1,349 +1,476 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import {
-  getTasks,
-  getCacheStats,
+  getTaskStats,
+  getCostSummary,
   getMemoryStats,
-  getAuditStats,
-  listAuditLog,
-  listRepos,
-  getMonitorHealth,
-  type LinearTask,
-  type AuditLogEntry,
+  getCacheStats,
+  getSecretsStatus,
+  listIntegrations,
+  type CostSummary,
+  type SecretStatus,
+  type IntegrationConfig,
 } from "@/lib/api";
-import { useUser } from "@/contexts/UserPreferencesContext";
+import { GridSection } from "@/components/ui/corner-ornament";
+import { ParticleField, EmberGlow } from "@/components/effects/ParticleField";
+import {
+  ArrowRight,
+  MessageSquare,
+  GitBranch,
+  Puzzle,
+  Brain,
+  Key,
+  Eye,
+  EyeOff,
+  Copy,
+  Zap,
+  Activity,
+} from "lucide-react";
 
+const Dither = dynamic(() => import("@/components/effects/Dither"), {
+  ssr: false,
+});
 
-function CrowIcon() {
-  return (
-    <svg className="inline-block w-4 h-4 ml-1.5 -mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} style={{ color: "var(--text-secondary)" }}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M4 18c1-2 3-3 5-3 1.5 0 2.5.5 3 1l2-4c.5-1 1.5-2 3-2.5 1-.3 2.5-.3 3.5.5l.5.5-1 1c-.5.5-1.5.8-2.5.5l-1.5 3c-.5 1-1.5 2-3 2.5L10 18M7 9c0-2 1.5-4 4-5 1-.4 2-.4 3 0l1 .5-.5 1c-.5.5-1.5.5-2 0-.8-.3-1.7-.2-2.5.3C9 6.8 8.5 7.8 8.5 9c0 .5.1 1 .3 1.5" />
-    </svg>
-  );
-}
-
-interface DashboardData {
-  tasks: LinearTask[];
-  repoCount: number;
-  cacheHitRate: number;
-  cacheTotalEntries: number;
-  memoryTotal: number;
-  memoryExpiring: number;
-  auditTotalTasks: number;
-  auditSuccessRate: number;
-  auditAvgDuration: number;
-  recentActivity: AuditLogEntry[];
-  monitorHealthy: number;
-  monitorWarnings: number;
-  monitorFailing: number;
-}
-
-export default function HomePage() {
-  const { user } = useUser();
-  const [data, setData] = useState<DashboardData | null>(null);
+export default function OverviewPage() {
+  const router = useRouter();
+  const [chatInput, setChatInput] = useState("");
+  const [taskStats, setTaskStats] = useState<{ total: number; byStatus: Record<string, number> } | null>(null);
+  const [costs, setCosts] = useState<CostSummary | null>(null);
+  const [memoryStats, setMemoryStats] = useState<{ total: number; byType: Record<string, number> } | null>(null);
+  const [cacheStats, setCacheStats] = useState<{ hitRate: number; totalEntries: number } | null>(null);
+  const [secrets, setSecrets] = useState<SecretStatus[]>([]);
+  const [integrations, setIntegrations] = useState<IntegrationConfig[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [showApiKey, setShowApiKey] = useState(false);
 
   useEffect(() => {
-    async function loadDashboard() {
-      try {
-        const [tasksRes, cacheRes, memoryRes, auditRes, activityRes, reposRes, healthRes] = await Promise.allSettled([
-          getTasks(),
-          getCacheStats(),
-          getMemoryStats(),
-          getAuditStats(),
-          listAuditLog({ limit: 5 }),
-          listRepos("Twofold-AS"),
-          getMonitorHealth(),
-        ]);
-
-        const tasks = tasksRes.status === "fulfilled" ? tasksRes.value.tasks : [];
-        const cache = cacheRes.status === "fulfilled" ? cacheRes.value : null;
-        const memory = memoryRes.status === "fulfilled" ? memoryRes.value : null;
-        const audit = auditRes.status === "fulfilled" ? auditRes.value : null;
-        const activity = activityRes.status === "fulfilled" ? activityRes.value.entries : [];
-        const repos = reposRes.status === "fulfilled" ? reposRes.value.repos : [];
-        const health = healthRes.status === "fulfilled" ? healthRes.value.repos : {};
-
-        // Count health check statuses
-        let healthy = 0, warnings = 0, failing = 0;
-        for (const checks of Object.values(health)) {
-          for (const c of checks) {
-            if (c.status === "pass") healthy++;
-            else if (c.status === "warn") warnings++;
-            else failing++;
-          }
-        }
-
-        setData({
-          tasks,
-          repoCount: repos.length,
-          cacheHitRate: cache?.hitRate ?? 0,
-          cacheTotalEntries: cache?.totalEntries ?? 0,
-          memoryTotal: memory?.total ?? 0,
-          memoryExpiring: memory?.expiringSoon ?? 0,
-          auditTotalTasks: audit?.totalTasks ?? 0,
-          auditSuccessRate: audit?.successRate ?? 0,
-          auditAvgDuration: audit?.averageDurationMs ?? 0,
-          recentActivity: activity,
-          monitorHealthy: healthy,
-          monitorWarnings: warnings,
-          monitorFailing: failing,
-        });
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load dashboard");
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    loadDashboard();
+    Promise.allSettled([
+      getTaskStats().then(setTaskStats),
+      getCostSummary().then(setCosts),
+      getMemoryStats().then(setMemoryStats),
+      getCacheStats().then(setCacheStats),
+      getSecretsStatus().then((res) => setSecrets(res.secrets)),
+      listIntegrations().then((res) => setIntegrations(res.configs)),
+    ]).finally(() => setLoading(false));
   }, []);
 
-  const activeTasks = data?.tasks.filter((t) => t.state !== "Done" && t.state !== "Canceled") ?? [];
-  const doneTasks = data?.tasks.filter((t) => t.state === "Done") ?? [];
+  const handleChatSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (chatInput.trim()) {
+      router.push(`/chat?q=${encodeURIComponent(chatInput.trim())}`);
+    } else {
+      router.push("/chat");
+    }
+  };
+
+  const activeTasks = taskStats?.byStatus?.in_progress ?? 0;
+  const configuredSecrets = secrets.filter((s) => s.configured).length;
+
+  // Feature cards matching Firecrawl's "Explore our endpoints" pattern
+  const features = [
+    {
+      icon: <MessageSquare className="w-4 h-4" style={{ color: "var(--tf-heat)" }} />,
+      title: "Chat",
+      description: "Talk to TheFold. Ask questions, describe tasks, review code.",
+      href: "/chat",
+    },
+    {
+      icon: <GitBranch className="w-4 h-4" style={{ color: "var(--tf-heat)" }} />,
+      title: "Repos",
+      description: "Manage connected GitHub repositories and health status.",
+      href: "/repos",
+    },
+    {
+      icon: <Puzzle className="w-4 h-4" style={{ color: "var(--tf-heat)" }} />,
+      title: "Components",
+      description: "Browse and use reusable components and templates.",
+      href: "/components",
+    },
+    {
+      icon: <Brain className="w-4 h-4" style={{ color: "var(--tf-heat)" }} />,
+      title: "AI",
+      description: "Providers, models, costs and token budgets.",
+      href: "/ai",
+      badge: "NEW",
+    },
+  ];
 
   return (
-    <div>
-      {/* Header bar */}
-      <div className="flex items-stretch" style={{ borderBottom: "1px solid var(--border)", minHeight: "80px" }}>
-        <div className="flex flex-col justify-center h-full px-5 py-3">
-          <h1 className="page-title text-xl" style={{ color: "var(--text-primary)" }}>
-            Welcome, {user?.name || "..."}
+    <div className="min-h-full page-enter" style={{ background: "var(--tf-bg-base)" }}>
+      {/* Header section with particle field */}
+      <GridSection showTop={false} className="px-6 pt-8 pb-6 relative overflow-hidden">
+        <ParticleField count={12} className="opacity-40" />
+        <EmberGlow />
+        <div className="relative z-10">
+          <h1 className="text-display-lg mb-1" style={{ color: "var(--tf-text-primary)" }}>
+            Explore our features
           </h1>
-          <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
-            Built to impress Kråkenes.<CrowIcon />
+          <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>
+            Power your development with TheFold&apos;s autonomous agent
           </p>
         </div>
-      </div>
+      </GridSection>
 
-      <div className="p-8">
-      {/* Stats row */}
-      <div className="flex items-start gap-8 lg:gap-12 mb-8">
-        <StatNum label="Repositories" value={loading ? "—" : data?.repoCount ?? 0} />
-        <StatNum label="Active Tasks" value={loading ? "—" : activeTasks.length} />
-        <StatNum label="Completed" value={loading ? "—" : doneTasks.length} />
-        <StatNum label="Services" value={8} />
-      </div>
-
-      {error && (
-        <div className="mb-6 px-4 py-3 text-sm" style={{ background: "#2d1b1b", color: "#f87171", border: "1px solid #7f1d1d" }}>
-          {error}
+      {/* Feature cards — matches Firecrawl's endpoint cards */}
+      <GridSection className="px-6 py-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px stagger-children" style={{ background: "var(--tf-border-faint)" }}>
+          {features.map((f) => (
+            <button
+              key={f.title}
+              onClick={() => router.push(f.href)}
+              className="feature-card text-left p-5 transition-all group relative overflow-hidden"
+              style={{ background: "var(--tf-bg-base)" }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--tf-surface-raised)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "var(--tf-bg-base)";
+              }}
+            >
+              {/* Hover glow overlay */}
+              <div
+                className="absolute inset-0 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+                style={{
+                  background: "radial-gradient(ellipse at 30% 20%, rgba(255, 107, 44, 0.06) 0%, transparent 60%)",
+                }}
+              />
+              <div className="relative z-10">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="feature-icon">{f.icon}</span>
+                  <span className="text-sm font-medium" style={{ color: "var(--tf-text-primary)" }}>
+                    {f.title}
+                  </span>
+                  {f.badge && (
+                    <span
+                      className="text-[9px] px-1.5 py-0.5 rounded-full font-medium badge-sparkle"
+                      style={{ background: "var(--tf-heat)", color: "white" }}
+                    >
+                      {f.badge}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs leading-relaxed" style={{ color: "var(--tf-text-muted)" }}>
+                  {f.description}
+                </p>
+              </div>
+              {/* Arrow that slides in on hover */}
+              <div className="absolute right-4 top-1/2 -translate-y-1/2 translate-x-2 opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all duration-200">
+                <ArrowRight className="w-4 h-4" style={{ color: "var(--tf-heat)" }} />
+              </div>
+            </button>
+          ))}
         </div>
-      )}
+      </GridSection>
 
-      {/* Dashboard grid — 2 cols desktop, 1 col mobile */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Active Tasks */}
-        <div className="card">
-          <h2 className="font-display text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-            Active Tasks
-          </h2>
-          {loading ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>Loading...</p>
-          ) : activeTasks.length === 0 ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-              No active tasks. Create tasks in Linear with the &quot;thefold&quot; label.
-            </p>
-          ) : (
-            <table className="w-full">
-              <thead>
-                <tr>
-                  <th className="table-header">ID</th>
-                  <th className="table-header">Title</th>
-                  <th className="table-header">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activeTasks.slice(0, 5).map((task) => (
-                  <tr key={task.id} className="table-row">
-                    <td className="table-cell font-mono text-sm" style={{ color: "var(--text-secondary)" }}>{task.identifier}</td>
-                    <td className="table-cell">{task.title}</td>
-                    <td className="table-cell"><span className="badge-active">{task.state}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+      {/* Main grid — 2 columns like Firecrawl */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px]">
+        {/* Left column */}
+        <div>
+          {/* Tasks chart — "Scraped pages - Last 7 days" equivalent */}
+          <GridSection className="px-6 py-6">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-base font-medium" style={{ color: "var(--tf-text-primary)" }}>
+                  Tasks — Last 7 days
+                </h2>
+                <p className="text-xs" style={{ color: "var(--tf-text-muted)" }}>
+                  {activeTasks > 0 ? `${activeTasks} active now` : "No active tasks"}
+                </p>
+              </div>
+              <span className="text-3xl font-bold tabular-nums" style={{ color: "var(--tf-text-primary)" }}>
+                {loading ? "—" : taskStats?.total ?? 0}
+              </span>
+            </div>
 
-        {/* Recent Activity — from audit log */}
-        <div className="card">
-          <h2 className="font-display text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-            Recent Activity
-          </h2>
-          {loading ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>Loading...</p>
-          ) : (data?.recentActivity.length ?? 0) === 0 ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>No recent activity recorded.</p>
-          ) : (
-            <div className="space-y-3">
-              {data!.recentActivity.map((entry) => (
-                <div key={entry.id} className="flex items-start gap-3 py-1">
-                  <span
-                    className="status-dot mt-1.5 flex-shrink-0"
-                    style={{ background: entry.success === false ? "var(--error)" : entry.success === true ? "var(--success)" : "var(--text-muted)" }}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm truncate" style={{ color: "var(--text-primary)" }}>
-                      {formatActionType(entry.actionType)}
-                      {entry.repoName ? ` — ${entry.repoName}` : ""}
-                    </p>
-                    <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                      {formatTimeAgo(entry.timestamp)}
-                      {entry.durationMs ? ` · ${(entry.durationMs / 1000).toFixed(1)}s` : ""}
-                    </p>
+            {/* Bar chart with animated bars */}
+            <div className="h-40 flex items-end gap-1 stagger-children">
+              {(costs?.dailyTrend ?? Array(7).fill({ total: 0 })).slice(-7).map((day, i) => {
+                const max = Math.max(...(costs?.dailyTrend?.map((d) => d.total) ?? [1]), 0.01);
+                const height = Math.max(((day.total ?? 0) / max) * 100, 2);
+                return (
+                  <div key={i} className="flex-1 flex flex-col items-center gap-1 group/bar">
+                    <div
+                      className="w-full rounded-sm transition-all duration-500 ease-out group-hover/bar:brightness-125"
+                      style={{
+                        height: `${height}%`,
+                        background: "var(--tf-heat)",
+                        minHeight: "2px",
+                        boxShadow: height > 20 ? "0 0 8px rgba(255, 107, 44, 0.2)" : "none",
+                        animationDelay: `${i * 80}ms`,
+                      }}
+                    />
+                    <span className="text-[10px] tabular-nums" style={{ color: "var(--tf-text-faint)" }}>
+                      {day.date ? new Date(day.date).toLocaleDateString("en", { month: "2-digit", day: "2-digit" }) : ""}
+                    </span>
                   </div>
+                );
+              })}
+            </div>
+          </GridSection>
+
+          {/* Active tasks / live indicator */}
+          <GridSection className="px-6 py-6">
+            <div className="flex items-center gap-3 mb-3">
+              <h2 className="text-base font-medium" style={{ color: "var(--tf-text-primary)" }}>
+                Active Tasks
+              </h2>
+              {activeTasks > 0 && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full font-medium tracking-wider" style={{ color: "var(--tf-success)", border: "1px solid var(--tf-success)" }}>
+                  LIVE
+                </span>
+              )}
+            </div>
+            <p className="text-xs mb-4" style={{ color: "var(--tf-text-muted)" }}>
+              {activeTasks} of {taskStats?.total ?? 0} tasks in progress
+            </p>
+            {taskStats ? (
+              <div className="space-y-2">
+                {Object.entries(taskStats.byStatus)
+                  .filter(([, count]) => count > 0)
+                  .sort(([a], [b]) => {
+                    const order = ["in_progress", "planned", "in_review", "backlog", "done", "blocked"];
+                    return order.indexOf(a) - order.indexOf(b);
+                  })
+                  .map(([status, count]) => (
+                    <div key={status} className="flex items-center justify-between py-1">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className="w-1.5 h-1.5 rounded-full"
+                          style={{
+                            background:
+                              status === "in_progress" ? "var(--tf-heat)"
+                              : status === "done" ? "var(--tf-success)"
+                              : status === "blocked" ? "var(--tf-error)"
+                              : status === "in_review" ? "var(--tf-warning)"
+                              : "var(--tf-text-faint)",
+                          }}
+                        />
+                        <span className="text-sm capitalize" style={{ color: "var(--tf-text-secondary)" }}>
+                          {status.replace(/_/g, " ")}
+                        </span>
+                      </div>
+                      <span className="text-sm font-mono tabular-nums" style={{ color: "var(--tf-text-primary)" }}>
+                        {count}
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            ) : !loading ? (
+              <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>No tasks yet</p>
+            ) : (
+              <div className="space-y-2">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="h-6 rounded animate-pulse" style={{ background: "var(--tf-surface-raised)" }} />
+                ))}
+              </div>
+            )}
+          </GridSection>
+
+          {/* Integrations grid */}
+          <GridSection className="px-6 py-6">
+            <h2 className="text-base font-medium mb-1" style={{ color: "var(--tf-text-primary)" }}>
+              Integrations
+            </h2>
+            <p className="text-xs mb-4" style={{ color: "var(--tf-text-muted)" }}>
+              Connected services and tools
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-px stagger-children" style={{ background: "var(--tf-border-faint)" }}>
+              {[
+                { name: "GitHub", icon: <GitBranch className="w-4 h-4" />, connected: true },
+                { name: "Linear", icon: <Activity className="w-4 h-4" />, connected: true },
+                { name: "Memory", icon: <Brain className="w-4 h-4" />, connected: true },
+                ...(integrations.map((i) => ({
+                  name: i.platform,
+                  icon: <Zap className="w-4 h-4" />,
+                  connected: i.enabled,
+                }))),
+              ].map((item) => (
+                <div
+                  key={item.name}
+                  className="flex items-center gap-3 p-4 capitalize transition-colors group/int"
+                  style={{ background: "var(--tf-bg-base)" }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--tf-surface)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "var(--tf-bg-base)"; }}
+                >
+                  <span
+                    className="transition-all group-hover/int:scale-110"
+                    style={{ color: item.connected ? "var(--tf-text-secondary)" : "var(--tf-text-faint)" }}
+                  >
+                    {item.icon}
+                  </span>
+                  <span className="text-sm" style={{ color: item.connected ? "var(--tf-text-primary)" : "var(--tf-text-faint)" }}>
+                    {item.name}
+                  </span>
+                  {item.connected && (
+                    <div className="w-1.5 h-1.5 rounded-full ml-auto" style={{ background: "var(--tf-success)" }} />
+                  )}
                 </div>
               ))}
             </div>
-          )}
+          </GridSection>
         </div>
 
-        {/* Quick Actions */}
-        <div className="card">
-          <h2 className="font-display text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-            Quick Actions
-          </h2>
-          <div className="flex flex-wrap gap-3">
-            <button className="btn-primary">New Task</button>
-            <button className="btn-secondary">Start Agent</button>
-            <button className="btn-secondary">Sync Repos</button>
-          </div>
-        </div>
-
-        {/* Agent Status — from audit stats */}
-        <div className="card">
-          <h2 className="font-display text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-            Agent Status
-          </h2>
-          {loading ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>Loading...</p>
-          ) : (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Total tasks processed</span>
-                <span className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>{data?.auditTotalTasks ?? 0}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Success rate</span>
-                <span className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>{(data?.auditSuccessRate ?? 0).toFixed(1)}%</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Avg duration</span>
-                <span className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>
-                  {data?.auditAvgDuration ? `${(data.auditAvgDuration / 1000).toFixed(1)}s` : "—"}
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Completed today</span>
-                <span className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>{doneTasks.length}</span>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Cache Performance — real data */}
-        <div className="card">
-          <h2 className="font-display text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-            Cache Performance
-          </h2>
-          {loading ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>Loading...</p>
-          ) : (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Hit rate</span>
-                <span className="text-sm font-mono font-medium" style={{ color: (data?.cacheHitRate ?? 0) > 50 ? "var(--success)" : "var(--text-primary)" }}>
-                  {(data?.cacheHitRate ?? 0).toFixed(1)}%
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Total entries</span>
-                <span className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>{data?.cacheTotalEntries ?? 0}</span>
-              </div>
-              <div className="pt-2 mt-2" style={{ borderTop: "1px solid var(--border)" }}>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Monitor checks</span>
-                  <div className="flex items-center gap-2">
-                    {(data?.monitorHealthy ?? 0) > 0 && (
-                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: "#14532d", color: "#4ade80" }}>
-                        {data?.monitorHealthy} pass
-                      </span>
-                    )}
-                    {(data?.monitorWarnings ?? 0) > 0 && (
-                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: "#713f12", color: "#facc15" }}>
-                        {data?.monitorWarnings} warn
-                      </span>
-                    )}
-                    {(data?.monitorFailing ?? 0) > 0 && (
-                      <span className="text-xs px-1.5 py-0.5 rounded" style={{ background: "#7f1d1d", color: "#f87171" }}>
-                        {data?.monitorFailing} fail
-                      </span>
-                    )}
-                    {(data?.monitorHealthy ?? 0) === 0 && (data?.monitorWarnings ?? 0) === 0 && (data?.monitorFailing ?? 0) === 0 && (
-                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>No checks yet</span>
-                    )}
+        {/* Right column — vertical border line like Firecrawl */}
+        <div style={{ borderLeft: "1px solid var(--tf-border-faint)" }}>
+          {/* Secrets / API Key section */}
+          <GridSection className="px-6 py-6">
+            <h2 className="text-base font-medium mb-1" style={{ color: "var(--tf-text-primary)" }}>
+              Secrets
+            </h2>
+            <p className="text-xs mb-4" style={{ color: "var(--tf-text-muted)" }}>
+              {configuredSecrets} of {secrets.length} configured
+            </p>
+            {secrets.length > 0 ? (
+              <div className="space-y-2">
+                {secrets.map((s) => (
+                  <div key={s.name} className="flex items-center justify-between py-1">
+                    <span className="text-xs font-mono" style={{ color: "var(--tf-text-secondary)" }}>
+                      {s.name}
+                    </span>
+                    <div
+                      className="w-2 h-2 rounded-full"
+                      style={{ background: s.configured ? "var(--tf-success)" : "var(--tf-error)" }}
+                    />
                   </div>
+                ))}
+              </div>
+            ) : !loading ? (
+              <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>No secrets</p>
+            ) : (
+              <div className="space-y-2">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="h-5 rounded animate-pulse" style={{ background: "var(--tf-surface-raised)" }} />
+                ))}
+              </div>
+            )}
+          </GridSection>
+
+          {/* Memory section */}
+          <GridSection className="px-6 py-6">
+            <h2 className="text-base font-medium mb-1" style={{ color: "var(--tf-text-primary)" }}>
+              Memory
+            </h2>
+            <p className="text-xs mb-4" style={{ color: "var(--tf-text-muted)" }}>
+              Semantic knowledge base
+            </p>
+            {memoryStats ? (
+              <div className="space-y-2">
+                {Object.entries(memoryStats.byType)
+                  .filter(([, count]) => count > 0)
+                  .map(([type, count]) => (
+                    <div key={type} className="flex items-center justify-between py-1">
+                      <span className="text-sm capitalize" style={{ color: "var(--tf-text-secondary)" }}>
+                        {type.replace(/_/g, " ")}
+                      </span>
+                      <span className="text-sm font-mono tabular-nums" style={{ color: "var(--tf-text-primary)" }}>
+                        {count}
+                      </span>
+                    </div>
+                  ))}
+                <div className="flex items-center justify-between pt-2 mt-2 border-t" style={{ borderColor: "var(--tf-border-faint)" }}>
+                  <span className="text-xs font-medium" style={{ color: "var(--tf-text-muted)" }}>Total</span>
+                  <span className="text-sm font-mono font-medium" style={{ color: "var(--tf-text-primary)" }}>
+                    {memoryStats.total}
+                  </span>
                 </div>
               </div>
-            </div>
-          )}
-        </div>
+            ) : !loading ? (
+              <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>No memories stored</p>
+            ) : (
+              <div className="space-y-2">
+                {[1, 2].map((i) => (
+                  <div key={i} className="h-5 rounded animate-pulse" style={{ background: "var(--tf-surface-raised)" }} />
+                ))}
+              </div>
+            )}
+          </GridSection>
 
-        {/* Memory Stats — real data */}
-        <div className="card">
-          <h2 className="font-display text-lg font-semibold mb-4" style={{ color: "var(--text-primary)" }}>
-            Memory
-          </h2>
-          {loading ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>Loading...</p>
-          ) : (
+          {/* Cache section */}
+          <GridSection className="px-6 py-6">
+            <h2 className="text-base font-medium mb-1" style={{ color: "var(--tf-text-primary)" }}>
+              Cache
+            </h2>
+            <p className="text-xs mb-4" style={{ color: "var(--tf-text-muted)" }}>
+              Hit rate and entries
+            </p>
+            {cacheStats ? (
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs" style={{ color: "var(--tf-text-muted)" }}>Hit Rate</span>
+                    <span className="text-sm font-mono" style={{ color: "var(--tf-text-primary)" }}>
+                      {Number(cacheStats.hitRate).toFixed(1)}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded-full relative" style={{ background: "var(--tf-border-faint)" }}>
+                    <div
+                      className="h-full rounded-full transition-all duration-700 ease-out"
+                      style={{
+                        width: `${Math.min(Number(cacheStats.hitRate), 100)}%`,
+                        background: "var(--tf-heat)",
+                        boxShadow: Number(cacheStats.hitRate) > 50 ? "0 0 8px rgba(255, 107, 44, 0.3)" : "none",
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs" style={{ color: "var(--tf-text-muted)" }}>Total Entries</span>
+                  <span className="text-sm font-mono" style={{ color: "var(--tf-text-primary)" }}>
+                    {cacheStats.totalEntries}
+                  </span>
+                </div>
+              </div>
+            ) : !loading ? (
+              <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>No cache data</p>
+            ) : (
+              <div className="space-y-2">
+                {[1, 2].map((i) => (
+                  <div key={i} className="h-5 rounded animate-pulse" style={{ background: "var(--tf-surface-raised)" }} />
+                ))}
+              </div>
+            )}
+          </GridSection>
+
+          {/* Cost today */}
+          <GridSection className="px-6 py-6">
+            <h2 className="text-base font-medium mb-1" style={{ color: "var(--tf-text-primary)" }}>
+              Cost Today
+            </h2>
+            <p className="text-xs mb-4" style={{ color: "var(--tf-text-muted)" }}>
+              Token usage and spend
+            </p>
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Stored memories</span>
-                <span className="text-sm font-mono" style={{ color: "var(--text-primary)" }}>{data?.memoryTotal ?? 0}</span>
+                <span className="text-xs" style={{ color: "var(--tf-text-muted)" }}>Today</span>
+                <span className="text-lg font-mono font-bold" style={{ color: "var(--tf-text-primary)" }}>
+                  ${loading ? "—" : Number(costs?.today.total ?? 0).toFixed(2)}
+                </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Expiring soon</span>
-                <span className="text-sm font-mono" style={{ color: (data?.memoryExpiring ?? 0) > 0 ? "#facc15" : "var(--text-primary)" }}>
-                  {data?.memoryExpiring ?? 0}
+                <span className="text-xs" style={{ color: "var(--tf-text-muted)" }}>Tokens</span>
+                <span className="text-sm font-mono" style={{ color: "var(--tf-text-secondary)" }}>
+                  {loading ? "—" : (costs?.today.tokens ?? 0).toLocaleString()}
+                </span>
+              </div>
+              <div className="flex items-center justify-between pt-2 border-t" style={{ borderColor: "var(--tf-border-faint)" }}>
+                <span className="text-xs" style={{ color: "var(--tf-text-muted)" }}>This week</span>
+                <span className="text-sm font-mono" style={{ color: "var(--tf-text-secondary)" }}>
+                  ${loading ? "—" : Number(costs?.thisWeek.total ?? 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-xs" style={{ color: "var(--tf-text-muted)" }}>This month</span>
+                <span className="text-sm font-mono" style={{ color: "var(--tf-text-secondary)" }}>
+                  ${loading ? "—" : Number(costs?.thisMonth.total ?? 0).toFixed(2)}
                 </span>
               </div>
             </div>
-          )}
+          </GridSection>
         </div>
       </div>
-      </div>
     </div>
   );
-}
-
-function StatNum({ label, value }: { label: string; value: number | string }) {
-  return (
-    <div className="text-left">
-      <div className="text-[10px] mb-1 uppercase tracking-wider font-medium" style={{ color: "var(--text-muted)" }}>{label}</div>
-      <span className="text-3xl sm:text-4xl lg:text-5xl font-light" style={{ color: "var(--text-primary)" }}>{value}</span>
-    </div>
-  );
-}
-
-function formatActionType(action: string): string {
-  return action
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function formatTimeAgo(timestamp: string): string {
-  const now = Date.now();
-  const then = new Date(timestamp).getTime();
-  const diff = now - then;
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "Just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
 }

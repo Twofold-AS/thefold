@@ -4,9 +4,16 @@
             "args": [
                 "mcp",
                 "run",
-                "--app=thefold-ozb2"
+                "--app=thefold-aoti"
             ],
             "command": "encore"
+        },
+        "firecrawl": {
+            "type": "http",
+            "url": "https://mcp.firecrawl.dev/v2/mcp",
+            "headers": {
+                "Authorization": "Bearer fc-5d20300b6e2b4d558175aebebc3ff9f7"
+            }
         }
     }
 }

@@ -1,18 +1,29 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import Image from "next/image";
+import dynamic from "next/dynamic";
 import { setToken } from "@/lib/auth";
 import { requestOtp, verifyOtp } from "@/lib/api";
+import { ArrowRight, Mail, KeyRound, RotateCw } from "lucide-react";
+import { ParticleField } from "@/components/effects/ParticleField";
 
-import { Suspense } from "react";
+const Dither = dynamic(() => import("@/components/effects/Dither"), {
+  ssr: false,
+});
 
 type Step = "email" | "code";
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div>Laster...</div>}>
+    <Suspense
+      fallback={
+        <div
+          className="min-h-screen flex items-center justify-center"
+          style={{ background: "var(--tf-bg-base)" }}
+        />
+      }
+    >
       <LoginContent />
     </Suspense>
   );
@@ -46,20 +57,18 @@ function LoginContent() {
   async function handleRequestOtp(e: React.FormEvent) {
     e.preventDefault();
     setError("");
-
     const trimmed = email.trim().toLowerCase();
     if (!trimmed) {
-      setError("Skriv inn e-postadressen din");
+      setError("Enter your email address");
       return;
     }
-
     setLoading(true);
     try {
       await requestOtp(trimmed);
       setStep("code");
       setCooldown(60);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Noe gikk galt");
+      setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setLoading(false);
     }
@@ -69,29 +78,24 @@ function LoginContent() {
     setError("");
     const digits = codeOverride || code;
     const fullCode = digits.join("");
-
     if (fullCode.length !== 6) return;
-
     setLoading(true);
     try {
       const result = await verifyOtp(email.trim().toLowerCase(), fullCode);
-
       if (!result.success) {
-        setError(result.error || "Ugyldig kode");
+        setError(result.error || "Invalid code");
         if (result.error?.includes("ny kode")) {
           setCode(["", "", "", "", "", ""]);
           setStep("email");
         }
         return;
       }
-
       if (result.token) {
         setToken(result.token);
         window.location.href = redirectTo;
-        return;
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Noe gikk galt");
+      setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setLoading(false);
     }
@@ -102,11 +106,9 @@ function LoginContent() {
     const newCode = [...code];
     newCode[index] = digit;
     setCode(newCode);
-
     if (digit && index < 5) {
       codeRefs.current[index + 1]?.focus();
     }
-
     if (digit && index === 5 && newCode.every((d) => d !== "")) {
       setTimeout(() => handleVerifyOtp(newCode), 100);
     }
@@ -125,13 +127,11 @@ function LoginContent() {
     e.preventDefault();
     const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
     if (!pasted) return;
-
     const newCode = [...code];
     for (let i = 0; i < 6; i++) {
       newCode[i] = pasted[i] || "";
     }
     setCode(newCode);
-
     const lastIdx = Math.min(pasted.length, 6) - 1;
     if (lastIdx >= 0) {
       codeRefs.current[lastIdx]?.focus();
@@ -150,219 +150,236 @@ function LoginContent() {
       await requestOtp(email.trim().toLowerCase());
       setCooldown(60);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Noe gikk galt");
+      setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-page)" }}>
-      {/* Centered side-by-side layout */}
-      <div className="flex-1 flex items-center justify-center px-6 py-12">
-        <div className="flex items-center gap-12 lg:gap-16">
-          {/* Left: Planet image */}
-          <div className="hidden lg:block flex-shrink-0 w-[440px] h-[440px] overflow-hidden">
-            <Image
-              src="/images/planet.png"
-              alt=""
-              width={440}
-              height={440}
-              className="w-full h-full object-cover"
-              priority
-              unoptimized
-            />
+    <div className="min-h-screen flex flex-col relative" style={{ background: "var(--tf-bg-base)" }}>
+      {/* Dither background */}
+      <div className="absolute inset-0 pointer-events-none" style={{ opacity: 0.2 }}>
+        <Dither
+          waveColor={[1.0, 0.42, 0.17]}
+          disableAnimation={false}
+          enableMouseInteraction={false}
+          colorNum={4}
+          waveAmplitude={0.25}
+          waveFrequency={2}
+          waveSpeed={0.02}
+          pixelSize={3}
+        />
+      </div>
+      {/* Floating ember particles */}
+      <div className="absolute inset-0 pointer-events-none">
+        <ParticleField count={25} className="opacity-50" />
+      </div>
+
+      <div className="relative z-10 flex-1 flex items-center justify-center px-6 py-12">
+        <div
+          className="w-full max-w-[420px] rounded-xl p-8 backdrop-blur-sm"
+          style={{
+            background: "rgba(17, 17, 17, 0.85)",
+            border: "1px solid var(--tf-border-faint)",
+          }}
+        >
+          {/* Header */}
+          <div className="text-center mb-10">
+            <p className="text-[10px] mb-3 tracking-[0.2em] uppercase" style={{ color: "var(--tf-text-faint)" }}>
+              Sign in to
+            </p>
+            <h1
+              className="text-4xl font-bold tracking-tight mb-2"
+              style={{ color: "var(--tf-text-primary)" }}
+            >
+              The<span style={{ color: "var(--tf-heat)" }}>Fold</span>
+            </h1>
+            <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>
+              An AI that actually commits.
+            </p>
           </div>
 
-          {/* Right: Login card */}
-          <div
-            className="w-[420px]"
-            style={{
-              border: "1px solid var(--border)",
-              borderRadius: "0",
-              padding: "32px",
-              minHeight: "480px",
-            }}
-          >
-            <div className="mb-10">
-              <div style={{ textAlign: "center" }}>
-                <p style={{ color: "var(--text-muted)", fontSize: "0.875rem", marginBottom: "0.5rem" }}>
-                  Logg inn p&aring;
-                </p>
-                <h1 className="text-shimmer-slow" style={{
-                  fontFamily: "'TheFold Brand', sans-serif",
-                  fontSize: "2.5rem",
-                  fontWeight: "normal",
-                  letterSpacing: "normal",
-                  lineHeight: 1,
-                  color: "var(--text-primary)",
-                }}>
-                  TheFold
-                </h1>
-              </div>
-              <p className="mt-3 text-sm" style={{ color: "var(--text-secondary)", textAlign: "center" }}>
-                An AI that actually commits.
-              </p>
-            </div>
-
-            {step === "email" ? (
-              <form onSubmit={handleRequestOtp} className="space-y-5">
-                <div>
-                  <label
-                    htmlFor="email"
-                    className="block text-xs font-medium mb-1.5"
-                    style={{ color: "var(--text-secondary)" }}
-                  >
-                    E-post
-                  </label>
+          {step === "email" ? (
+            <form onSubmit={handleRequestOtp} className="space-y-5">
+              <div>
+                <label
+                  htmlFor="email"
+                  className="block text-xs font-medium mb-1.5"
+                  style={{ color: "var(--tf-text-secondary)" }}
+                >
+                  Email
+                </label>
+                <div className="relative">
+                  <Mail
+                    className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4"
+                    style={{ color: "var(--tf-text-faint)" }}
+                  />
                   <input
                     id="email"
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="deg@twofold.no"
-                    className="input-field"
+                    placeholder="you@company.com"
+                    className="w-full rounded-lg py-3 pl-10 pr-4 text-sm border outline-none transition-colors"
+                    style={{
+                      background: "var(--tf-bg-base)",
+                      borderColor: "var(--tf-border-faint)",
+                      color: "var(--tf-text-primary)",
+                    }}
+                    onFocus={(e) => { e.currentTarget.style.borderColor = "var(--tf-heat)"; }}
+                    onBlur={(e) => { e.currentTarget.style.borderColor = "var(--tf-border-faint)"; }}
                     autoFocus
                     autoComplete="email"
                     disabled={loading}
                   />
                 </div>
-
-                {error && (
-                  <div
-                    className="text-sm px-3 py-2"
-                    style={{
-                      color: "var(--error)",
-                      background: "rgba(239, 68, 68, 0.1)",
-                      borderLeft: "3px solid var(--error)",
-                    }}
-                  >
-                    {error}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={loading || !email.trim()}
-                  className="btn-primary w-full justify-center"
-                >
-                  {loading ? (
-                    <>
-                      <div
-                        className="w-4 h-4 border-2 rounded-full animate-spin"
-                        style={{
-                          borderColor: "var(--border)",
-                          borderTopColor: "var(--text-primary)",
-                        }}
-                      />
-                      Logger inn...
-                    </>
-                  ) : (
-                    "Logg inn"
-                  )}
-                </button>
-              </form>
-            ) : (
-              <div className="space-y-5">
-                <p
-                  className="text-sm text-center"
-                  style={{ color: "var(--text-secondary)" }}
-                >
-                  Vi sendte en kode til{" "}
-                  <span style={{ color: "var(--text-primary)" }}>{email}</span>
-                </p>
-
-                <div className="flex justify-center gap-2" onPaste={handleCodePaste}>
-                  {code.map((digit, i) => (
-                    <input
-                      key={i}
-                      ref={(el) => { codeRefs.current[i] = el; }}
-                      type="text"
-                      inputMode="numeric"
-                      maxLength={1}
-                      value={digit}
-                      onChange={(e) => handleCodeChange(i, e.target.value)}
-                      onKeyDown={(e) => handleCodeKeyDown(i, e)}
-                      disabled={loading}
-                      className="input-field text-center font-mono text-2xl font-bold"
-                      style={{
-                        width: "48px",
-                        height: "56px",
-                        padding: "0",
-                        caretColor: "transparent",
-                      }}
-                    />
-                  ))}
-                </div>
-
-                {error && (
-                  <div
-                    className="text-sm px-3 py-2"
-                    style={{
-                      color: "var(--error)",
-                      background: "rgba(239, 68, 68, 0.1)",
-                      borderLeft: "3px solid var(--error)",
-                    }}
-                  >
-                    {error}
-                  </div>
-                )}
-
-                <button
-                  onClick={() => handleVerifyOtp()}
-                  disabled={loading || code.some((d) => !d)}
-                  className="btn-primary w-full justify-center"
-                >
-                  {loading ? (
-                    <>
-                      <div
-                        className="w-4 h-4 border-2 rounded-full animate-spin"
-                        style={{
-                          borderColor: "var(--border)",
-                          borderTopColor: "var(--text-primary)",
-                        }}
-                      />
-                      Verifiserer...
-                    </>
-                  ) : (
-                    "Logg inn"
-                  )}
-                </button>
-
-                <div
-                  className="flex items-center justify-between text-xs"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  <button
-                    onClick={() => {
-                      setStep("email");
-                      setError("");
-                      setCode(["", "", "", "", "", ""]);
-                    }}
-                    className="hover:underline"
-                    style={{ color: "var(--text-secondary)" }}
-                  >
-                    Endre e-post
-                  </button>
-                  <button
-                    onClick={handleResendCode}
-                    disabled={cooldown > 0 || loading}
-                    className="hover:underline disabled:opacity-50 disabled:no-underline"
-                    style={{ color: "var(--text-secondary)" }}
-                  >
-                    {cooldown > 0 ? `Send igjen (${cooldown}s)` : "Send kode igjen"}
-                  </button>
-                </div>
               </div>
-            )}
-          </div>
+
+              {error && (
+                <div
+                  className="text-sm px-3 py-2 rounded-lg"
+                  style={{
+                    color: "var(--tf-error)",
+                    background: "rgba(235, 52, 36, 0.08)",
+                    border: "1px solid rgba(235, 52, 36, 0.15)",
+                  }}
+                >
+                  {error}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={loading || !email.trim()}
+                className="w-full flex items-center justify-center gap-2 rounded-full py-3 text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-50"
+                style={{
+                  background: "var(--tf-heat)",
+                  color: "white",
+                }}
+              >
+                {loading ? (
+                  <div
+                    className="w-4 h-4 border-2 rounded-full animate-spin"
+                    style={{ borderColor: "rgba(255,255,255,0.3)", borderTopColor: "white" }}
+                  />
+                ) : (
+                  <>
+                    Continue
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+            </form>
+          ) : (
+            <div className="space-y-5">
+              <div className="text-center">
+                <div
+                  className="w-10 h-10 rounded-lg flex items-center justify-center mx-auto mb-3"
+                  style={{ background: "rgba(255, 107, 44, 0.08)" }}
+                >
+                  <KeyRound className="w-5 h-5" style={{ color: "var(--tf-heat)" }} />
+                </div>
+                <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>
+                  We sent a code to{" "}
+                  <span className="font-medium" style={{ color: "var(--tf-text-primary)" }}>
+                    {email}
+                  </span>
+                </p>
+              </div>
+
+              <div className="flex justify-center gap-2" onPaste={handleCodePaste}>
+                {code.map((digit, i) => (
+                  <input
+                    key={i}
+                    ref={(el) => { codeRefs.current[i] = el; }}
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={1}
+                    value={digit}
+                    onChange={(e) => handleCodeChange(i, e.target.value)}
+                    onKeyDown={(e) => handleCodeKeyDown(i, e)}
+                    disabled={loading}
+                    className="text-center font-mono text-2xl font-bold rounded-lg border outline-none transition-colors"
+                    style={{
+                      width: "48px",
+                      height: "56px",
+                      background: "var(--tf-bg-base)",
+                      borderColor: digit ? "var(--tf-heat)" : "var(--tf-border-faint)",
+                      color: "var(--tf-text-primary)",
+                      caretColor: "transparent",
+                    }}
+                    onFocus={(e) => { e.currentTarget.style.borderColor = "var(--tf-heat)"; }}
+                    onBlur={(e) => {
+                      e.currentTarget.style.borderColor = digit ? "var(--tf-heat)" : "var(--tf-border-faint)";
+                    }}
+                  />
+                ))}
+              </div>
+
+              {error && (
+                <div
+                  className="text-sm px-3 py-2 rounded-lg"
+                  style={{
+                    color: "var(--tf-error)",
+                    background: "rgba(235, 52, 36, 0.08)",
+                    border: "1px solid rgba(235, 52, 36, 0.15)",
+                  }}
+                >
+                  {error}
+                </div>
+              )}
+
+              <button
+                onClick={() => handleVerifyOtp()}
+                disabled={loading || code.some((d) => !d)}
+                className="w-full flex items-center justify-center gap-2 rounded-full py-3 text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-50"
+                style={{ background: "var(--tf-heat)", color: "white" }}
+              >
+                {loading ? (
+                  <div
+                    className="w-4 h-4 border-2 rounded-full animate-spin"
+                    style={{ borderColor: "rgba(255,255,255,0.3)", borderTopColor: "white" }}
+                  />
+                ) : (
+                  "Verify"
+                )}
+              </button>
+
+              <div
+                className="flex items-center justify-between text-xs pt-1"
+                style={{ color: "var(--tf-text-muted)" }}
+              >
+                <button
+                  onClick={() => {
+                    setStep("email");
+                    setError("");
+                    setCode(["", "", "", "", "", ""]);
+                  }}
+                  className="transition-colors hover:underline"
+                  style={{ color: "var(--tf-text-secondary)" }}
+                >
+                  Change email
+                </button>
+                <button
+                  onClick={handleResendCode}
+                  disabled={cooldown > 0 || loading}
+                  className="flex items-center gap-1 transition-colors disabled:opacity-50"
+                  style={{ color: "var(--tf-text-secondary)" }}
+                >
+                  <RotateCw className="w-3 h-3" />
+                  {cooldown > 0 ? `Resend (${cooldown}s)` : "Resend code"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Footer */}
-      <div className="py-6 flex flex-col items-center gap-2">
-        <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-          Twofold AS &middot; &copy; 2025
+      <div className="relative z-10 py-6 flex flex-col items-center">
+        <p className="text-xs" style={{ color: "var(--tf-text-faint)" }}>
+          Twofold AS &middot; &copy; {new Date().getFullYear()}
         </p>
       </div>
     </div>

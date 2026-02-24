@@ -27,6 +27,7 @@ import { ChatToolsMenu } from "@/components/ChatToolsMenu";
 import { InlineSkillForm } from "@/components/InlineSkillForm";
 import { LivePreview } from "@/components/LivePreview";
 import { AgentStatus, parseAgentStatusContent } from "@/components/AgentStatus";
+import type { AgentStatusData } from "@/components/AgentStatus";
 import { ChatMessage } from "@/components/ChatMessage";
 import { usePreferences, useUser } from "@/contexts/UserPreferencesContext";
 import { MagicIcon, magicPhrases } from "@/components/MagicIcon";
@@ -57,7 +58,7 @@ export default function RepoChatPage() {
   const [phraseIndex, setPhraseIndex] = useState(0);
   const [thinkingSeconds, setThinkingSeconds] = useState(0);
   const [cancelled, setCancelled] = useState(false);
-  const [statusOverride, setStatusOverride] = useState<Record<string, unknown> | null>(null);
+  const [statusOverride, setStatusOverride] = useState<(AgentStatusData & { messageId?: string; metadata?: Record<string, string>; hasNewerConversation?: boolean }) | null>(null);
   const [statusDismissed, setStatusDismissed] = useState(false);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -312,7 +313,8 @@ export default function RepoChatPage() {
     const hasNewerConversation = messages.slice(lastIdx + 1).some(
       m => m.role === "user" || (m.role === "assistant" && m.messageType !== "agent_status" && m.messageType !== "agent_report" && m.messageType !== "agent_thought")
     );
-    return { ...parsed, messageId: last.id, metadata: last.metadata, hasNewerConversation };
+    const meta = typeof last.metadata === "string" ? JSON.parse(last.metadata) : last.metadata;
+    return { ...parsed, messageId: last.id, metadata: meta as Record<string, string> | undefined, hasNewerConversation };
   }, [messages, statusOverride, statusDismissed]);
 
   const agentActive = useMemo(() => {
@@ -325,7 +327,7 @@ export default function RepoChatPage() {
       if (!meta?.taskId) return false;
     } catch { return false; }
     const terminalPhases = ["Ferdig", "Feilet", "Stopped", "completed", "failed"];
-    return !terminalPhases.includes(lastAgentStatus.phase);
+    return !terminalPhases.includes(lastAgentStatus.phase as string);
   }, [lastAgentStatus]);
 
   // Extract last agent thought for display in AgentWorking
@@ -355,7 +357,7 @@ export default function RepoChatPage() {
         const stoppedStatuses = ["backlog", "cancelled", "done"];
         if (stoppedStatuses.includes(result.task.status)) {
           setStatusOverride({
-            type: "agent_status",
+            type: "status",
             phase: "Stopped",
             title: "Oppgave stoppet",
             error: result.task.errorMessage || "Oppgaven ble stoppet eksternt",
@@ -415,7 +417,7 @@ export default function RepoChatPage() {
     try {
       // Optimistic: show "Godkjenner..." immediately
       setStatusOverride({
-        type: "agent_status",
+        type: "status",
         phase: "Bygger",
         title: "Godkjenner...",
         steps: [
@@ -428,7 +430,7 @@ export default function RepoChatPage() {
       await approveReview(reviewId);
       // Optimistic: show "Ferdig"
       setStatusOverride({
-        type: "agent_status",
+        type: "status",
         phase: "Ferdig",
         title: "PR opprettet",
         steps: [
@@ -442,7 +444,7 @@ export default function RepoChatPage() {
     } catch (e: any) {
       console.error("Approve failed:", e);
       setStatusOverride({
-        type: "agent_status",
+        type: "status",
         phase: "Feilet",
         title: "Godkjenning feilet",
         error: e?.message || "Ukjent feil",
@@ -460,7 +462,7 @@ export default function RepoChatPage() {
       await rejectReview(reviewId, "Avvist fra chat");
       // Optimistic: show "Feilet" immediately
       setStatusOverride({
-        type: "agent_status",
+        type: "status",
         phase: "Feilet",
         title: "Review avvist",
         error: "Avvist fra chat",

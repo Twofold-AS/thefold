@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   sendMessage,
   getChatHistory,
@@ -12,79 +12,126 @@ import {
   cancelChatGeneration,
   cancelTask,
   uploadChatFile,
-  listSkills,
   approveReview,
   rejectReview,
-  forceContinueTask,
   getTask,
   type Message,
   type ConversationSummary,
-  type Skill,
 } from "@/lib/api";
-import { MessageSquare, PanelLeftClose, PanelLeft } from "lucide-react";
-import { ModelSelector } from "@/components/ModelSelector";
-import { SkillsSelector, MessageSkillBadges } from "@/components/SkillsSelector";
-import { ChatToolsMenu } from "@/components/ChatToolsMenu";
-import { InlineSkillForm } from "@/components/InlineSkillForm";
-import { AgentStatus, parseAgentStatusContent } from "@/components/AgentStatus";
-import { ChatMessage } from "@/components/ChatMessage";
-import { usePreferences, useUser } from "@/contexts/UserPreferencesContext";
+import {
+  Plus,
+  Trash2,
+  ArrowRightLeft,
+  MessageSquare,
+  PanelLeftClose,
+  PanelLeft,
+  Sparkles,
+  Ghost,
+  Filter,
+  CheckCircle2,
+  AlertCircle,
+  Clock,
+  RotateCw,
+  ChevronDown,
+  ChevronUp,
+  ThumbsUp,
+  ThumbsDown,
+  Edit3,
+} from "lucide-react";
+import { ChatBubble } from "@/components/chat/chat-bubble";
+import { AgentProgressCard, type AgentProgressData, type ProgressStep } from "@/components/chat/agent-progress";
+import { ChatInput } from "@/components/chat/chat-input";
+import { ChatControls } from "@/components/chat/chat-controls";
+import { ThinkingIndicator } from "@/components/chat/thinking-indicator";
+import { ParticleField, EmberGlow } from "@/components/effects/ParticleField";
+import { usePreferences } from "@/contexts/UserPreferencesContext";
 import { useRepoContext } from "@/lib/repo-context";
-import { MagicIcon, magicPhrases } from "@/components/MagicIcon";
-import Image from "next/image";
+
+function parseAgentStatus(content: string): AgentProgressData | null {
+  try {
+    const parsed = JSON.parse(content);
+    return {
+      phase: parsed.phase || "unknown",
+      title: parsed.title || parsed.phase || "Working",
+      steps: (parsed.steps || []).map((s: { label: string; status: string }) => ({
+        label: s.label,
+        status: s.status === "done" ? "done" : s.status === "active" ? "active" : s.status === "error" ? "error" : "pending",
+      })) as ProgressStep[],
+      error: parsed.error,
+      reviewData: parsed.reviewData,
+      taskId: parsed.taskId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Parse agent_progress messages (new format from Z-project)
+function parseAgentProgress(content: string): AgentProgressData | null {
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed.status) {
+      // New progress format
+      return {
+        phase: parsed.phase || parsed.status,
+        title: parsed.summary || parsed.title || parsed.status,
+        steps: (parsed.steps || []).map((s: { label: string; status: string }) => ({
+          label: s.label,
+          status: s.status === "done" ? "done" : s.status === "active" ? "active" : s.status === "error" ? "error" : "pending",
+        })) as ProgressStep[],
+        error: parsed.error,
+        reviewData: parsed.report || parsed.reviewData,
+        taskId: parsed.taskId,
+      };
+    }
+    return parseAgentStatus(content);
+  } catch {
+    return parseAgentStatus(content);
+  }
+}
+
+type ConvFilter = "all" | "repo" | "inkognito";
 
 export default function ChatPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { preferences } = usePreferences();
-  const { initial, avatarColor, aiName, aiInitials } = useUser();
-  const { repos } = useRepoContext();
-  const modelMode = preferences.modelMode;
+  const { repos, selectedRepo } = useRepoContext();
 
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
-  const [showRepoSelector, setShowRepoSelector] = useState(false);
   const [showConvList, setShowConvList] = useState(true);
   const [transferring, setTransferring] = useState(false);
   const [transferred, setTransferred] = useState<string | null>(null);
-  const [activeSkillIds, setActiveSkillIds] = useState<string[]>([]);
-  const [showSkillForm, setShowSkillForm] = useState(false);
-  const [showTaskForm, setShowTaskForm] = useState(false);
-  const [allSkills, setAllSkills] = useState<Skill[]>([]);
   const [pollMode, setPollMode] = useState<"idle" | "waiting" | "cooldown">("idle");
-  const [heartbeatLost, setHeartbeatLost] = useState(false);
-  const [phraseIndex, setPhraseIndex] = useState(0);
-  const [thinkingSeconds, setThinkingSeconds] = useState(0);
   const [cancelled, setCancelled] = useState(false);
   const [statusOverride, setStatusOverride] = useState<Record<string, unknown> | null>(null);
   const [statusDismissed, setStatusDismissed] = useState(false);
+  const [showRepoSelector, setShowRepoSelector] = useState(false);
+
+  // Chat controls state
+  const [inkognito, setInkognito] = useState(false);
+  const [agentMode, setAgentMode] = useState(true);
+  const [subAgents, setSubAgents] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [chatRepo, setChatRepo] = useState<string | null>(null);
+  const [convFilter, setConvFilter] = useState<ConvFilter>("all");
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isNearBottomRef = useRef(true);
 
-  const autoResize = useCallback(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "56px";
-    el.style.height = Math.min(el.scrollHeight, 150) + "px";
-  }, []);
-
-  // Check if user is near bottom
   const checkNearBottom = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
-    const threshold = 100;
     isNearBottomRef.current =
-      container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+      container.scrollHeight - container.scrollTop - container.clientHeight < 100;
   }, []);
 
-  // Scroll to bottom only if near bottom (with delay for animation)
   const scrollToBottom = useCallback(() => {
     if (isNearBottomRef.current) {
       setTimeout(() => {
@@ -93,28 +140,36 @@ export default function ChatPage() {
     }
   }, []);
 
-  // On mount: always start with a fresh conversation
+  // On mount: check for initial query from overview
   useEffect(() => {
     const freshId = mainConversationId();
     setActiveConvId(freshId);
     setMessages([]);
-
     getMainConversations()
       .then((res) => setConversations(res.conversations))
       .catch(() => {});
-    listSkills().then((res) => setAllSkills(res.skills)).catch(() => {});
+
+    const q = searchParams.get("q");
+    if (q) {
+      setInput(q);
+    }
   }, []);
 
-  // Load history once when conversation changes (no constant polling)
+  // Sync repo context
+  useEffect(() => {
+    if (selectedRepo) {
+      setChatRepo(selectedRepo.fullName);
+    }
+  }, [selectedRepo]);
+
   useEffect(() => {
     if (!activeConvId) return;
     loadHistory();
   }, [activeConvId]);
 
-  // Smart polling: only when AI is working
+  // Smart polling
   useEffect(() => {
     if (pollMode === "idle" || !activeConvId) return;
-
     const interval = pollMode === "waiting" ? 2000 : 1000;
 
     const timer = setInterval(async () => {
@@ -123,75 +178,46 @@ export default function ChatPage() {
         setMessages(res.messages);
 
         const lastMsg = res.messages[res.messages.length - 1];
-
-        // AI is done — only stop when assistant message has ACTUAL content (not empty placeholder)
-        // Exclude agent_thought too — thoughts are intermediate, not completion signals
-        if (lastMsg && lastMsg.role === "assistant" && lastMsg.messageType !== "agent_status" && lastMsg.messageType !== "agent_thought" && lastMsg.content && lastMsg.content.trim()) {
-          if (pollMode === "waiting") {
-            setPollMode("cooldown");
-          } else {
-            setPollMode("idle");
-          }
-          setHeartbeatLost(false);
-          return;
+        if (
+          lastMsg &&
+          lastMsg.role === "assistant" &&
+          lastMsg.messageType !== "agent_status" &&
+          lastMsg.messageType !== "agent_thought" &&
+          lastMsg.messageType !== "agent_progress" &&
+          lastMsg.content?.trim()
+        ) {
+          setPollMode(pollMode === "waiting" ? "cooldown" : "idle");
         }
-
-        // Heartbeat check — use longer timeout for "Venter" phase (review waiting)
-        if (lastMsg?.messageType === "agent_status" && lastMsg.updatedAt) {
-          let isWaitingPhase = false;
-          try {
-            const parsed = JSON.parse(lastMsg.content);
-            isWaitingPhase = parsed?.phase === "Venter";
-          } catch {}
-          const timeout = isWaitingPhase ? 300000 : 30000; // 5 min for Venter, 30s otherwise
-          const lastUpdate = new Date(lastMsg.updatedAt).getTime();
-          const now = Date.now();
-          setHeartbeatLost(now - lastUpdate > timeout);
-        }
-      } catch {
-        // Silent
-      }
+      } catch {}
     }, interval);
 
     return () => clearInterval(timer);
   }, [pollMode, activeConvId]);
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, scrollToBottom]);
-
-  useEffect(() => {
-    autoResize();
-  }, [input, autoResize]);
+  useEffect(() => scrollToBottom(), [messages, scrollToBottom]);
 
   async function loadHistory() {
     if (!activeConvId) return;
     try {
       const res = await getChatHistory(activeConvId, 100);
       setMessages(res.messages);
-    } catch {
-      // Silent
-    }
+    } catch {}
   }
 
-  async function handleSend(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSend() {
     const text = input.trim();
     if (!text || sending) return;
 
     const convId = activeConvId || mainConversationId();
     if (!activeConvId) setActiveConvId(convId);
 
-    // Optimistic: add new conversation to list immediately
-    const isInList = conversations.some((c) => c.id === convId);
-    if (!isInList) {
+    if (!conversations.some((c) => c.id === convId)) {
       setConversations((prev) => [
         { id: convId, title: text.substring(0, 80), lastMessage: text, lastActivity: new Date().toISOString() },
         ...prev,
       ]);
     }
 
-    // Optimistic: show user message immediately
     const optimisticMsg: Message = {
       id: "temp-" + Date.now(),
       conversationId: convId,
@@ -204,34 +230,21 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, optimisticMsg]);
     setInput("");
     setSending(true);
-    setPollMode("waiting"); // Start smart polling
+    setPollMode("waiting");
 
     try {
       await sendMessage(convId, text, {
-        chatOnly: true,
+        chatOnly: !agentMode || inkognito,
         modelOverride: selectedModel,
-        skillIds: activeSkillIds.length > 0 ? activeSkillIds : undefined,
       });
       await loadHistory();
-
-      // Refresh conversation list after sending
       try {
         const updated = await getMainConversations();
         setConversations(updated.conversations);
-      } catch {
-        // Keep optimistic state
-      }
-    } catch {
-      // Silent
-    } finally {
+      } catch {}
+    } catch {}
+    finally {
       setSending(false);
-    }
-  }
-
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend(e);
     }
   }
 
@@ -242,43 +255,26 @@ export default function ChatPage() {
     setTransferred(null);
   }
 
-  function handleSuggestedQuestion(q: string) {
-    setInput(q);
-    textareaRef.current?.focus();
+  async function handleDeleteConversation(convId: string) {
+    try {
+      await deleteConversation(convId);
+      setConversations((prev) => prev.filter((c) => c.id !== convId));
+      if (activeConvId === convId) handleNewConversation();
+    } catch {}
   }
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-
     const convId = activeConvId || mainConversationId();
     if (!activeConvId) setActiveConvId(convId);
-
     try {
       const content = await file.text();
       await uploadChatFile(convId, file.name, file.type || "text/plain", content, file.size);
-
-      // Send as a message with file content (truncated for large files)
-      const preview = content.length > 10000 ? content.substring(0, 10000) + "\n\n... (avkortet)" : content;
-      setInput(`[Fil: ${file.name}]\n\n${preview}`);
-      textareaRef.current?.focus();
-    } catch {
-      // Silent
-    }
-    // Reset file input
+      const preview = content.length > 10000 ? content.substring(0, 10000) + "\n\n... (truncated)" : content;
+      setInput(`[File: ${file.name}]\n\n${preview}`);
+    } catch {}
     if (fileInputRef.current) fileInputRef.current.value = "";
-  }
-
-  async function handleDeleteConversation(convId: string) {
-    try {
-      await deleteConversation(convId);
-      setConversations((prev) => prev.filter((c) => c.id !== convId));
-      if (activeConvId === convId) {
-        handleNewConversation();
-      }
-    } catch {
-      // Silent
-    }
   }
 
   async function handleTransferToRepo(repoName: string) {
@@ -289,777 +285,578 @@ export default function ChatPage() {
       setShowRepoSelector(false);
       setTransferred(repoName);
       router.push(`/repo/${repoName}/chat?convId=${result.targetConversationId}`);
-    } catch {
-      // Silent
-    } finally {
-      setTransferring(false);
-    }
+    } catch {}
+    finally { setTransferring(false); }
   }
 
-  function formatTime(dateStr: string) {
-    return new Date(dateStr).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
+  function handleCancel() {
+    setCancelled(true);
+    if (activeConvId) {
+      cancelChatGeneration(activeConvId).catch(() => {});
+      setPollMode("idle");
+    }
   }
 
   function formatDate(dateStr: string) {
     const d = new Date(dateStr);
     const now = new Date();
-    if (d.toDateString() === now.toDateString()) return formatTime(dateStr);
-    return d.toLocaleDateString("nb-NO", { day: "numeric", month: "short" });
+    if (d.toDateString() === now.toDateString()) {
+      return d.toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" });
+    }
+    return d.toLocaleDateString("en", { day: "numeric", month: "short" });
   }
 
   const isReadOnly = !!transferred;
 
-  // Agent status tracking for AgentStatus box (rendered separately from messages)
-  const lastAgentStatus = useMemo(() => {
+  // Agent status tracking
+  const lastAgentStatus = useMemo((): AgentProgressData | null => {
     if (statusDismissed) return null;
-    if (statusOverride !== null) return statusOverride;
-    const statusMsgs = messages.filter(m => m.messageType === "agent_status");
+    if (statusOverride) return statusOverride as unknown as AgentProgressData;
+
+    // Check for agent_progress first (new format)
+    const progressMsgs = messages.filter((m) => m.messageType === "agent_progress");
+    if (progressMsgs.length > 0) {
+      const last = progressMsgs[progressMsgs.length - 1];
+      return parseAgentProgress(last.content);
+    }
+
+    // Fallback to legacy agent_status
+    const statusMsgs = messages.filter((m) => m.messageType === "agent_status");
     if (statusMsgs.length === 0) return null;
     const last = statusMsgs[statusMsgs.length - 1];
-    // Use typed parser — handles new contract + legacy format
-    const parsed = parseAgentStatusContent(last.content);
+    const parsed = parseAgentStatus(last.content);
     if (!parsed) return null;
-    // Track whether there are newer user/assistant messages after this status
-    const lastIdx = messages.indexOf(last);
-    const hasNewerConversation = messages.slice(lastIdx + 1).some(
-      m => m.role === "user" || (m.role === "assistant" && m.messageType !== "agent_status" && m.messageType !== "agent_report" && m.messageType !== "agent_thought")
-    );
-    return { ...parsed, messageId: last.id, metadata: last.metadata, hasNewerConversation };
+    try {
+      const meta = typeof last.metadata === "string" ? JSON.parse(last.metadata) : last.metadata;
+      if (meta?.taskId) parsed.taskId = meta.taskId;
+    } catch {}
+    return parsed;
   }, [messages, statusOverride, statusDismissed]);
 
   const agentActive = useMemo(() => {
     if (!lastAgentStatus) return false;
-    // Only show AgentStatus for real agent tasks (must have taskId in metadata)
-    try {
-      const meta = typeof lastAgentStatus.metadata === "string"
-        ? JSON.parse(lastAgentStatus.metadata)
-        : lastAgentStatus.metadata;
-      if (!meta?.taskId) return false;
-    } catch { return false; }
-    const terminalPhases = ["Ferdig", "Feilet", "Stopped", "completed", "failed"];
-    return !terminalPhases.includes(lastAgentStatus.phase);
+    const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"];
+    return !terminal.includes(lastAgentStatus.phase);
   }, [lastAgentStatus]);
 
-  // Extract last agent thought for display in AgentWorking
-  const lastThought = useMemo(() => {
-    const thoughts = messages.filter(m => m.messageType === "agent_thought");
-    return thoughts.length > 0 ? thoughts[thoughts.length - 1].content : undefined;
-  }, [messages]);
-
-  // Extract active task ID from agent status metadata
-  const activeTaskId = useMemo(() => {
-    if (!lastAgentStatus) return null;
-    try {
-      const meta = typeof lastAgentStatus.metadata === "string"
-        ? JSON.parse(lastAgentStatus.metadata)
-        : lastAgentStatus.metadata;
-      return meta?.taskId || null;
-    } catch { return null; }
-  }, [lastAgentStatus]);
-
-  // FIX 4: Poll task status to detect external stops
+  // Poll task status for external stops
   useEffect(() => {
-    if (!activeTaskId || !agentActive) return;
-
+    const taskId = lastAgentStatus?.taskId;
+    if (!taskId || !agentActive) return;
     const interval = setInterval(async () => {
       try {
-        const result = await getTask(activeTaskId);
-        const stoppedStatuses = ["backlog", "cancelled", "done"];
-        if (stoppedStatuses.includes(result.task.status)) {
+        const result = await getTask(taskId);
+        if (["backlog", "cancelled", "done"].includes(result.task.status)) {
           setStatusOverride({
-            type: "agent_status",
             phase: "Stopped",
-            title: "Oppgave stoppet",
-            error: result.task.errorMessage || "Oppgaven ble stoppet eksternt",
-            steps: [{ label: "Oppgaven ble stoppet eksternt", status: "error" }],
+            title: "Task stopped",
+            steps: [{ label: "Task was stopped externally", status: "error" }],
           });
           setPollMode("idle");
-          clearInterval(interval);
-        }
-      } catch { /* ignore — task may not exist in tasks-service */ }
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, [activeTaskId, agentActive]);
-
-  // Agent callbacks
-  function handleAgentReply(answer: string) {
-    if (!activeConvId) return;
-    // Send the reply as a normal user message — backend picks it up
-    const convId = activeConvId;
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: "temp-reply-" + Date.now(),
-        conversationId: convId,
-        role: "user",
-        content: answer,
-        messageType: "chat",
-        createdAt: new Date().toISOString(),
-        metadata: null,
-      },
-    ]);
-    setPollMode("waiting");
-    sendMessage(convId, answer, { chatOnly: true, modelOverride: selectedModel }).then(() => loadHistory()).catch(() => {});
-  }
-
-  function handleAgentCancel() {
-    setCancelled(true);
-    if (activeConvId) {
-      cancelChatGeneration(activeConvId).catch(() => {});
-      setPollMode("idle");
-      setHeartbeatLost(false);
-    }
-    // Also cancel the task if we have a taskId
-    if (lastAgentStatus) {
-      try {
-        const meta = typeof lastAgentStatus.metadata === "string"
-          ? JSON.parse(lastAgentStatus.metadata)
-          : lastAgentStatus.metadata;
-        if (meta?.taskId) {
-          cancelTask(meta.taskId).catch(() => {});
         }
       } catch {}
-    }
-  }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [lastAgentStatus?.taskId, agentActive]);
 
-  // Review actions from AgentStatus
-  async function handleApproveFromChat(reviewId: string) {
+  // Review handlers
+  async function handleApprove(reviewId: string) {
     try {
       setStatusOverride({
-        type: "agent_status",
         phase: "Bygger",
-        title: "Godkjenner...",
+        title: "Creating PR...",
         steps: [
-          { label: "Kode skrevet", status: "done" },
-          { label: "Validert", status: "done" },
-          { label: "Review godkjent", status: "done" },
-          { label: "Oppretter PR", status: "active" },
+          { label: "Code written", status: "done" },
+          { label: "Validated", status: "done" },
+          { label: "Review approved", status: "done" },
+          { label: "Creating PR", status: "active" },
         ],
       });
       await approveReview(reviewId);
       setStatusOverride({
-        type: "agent_status",
         phase: "Ferdig",
-        title: "PR opprettet",
+        title: "PR created",
         steps: [
-          { label: "Kode skrevet", status: "done" },
-          { label: "Validert", status: "done" },
-          { label: "Review godkjent", status: "done" },
-          { label: "PR opprettet", status: "done" },
+          { label: "Code written", status: "done" },
+          { label: "Validated", status: "done" },
+          { label: "Review approved", status: "done" },
+          { label: "PR created", status: "done" },
         ],
       });
       loadHistory();
-    } catch (e: any) {
-      console.error("Approve failed:", e);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
       setStatusOverride({
-        type: "agent_status",
         phase: "Feilet",
-        title: "Godkjenning feilet",
-        error: e?.message || "Ukjent feil",
+        title: "Approval failed",
+        error: msg,
         steps: [],
       });
     }
   }
 
-  function handleRequestChangesFromChat(reviewId: string) {
+  function handleRequestChanges(reviewId: string) {
     router.push(`/review/${reviewId}`);
   }
 
-  async function handleRejectFromChat(reviewId: string) {
+  async function handleReject(reviewId: string) {
     try {
-      await rejectReview(reviewId, "Avvist fra chat");
+      await rejectReview(reviewId, "Rejected from chat");
       setStatusOverride({
-        type: "agent_status",
         phase: "Feilet",
-        title: "Review avvist",
-        error: "Avvist fra chat",
+        title: "Review rejected",
+        error: "Rejected from chat",
         steps: [
-          { label: "Kode skrevet", status: "done" },
-          { label: "Validert", status: "done" },
-          { label: "Review avvist", status: "error" },
+          { label: "Code written", status: "done" },
+          { label: "Validated", status: "done" },
+          { label: "Review rejected", status: "error" },
         ],
       });
-    } catch (e: any) {
-      console.error("Reject failed:", e);
-    }
-  }
-
-  function handleDismissStatus() {
-    setStatusDismissed(true);
-    setStatusOverride(null);
-    setPollMode("idle");
-    setHeartbeatLost(false);
-  }
-
-  async function handleForceContinue(taskId: string) {
-    if (!activeConvId) return;
-    try {
-      await forceContinueTask(taskId, activeConvId);
-      setPollMode("waiting");
-    } catch (e: any) {
-      console.error("Force continue failed:", e);
-    }
+    } catch {}
   }
 
   function handleCancelTask(taskId: string) {
     cancelTask(taskId).catch(() => {});
-    handleDismissStatus();
+    setStatusDismissed(true);
+    setStatusOverride(null);
+    setPollMode("idle");
   }
 
-  // Check if AI is still thinking (last message is agent_status or we're sending)
-  const lastMsg = messages[messages.length - 1];
-  const isWaitingForAI = pollMode === "waiting" && (!lastMsg || lastMsg.role === "user" || lastMsg.messageType === "agent_status");
+  // Reset flags on new messages
+  useEffect(() => {
+    setCancelled(false);
+    setStatusDismissed(false);
+    setStatusOverride(null);
+  }, [messages.length]);
 
-  // Thinking indicator: show until AI response with actual content appears
+  // Waiting state
   const waitingForReply = useMemo(() => {
     if (messages.length === 0) return false;
     const last = messages[messages.length - 1];
-    // User message = still waiting
     if (last.role === "user") return true;
-    // Empty assistant placeholder = still waiting
     if (last.role === "assistant" && (!last.content || !last.content.trim())) return true;
-    // Agent status = still waiting, UNLESS terminal phase
-    if (last.messageType === "agent_status") {
-      try {
-        const parsed = JSON.parse(last.content);
-        const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed"];
-        if (terminal.includes(parsed.phase)) return false;
-      } catch {}
+    if (last.messageType === "agent_status" || last.messageType === "agent_progress") {
+      const parsed = parseAgentProgress(last.content) || parseAgentStatus(last.content);
+      if (parsed && ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"].includes(parsed.phase)) return false;
       return true;
     }
-    // Agent thought = still waiting (intermediate feed, not a final response)
-    if (last.messageType === "agent_thought") return true;
     return false;
   }, [messages]);
 
-  const showThinking = (sending || waitingForReply) && !cancelled && !statusDismissed;
+  const showThinking = (sending || waitingForReply) && !cancelled && !statusDismissed && !agentActive;
 
-  // Reset cancelled flag when new messages arrive
-  useEffect(() => { setCancelled(false); setStatusDismissed(false); setStatusOverride(null); }, [messages.length]);
-
-  useEffect(() => {
-    if (!showThinking) return;
-    const interval = setInterval(() => {
-      setPhraseIndex((prev) => {
-        let next: number;
-        do { next = Math.floor(Math.random() * magicPhrases.length); } while (next === prev && magicPhrases.length > 1);
-        return next;
-      });
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [showThinking]);
-
-  useEffect(() => {
-    if (!showThinking) { setThinkingSeconds(0); return; }
-    const start = Date.now();
-    const interval = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - start) / 1000);
-      // Safety timeout — stop counting at 120s
-      setThinkingSeconds(prev => elapsed >= 120 ? prev : elapsed);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [showThinking]);
-
+  function getMeta(msg: Message) {
+    if (!msg.metadata) return null;
+    try {
+      return typeof msg.metadata === "string" ? JSON.parse(msg.metadata) : msg.metadata;
+    } catch {
+      return null;
+    }
+  }
 
   return (
-    <div className="flex flex-col" style={{ height: "100vh" }}>
-      {/* Chat header — custom, not PageHeaderBar */}
-      <div className="flex items-stretch flex-shrink-0" style={{ borderBottom: "1px solid var(--border)", minHeight: "80px" }}>
-        {/* Tittel — LIKE BRED SOM SAMTALE-PANELET */}
+    <div className="flex h-full">
+      {/* Conversation list */}
+      {showConvList && (
         <div
-          className="flex items-center px-5 shrink-0"
-          style={{ borderRight: "1px solid var(--border)", width: "280px" }}
+          className="w-[260px] flex-shrink-0 flex flex-col border-r overflow-hidden hidden sm:flex"
+          style={{ borderColor: "var(--tf-border-faint)", background: "var(--tf-bg-base)" }}
         >
-          <h1 className="page-title text-xl" style={{ color: "var(--text-primary)" }}>
-            Chat
-          </h1>
-        </div>
-
-        {/* AI-modell — cellen ER knappen */}
-        <div
-          className="relative shrink-0"
-          style={{ borderRight: "1px solid var(--border)", minWidth: "200px", overflow: "visible" }}
-        >
-          <ModelSelector value={selectedModel} onChange={setSelectedModel} mode={modelMode === "manual" ? "manual" : "auto"} />
-        </div>
-
-        {/* Skills — cellen ER knappen */}
-        <div
-          className="relative shrink-0"
-          style={{ borderRight: "1px solid var(--border)", minWidth: "160px", overflow: "visible" }}
-        >
-          <SkillsSelector selectedIds={activeSkillIds} onChange={setActiveSkillIds} />
-        </div>
-
-        {/* Spacer */}
-        <div className="flex-1" />
-
-        {/* Ny samtale */}
-        <div
-          className="flex items-center px-5 cursor-pointer hover:bg-white/5 transition-colors shrink-0"
-          style={{ borderLeft: "1px solid var(--border)" }}
-          onClick={handleNewConversation}
-        >
-          <span className="text-sm" style={{ color: "var(--text-secondary)" }}>+ Ny samtale</span>
-        </div>
-
-        {/* Slett */}
-        <div
-          className="flex items-center px-5 cursor-pointer hover:bg-white/5 transition-colors shrink-0"
-          style={{ borderLeft: "1px solid var(--border)" }}
-          onClick={() => activeConvId && messages.length > 0 && handleDeleteConversation(activeConvId)}
-        >
-          <span className="text-sm" style={{ color: "var(--text-muted)" }}>Slett</span>
-        </div>
-
-        {/* Overfør til repo */}
-        <div
-          className="flex items-center px-5 cursor-pointer hover:bg-white/5 transition-colors shrink-0"
-          style={{ borderLeft: "1px solid var(--border)" }}
-          onClick={() => messages.length > 0 && setShowRepoSelector(true)}
-        >
-          <span className="text-sm" style={{ color: "var(--text-secondary)" }}>{"\u2192"} Overfør til repo</span>
-        </div>
-      </div>
-
-      {/* Transferred notice */}
-      {transferred && (
-        <div
-          className="text-xs px-3 py-2 mb-3"
-          style={{ background: "var(--bg-card)", border: "1px solid var(--border)", color: "var(--text-muted)" }}
-        >
-          Samtale overfort til <strong style={{ color: "var(--text-primary)" }}>{transferred}</strong>
-        </div>
-      )}
-
-      <div className="flex flex-1 overflow-hidden">
-        {/* Samtale-panel — fast bredde, koblet med tittel-cellen */}
-        {showConvList && (
           <div
-            className="hidden lg:flex flex-col shrink-0 overflow-y-auto"
-            style={{ width: "280px", borderRight: "1px solid var(--border)" }}
+            className="flex items-center justify-between px-4 h-12 border-b flex-shrink-0"
+            style={{ borderColor: "var(--tf-border-faint)" }}
           >
+            <span className="text-xs font-medium" style={{ color: "var(--tf-text-muted)" }}>
+              Conversations
+            </span>
+            <button
+              onClick={handleNewConversation}
+              className="w-6 h-6 rounded-md flex items-center justify-center transition-colors hover:bg-[var(--tf-surface-raised)]"
+              style={{ color: "var(--tf-text-faint)" }}
+            >
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Filter tabs */}
+          <div className="flex items-center gap-1 px-3 py-2 border-b" style={{ borderColor: "var(--tf-border-faint)" }}>
+            {(["all", "repo", "inkognito"] as ConvFilter[]).map((f) => (
+              <button
+                key={f}
+                onClick={() => setConvFilter(f)}
+                className="text-[10px] px-2 py-1 rounded-md transition-colors capitalize"
+                style={{
+                  background: convFilter === f ? "rgba(255, 107, 44, 0.08)" : "transparent",
+                  color: convFilter === f ? "var(--tf-heat)" : "var(--tf-text-faint)",
+                }}
+              >
+                {f === "inkognito" ? (
+                  <Ghost className="w-3 h-3 inline mr-0.5" />
+                ) : null}
+                {f}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 overflow-y-auto">
             {conversations.length === 0 ? (
-              <div className="px-4 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
-                <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                  Ingen samtaler ennå
+              <div className="px-4 py-6 text-center">
+                <span className="text-xs" style={{ color: "var(--tf-text-faint)" }}>
+                  No conversations yet
                 </span>
               </div>
             ) : (
               conversations.map((c) => (
                 <div
                   key={c.id}
-                  onClick={() => { setActiveConvId(c.id); setTransferred(null); }}
-                  className="px-4 py-3 cursor-pointer hover:bg-white/5 transition-colors"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    setActiveConvId(c.id);
+                    setTransferred(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      setActiveConvId(c.id);
+                      setTransferred(null);
+                    }
+                  }}
+                  className="w-full text-left px-4 py-3 transition-colors border-b group cursor-pointer"
                   style={{
-                    borderBottom: "1px solid var(--border)",
-                    background: c.id === activeConvId ? "rgba(255,255,255,0.06)" : "transparent",
+                    borderColor: "var(--tf-border-faint)",
+                    background: c.id === activeConvId ? "var(--tf-surface)" : "transparent",
                   }}
                 >
-                  <span className="text-sm block truncate" style={{
-                    color: c.id === activeConvId ? "var(--text-primary)" : "var(--text-secondary)",
-                  }}>
-                    {c.title || "Ny samtale"}
+                  <span
+                    className="text-sm block truncate"
+                    style={{
+                      color: c.id === activeConvId ? "var(--tf-text-primary)" : "var(--tf-text-secondary)",
+                    }}
+                  >
+                    {c.title || "New conversation"}
                   </span>
-                  <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-                    {formatDate(c.lastActivity)}
-                  </span>
+                  <div className="flex items-center justify-between mt-0.5">
+                    <span className="text-[10px]" style={{ color: "var(--tf-text-faint)" }}>
+                      {formatDate(c.lastActivity)}
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteConversation(c.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 transition-opacity"
+                      style={{ color: "var(--tf-text-faint)" }}
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
               ))
             )}
           </div>
-        )}
+        </div>
+      )}
 
-        {/* Chat-area */}
-        <div className="flex flex-col flex-1 overflow-hidden relative">
-          {/* Toggle samtale-liste knapp — INNE I chat-area */}
-          <button
-            onClick={() => setShowConvList(!showConvList)}
-            className="hidden lg:flex absolute left-0 top-1/2 -translate-y-1/2 z-10 p-1 hover:bg-white/5"
-            style={{ color: "var(--text-muted)" }}
-            title={showConvList ? "Skjul samtaler" : "Vis samtaler"}
-          >
-            {showConvList ? <PanelLeftClose size={14} /> : <PanelLeft size={14} />}
-          </button>
-          {/* Scrollable messages */}
-          <div
-            ref={messagesContainerRef}
-            onScroll={checkNearBottom}
-            className="flex-1 overflow-y-auto chat-scroll pb-4 px-4"
-          >
-            {messages.length === 0 ? (
-              /* Empty state */
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center max-w-sm">
-                  <Image src="/logo.svg" alt="TheFold" width={40} height={40} className="mx-auto mb-4 opacity-40" />
-                  <p className="text-sm mb-4" style={{ color: "var(--text-muted)" }}>
-                    Hva kan jeg hjelpe med?
-                  </p>
-                  <div className="flex flex-wrap gap-2 justify-center">
-                    {["Analyser kodebasen", "Lag en ny feature", "Fiks en bug"].map((q) => (
-                      <button
-                        key={q}
-                        onClick={() => handleSuggestedQuestion(q)}
-                        className="text-xs px-3 py-1.5 transition-colors"
-                        style={{
-                          border: "1px solid var(--border)",
-                          color: "var(--text-secondary)",
-                          background: "transparent",
-                        }}
-                        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
-                        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                      >
-                        {q}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-4 max-w-4xl mx-auto pt-4">
-                {messages.filter(m => {
-                  // BUG 6 FIX: Allow terminal agent_status messages through for inline rendering
-                  if (m.messageType === "agent_status") {
-                    const parsed = parseAgentStatusContent(m.content);
-                    const terminalPhases = ["Ferdig", "Feilet", "Stopped", "completed", "failed"];
-                    if (parsed && terminalPhases.includes(parsed.phase)) {
-                      return true; // Render inline
-                    }
-                    return false; // Active statuses still filtered (rendered sticky at bottom)
-                  }
-                  if (m.messageType === "agent_report") return false;
-                  if (m.role === "assistant" && (!m.content || !m.content.trim()) && m.messageType !== "agent_thought") return false;
-                  return true;
-                }).map((msg) => {
-                  const isUser = msg.role === "user";
-                  const isContextTransfer = msg.messageType === "context_transfer";
-
-                  // BUG 6 FIX: Render terminal agent_status inline as AgentStatus box
-                  if (msg.messageType === "agent_status") {
-                    const parsed = parseAgentStatusContent(msg.content);
-                    if (!parsed) return null;
-                    return (
-                      <div key={msg.id} className="message-enter">
-                        <AgentStatus
-                          data={{
-                            phase: parsed.phase,
-                            title: parsed.title || parsed.phase,
-                            steps: parsed.steps || [],
-                            error: parsed.error,
-                            questions: parsed.questions,
-                            reviewData: parsed.reviewData,
-                            planProgress: parsed.planProgress,
-                            activeTasks: parsed.activeTasks,
-                          }}
-                          onDismiss={() => {}}
-                        />
-                      </div>
-                    );
-                  }
-
-                  if (msg.messageType === "agent_thought") {
-                    // Safety: if content is JSON (old messages), extract .thought field
-                    let thoughtText = msg.content;
-                    try {
-                      const parsed = JSON.parse(msg.content);
-                      if (parsed.thought) thoughtText = parsed.thought;
-                    } catch { /* already plain text */ }
-                    return (
-                      <div key={msg.id} className="flex items-start gap-1.5 animate-fadeIn max-w-4xl">
-                        <span className="text-xs opacity-40 mt-0.5" style={{ color: "var(--text-muted)" }}>
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                        </span>
-                        <span className="text-xs italic opacity-40" style={{ color: "var(--text-muted)" }}>{thoughtText}</span>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <div
-                      key={msg.id}
-                      className={`flex gap-2.5 message-enter ${isUser ? "flex-row-reverse" : ""}`}
-                    >
-                      {/* Avatar */}
-                      <div
-                        className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-medium flex-shrink-0 mt-0.5"
-                        style={{
-                          background: isUser ? avatarColor : "var(--bg-card)",
-                          color: isUser ? "#fff" : "var(--text-secondary)",
-                          border: isUser ? "none" : "1px solid var(--border)",
-                        }}
-                      >
-                        {isUser ? initial : aiInitials}
-                      </div>
-
-                      {/* Bubble */}
-                      <div
-                        className={`${isUser ? "max-w-[70%] text-right" : "max-w-[85%]"}`}
-                        style={{
-                          ...(isContextTransfer
-                            ? { borderLeft: "2px solid #22c55e", paddingLeft: "12px" }
-                            : {}),
-                        }}
-                      >
-                        {isContextTransfer && (
-                          <span
-                            className="inline-block text-[10px] px-1.5 py-0.5 mb-1 font-medium"
-                            style={{ background: "rgba(34,197,94,0.15)", color: "#4ade80" }}
-                          >
-                            Context-overforing
-                          </span>
-                        )}
-
-                        <div
-                          className={`text-sm leading-relaxed rounded-xl px-3.5 py-2.5 inline-block ${isUser ? "whitespace-pre-wrap" : ""}`}
-                          style={{
-                            background: isUser ? "transparent" : "var(--bg-chat)",
-                            color: isUser ? "#fff" : "var(--text-chat)",
-                            textAlign: "left",
-                          }}
-                        >
-                          {isUser ? (
-                            <span>{msg.content}</span>
-                          ) : (
-                            <ChatMessage content={msg.content} role="assistant" />
-                          )}
-                        </div>
-
-                        {/* Timestamp + Token info + Skills */}
-                        <div
-                          className="text-[10px] mt-1 px-1 flex items-center gap-2 flex-wrap"
-                          style={{ color: "var(--text-muted)" }}
-                        >
-                          <span>{formatTime(msg.createdAt)}</span>
-                          {!isUser && msg.metadata && (() => {
-                            try {
-                              const meta = typeof msg.metadata === "string" ? JSON.parse(msg.metadata) : msg.metadata;
-                              if (meta.model) {
-                                return (
-                                  <>
-                                    <span>{meta.model}</span>
-                                    {meta.tokens?.totalTokens != null && <span>{meta.tokens.totalTokens} tokens</span>}
-                                    {meta.cost != null && <span>${meta.cost.toFixed(4)}</span>}
-                                    {meta.truncated && (
-                                      <span style={{ color: "#ef4444" }}>Avbrutt (maks tokens)</span>
-                                    )}
-                                    {meta.toolsUsed?.length > 0 && (
-                                      <span>{meta.toolsUsed.length} verktoy brukt</span>
-                                    )}
-                                  </>
-                                );
-                              }
-                            } catch { /* ignore */ }
-                            return null;
-                          })()}
-                        </div>
-                        {msg.metadata && (() => {
-                          try {
-                            const meta = typeof msg.metadata === "string" ? JSON.parse(msg.metadata) : msg.metadata;
-                            if (meta.skillIds?.length > 0) {
-                              return <div className="px-1"><MessageSkillBadges skillIds={meta.skillIds} allSkills={allSkills} /></div>;
-                            }
-                          } catch { /* ignore */ }
-                          return null;
-                        })()}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {/* Heartbeat lost — backend stopped responding */}
-                {/* AgentStatus — sticky at bottom for active/in-progress status only */}
-                {/* Terminal statuses (Ferdig/Feilet/Stopped) are ALWAYS rendered inline in message flow (BUG 6 FIX) */}
-                {lastAgentStatus && !lastAgentStatus.hasNewerConversation && (agentActive || lastAgentStatus.phase === "Venter") && (
-                  <div className="message-enter">
-                    <AgentStatus
-                      data={{
-                        phase: lastAgentStatus.phase,
-                        title: lastAgentStatus.title || lastAgentStatus.phase,
-                        steps: lastAgentStatus.steps || [],
-                        error: lastAgentStatus.error,
-                        questions: lastAgentStatus.questions,
-                        reviewData: lastAgentStatus.reviewData,
-                        planProgress: lastAgentStatus.planProgress,
-                        activeTasks: lastAgentStatus.activeTasks,
-                        ...(lastAgentStatus.metadata?.taskId ? { taskId: lastAgentStatus.metadata.taskId } : {}),
-                      }}
-                      lastThought={lastThought}
-                      onReply={handleAgentReply}
-                      onDismiss={handleDismissStatus}
-                      onApprove={handleApproveFromChat}
-                      onRequestChanges={handleRequestChangesFromChat}
-                      onReject={handleRejectFromChat}
-                      onForceContinue={handleForceContinue}
-                      onCancelTask={handleCancelTask}
-                    />
-                  </div>
-                )}
-
-                {/* Thinking indicator — MagicIcon + aiName + phrase + timer */}
-                {showThinking && !agentActive && (
-                  <div className="flex items-center gap-3 px-4 py-3">
-                    <div className="w-8 h-8 flex-shrink-0 flex items-center justify-center"
-                      style={{ color: "var(--text-muted)" }}>
-                      <MagicIcon phrase={magicPhrases[phraseIndex]} />
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-sm" style={{ color: "var(--text-muted)" }}>
-                        {aiName}
-                      </span>
-                      <span className="text-xs" style={{ color: "var(--text-muted)", opacity: 0.6 }}>
-                        &middot; {magicPhrases[phraseIndex]}
-                      </span>
-                      <span className="text-xs" style={{ color: "var(--text-muted)", opacity: 0.4 }}>
-                        &middot; tenker &middot; {thinkingSeconds}s
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {heartbeatLost && (
-                  <div className="px-4 py-3 message-enter" style={{ border: "1px solid #ef4444" }}>
-                    <span className="text-sm" style={{ color: "#ef4444" }}>
-                      Mistet kontakt med {aiName}.
-                    </span>
-                    <button
-                      onClick={() => { setPollMode("idle"); setHeartbeatLost(false); }}
-                      className="text-sm ml-2 underline"
-                      style={{ color: "var(--text-secondary)", background: "none", border: "none", cursor: "pointer" }}
-                    >
-                      Avbryt
-                    </button>
-                  </div>
-                )}
-
-                <div ref={bottomRef} />
-              </div>
+      {/* Main chat area */}
+      <div className={`flex-1 flex flex-col min-w-0 relative ${inkognito ? "inkognito-active" : ""}`}>
+        {/* Chat header */}
+        <div
+          className="flex items-center justify-between h-12 px-4 border-b flex-shrink-0"
+          style={{ borderColor: "var(--tf-border-faint)" }}
+        >
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowConvList(!showConvList)}
+              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors hidden sm:flex"
+              style={{ color: "var(--tf-text-faint)" }}
+            >
+              {showConvList ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeft className="w-4 h-4" />}
+            </button>
+            <span className="text-sm font-medium" style={{ color: "var(--tf-text-primary)" }}>
+              Chat
+            </span>
+            {inkognito && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-md font-medium flex items-center gap-1"
+                style={{ background: "rgba(144, 97, 255, 0.08)", color: "#9061FF" }}
+              >
+                <Ghost className="w-3 h-3" />
+                Inkognito
+              </span>
+            )}
+            {chatRepo && !inkognito && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-md font-medium"
+                style={{ background: "rgba(255, 107, 44, 0.08)", color: "var(--tf-heat)" }}
+              >
+                {chatRepo}
+              </span>
+            )}
+            {agentActive && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-md font-medium"
+                style={{ background: "rgba(255, 107, 44, 0.08)", color: "var(--tf-heat)" }}
+              >
+                Agent active
+              </span>
             )}
           </div>
 
-          {/* Input */}
-          {!isReadOnly && (
-            <div className="flex-shrink-0 px-2 pb-2 pt-3" style={{ borderTop: "1px solid var(--border)" }}>
-              {/* Inline forms */}
-              <div className="max-w-4xl mx-auto">
-                {showSkillForm && (
-                  <InlineSkillForm
-                    onClose={() => setShowSkillForm(false)}
-                    onCreated={() => setShowSkillForm(false)}
-                  />
-                )}
-                {showTaskForm && (
-                  <div
-                    style={{
-                      background: "var(--bg-card)",
-                      border: "1px solid var(--border)",
-                      padding: "16px",
-                      marginBottom: "8px",
-                    }}
-                  >
-                    <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                      Task-oppretting via Linear kommer snart
-                    </p>
-                    <button
-                      onClick={() => setShowTaskForm(false)}
-                      className="text-xs mt-2"
-                      style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
-                    >
-                      Lukk
-                    </button>
-                  </div>
-                )}
-              </div>
+          <div className="flex items-center gap-2">
+            {messages.length > 0 && !inkognito && (
+              <button
+                onClick={() => setShowRepoSelector(true)}
+                className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-colors hover:bg-[var(--tf-surface-raised)]"
+                style={{ color: "var(--tf-text-faint)" }}
+              >
+                <ArrowRightLeft className="w-3 h-3" />
+                <span className="hidden sm:inline">Transfer</span>
+              </button>
+            )}
+            <button
+              onClick={handleNewConversation}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-colors hover:bg-[var(--tf-surface-raised)]"
+              style={{ color: "var(--tf-text-faint)" }}
+            >
+              <Plus className="w-3 h-3" />
+              <span className="hidden sm:inline">New chat</span>
+            </button>
+          </div>
+        </div>
 
-              <input
-                type="file"
-                ref={fileInputRef}
-                className="hidden"
-                accept=".md,.txt,.json,.ts,.tsx,.js,.jsx,.py,.yaml,.yml,.csv,.html,.css,.sql,.sh,.toml"
-                onChange={handleFileUpload}
-              />
-              <form onSubmit={handleSend} className="flex gap-2 items-end max-w-4xl mx-auto">
-                <ChatToolsMenu
-                  onCreateSkill={() => setShowSkillForm(true)}
-                  onCreateTask={() => setShowTaskForm(true)}
-                  onUploadFile={() => fileInputRef.current?.click()}
-                  onTransfer={messages.length > 0 ? () => setShowRepoSelector(true) : undefined}
+        {/* Transferred notice */}
+        {transferred && (
+          <div
+            className="text-xs px-4 py-2 border-b"
+            style={{
+              background: "rgba(66, 195, 102, 0.04)",
+              borderColor: "var(--tf-border-faint)",
+              color: "var(--tf-text-muted)",
+            }}
+          >
+            Transferred to <strong style={{ color: "var(--tf-success)" }}>{transferred}</strong>
+          </div>
+        )}
+
+        {/* Messages */}
+        <div
+          ref={messagesContainerRef}
+          onScroll={checkNearBottom}
+          className="flex-1 overflow-y-auto px-4 py-4"
+        >
+          {messages.length === 0 ? (
+            <div className="flex items-center justify-center h-full relative overflow-hidden">
+              {/* Background particles */}
+              <ParticleField count={15} className="opacity-30" />
+              <EmberGlow />
+
+              <div className="text-center w-full max-w-2xl px-4 relative z-10 page-enter">
+                {/* Animated logo icon */}
+                <div className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-6 flame-animate" style={{ background: "rgba(255, 107, 44, 0.1)" }}>
+                  <Sparkles className="w-6 h-6" style={{ color: "var(--tf-heat)" }} />
+                </div>
+
+                {/* Big centered heading like Firecrawl's agent page */}
+                <h1
+                  className="text-3xl sm:text-4xl font-bold mb-3 tracking-tight"
+                  style={{ color: "var(--tf-text-primary)" }}
+                >
+                  What do you want to build?
+                </h1>
+                <p className="text-sm mb-8" style={{ color: "var(--tf-text-muted)" }}>
+                  Describe a task or ask a question about your codebase
+                </p>
+
+                {/* Suggestion cards — matches Firecrawl's 3-card grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 stagger-children">
+                  {[
+                    { text: "Analyze the codebase and suggest improvements", icon: "🔍" },
+                    { text: "Build a new feature with tests and documentation", icon: "🔨" },
+                    { text: "Find and fix bugs in the latest changes", icon: "🐛" },
+                  ].map((q) => (
+                    <button
+                      key={q.text}
+                      onClick={() => setInput(q.text)}
+                      className="feature-card text-left text-sm p-4 rounded-lg transition-all active:scale-[0.98] group relative overflow-hidden"
+                      style={{
+                        border: "1px solid var(--tf-border-faint)",
+                        color: "var(--tf-text-secondary)",
+                        background: "var(--tf-surface)",
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.borderColor = "rgba(255, 107, 44, 0.2)";
+                        e.currentTarget.style.background = "var(--tf-surface-raised)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.borderColor = "var(--tf-border-faint)";
+                        e.currentTarget.style.background = "var(--tf-surface)";
+                      }}
+                    >
+                      {/* Subtle glow overlay */}
+                      <div
+                        className="absolute inset-0 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+                        style={{ background: "radial-gradient(ellipse at 50% 0%, rgba(255, 107, 44, 0.04) 0%, transparent 70%)" }}
+                      />
+                      <span className="relative z-10">{q.text}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4 max-w-3xl mx-auto">
+              {messages
+                .filter((m) => {
+                  // SKIP agent_thought — NEVER show
+                  if (m.messageType === "agent_thought") return false;
+                  // SKIP agent_report — replaced by agent_progress
+                  if (m.messageType === "agent_report") return false;
+                  // Filter out active agent statuses (rendered inline below)
+                  if (m.messageType === "agent_status") {
+                    const parsed = parseAgentStatus(m.content);
+                    const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"];
+                    return parsed && terminal.includes(parsed.phase);
+                  }
+                  // Filter active agent_progress (rendered inline below)
+                  if (m.messageType === "agent_progress") {
+                    const parsed = parseAgentProgress(m.content);
+                    const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"];
+                    return parsed && terminal.includes(parsed.phase);
+                  }
+                  // Skip empty assistant messages
+                  if (m.role === "assistant" && (!m.content || !m.content.trim())) return false;
+                  return true;
+                })
+                .map((msg) => {
+                  // Terminal agent status — render as AgentProgressCard
+                  if (msg.messageType === "agent_status" || msg.messageType === "agent_progress") {
+                    const parsed = msg.messageType === "agent_progress"
+                      ? parseAgentProgress(msg.content)
+                      : parseAgentStatus(msg.content);
+                    if (!parsed) return null;
+                    return (
+                      <AgentProgressCard key={msg.id} data={parsed} />
+                    );
+                  }
+
+                  // Context transfer
+                  if (msg.messageType === "context_transfer") {
+                    return (
+                      <ChatBubble
+                        key={msg.id}
+                        role="assistant"
+                        content={msg.content}
+                        isContextTransfer
+                      />
+                    );
+                  }
+
+                  // Regular message
+                  const meta = getMeta(msg);
+                  return (
+                    <ChatBubble
+                      key={msg.id}
+                      role={msg.role}
+                      content={msg.content}
+                      timestamp={msg.createdAt}
+                      model={meta?.model}
+                      tokens={meta?.tokens?.totalTokens}
+                      cost={meta?.cost}
+                    />
+                  );
+                })}
+
+              {/* Active agent status — inline in message stream */}
+              {lastAgentStatus && agentActive && (
+                <AgentProgressCard
+                  data={lastAgentStatus}
+                  onApprove={handleApprove}
+                  onRequestChanges={handleRequestChanges}
+                  onReject={handleReject}
+                  onCancel={handleCancelTask}
                 />
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Skriv en melding..."
-                  className="input-field flex-1 resize-none"
-                  style={{ minHeight: "56px", maxHeight: "150px" }}
-                  rows={1}
-                  disabled={sending}
+              )}
+
+              {/* Waiting/review status */}
+              {lastAgentStatus && lastAgentStatus.phase === "Venter" && (
+                <AgentProgressCard
+                  data={lastAgentStatus}
+                  onApprove={handleApprove}
+                  onRequestChanges={handleRequestChanges}
+                  onReject={handleReject}
+                  onCancel={handleCancelTask}
                 />
-                {isWaitingForAI && !cancelled ? (
-                  <button
-                    type="button"
-                    onClick={() => handleAgentCancel()}
-                    className="flex items-center justify-center hover:bg-white/10 transition-colors"
-                    style={{ width: "32px", height: "32px", border: "1px solid var(--border)", borderRadius: "50%", background: "transparent", flexShrink: 0 }}
-                    title="Stopp generering"
-                  >
-                    <div className="w-2.5 h-2.5" style={{ background: "var(--text-primary)" }} />
-                  </button>
-                ) : (
-                  <button
-                    type="submit"
-                    disabled={sending || !input.trim()}
-                    className="flex items-center justify-center hover:bg-white/10 transition-colors"
-                    style={{
-                      width: "32px",
-                      height: "32px",
-                      border: "1px solid var(--border)",
-                      borderRadius: "50%",
-                      background: "transparent",
-                      flexShrink: 0,
-                      opacity: !input.trim() && !sending ? 0.3 : 1,
-                    }}
-                  >
-                    <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor" style={{ color: "var(--text-primary)" }}>
-                      <path fillRule="evenodd" d="M3.293 9.707a1 1 0 010-1.414l6-6a1 1 0 011.414 0l6 6a1 1 0 01-1.414 1.414L11 5.414V17a1 1 0 11-2 0V5.414L4.707 9.707a1 1 0 01-1.414 0z" />
-                    </svg>
-                  </button>
-                )}
-              </form>
+              )}
+
+              {/* Thinking indicator */}
+              {showThinking && <ThinkingIndicator />}
+
+              <div ref={bottomRef} />
             </div>
           )}
         </div>
+
+        {/* Input area */}
+        {!isReadOnly && (
+          <div className="flex-shrink-0 px-4 pb-4 pt-2">
+            <input
+              type="file"
+              ref={fileInputRef}
+              className="hidden"
+              accept=".md,.txt,.json,.ts,.tsx,.js,.jsx,.py,.yaml,.yml,.csv,.html,.css,.sql,.sh,.toml"
+              onChange={handleFileUpload}
+            />
+            <div className="max-w-3xl mx-auto">
+              {/* Chat controls */}
+              <ChatControls
+                repos={repos}
+                selectedRepo={chatRepo}
+                onRepoChange={(repo) => setChatRepo(repo)}
+                inkognito={inkognito}
+                onInkognitoToggle={() => setInkognito(!inkognito)}
+                agentMode={agentMode}
+                onAgentModeToggle={() => setAgentMode(!agentMode)}
+                subAgents={subAgents}
+                onSubAgentsToggle={() => setSubAgents(!subAgents)}
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+              />
+
+              <ChatInput
+                value={input}
+                onChange={setInput}
+                onSubmit={handleSend}
+                onFileUpload={() => fileInputRef.current?.click()}
+                disabled={sending}
+                isStreaming={pollMode === "waiting" && !cancelled}
+                onStop={handleCancel}
+              />
+              <div className="flex items-center justify-center mt-2">
+                <span className="text-[10px]" style={{ color: "var(--tf-text-faint)" }}>
+                  TheFold can make mistakes. Review important output carefully.
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Repo Selector Modal */}
       {showRepoSelector && (
         <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-          }}
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: "rgba(0, 0, 0, 0.6)" }}
           onClick={() => setShowRepoSelector(false)}
         >
           <div
-            style={{
-              background: "var(--bg-primary, var(--bg-page))",
-              border: "1px solid var(--border)",
-              padding: "24px",
-              maxWidth: "400px",
-              width: "90%",
-            }}
+            className="rounded-xl p-6 max-w-sm w-[90%]"
+            style={{ background: "var(--tf-surface)", border: "1px solid var(--tf-border-muted)" }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-2 mb-4">
-              <MessageSquare size={18} style={{ color: "var(--text-secondary)" }} />
-              <h3 className="font-display text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
-                Overfor til repo
+              <MessageSquare className="w-4 h-4" style={{ color: "var(--tf-text-secondary)" }} />
+              <h3 className="text-sm font-medium" style={{ color: "var(--tf-text-primary)" }}>
+                Transfer to repository
               </h3>
             </div>
 
@@ -1069,19 +866,17 @@ export default function ChatPage() {
                   key={repo.fullName}
                   onClick={() => handleTransferToRepo(repo.name)}
                   disabled={transferring}
-                  className="w-full text-left p-3 transition-colors"
+                  className="w-full text-left p-3 rounded-lg transition-colors hover:bg-[var(--tf-surface-raised)]"
                   style={{
-                    border: "1px solid var(--border)",
+                    border: "1px solid var(--tf-border-faint)",
                     background: "transparent",
-                    color: "var(--text-primary)",
+                    color: "var(--tf-text-primary)",
                     opacity: transferring ? 0.6 : 1,
                   }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-hover)")}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                 >
-                  <div className="text-sm font-medium">{repo.fullName}</div>
-                  <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-                    {repo.status === "healthy" ? "Tilkoblet" : repo.status}
+                  <div className="text-sm">{repo.fullName}</div>
+                  <div className="text-xs mt-0.5" style={{ color: "var(--tf-text-faint)" }}>
+                    {repo.status === "healthy" ? "Connected" : repo.status}
                   </div>
                 </button>
               ))}
@@ -1089,9 +884,14 @@ export default function ChatPage() {
 
             <button
               onClick={() => setShowRepoSelector(false)}
-              className="btn-secondary w-full mt-4"
+              className="w-full mt-4 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-[var(--tf-surface-raised)]"
+              style={{
+                border: "1px solid var(--tf-border-faint)",
+                color: "var(--tf-text-secondary)",
+                background: "transparent",
+              }}
             >
-              Avbryt
+              Cancel
             </button>
           </div>
         </div>

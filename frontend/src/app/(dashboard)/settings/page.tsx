@@ -1,781 +1,429 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { clearToken } from "@/lib/auth";
-import { useRouter } from "next/navigation";
-import Link from "next/link";
+import { useEffect, useState } from "react";
 import {
+  getMe,
   updateProfile,
   updatePreferences,
-  getCacheStats,
-  listAuditLog,
-  getMemoryStats,
-  getMonitorHealth,
   getSecretsStatus,
-  getTaskStats,
-  listBuilderJobs,
-  listSkills,
-  listMCPServers,
-  type AuditLogEntry,
+  listIntegrations,
+  logout,
+  type UserProfile,
+  type SecretStatus,
+  type IntegrationConfig,
 } from "@/lib/api";
-import { Check, Cpu, DollarSign, LogOut, Shield } from "lucide-react";
-import { useUser } from "@/contexts/UserPreferencesContext";
-import { isDebugEnabled, setDebugEnabled } from "@/lib/debug";
-import { getStoredTheme, setStoredTheme, type Theme } from "@/lib/theme";
-import { PageHeaderBar } from "@/components/PageHeaderBar";
+import { clearToken } from "@/lib/auth";
+import { useRouter } from "next/navigation";
+import { GridSection } from "@/components/ui/corner-ornament";
+import { ParticleField, EmberGlow } from "@/components/effects/ParticleField";
+import {
+  User,
+  Sliders,
+  Shield,
+  Save,
+  Check,
+  LogOut,
+  Key,
+  Plug,
+} from "lucide-react";
+import { usePreferences } from "@/contexts/UserPreferencesContext";
 
-const AVATAR_COLORS = [
-  "#6366f1", "#8b5cf6", "#ec4899", "#ef4444",
-  "#f59e0b", "#22c55e", "#06b6d4", "#3b82f6",
-];
-
-type SettingsTab = "profil" | "preferanser" | "debug";
+type SettingsTab = "profile" | "preferences" | "security";
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { user, initial, avatarColor, refresh: refreshUser } = useUser();
-  const [activeTab, setActiveTab] = useState<SettingsTab>("profil");
+  const { preferences, refresh } = usePreferences();
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [secrets, setSecrets] = useState<SecretStatus[]>([]);
+  const [integrations, setIntegrations] = useState<IntegrationConfig[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [activeTab, setActiveTab] = useState<SettingsTab>("profile");
 
-  function handleLogout() {
-    clearToken();
-    router.replace("/login");
+  const [name, setName] = useState("");
+  const [modelMode, setModelMode] = useState("auto");
+  const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
+
+  useEffect(() => {
+    Promise.allSettled([
+      getMe().then((res) => {
+        setProfile(res.user);
+        setName(res.user.name || "");
+      }),
+      getSecretsStatus().then((res) => setSecrets(res.secrets)),
+      listIntegrations().then((res) => setIntegrations(res.configs)),
+    ]).finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (preferences) {
+      setModelMode(preferences.modelMode || "auto");
+    }
+  }, [preferences]);
+
+  useEffect(() => {
+    if (profile?.preferences) {
+      setSubAgentsEnabled(!!(profile.preferences as Record<string, unknown>).subAgentsEnabled);
+    }
+  }, [profile]);
+
+  async function handleSaveProfile() {
+    setSaving(true);
+    try {
+      await updateProfile({ name });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {}
+    finally { setSaving(false); }
   }
 
-  const TABS: { id: SettingsTab; label: string }[] = [
-    { id: "profil", label: "Profil" },
-    { id: "preferanser", label: "Preferanser" },
-    { id: "debug", label: "Debug" },
+  async function handleSavePreferences() {
+    setSaving(true);
+    try {
+      await updatePreferences({ modelMode, subAgentsEnabled });
+      await refresh();
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {}
+    finally { setSaving(false); }
+  }
+
+  async function handleLogout() {
+    try {
+      await logout();
+    } catch {}
+    clearToken();
+    router.push("/login");
+  }
+
+  const configuredSecrets = secrets.filter((s) => s.configured).length;
+
+  const tabs: { key: SettingsTab; label: string; icon: React.ReactNode }[] = [
+    { key: "profile", label: "Profile", icon: <User className="w-4 h-4" /> },
+    { key: "preferences", label: "Preferences", icon: <Sliders className="w-4 h-4" /> },
+    { key: "security", label: "Security", icon: <Shield className="w-4 h-4" /> },
   ];
 
   return (
-    <div>
-      <PageHeaderBar
-        title="Settings"
-        rightCells={[
-          {
-            content: (
-              <Link
-                href="/settings/models"
-                className="inline-flex items-center gap-2 text-sm"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                <Cpu size={14} />
-                AI-modeller
-              </Link>
-            ),
-          },
-          {
-            content: (
-              <Link
-                href="/settings/costs"
-                className="inline-flex items-center gap-2 text-sm"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                <DollarSign size={14} />
-                Kostnader
-              </Link>
-            ),
-          },
-          {
-            content: (
-              <Link
-                href="/settings/security"
-                className="inline-flex items-center gap-2 text-sm"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                <Shield size={14} />
-                Security & Audit
-              </Link>
-            ),
-          },
-        ]}
-      />
-      <div className="p-6">
-      {/* Tabs */}
-      <div className="flex gap-1.5 mb-6">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className="px-3 py-1.5 text-sm font-medium transition-colors duration-75"
-            style={{
-              background: activeTab === tab.id ? "var(--accent)" : "var(--bg-secondary)",
-              color: activeTab === tab.id ? "#fff" : "var(--text-secondary)",
-              border: activeTab === tab.id ? "none" : "1px solid var(--border)",
-            }}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
+    <div className="min-h-full page-enter" style={{ background: "var(--tf-bg-base)" }}>
+      {/* Header with decorative dots */}
+      <GridSection showTop={false} className="px-6 pt-8 pb-6 relative overflow-hidden">
+        <ParticleField count={8} className="opacity-30" />
+        <EmberGlow />
+        {/* Decorative dots pattern in top-right (like Firecrawl) */}
+        <div className="absolute top-4 right-6 opacity-20 hidden lg:block" style={{ color: "var(--tf-border-muted)" }}>
+          <svg width="120" height="60" viewBox="0 0 120 60" fill="none">
+            {Array.from({ length: 8 }).map((_, row) =>
+              Array.from({ length: 16 }).map((_, col) => (
+                <circle
+                  key={`${row}-${col}`}
+                  cx={col * 8 + 4}
+                  cy={row * 8 + 4}
+                  r="1"
+                  fill="currentColor"
+                />
+              ))
+            )}
+          </svg>
+        </div>
+        <h1 className="text-display-lg mb-1" style={{ color: "var(--tf-text-primary)" }}>
+          Settings
+        </h1>
+        <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>
+          Manage your profile, preferences, and security
+        </p>
+      </GridSection>
 
-      {/* Tab content */}
-      {activeTab === "profil" && (
-        <ProfilTab
-          user={user}
-          initial={initial}
-          avatarColor={avatarColor}
-          refreshUser={refreshUser}
-          onLogout={handleLogout}
-        />
-      )}
-      {activeTab === "preferanser" && <PreferanserTab user={user} refreshUser={refreshUser} />}
-      {activeTab === "debug" && <DebugTab />}
-      </div>
-    </div>
-  );
-}
-
-/* ============================================
-   Profil Tab
-   ============================================ */
-
-function ProfilTab({
-  user,
-  initial,
-  avatarColor,
-  refreshUser,
-  onLogout,
-}: {
-  user: { name: string; email: string; role: string } | null;
-  initial: string;
-  avatarColor: string;
-  refreshUser: () => Promise<void>;
-  onLogout: () => void;
-}) {
-  const [editName, setEditName] = useState("");
-  const [nameSaving, setNameSaving] = useState(false);
-  const [localColor, setLocalColor] = useState(avatarColor);
-  const nameTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    if (user?.name) setEditName(user.name);
-  }, [user?.name]);
-
-  useEffect(() => {
-    setLocalColor(avatarColor);
-  }, [avatarColor]);
-
-  function handleNameChange(value: string) {
-    setEditName(value);
-    if (nameTimeout.current) clearTimeout(nameTimeout.current);
-    nameTimeout.current = setTimeout(async () => {
-      const trimmed = value.trim();
-      if (!trimmed || trimmed === user?.name) return;
-      setNameSaving(true);
-      try {
-        await updateProfile({ name: trimmed });
-        await refreshUser();
-      } catch {
-        // Silent
-      } finally {
-        setNameSaving(false);
-      }
-    }, 800);
-  }
-
-  async function handleColorChange(color: string) {
-    setLocalColor(color);
-    try {
-      await updateProfile({ avatarColor: color });
-      await refreshUser();
-    } catch {
-      setLocalColor(avatarColor);
-    }
-  }
-
-  return (
-    <div className="space-y-8">
-      {/* Avatar + fields */}
-      <div className="card p-5">
-        <h3 className="text-sm font-display font-medium mb-4" style={{ color: "var(--text-primary)" }}>
-          Brukerinformasjon
-        </h3>
-        <div className="flex items-start gap-6">
-          {/* Avatar */}
-          <div className="flex flex-col items-center gap-2">
-            <div
-              className="w-16 h-16 rounded-full flex items-center justify-center text-xl font-semibold"
-              style={{ background: localColor, color: "#fff" }}
-            >
-              {initial}
-            </div>
-            <div className="flex gap-1.5 flex-wrap justify-center" style={{ maxWidth: "120px" }}>
-              {AVATAR_COLORS.map((c) => (
+      {/* Tabbed layout — matches Firecrawl settings pattern */}
+      <GridSection className="min-h-[500px]">
+        <div className="flex min-h-[500px]">
+          {/* Left tab sidebar */}
+          <div className="w-[200px] flex-shrink-0 p-4 hidden sm:block" style={{ borderRight: "1px solid var(--tf-border-faint)" }}>
+            <div className="space-y-1">
+              {tabs.map((tab) => (
                 <button
-                  key={c}
-                  onClick={() => handleColorChange(c)}
-                  className="w-5 h-5 rounded-full transition-transform hover:scale-110 flex items-center justify-center"
+                  key={tab.key}
+                  onClick={() => setActiveTab(tab.key)}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm transition-colors text-left"
                   style={{
-                    background: c,
-                    outline: c === localColor ? "2px solid var(--text-primary)" : "none",
-                    outlineOffset: "2px",
+                    background: activeTab === tab.key ? "rgba(255, 107, 44, 0.06)" : "transparent",
+                    color: activeTab === tab.key ? "var(--tf-heat)" : "var(--tf-text-secondary)",
                   }}
                 >
-                  {c === localColor && <Check size={10} color="#fff" />}
+                  {tab.icon}
+                  {tab.label}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Fields */}
-          <div className="flex-1 space-y-3">
-            <div>
-              <label className="section-label block mb-1">Visningsnavn</label>
-              <div className="relative">
-                <input
-                  type="text"
-                  value={editName}
-                  onChange={(e) => handleNameChange(e.target.value)}
-                  className="input-field"
-                  style={{ maxWidth: "300px" }}
-                />
-                {nameSaving && (
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs" style={{ color: "var(--text-muted)" }}>
-                    Lagrer...
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div>
-              <label className="section-label block mb-1">E-post</label>
-              <p className="text-sm" style={{ color: "var(--text-primary)" }}>
-                {user?.email || "..."}
-              </p>
-            </div>
-
-            <div>
-              <label className="section-label block mb-1">Rolle</label>
-              <span
-                className="text-xs px-2 py-0.5 font-medium"
+          {/* Mobile tabs */}
+          <div className="flex items-center gap-1 px-4 py-3 border-b sm:hidden" style={{ borderColor: "var(--tf-border-faint)" }}>
+            {tabs.map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs"
                 style={{
-                  background: user?.role === "admin" ? "#6366f1" : "var(--border)",
-                  color: user?.role === "admin" ? "#fff" : "var(--text-secondary)",
+                  background: activeTab === tab.key ? "rgba(255, 107, 44, 0.06)" : "transparent",
+                  color: activeTab === tab.key ? "var(--tf-heat)" : "var(--tf-text-muted)",
                 }}
               >
-                {user?.role || "..."}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Konto */}
-      <div className="card p-5">
-        <h3 className="text-sm font-display font-medium mb-3" style={{ color: "var(--text-primary)" }}>
-          Konto
-        </h3>
-        <button onClick={onLogout} className="btn-secondary inline-flex items-center gap-2">
-          <LogOut size={16} />
-          Logg ut
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================
-   Preferanser Tab
-   ============================================ */
-
-function getInitials(name: string): string {
-  return name.split(" ").map(w => w.charAt(0).toUpperCase()).slice(0, 2).join("");
-}
-
-function PreferanserTab({
-  user,
-  refreshUser,
-}: {
-  user: { name: string; email: string; role: string; preferences?: Record<string, unknown> } | null;
-  refreshUser: () => Promise<void>;
-}) {
-  const [theme, setTheme] = useState<Theme>("dark");
-  const [notifyTaskDone, setNotifyTaskDone] = useState(true);
-  const [notifyReview, setNotifyReview] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [aiName, setAiName] = useState("");
-
-  useEffect(() => {
-    setTheme(getStoredTheme());
-  }, []);
-
-  // Load notification preferences from user profile
-  useEffect(() => {
-    if (user?.preferences) {
-      const prefs = user.preferences as Record<string, unknown>;
-      if (typeof prefs.notifyTaskDone === "boolean") setNotifyTaskDone(prefs.notifyTaskDone);
-      if (typeof prefs.notifyReview === "boolean") setNotifyReview(prefs.notifyReview);
-      if (typeof prefs.aiName === "string") setAiName(prefs.aiName);
-    }
-  }, [user?.preferences]);
-
-  function handleThemeChange(newTheme: Theme) {
-    setTheme(newTheme);
-    setStoredTheme(newTheme);
-  }
-
-  async function handleNotifyChange(key: string, value: boolean) {
-    if (key === "notifyTaskDone") setNotifyTaskDone(value);
-    if (key === "notifyReview") setNotifyReview(value);
-
-    setSaving(true);
-    try {
-      await updatePreferences({ [key]: value });
-      await refreshUser();
-    } catch {
-      // Revert on error
-      if (key === "notifyTaskDone") setNotifyTaskDone(!value);
-      if (key === "notifyReview") setNotifyReview(!value);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleAINameSave() {
-    const trimmed = aiName.trim();
-    setSaving(true);
-    try {
-      await updatePreferences({ aiName: trimmed || "" });
-      await refreshUser();
-    } catch {
-      // Silent
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="space-y-6">
-      {/* Theme */}
-      <div className="card p-5">
-        <h3 className="text-sm font-display font-medium mb-3" style={{ color: "var(--text-primary)" }}>
-          Tema
-        </h3>
-        <div className="flex gap-3">
-          <button
-            onClick={() => handleThemeChange("dark")}
-            className="px-4 py-2 text-sm font-medium transition-colors"
-            style={{
-              background: theme === "dark" ? "var(--accent)" : "var(--bg-secondary)",
-              color: theme === "dark" ? "#fff" : "var(--text-secondary)",
-              border: theme === "dark" ? "none" : "1px solid var(--border)",
-            }}
-          >
-            M&oslash;rk
-          </button>
-          <button
-            onClick={() => handleThemeChange("light")}
-            className="px-4 py-2 text-sm font-medium transition-colors"
-            style={{
-              background: theme === "light" ? "var(--accent)" : "var(--bg-secondary)",
-              color: theme === "light" ? "#fff" : "var(--text-secondary)",
-              border: theme === "light" ? "none" : "1px solid var(--border)",
-            }}
-          >
-            Lys
-          </button>
-        </div>
-      </div>
-
-      {/* Language */}
-      <div className="card p-5">
-        <h3 className="text-sm font-display font-medium mb-3" style={{ color: "var(--text-primary)" }}>
-          Spr&aring;k
-        </h3>
-        <div className="flex gap-3">
-          <button
-            className="px-4 py-2 text-sm font-medium"
-            style={{ background: "var(--accent)", color: "#fff" }}
-          >
-            Norsk
-          </button>
-          <button
-            className="px-4 py-2 text-sm font-medium"
-            style={{ background: "var(--bg-secondary)", color: "var(--text-muted)", border: "1px solid var(--border)" }}
-            disabled
-          >
-            English (kommer)
-          </button>
-        </div>
-      </div>
-
-      {/* Notifications */}
-      <div className="card p-5">
-        <h3 className="text-sm font-display font-medium mb-4" style={{ color: "var(--text-primary)" }}>
-          Varsler
-        </h3>
-        <div className="space-y-3">
-          <ToggleRow
-            label="Varsle n&aring;r oppgave er ferdig"
-            description="F&aring; beskjed n&aring;r en agent-task fullf&oslash;res"
-            checked={notifyTaskDone}
-            onChange={(v) => handleNotifyChange("notifyTaskDone", v)}
-          />
-          <ToggleRow
-            label="Varsle n&aring;r review trengs"
-            description="F&aring; beskjed n&aring;r kode venter p&aring; din godkjenning"
-            checked={notifyReview}
-            onChange={(v) => handleNotifyChange("notifyReview", v)}
-          />
-        </div>
-        {saving && (
-          <p className="text-xs mt-3" style={{ color: "var(--text-muted)" }}>
-            Lagrer...
-          </p>
-        )}
-      </div>
-
-      {/* AI Assistant Name */}
-      <div style={{ border: "1px solid var(--border)" }}>
-        <div className="px-4 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
-          <span className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>AI-assistent</span>
-        </div>
-        <div className="px-4 py-4 space-y-4">
-          <div>
-            <label className="text-sm block mb-1" style={{ color: "var(--text-muted)" }}>Navn p&aring; AI-assistenten</label>
-            <input
-              type="text"
-              value={aiName}
-              onChange={(e) => setAiName(e.target.value)}
-              onBlur={handleAINameSave}
-              placeholder="J&oslash;rgen Andr&eacute;"
-              className="w-full px-3 py-2 text-sm"
-              style={{ border: "1px solid var(--border)", background: "transparent", color: "var(--text-primary)" }}
-            />
-            <span className="text-xs mt-1 block" style={{ color: "var(--text-muted)" }}>
-              Initialer i chat: {getInitials(aiName || "J\u00f8rgen Andr\u00e9")}
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================
-   Debug Tab
-   ============================================ */
-
-type ServiceStatus = "checking" | "ok" | "error";
-
-function DebugTab() {
-  const [debugMode, setDebugMode] = useState(false);
-  const [cacheStats, setCacheStats] = useState<{
-    hitRate: number;
-    totalEntries: number;
-    embeddingHits: number;
-    embeddingMisses: number;
-    repoHits: number;
-    repoMisses: number;
-    aiPlanHits: number;
-    aiPlanMisses: number;
-  } | null>(null);
-  const [recentErrors, setRecentErrors] = useState<AuditLogEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [serviceStatuses, setServiceStatuses] = useState<Record<string, ServiceStatus>>({});
-
-  useEffect(() => {
-    setDebugMode(isDebugEnabled());
-  }, []);
-
-  const SERVICES = [
-    { name: "gateway", label: "Gateway (Auth)" },
-    { name: "chat", label: "Chat" },
-    { name: "ai", label: "AI" },
-    { name: "agent", label: "Agent" },
-    { name: "sandbox", label: "Sandbox" },
-    { name: "memory", label: "Memory" },
-    { name: "skills", label: "Skills" },
-    { name: "tasks", label: "Tasks" },
-    { name: "builder", label: "Builder" },
-    { name: "monitor", label: "Monitor" },
-    { name: "mcp", label: "MCP" },
-    { name: "cache", label: "Cache" },
-  ];
-
-  const checkServices = useCallback(async () => {
-    // Set all to "checking"
-    const initial: Record<string, ServiceStatus> = {};
-    SERVICES.forEach((s) => { initial[s.name] = "checking"; });
-    setServiceStatuses(initial);
-
-    // Ping each service with a lightweight call
-    const checks: Array<{ name: string; fn: () => Promise<unknown> }> = [
-      { name: "gateway", fn: () => getSecretsStatus() },
-      { name: "cache", fn: () => getCacheStats() },
-      { name: "memory", fn: () => getMemoryStats() },
-      { name: "monitor", fn: () => getMonitorHealth() },
-      { name: "agent", fn: () => listAuditLog({ limit: 1 }) },
-      { name: "tasks", fn: () => getTaskStats() },
-      { name: "builder", fn: () => listBuilderJobs({ limit: 1 }) },
-      { name: "skills", fn: () => listSkills(undefined, false) },
-      { name: "mcp", fn: () => listMCPServers() },
-    ];
-
-    // Run all checks in parallel
-    const results = await Promise.allSettled(checks.map((c) => c.fn()));
-    const updated: Record<string, ServiceStatus> = {};
-    checks.forEach((c, i) => {
-      updated[c.name] = results[i].status === "fulfilled" ? "ok" : "error";
-    });
-
-    // Services without direct endpoints — mark as ok if Encore is running
-    // (chat, ai, sandbox don't have lightweight GET endpoints we can ping)
-    const encoreUp = Object.values(updated).some((s) => s === "ok");
-    ["chat", "ai", "sandbox"].forEach((s) => {
-      updated[s] = encoreUp ? "ok" : "error";
-    });
-
-    setServiceStatuses(updated);
-  }, []);
-
-  const loadDebugData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [cacheRes, errorsRes] = await Promise.all([
-        getCacheStats(),
-        listAuditLog({ failedOnly: true, limit: 5 }),
-      ]);
-      setCacheStats(cacheRes);
-      setRecentErrors(errorsRes.entries);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadDebugData();
-    checkServices();
-  }, [loadDebugData, checkServices]);
-
-  function handleDebugToggle() {
-    const next = !debugMode;
-    setDebugMode(next);
-    setDebugEnabled(next);
-  }
-
-  return (
-    <div className="space-y-6">
-      {/* Debug mode toggle */}
-      <div className="card p-5">
-        <ToggleRow
-          label="Debug-modus"
-          description="Vis debug-popups ved API-kall (synlig kun for deg)"
-          checked={debugMode}
-          onChange={handleDebugToggle}
-        />
-      </div>
-
-      {/* System status */}
-      <div className="card p-5">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-display font-medium" style={{ color: "var(--text-primary)" }}>
-            Backend-tjenester
-          </h3>
-          <button onClick={checkServices} className="text-xs" style={{ color: "var(--text-muted)" }}>
-            Sjekk p&aring; nytt
-          </button>
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          {SERVICES.map((svc) => {
-            const status = serviceStatuses[svc.name] || "checking";
-            const dotColor = status === "ok" ? "#22c55e" : status === "error" ? "#ef4444" : "var(--text-muted)";
-            return (
-              <div
-                key={svc.name}
-                className="flex items-center gap-2 px-3 py-2 rounded"
-                style={{ background: "var(--bg-secondary)" }}
-              >
-                <span
-                  className="status-dot"
-                  style={{
-                    background: dotColor,
-                    animation: status === "checking" ? "pulse 1.5s infinite" : "none",
-                  }}
-                />
-                <span className="text-xs font-mono" style={{ color: "var(--text-secondary)" }}>
-                  {svc.label}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-        <p className="text-xs mt-3" style={{ color: "var(--text-muted)" }}>
-          {Object.values(serviceStatuses).filter((s) => s === "ok").length}/{SERVICES.length} tjenester tilkoblet
-        </p>
-      </div>
-
-      {/* Cache stats */}
-      <div className="card p-5">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-display font-medium" style={{ color: "var(--text-primary)" }}>
-            Cache-statistikk
-          </h3>
-          <button onClick={loadDebugData} className="text-xs" style={{ color: "var(--text-muted)" }}>
-            Oppdater
-          </button>
-        </div>
-        {loading ? (
-          <div className="text-sm" style={{ color: "var(--text-muted)" }}>Laster...</div>
-        ) : cacheStats ? (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Hit rate</span>
-              <span className="font-mono text-sm font-medium" style={{
-                color: cacheStats.hitRate > 60 ? "#22c55e" : cacheStats.hitRate > 30 ? "#eab308" : "#ef4444"
-              }}>
-                {cacheStats.hitRate.toFixed(1)}%
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Totalt entries</span>
-              <span className="font-mono text-sm" style={{ color: "var(--text-primary)" }}>{cacheStats.totalEntries}</span>
-            </div>
-            <div style={{ borderTop: "1px solid var(--border)", paddingTop: "12px" }}>
-              <div className="grid grid-cols-3 gap-2 text-xs">
-                <div className="text-center">
-                  <div style={{ color: "var(--text-muted)" }}>Embeddings</div>
-                  <div className="font-mono mt-1" style={{ color: "var(--text-primary)" }}>
-                    {cacheStats.embeddingHits}/{cacheStats.embeddingHits + cacheStats.embeddingMisses}
-                  </div>
-                </div>
-                <div className="text-center">
-                  <div style={{ color: "var(--text-muted)" }}>Repo</div>
-                  <div className="font-mono mt-1" style={{ color: "var(--text-primary)" }}>
-                    {cacheStats.repoHits}/{cacheStats.repoHits + cacheStats.repoMisses}
-                  </div>
-                </div>
-                <div className="text-center">
-                  <div style={{ color: "var(--text-muted)" }}>AI Plan</div>
-                  <div className="font-mono mt-1" style={{ color: "var(--text-primary)" }}>
-                    {cacheStats.aiPlanHits}/{cacheStats.aiPlanHits + cacheStats.aiPlanMisses}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="text-sm" style={{ color: "var(--text-muted)" }}>Kunne ikke hente cache-statistikk</div>
-        )}
-      </div>
-
-      {/* Recent errors */}
-      <div className="card overflow-hidden">
-        <div className="px-5 py-3" style={{ borderBottom: "1px solid var(--border)" }}>
-          <h3 className="text-sm font-display font-medium" style={{ color: "var(--text-primary)" }}>
-            Siste feil
-          </h3>
-        </div>
-        {recentErrors.length === 0 ? (
-          <div className="px-5 py-6 text-center text-sm" style={{ color: "var(--text-muted)" }}>
-            Ingen feil registrert
-          </div>
-        ) : (
-          <div className="divide-y" style={{ borderColor: "var(--border)" }}>
-            {recentErrors.map((entry) => (
-              <div key={entry.id} className="px-5 py-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="font-mono text-xs" style={{ color: "var(--text-primary)" }}>
-                    {entry.actionType}
-                  </span>
-                  {entry.taskId && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: "var(--bg-tertiary)", color: "var(--text-muted)" }}>
-                      {entry.taskId.substring(0, 8)}
-                    </span>
-                  )}
-                  <span className="text-[10px] ml-auto" style={{ color: "var(--text-muted)" }}>
-                    {new Date(entry.timestamp).toLocaleString("nb-NO")}
-                  </span>
-                </div>
-                {entry.errorMessage && (
-                  <p className="text-xs" style={{ color: "#ef4444" }}>
-                    {entry.errorMessage.length > 150 ? entry.errorMessage.substring(0, 150) + "..." : entry.errorMessage}
-                  </p>
-                )}
-              </div>
+                {tab.icon}
+                {tab.label}
+              </button>
             ))}
           </div>
-        )}
-      </div>
 
-      {/* Version info */}
-      <div className="card p-5">
-        <h3 className="text-sm font-display font-medium mb-3" style={{ color: "var(--text-primary)" }}>
-          Versjon
-        </h3>
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-sm" style={{ color: "var(--text-secondary)" }}>TheFold</span>
-            <span className="font-mono text-xs" style={{ color: "var(--text-primary)" }}>4.0-dev</span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Encore.ts</span>
-            <span className="font-mono text-xs" style={{ color: "var(--text-primary)" }}>1.54.x</span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-sm" style={{ color: "var(--text-secondary)" }}>Next.js</span>
-            <span className="font-mono text-xs" style={{ color: "var(--text-primary)" }}>15.x</span>
+          {/* Right content area */}
+          <div className="flex-1 p-6 lg:p-8">
+            {/* Profile tab */}
+            {activeTab === "profile" && (
+              <div className="max-w-lg space-y-6">
+                <div>
+                  <h2 className="text-base font-medium mb-1" style={{ color: "var(--tf-text-primary)" }}>
+                    Profile
+                  </h2>
+                  <p className="text-xs" style={{ color: "var(--tf-text-muted)" }}>
+                    Update your account information
+                  </p>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-xs block mb-1.5" style={{ color: "var(--tf-text-muted)" }}>
+                      Email
+                    </label>
+                    <div
+                      className="text-sm px-3 py-2.5 rounded-lg"
+                      style={{
+                        background: "var(--tf-surface)",
+                        color: "var(--tf-text-secondary)",
+                        border: "1px solid var(--tf-border-faint)",
+                      }}
+                    >
+                      {profile?.email || "—"}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs block mb-1.5" style={{ color: "var(--tf-text-muted)" }}>
+                      Name
+                    </label>
+                    <input
+                      type="text"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      className="w-full text-sm px-3 py-2.5 rounded-lg outline-none transition-colors"
+                      style={{
+                        background: "var(--tf-surface)",
+                        color: "var(--tf-text-primary)",
+                        border: "1px solid var(--tf-border-faint)",
+                      }}
+                      onFocus={(e) => { e.currentTarget.style.borderColor = "var(--tf-heat)"; }}
+                      onBlur={(e) => { e.currentTarget.style.borderColor = "var(--tf-border-faint)"; }}
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-3 text-xs" style={{ color: "var(--tf-text-faint)" }}>
+                    <span>
+                      Role: <strong style={{ color: "var(--tf-text-secondary)" }}>{profile?.role || "—"}</strong>
+                    </span>
+                    <span>
+                      Joined: {profile?.createdAt ? new Date(profile.createdAt).toLocaleDateString() : "—"}
+                    </span>
+                  </div>
+
+                  <button
+                    onClick={handleSaveProfile}
+                    disabled={saving}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-medium transition-all active:scale-[0.98]"
+                    style={{
+                      background: "var(--tf-heat)",
+                      color: "white",
+                      opacity: saving ? 0.6 : 1,
+                    }}
+                  >
+                    {saved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+                    {saved ? "Saved" : "Save"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Preferences tab */}
+            {activeTab === "preferences" && (
+              <div className="max-w-lg space-y-6">
+                <div>
+                  <h2 className="text-base font-medium mb-1" style={{ color: "var(--tf-text-primary)" }}>
+                    Preferences
+                  </h2>
+                  <p className="text-xs" style={{ color: "var(--tf-text-muted)" }}>
+                    AI behavior and routing
+                  </p>
+                </div>
+
+                <div className="space-y-5">
+                  <div>
+                    <label className="text-xs block mb-2" style={{ color: "var(--tf-text-muted)" }}>
+                      Model routing
+                    </label>
+                    <div className="flex gap-2">
+                      {["auto", "manual"].map((mode) => (
+                        <button
+                          key={mode}
+                          onClick={() => setModelMode(mode)}
+                          className="px-4 py-2 rounded-full text-sm capitalize transition-all active:scale-[0.98]"
+                          style={{
+                            background: modelMode === mode ? "rgba(255, 107, 44, 0.08)" : "var(--tf-surface)",
+                            color: modelMode === mode ? "var(--tf-heat)" : "var(--tf-text-secondary)",
+                            border: `1px solid ${modelMode === mode ? "rgba(255, 107, 44, 0.2)" : "var(--tf-border-faint)"}`,
+                          }}
+                        >
+                          {mode}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="text-[10px] mt-1.5 block" style={{ color: "var(--tf-text-faint)" }}>
+                      Auto: best model selected. Manual: you choose per message.
+                    </span>
+                  </div>
+
+                  <div
+                    className="flex items-center justify-between p-4 rounded-lg"
+                    style={{ border: "1px solid var(--tf-border-faint)" }}
+                  >
+                    <div>
+                      <span className="text-sm block" style={{ color: "var(--tf-text-primary)" }}>
+                        Sub-agents
+                      </span>
+                      <span className="text-[10px]" style={{ color: "var(--tf-text-faint)" }}>
+                        Parallel AI agents for complex tasks
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setSubAgentsEnabled(!subAgentsEnabled)}
+                      className="w-10 h-5 rounded-full relative transition-colors"
+                      style={{ background: subAgentsEnabled ? "var(--tf-heat)" : "var(--tf-border-muted)" }}
+                    >
+                      <div
+                        className="w-4 h-4 rounded-full bg-white absolute top-0.5 transition-transform"
+                        style={{ left: subAgentsEnabled ? "22px" : "2px" }}
+                      />
+                    </button>
+                  </div>
+
+                  <button
+                    onClick={handleSavePreferences}
+                    disabled={saving}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-medium transition-all active:scale-[0.98]"
+                    style={{
+                      background: "var(--tf-heat)",
+                      color: "white",
+                      opacity: saving ? 0.6 : 1,
+                    }}
+                  >
+                    {saved ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+                    {saved ? "Saved" : "Save preferences"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Security tab */}
+            {activeTab === "security" && (
+              <div className="max-w-lg space-y-6">
+                <div>
+                  <h2 className="text-base font-medium mb-1" style={{ color: "var(--tf-text-primary)" }}>
+                    Security
+                  </h2>
+                  <p className="text-xs" style={{ color: "var(--tf-text-muted)" }}>
+                    Secrets, integrations, and session management
+                  </p>
+                </div>
+
+                {/* Secrets */}
+                <div>
+                  <div className="flex items-center gap-2 mb-3">
+                    <Key className="w-4 h-4" style={{ color: "var(--tf-text-muted)" }} />
+                    <h3 className="text-sm font-medium" style={{ color: "var(--tf-text-primary)" }}>
+                      Secrets
+                    </h3>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: "var(--tf-surface)", color: "var(--tf-text-muted)" }}>
+                      {configuredSecrets}/{secrets.length}
+                    </span>
+                  </div>
+                  <div
+                    className="rounded-lg divide-y"
+                    style={{ border: "1px solid var(--tf-border-faint)" }}
+                  >
+                    {secrets.map((s) => (
+                      <div key={s.name} className="flex items-center justify-between px-4 py-2.5">
+                        <span className="text-xs font-mono" style={{ color: "var(--tf-text-secondary)" }}>
+                          {s.name}
+                        </span>
+                        <div
+                          className="w-2 h-2 rounded-full"
+                          style={{ background: s.configured ? "var(--tf-success)" : "var(--tf-error)" }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Integrations */}
+                <div>
+                  <div className="flex items-center gap-2 mb-3">
+                    <Plug className="w-4 h-4" style={{ color: "var(--tf-text-muted)" }} />
+                    <h3 className="text-sm font-medium" style={{ color: "var(--tf-text-primary)" }}>
+                      Integrations
+                    </h3>
+                  </div>
+                  {integrations.length > 0 ? (
+                    <div
+                      className="rounded-lg divide-y"
+                      style={{ border: "1px solid var(--tf-border-faint)" }}
+                    >
+                      {integrations.map((c) => (
+                        <div key={c.id} className="flex items-center justify-between px-4 py-2.5">
+                          <span className="text-sm capitalize" style={{ color: "var(--tf-text-primary)" }}>
+                            {c.platform}
+                          </span>
+                          <div
+                            className="w-2 h-2 rounded-full"
+                            style={{ background: c.enabled ? "var(--tf-success)" : "var(--tf-text-faint)" }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>
+                      No integrations configured
+                    </p>
+                  )}
+                </div>
+
+                {/* Sign out */}
+                <div className="pt-4 border-t" style={{ borderColor: "var(--tf-border-faint)" }}>
+                  <button
+                    onClick={handleLogout}
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-medium transition-all active:scale-[0.98]"
+                    style={{
+                      background: "rgba(235, 52, 36, 0.08)",
+                      color: "var(--tf-error)",
+                      border: "1px solid rgba(235, 52, 36, 0.15)",
+                    }}
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Sign out
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================
-   Shared: Toggle Row
-   ============================================ */
-
-function ToggleRow({
-  label,
-  description,
-  checked,
-  onChange,
-}: {
-  label: string;
-  description: string;
-  checked: boolean;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between py-2">
-      <div>
-        <div className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-          {label}
-        </div>
-        <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
-          {description}
-        </div>
-      </div>
-      <div
-        onClick={() => onChange(!checked)}
-        style={{
-          width: "40px",
-          height: "22px",
-          borderRadius: "11px",
-          background: checked ? "#6366f1" : "var(--border)",
-          position: "relative",
-          cursor: "pointer",
-          transition: "background 0.15s",
-          flexShrink: 0,
-        }}
-      >
-        <div
-          style={{
-            width: "18px",
-            height: "18px",
-            borderRadius: "50%",
-            background: "#fff",
-            position: "absolute",
-            top: "2px",
-            left: checked ? "20px" : "2px",
-            transition: "left 0.15s",
-          }}
-        />
-      </div>
+      </GridSection>
     </div>
   );
 }

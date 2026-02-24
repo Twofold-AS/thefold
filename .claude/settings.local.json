@@ -11,7 +11,16 @@
       "Bash(encore test:*)",
       "Bash(curl:*)",
       "Bash(npx vitest run:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(docker exec:*)",
+      "Bash(encore secret list:*)",
+      "Bash(npx shadcn@latest init:*)",
+      "Bash(npx shadcn@latest add:*)",
+      "Bash(npx next build:*)",
+      "mcp__firecrawl__firecrawl_scrape",
+      "Bash(for page in home chat ai repos components settings login)",
+      "Bash(do echo -n \"$page: \")",
+      "Bash(done)"
     ]
   },
   "enableAllProjectMcpServers": true,

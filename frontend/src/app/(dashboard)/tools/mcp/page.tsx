@@ -11,9 +11,10 @@ const CATEGORY_ICONS: Record<string, string> = {
   ai: "\u{1F916}",
 };
 
-const STATUS_CONFIG = {
+const STATUS_CONFIG: Record<string, { label: string; bg: string; color: string }> = {
   installed: { label: "Installert", bg: "#22c55e20", color: "#22c55e" },
   available: { label: "Tilgjengelig", bg: "var(--bg-tertiary)", color: "var(--text-muted)" },
+  not_configured: { label: "Ikke konfigurert", bg: "var(--bg-tertiary)", color: "var(--text-muted)" },
   error: { label: "Feil", bg: "#ef444420", color: "#ef4444" },
 };
 
