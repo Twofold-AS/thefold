@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useRepoContext } from "@/lib/repo-context";
 import { getMonitorHealth } from "@/lib/api";
 import { GridSection } from "@/components/ui/corner-ornament";
-import { ParticleField, EmberGlow } from "@/components/effects/ParticleField";
 import {
   GitBranch,
   ExternalLink,
@@ -41,24 +40,13 @@ export default function ReposPage() {
   return (
     <div className="min-h-full page-enter" style={{ background: "var(--tf-bg-base)" }}>
       {/* Header */}
-      <GridSection showTop={false} className="px-6 pt-8 pb-6 relative overflow-hidden">
-        <ParticleField count={8} className="opacity-30" />
-        <EmberGlow />
-        <div className="absolute top-4 right-6 opacity-20 hidden lg:block" style={{ color: "var(--tf-border-muted)" }}>
-          <svg width="120" height="60" viewBox="0 0 120 60" fill="none">
-            {Array.from({ length: 8 }).map((_, row) =>
-              Array.from({ length: 16 }).map((_, col) => (
-                <circle key={`${row}-${col}`} cx={col * 8 + 4} cy={row * 8 + 4} r="1" fill="currentColor" />
-              ))
-            )}
-          </svg>
-        </div>
+      <GridSection showTop={false} className="px-6 pt-8 pb-6">
         <div className="flex items-center gap-4 mb-1">
           <h1 className="text-display-lg" style={{ color: "var(--tf-text-primary)" }}>
             Repos
           </h1>
           <div className="flex items-center gap-2">
-            <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(255, 107, 44, 0.08)", color: "var(--tf-heat)" }}>
+            <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(53, 88, 114, 0.08)", color: "var(--tf-heat)" }}>
               {repos.length} connected
             </span>
             {healthyRepos > 0 && (
@@ -137,7 +125,7 @@ export default function ReposPage() {
                     key={repo.fullName}
                     className="px-4 py-3.5 transition-colors cursor-pointer hover:bg-[var(--tf-surface)]"
                     style={{
-                      background: isSelected ? "rgba(255, 107, 44, 0.03)" : "transparent",
+                      background: isSelected ? "rgba(53, 88, 114, 0.03)" : "transparent",
                     }}
                     onClick={() => {
                       selectRepo(repo.name);

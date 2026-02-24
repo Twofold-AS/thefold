@@ -15,7 +15,6 @@ import {
 import { clearToken } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 import { GridSection } from "@/components/ui/corner-ornament";
-import { ParticleField, EmberGlow } from "@/components/effects/ParticleField";
 import {
   User,
   Sliders,
@@ -108,25 +107,7 @@ export default function SettingsPage() {
   return (
     <div className="min-h-full page-enter" style={{ background: "var(--tf-bg-base)" }}>
       {/* Header with decorative dots */}
-      <GridSection showTop={false} className="px-6 pt-8 pb-6 relative overflow-hidden">
-        <ParticleField count={8} className="opacity-30" />
-        <EmberGlow />
-        {/* Decorative dots pattern in top-right (like Firecrawl) */}
-        <div className="absolute top-4 right-6 opacity-20 hidden lg:block" style={{ color: "var(--tf-border-muted)" }}>
-          <svg width="120" height="60" viewBox="0 0 120 60" fill="none">
-            {Array.from({ length: 8 }).map((_, row) =>
-              Array.from({ length: 16 }).map((_, col) => (
-                <circle
-                  key={`${row}-${col}`}
-                  cx={col * 8 + 4}
-                  cy={row * 8 + 4}
-                  r="1"
-                  fill="currentColor"
-                />
-              ))
-            )}
-          </svg>
-        </div>
+      <GridSection showTop={false} className="px-6 pt-8 pb-6">
         <h1 className="text-display-lg mb-1" style={{ color: "var(--tf-text-primary)" }}>
           Settings
         </h1>
@@ -147,7 +128,7 @@ export default function SettingsPage() {
                   onClick={() => setActiveTab(tab.key)}
                   className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm transition-colors text-left"
                   style={{
-                    background: activeTab === tab.key ? "rgba(255, 107, 44, 0.06)" : "transparent",
+                    background: activeTab === tab.key ? "rgba(53, 88, 114, 0.06)" : "transparent",
                     color: activeTab === tab.key ? "var(--tf-heat)" : "var(--tf-text-secondary)",
                   }}
                 >
@@ -166,7 +147,7 @@ export default function SettingsPage() {
                 onClick={() => setActiveTab(tab.key)}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs"
                 style={{
-                  background: activeTab === tab.key ? "rgba(255, 107, 44, 0.06)" : "transparent",
+                  background: activeTab === tab.key ? "rgba(53, 88, 114, 0.06)" : "transparent",
                   color: activeTab === tab.key ? "var(--tf-heat)" : "var(--tf-text-muted)",
                 }}
               >
@@ -276,9 +257,9 @@ export default function SettingsPage() {
                           onClick={() => setModelMode(mode)}
                           className="px-4 py-2 rounded-full text-sm capitalize transition-all active:scale-[0.98]"
                           style={{
-                            background: modelMode === mode ? "rgba(255, 107, 44, 0.08)" : "var(--tf-surface)",
+                            background: modelMode === mode ? "rgba(53, 88, 114, 0.08)" : "var(--tf-surface)",
                             color: modelMode === mode ? "var(--tf-heat)" : "var(--tf-text-secondary)",
-                            border: `1px solid ${modelMode === mode ? "rgba(255, 107, 44, 0.2)" : "var(--tf-border-faint)"}`,
+                            border: `1px solid ${modelMode === mode ? "rgba(53, 88, 114, 0.2)" : "var(--tf-border-faint)"}`,
                           }}
                         >
                           {mode}

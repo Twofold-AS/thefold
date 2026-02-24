@@ -1,6 +1,5 @@
 "use client";
 
-import { useRepoContext } from "@/lib/repo-context";
 import { useUser } from "@/contexts/UserPreferencesContext";
 import { useRouter } from "next/navigation";
 import { ChevronDown, LogOut, Settings, User } from "lucide-react";
@@ -15,7 +14,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 export function Topbar() {
-  const { repos, selectedRepo, selectRepo } = useRepoContext();
   const { user, initial, avatarColor } = useUser();
   const router = useRouter();
 
@@ -35,64 +33,9 @@ export function Topbar() {
         borderColor: "var(--tf-border-faint)",
       }}
     >
-      {/* Left: Repo selector */}
+      {/* Left: spacer for mobile hamburger */}
       <div className="flex items-center gap-3">
-        {/* Spacer for mobile hamburger */}
         <div className="w-8 sm:hidden" />
-
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors hover:bg-[var(--tf-surface-raised)]"
-              style={{ color: "var(--tf-text-primary)" }}
-            >
-              <div
-                className="w-5 h-5 rounded flex items-center justify-center text-[10px] font-medium text-white"
-                style={{ background: selectedRepo ? "var(--tf-heat)" : "var(--tf-border-muted)" }}
-              >
-                {selectedRepo?.name?.[0]?.toUpperCase() || "T"}
-              </div>
-              <span className="font-medium hidden sm:inline">{selectedRepo?.fullName || "Select repo"}</span>
-              <ChevronDown className="w-3.5 h-3.5" style={{ color: "var(--tf-text-muted)" }} />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-64">
-            <DropdownMenuItem
-              onClick={() => selectRepo("")}
-              className="flex items-center gap-2"
-            >
-              <div
-                className="w-4 h-4 rounded flex items-center justify-center text-[9px] font-medium text-white"
-                style={{ background: !selectedRepo ? "var(--tf-heat)" : "var(--tf-border-muted)" }}
-              >
-                T
-              </div>
-              <span className="flex-1 truncate">No repo (general)</span>
-              {!selectedRepo && (
-                <div className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--tf-heat)" }} />
-              )}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            {repos.map((repo) => (
-              <DropdownMenuItem
-                key={repo.fullName}
-                onClick={() => selectRepo(repo.fullName)}
-                className="flex items-center gap-2"
-              >
-                <div
-                  className="w-4 h-4 rounded flex items-center justify-center text-[9px] font-medium text-white"
-                  style={{ background: repo.fullName === selectedRepo?.fullName ? "var(--tf-heat)" : "var(--tf-border-muted)" }}
-                >
-                  {repo.name[0]?.toUpperCase()}
-                </div>
-                <span className="flex-1 truncate">{repo.fullName}</span>
-                {repo.fullName === selectedRepo?.fullName && (
-                  <div className="w-1.5 h-1.5 rounded-full" style={{ background: "var(--tf-heat)" }} />
-                )}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
       </div>
 
       {/* Right: User avatar with dropdown */}

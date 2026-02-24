@@ -6,7 +6,13 @@ import {
   sendMessage,
   getChatHistory,
   getMainConversations,
+  getRepoConversations,
+  getInkognitoConversations,
+  getAllRepoConversations,
+  getConversations,
   mainConversationId,
+  repoConversationId,
+  inkognitoConversationId,
   transferContext,
   deleteConversation,
   cancelChatGeneration,
@@ -15,8 +21,10 @@ import {
   approveReview,
   rejectReview,
   getTask,
+  listSkills,
   type Message,
   type ConversationSummary,
+  type Skill,
 } from "@/lib/api";
 import {
   Plus,
@@ -27,23 +35,12 @@ import {
   PanelLeft,
   Sparkles,
   Ghost,
-  Filter,
-  CheckCircle2,
-  AlertCircle,
-  Clock,
-  RotateCw,
-  ChevronDown,
-  ChevronUp,
-  ThumbsUp,
-  ThumbsDown,
-  Edit3,
 } from "lucide-react";
 import { ChatBubble } from "@/components/chat/chat-bubble";
 import { AgentProgressCard, type AgentProgressData, type ProgressStep } from "@/components/chat/agent-progress";
 import { ChatInput } from "@/components/chat/chat-input";
 import { ChatControls } from "@/components/chat/chat-controls";
 import { ThinkingIndicator } from "@/components/chat/thinking-indicator";
-import { ParticleField, EmberGlow } from "@/components/effects/ParticleField";
 import { usePreferences } from "@/contexts/UserPreferencesContext";
 import { useRepoContext } from "@/lib/repo-context";
 
@@ -66,12 +63,10 @@ function parseAgentStatus(content: string): AgentProgressData | null {
   }
 }
 
-// Parse agent_progress messages (new format from Z-project)
 function parseAgentProgress(content: string): AgentProgressData | null {
   try {
     const parsed = JSON.parse(content);
     if (parsed.status) {
-      // New progress format
       return {
         phase: parsed.phase || parsed.status,
         title: parsed.summary || parsed.title || parsed.status,
@@ -119,6 +114,8 @@ export default function ChatPage() {
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [chatRepo, setChatRepo] = useState<string | null>(null);
   const [convFilter, setConvFilter] = useState<ConvFilter>("all");
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
 
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -140,20 +137,52 @@ export default function ChatPage() {
     }
   }, []);
 
+  // Load conversations based on current filter + repo
+  const loadConversations = useCallback(async () => {
+    try {
+      if (convFilter === "inkognito") {
+        const res = await getInkognitoConversations();
+        setConversations(res.conversations);
+      } else if (convFilter === "repo") {
+        if (chatRepo) {
+          const res = await getRepoConversations(chatRepo);
+          setConversations(res.conversations);
+        } else {
+          const res = await getAllRepoConversations();
+          setConversations(res.conversations);
+        }
+      } else {
+        // "all" — show everything
+        const res = await getConversations();
+        setConversations(res.conversations);
+      }
+    } catch {}
+  }, [convFilter, chatRepo]);
+
+  // Load skills on mount
+  useEffect(() => {
+    listSkills(undefined, true)
+      .then((res) => setAvailableSkills(res.skills))
+      .catch(() => {});
+  }, []);
+
   // On mount: check for initial query from overview
   useEffect(() => {
     const freshId = mainConversationId();
     setActiveConvId(freshId);
     setMessages([]);
-    getMainConversations()
-      .then((res) => setConversations(res.conversations))
-      .catch(() => {});
+    loadConversations();
 
     const q = searchParams.get("q");
     if (q) {
       setInput(q);
     }
   }, []);
+
+  // Reload conversations when filter or repo changes
+  useEffect(() => {
+    loadConversations();
+  }, [convFilter, chatRepo, loadConversations]);
 
   // Sync repo context
   useEffect(() => {
@@ -204,11 +233,18 @@ export default function ChatPage() {
     } catch {}
   }
 
+  // Generate conversation ID based on current mode
+  function generateConvId(): string {
+    if (inkognito) return inkognitoConversationId();
+    if (chatRepo) return repoConversationId(chatRepo);
+    return mainConversationId();
+  }
+
   async function handleSend() {
     const text = input.trim();
     if (!text || sending) return;
 
-    const convId = activeConvId || mainConversationId();
+    const convId = activeConvId || generateConvId();
     if (!activeConvId) setActiveConvId(convId);
 
     if (!conversations.some((c) => c.id === convId)) {
@@ -236,11 +272,12 @@ export default function ChatPage() {
       await sendMessage(convId, text, {
         chatOnly: !agentMode || inkognito,
         modelOverride: selectedModel,
+        skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
+        repoName: chatRepo || undefined,
       });
       await loadHistory();
       try {
-        const updated = await getMainConversations();
-        setConversations(updated.conversations);
+        await loadConversations();
       } catch {}
     } catch {}
     finally {
@@ -249,7 +286,7 @@ export default function ChatPage() {
   }
 
   function handleNewConversation() {
-    const id = mainConversationId();
+    const id = generateConvId();
     setActiveConvId(id);
     setMessages([]);
     setTransferred(null);
@@ -266,7 +303,7 @@ export default function ChatPage() {
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const convId = activeConvId || mainConversationId();
+    const convId = activeConvId || generateConvId();
     if (!activeConvId) setActiveConvId(convId);
     try {
       const content = await file.text();
@@ -284,7 +321,8 @@ export default function ChatPage() {
       const result = await transferContext(activeConvId, repoName);
       setShowRepoSelector(false);
       setTransferred(repoName);
-      router.push(`/repo/${repoName}/chat?convId=${result.targetConversationId}`);
+      setChatRepo(repoName);
+      setActiveConvId(result.targetConversationId);
     } catch {}
     finally { setTransferring(false); }
   }
@@ -313,14 +351,12 @@ export default function ChatPage() {
     if (statusDismissed) return null;
     if (statusOverride) return statusOverride as unknown as AgentProgressData;
 
-    // Check for agent_progress first (new format)
     const progressMsgs = messages.filter((m) => m.messageType === "agent_progress");
     if (progressMsgs.length > 0) {
       const last = progressMsgs[progressMsgs.length - 1];
       return parseAgentProgress(last.content);
     }
 
-    // Fallback to legacy agent_status
     const statusMsgs = messages.filter((m) => m.messageType === "agent_status");
     if (statusMsgs.length === 0) return null;
     const last = statusMsgs[statusMsgs.length - 1];
@@ -454,6 +490,11 @@ export default function ChatPage() {
     }
   }
 
+  // Check if a conversation is inkognito
+  function isInkognitoConv(convId: string) {
+    return convId.startsWith("inkognito-");
+  }
+
   return (
     <div className="flex h-full">
       {/* Conversation list */}
@@ -484,15 +525,13 @@ export default function ChatPage() {
               <button
                 key={f}
                 onClick={() => setConvFilter(f)}
-                className="text-[10px] px-2 py-1 rounded-md transition-colors capitalize"
+                className="text-[10px] px-2 py-1 rounded-md transition-colors capitalize flex items-center gap-1"
                 style={{
-                  background: convFilter === f ? "rgba(255, 107, 44, 0.08)" : "transparent",
+                  background: convFilter === f ? "rgba(53, 88, 114, 0.08)" : "transparent",
                   color: convFilter === f ? "var(--tf-heat)" : "var(--tf-text-faint)",
                 }}
               >
-                {f === "inkognito" ? (
-                  <Ghost className="w-3 h-3 inline mr-0.5" />
-                ) : null}
+                {f === "inkognito" && <Ghost className="w-3 h-3" />}
                 {f}
               </button>
             ))}
@@ -527,14 +566,19 @@ export default function ChatPage() {
                     background: c.id === activeConvId ? "var(--tf-surface)" : "transparent",
                   }}
                 >
-                  <span
-                    className="text-sm block truncate"
-                    style={{
-                      color: c.id === activeConvId ? "var(--tf-text-primary)" : "var(--tf-text-secondary)",
-                    }}
-                  >
-                    {c.title || "New conversation"}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {isInkognitoConv(c.id) && (
+                      <Ghost className="w-3 h-3 flex-shrink-0" style={{ color: "#9061FF" }} />
+                    )}
+                    <span
+                      className="text-sm block truncate flex-1"
+                      style={{
+                        color: c.id === activeConvId ? "var(--tf-text-primary)" : "var(--tf-text-secondary)",
+                      }}
+                    >
+                      {c.title || "New conversation"}
+                    </span>
+                  </div>
                   <div className="flex items-center justify-between mt-0.5">
                     <span className="text-[10px]" style={{ color: "var(--tf-text-faint)" }}>
                       {formatDate(c.lastActivity)}
@@ -558,7 +602,10 @@ export default function ChatPage() {
       )}
 
       {/* Main chat area */}
-      <div className={`flex-1 flex flex-col min-w-0 relative ${inkognito ? "inkognito-active" : ""}`}>
+      <div
+        className="flex-1 flex flex-col min-w-0 relative"
+        style={inkognito ? { background: "rgba(144, 97, 255, 0.02)" } : undefined}
+      >
         {/* Chat header */}
         <div
           className="flex items-center justify-between h-12 px-4 border-b flex-shrink-0"
@@ -580,14 +627,14 @@ export default function ChatPage() {
                 className="text-[10px] px-1.5 py-0.5 rounded-md font-medium flex items-center gap-1"
                 style={{ background: "rgba(144, 97, 255, 0.08)", color: "#9061FF" }}
               >
-                <Ghost className="w-3 h-3" />
+                <Ghost className="w-3.5 h-3.5" />
                 Inkognito
               </span>
             )}
             {chatRepo && !inkognito && (
               <span
                 className="text-[10px] px-1.5 py-0.5 rounded-md font-medium"
-                style={{ background: "rgba(255, 107, 44, 0.08)", color: "var(--tf-heat)" }}
+                style={{ background: "rgba(53, 88, 114, 0.08)", color: "var(--tf-heat)" }}
               >
                 {chatRepo}
               </span>
@@ -595,7 +642,7 @@ export default function ChatPage() {
             {agentActive && (
               <span
                 className="text-[10px] px-1.5 py-0.5 rounded-md font-medium"
-                style={{ background: "rgba(255, 107, 44, 0.08)", color: "var(--tf-heat)" }}
+                style={{ background: "rgba(53, 88, 114, 0.08)", color: "var(--tf-heat)" }}
               >
                 Agent active
               </span>
@@ -646,17 +693,11 @@ export default function ChatPage() {
         >
           {messages.length === 0 ? (
             <div className="flex items-center justify-center h-full relative overflow-hidden">
-              {/* Background particles */}
-              <ParticleField count={15} className="opacity-30" />
-              <EmberGlow />
-
               <div className="text-center w-full max-w-2xl px-4 relative z-10 page-enter">
-                {/* Animated logo icon */}
-                <div className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-6 flame-animate" style={{ background: "rgba(255, 107, 44, 0.1)" }}>
+                <div className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-6" style={{ background: "rgba(53, 88, 114, 0.1)" }}>
                   <Sparkles className="w-6 h-6" style={{ color: "var(--tf-heat)" }} />
                 </div>
 
-                {/* Big centered heading like Firecrawl's agent page */}
                 <h1
                   className="text-3xl sm:text-4xl font-bold mb-3 tracking-tight"
                   style={{ color: "var(--tf-text-primary)" }}
@@ -667,7 +708,6 @@ export default function ChatPage() {
                   Describe a task or ask a question about your codebase
                 </p>
 
-                {/* Suggestion cards — matches Firecrawl's 3-card grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 stagger-children">
                   {[
                     { text: "Analyze the codebase and suggest improvements", icon: "🔍" },
@@ -677,14 +717,14 @@ export default function ChatPage() {
                     <button
                       key={q.text}
                       onClick={() => setInput(q.text)}
-                      className="feature-card text-left text-sm p-4 rounded-lg transition-all active:scale-[0.98] group relative overflow-hidden"
+                      className="text-left text-sm p-4 rounded-lg transition-all active:scale-[0.98]"
                       style={{
                         border: "1px solid var(--tf-border-faint)",
                         color: "var(--tf-text-secondary)",
                         background: "var(--tf-surface)",
                       }}
                       onMouseEnter={(e) => {
-                        e.currentTarget.style.borderColor = "rgba(255, 107, 44, 0.2)";
+                        e.currentTarget.style.borderColor = "rgba(53, 88, 114, 0.2)";
                         e.currentTarget.style.background = "var(--tf-surface-raised)";
                       }}
                       onMouseLeave={(e) => {
@@ -692,12 +732,7 @@ export default function ChatPage() {
                         e.currentTarget.style.background = "var(--tf-surface)";
                       }}
                     >
-                      {/* Subtle glow overlay */}
-                      <div
-                        className="absolute inset-0 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-300"
-                        style={{ background: "radial-gradient(ellipse at 50% 0%, rgba(255, 107, 44, 0.04) 0%, transparent 70%)" }}
-                      />
-                      <span className="relative z-10">{q.text}</span>
+                      {q.text}
                     </button>
                   ))}
                 </div>
@@ -707,51 +742,34 @@ export default function ChatPage() {
             <div className="space-y-4 max-w-3xl mx-auto">
               {messages
                 .filter((m) => {
-                  // SKIP agent_thought — NEVER show
                   if (m.messageType === "agent_thought") return false;
-                  // SKIP agent_report — replaced by agent_progress
                   if (m.messageType === "agent_report") return false;
-                  // Filter out active agent statuses (rendered inline below)
                   if (m.messageType === "agent_status") {
                     const parsed = parseAgentStatus(m.content);
                     const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"];
                     return parsed && terminal.includes(parsed.phase);
                   }
-                  // Filter active agent_progress (rendered inline below)
                   if (m.messageType === "agent_progress") {
                     const parsed = parseAgentProgress(m.content);
                     const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"];
                     return parsed && terminal.includes(parsed.phase);
                   }
-                  // Skip empty assistant messages
                   if (m.role === "assistant" && (!m.content || !m.content.trim())) return false;
                   return true;
                 })
                 .map((msg) => {
-                  // Terminal agent status — render as AgentProgressCard
                   if (msg.messageType === "agent_status" || msg.messageType === "agent_progress") {
                     const parsed = msg.messageType === "agent_progress"
                       ? parseAgentProgress(msg.content)
                       : parseAgentStatus(msg.content);
                     if (!parsed) return null;
-                    return (
-                      <AgentProgressCard key={msg.id} data={parsed} />
-                    );
+                    return <AgentProgressCard key={msg.id} data={parsed} />;
                   }
 
-                  // Context transfer
                   if (msg.messageType === "context_transfer") {
-                    return (
-                      <ChatBubble
-                        key={msg.id}
-                        role="assistant"
-                        content={msg.content}
-                        isContextTransfer
-                      />
-                    );
+                    return <ChatBubble key={msg.id} role="assistant" content={msg.content} isContextTransfer />;
                   }
 
-                  // Regular message
                   const meta = getMeta(msg);
                   return (
                     <ChatBubble
@@ -766,7 +784,6 @@ export default function ChatPage() {
                   );
                 })}
 
-              {/* Active agent status — inline in message stream */}
               {lastAgentStatus && agentActive && (
                 <AgentProgressCard
                   data={lastAgentStatus}
@@ -777,7 +794,6 @@ export default function ChatPage() {
                 />
               )}
 
-              {/* Waiting/review status */}
               {lastAgentStatus && lastAgentStatus.phase === "Venter" && (
                 <AgentProgressCard
                   data={lastAgentStatus}
@@ -788,7 +804,6 @@ export default function ChatPage() {
                 />
               )}
 
-              {/* Thinking indicator */}
               {showThinking && <ThinkingIndicator />}
 
               <div ref={bottomRef} />
@@ -807,7 +822,6 @@ export default function ChatPage() {
               onChange={handleFileUpload}
             />
             <div className="max-w-3xl mx-auto">
-              {/* Chat controls */}
               <ChatControls
                 repos={repos}
                 selectedRepo={chatRepo}
@@ -820,6 +834,9 @@ export default function ChatPage() {
                 onSubAgentsToggle={() => setSubAgents(!subAgents)}
                 selectedModel={selectedModel}
                 onModelChange={setSelectedModel}
+                skills={availableSkills}
+                selectedSkillIds={selectedSkillIds}
+                onSkillsChange={setSelectedSkillIds}
               />
 
               <ChatInput
@@ -875,9 +892,6 @@ export default function ChatPage() {
                   }}
                 >
                   <div className="text-sm">{repo.fullName}</div>
-                  <div className="text-xs mt-0.5" style={{ color: "var(--tf-text-faint)" }}>
-                    {repo.status === "healthy" ? "Connected" : repo.status}
-                  </div>
                 </button>
               ))}
             </div>

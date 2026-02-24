@@ -7,7 +7,8 @@ Based on Firecrawl's branding (scraped 2026-02-24):
 | Token | Value | Usage |
 |-------|-------|-------|
 | heat-100 | #FF4C00 | Firecrawl primary CTA |
-| tf-heat | #FF6B2C | TheFold brand orange |
+| tf-heat | #355872 | TheFold brand blue |
+| tf-heat-light | #7aaace | Hover, glow, secondary |
 | bg-base | #0A0A0A | Page background |
 | bg-lighter | #141414 | Sidebar/elevated bg |
 | surface | #171717 | Card background |

@@ -8,6 +8,7 @@ import {
   ChevronDown,
   Zap,
   GitBranch,
+  Sparkles,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -15,6 +16,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+
+interface Skill {
+  id: string;
+  name: string;
+  description: string;
+}
 
 interface ChatControlsProps {
   repos: Array<{ name: string; fullName: string }>;
@@ -29,6 +36,9 @@ interface ChatControlsProps {
   selectedModel: string | null;
   onModelChange: (model: string | null) => void;
   models?: Array<{ id: string; displayName: string }>;
+  skills?: Skill[];
+  selectedSkillIds?: string[];
+  onSkillsChange?: (ids: string[]) => void;
 }
 
 export function ChatControls({
@@ -44,6 +54,9 @@ export function ChatControls({
   selectedModel,
   onModelChange,
   models = [],
+  skills = [],
+  selectedSkillIds = [],
+  onSkillsChange,
 }: ChatControlsProps) {
   return (
     <div className="flex items-center gap-1.5 flex-wrap px-1 py-1.5">
@@ -91,6 +104,59 @@ export function ChatControls({
       {/* Right group: Agent controls (hidden in inkognito) */}
       {!inkognito && (
         <div className="flex items-center gap-1.5 ml-auto">
+          {/* Skills selector */}
+          {skills.length > 0 && onSkillsChange && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className={`control-chip ${selectedSkillIds.length > 0 ? "active" : ""}`}>
+                  <Sparkles className="w-3 h-3" />
+                  <span className="hidden sm:inline">
+                    {selectedSkillIds.length > 0 ? `${selectedSkillIds.length} skills` : "Skills"}
+                  </span>
+                  <ChevronDown className="w-2.5 h-2.5" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-56">
+                {selectedSkillIds.length > 0 && (
+                  <DropdownMenuItem onClick={() => onSkillsChange([])}>
+                    Clear all
+                  </DropdownMenuItem>
+                )}
+                {skills.map((skill) => {
+                  const isSelected = selectedSkillIds.includes(skill.id);
+                  return (
+                    <DropdownMenuItem
+                      key={skill.id}
+                      onClick={() => {
+                        if (isSelected) {
+                          onSkillsChange(selectedSkillIds.filter((id) => id !== skill.id));
+                        } else {
+                          onSkillsChange([...selectedSkillIds, skill.id]);
+                        }
+                      }}
+                      className="flex items-center gap-2"
+                    >
+                      <div
+                        className="w-3 h-3 rounded-sm border flex items-center justify-center flex-shrink-0"
+                        style={{
+                          borderColor: isSelected ? "var(--tf-heat)" : "var(--tf-border-muted)",
+                          background: isSelected ? "rgba(53, 88, 114, 0.1)" : "transparent",
+                        }}
+                      >
+                        {isSelected && (
+                          <div className="w-1.5 h-1.5 rounded-sm" style={{ background: "var(--tf-heat)" }} />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <span className="text-sm block truncate">{skill.name}</span>
+                      </div>
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+
           {/* Agent mode */}
           <button
             onClick={onAgentModeToggle}

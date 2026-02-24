@@ -276,7 +276,7 @@ function LoginContent() {
               <div className="text-center">
                 <div
                   className="w-10 h-10 rounded-lg flex items-center justify-center mx-auto mb-3"
-                  style={{ background: "rgba(255, 107, 44, 0.08)" }}
+                  style={{ background: "rgba(53, 88, 114, 0.08)" }}
                 >
                   <KeyRound className="w-5 h-5" style={{ color: "var(--tf-heat)" }} />
                 </div>

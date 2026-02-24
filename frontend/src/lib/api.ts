@@ -352,6 +352,24 @@ export async function getRepoConversations(repoName: string) {
   };
 }
 
+export function inkognitoConversationId(): string {
+  return `inkognito-${crypto.randomUUID()}`;
+}
+
+export async function getInkognitoConversations() {
+  const result = await getConversations();
+  return {
+    conversations: result.conversations.filter((c) => c.id.startsWith("inkognito-")),
+  };
+}
+
+export async function getAllRepoConversations() {
+  const result = await getConversations();
+  return {
+    conversations: result.conversations.filter((c) => c.id.startsWith("repo-")),
+  };
+}
+
 // --- Skills ---
 
 export interface Skill {

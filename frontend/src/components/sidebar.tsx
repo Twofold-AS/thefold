@@ -14,6 +14,7 @@ import {
   Sparkles,
   Menu,
   X,
+  Activity,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -34,8 +35,10 @@ const NAV_ITEMS: { category?: string; items: NavItem[] }[] = [
     category: "WORKSPACE",
     items: [
       { label: "Chat", href: "/chat", icon: MessageSquare },
+      { label: "Tasks", href: "/tasks", icon: Activity },
       { label: "Repos", href: "/repos", icon: GitBranch },
       { label: "Components", href: "/components", icon: Boxes },
+      { label: "Skills", href: "/skills", icon: Sparkles },
     ],
   },
   {
@@ -85,9 +88,8 @@ export function Sidebar() {
       >
         {!collapsed || isMobile ? (
           <button onClick={() => navigateTo("/home")} className="flex items-center gap-2.5 group">
-            <div className="w-7 h-7 rounded-md flex items-center justify-center flame-animate relative" style={{ background: "var(--tf-heat)" }}>
+            <div className="w-7 h-7 rounded-md flex items-center justify-center relative" style={{ background: "var(--tf-heat)" }}>
               <Sparkles className="w-4 h-4 text-white" />
-              <div className="absolute inset-0 rounded-md opacity-0 group-hover:opacity-100 transition-opacity" style={{ boxShadow: "0 0 12px rgba(255, 107, 44, 0.5)" }} />
             </div>
             <span className="font-logotype text-[18px] tracking-tight" style={{ color: "var(--tf-text-primary)" }}>
               TheFold
@@ -95,9 +97,8 @@ export function Sidebar() {
           </button>
         ) : (
           <button onClick={() => navigateTo("/home")} className="mx-auto">
-            <div className="w-7 h-7 rounded-md flex items-center justify-center flame-animate relative" style={{ background: "var(--tf-heat)" }}>
+            <div className="w-7 h-7 rounded-md flex items-center justify-center relative" style={{ background: "var(--tf-heat)" }}>
               <Sparkles className="w-4 h-4 text-white" />
-              <div className="absolute inset-0 rounded-md" style={{ boxShadow: "0 0 8px rgba(255, 107, 44, 0.3)" }} />
             </div>
           </button>
         )}
@@ -137,7 +138,7 @@ export function Sidebar() {
                     )}
                     style={{
                       color: active ? "var(--tf-heat)" : "var(--tf-text-secondary)",
-                      background: active ? "rgba(255, 107, 44, 0.06)" : "transparent",
+                      background: active ? "rgba(53, 88, 114, 0.06)" : "transparent",
                     }}
                     onMouseEnter={(e) => {
                       if (!active) {
@@ -152,10 +153,7 @@ export function Sidebar() {
                       }
                     }}
                   >
-                    <item.icon className={cn(
-                      "w-[18px] h-[18px] flex-shrink-0 sidebar-icon transition-transform group-hover/nav:scale-110",
-                      active && "sidebar-icon-active"
-                    )} />
+                    <item.icon className="w-[18px] h-[18px] flex-shrink-0" />
                     {(!collapsed || isMobile) && (
                       <span className="flex-1 text-left">{item.label}</span>
                     )}

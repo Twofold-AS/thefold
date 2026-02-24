@@ -140,9 +140,9 @@ export function ChatBubble({
           <div
             className="inline-block text-sm leading-relaxed rounded-xl px-4 py-2.5 whitespace-pre-wrap max-w-[75%]"
             style={{
-              background: "rgba(255, 107, 44, 0.08)",
+              background: "rgba(53, 88, 114, 0.08)",
               color: "var(--tf-text-primary)",
-              border: "1px solid rgba(255, 107, 44, 0.12)",
+              border: "1px solid rgba(53, 88, 114, 0.12)",
               textAlign: "left",
             }}
           >

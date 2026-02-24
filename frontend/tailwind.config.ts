@@ -13,16 +13,17 @@ const config: Config = {
         logotype: ['"TheFold Brand"', "system-ui", "sans-serif"],
       },
       colors: {
-        // Brand heat scale (Firecrawl-inspired, TheFold orange)
+        // Brand heat scale (TheFold blue)
         heat: {
-          4: "rgba(255, 107, 44, 0.04)",
-          8: "rgba(255, 107, 44, 0.08)",
-          12: "rgba(255, 107, 44, 0.12)",
-          16: "rgba(255, 107, 44, 0.16)",
-          20: "rgba(255, 107, 44, 0.20)",
-          40: "rgba(255, 107, 44, 0.40)",
-          90: "rgba(255, 107, 44, 0.90)",
-          DEFAULT: "#FF6B2C",
+          4: "rgba(53, 88, 114, 0.04)",
+          8: "rgba(53, 88, 114, 0.08)",
+          12: "rgba(53, 88, 114, 0.12)",
+          16: "rgba(53, 88, 114, 0.16)",
+          20: "rgba(53, 88, 114, 0.20)",
+          40: "rgba(53, 88, 114, 0.40)",
+          90: "rgba(53, 88, 114, 0.90)",
+          DEFAULT: "#355872",
+          light: "#7aaace",
         },
         // Surfaces
         surface: {
@@ -144,8 +145,8 @@ const config: Config = {
           "50%": { opacity: "0.2" },
         },
         logoGlow: {
-          "0%, 100%": { filter: "drop-shadow(0 0 2px rgba(255,107,44,0.3))" },
-          "50%": { filter: "drop-shadow(0 0 8px rgba(255,107,44,0.6))" },
+          "0%, 100%": { filter: "drop-shadow(0 0 2px rgba(53,88,114,0.3))" },
+          "50%": { filter: "drop-shadow(0 0 8px rgba(122,170,206,0.5))" },
         },
         stepEnter: {
           from: { opacity: "0", transform: "translateX(-8px)" },

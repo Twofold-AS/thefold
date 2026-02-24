@@ -65,7 +65,7 @@ export function EmberGlow({ className = "" }: { className?: string }) {
     <div
       className={`absolute inset-0 pointer-events-none ${className}`}
       style={{
-        background: "radial-gradient(ellipse at 50% 0%, rgba(255, 107, 44, 0.06) 0%, transparent 60%)",
+        background: "radial-gradient(ellipse at 50% 0%, rgba(53, 88, 114, 0.06) 0%, transparent 60%)",
       }}
     />
   );

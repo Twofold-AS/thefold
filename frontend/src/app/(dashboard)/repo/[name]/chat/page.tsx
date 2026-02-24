@@ -1,3 +1,5 @@
+// DEPRECATED: This page is no longer in active navigation.
+// Kept for reference. Will be removed in future cleanup.
 "use client";
 
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
