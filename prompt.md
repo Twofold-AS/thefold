@@ -1,395 +1,337 @@
-# Z-HOTFIX — Fiks kjente feil + DB-opprydding + Secrets-oppsett
+# Z-CLEANUP — Rename, flagg-opprydding, docs, testing
 
 ## KONTEKST
 
-Prosjekt Z er fullført. thefold-verify viser 572/609 tester (93.9%).
-33 feil er pre-eksisterende. Denne prompten fikser dem.
+Z-HOTFIX er kjørt. Secrets satt, embedding migrert, testfeil fikset.
+Denne prompten rydder opp i navngiving, feature flags, og docs.
 
 Les først:
 - CLAUDE.md
-- KONTOSOPPSETT.md (generert av ZU)
-- Z-PROSJEKT-PLAN.md (for kontekst)
+- GRUNNMUR-STATUS.md
+- .claude/skills/thefold-verify/SKILL.md
 
 ---
 
-## DEL 1: FIKS TEST-FEIL (33 stk)
+## DEL 1: RENAME Z-PREFIXED FILER
 
-### Kategori 1: MCP pre-seed (14 feil)
+Alle filer med `z-` prefix skal renames. Bruk `git mv` for å bevare historikk.
+Etter rename: oppdater ALLE imports og referanser i hele prosjektet.
 
-**Årsak:** Migrasjon `mcp/migrations/3_z_cleanup_servers.up.sql` slettet github/postgres servere. Tester i `mcp/mcp.test.ts` forventer fortsatt disse.
-
-**Fiks:**
-1. Åpne `mcp/mcp.test.ts`
-2. Oppdater alle tester som refererer til "github" eller "postgres" MCP-servere
-3. Erstatt med serverne som faktisk eksisterer etter migrasjon 3 (context7, brave-search, puppeteer, sentry, linear)
-4. Oppdater antall-asserts (f.eks. `expect(servers.length).toBe(6)` → riktig tall)
-5. Legg til tester for de nye serverne (sentry, linear)
+### Testfiler
 
 ```bash
-# Finn alle referanser til gamle servere:
-grep -n "github\|postgres" mcp/mcp.test.ts
+git mv agent/z-confidence-question.test.ts agent/confidence-question.test.ts
+git mv agent/z-sub-agent-display.test.ts agent/sub-agent-display.test.ts
+git mv agent/token-policy.test.ts agent/token-policy.test.ts  # denne er OK allerede
+git mv ai/z-dynamic-sub-agents.test.ts ai/dynamic-sub-agents.test.ts
+git mv ai/provider-abstraction.test.ts ai/provider-abstraction.test.ts  # OK
+git mv chat/z-review-from-chat.test.ts chat/review-from-chat.test.ts
+git mv chat/progress-message.test.ts chat/progress-message.test.ts  # OK
+git mv chat/z-performance.test.ts chat/performance.test.ts
+git mv chat/z-legacy-cleanup.test.ts chat/legacy-cleanup.test.ts
+git mv gateway/z-email.test.ts gateway/email.test.ts
+git mv github/github-app.test.ts github/github-app.test.ts  # OK
+git mv integrations/z-two-way.test.ts integrations/two-way.test.ts
+git mv mcp/z-mcp-functional.test.ts mcp/mcp-functional.test.ts
+git mv memory/z-openai-embeddings.test.ts memory/openai-embeddings.test.ts
+git mv registry/z-component-library.test.ts registry/component-library.test.ts
+git mv registry/z-healing.test.ts registry/healing.test.ts
+git mv tasks/z-tasks-master.test.ts tasks/tasks-master.test.ts
+git mv tasks/z-linear-sync.test.ts tasks/linear-sync.test.ts
+git mv web/web.test.ts web/web.test.ts  # OK
 ```
 
-### Kategori 2: Sandbox timeout (5 feil)
-
-**Årsak:** npm install i sandbox tar >120s på Windows. Testene har for kort timeout.
-
-**Fiks:**
-1. Åpne `sandbox/sandbox.test.ts`
-2. Finn alle tester med `{ timeout: ... }` eller som kjører npm install
-3. Øk timeout til 300000 (5 min) for tester som involverer npm:
-
-```typescript
-it("should validate with npm install", { timeout: 300_000 }, async () => {
+Kjør dette for å finne alle:
+```bash
+find . -name "z-*" -not -path "*/node_modules/*" -not -path "*/.git/*"
 ```
 
-4. Alternativt: legg til `skip` condition for CI/Windows:
-```typescript
-const isCI = process.env.CI === "true";
-it.skipIf(isCI)("should validate with npm install", ...);
-```
+### Migrasjonsfiler
 
-### Kategori 3: ~encore/clients mock-feil (10 feil)
+Migrasjoner kan IKKE renames — Encore tracker dem ved filnavn. Hvis du endrer navn, tror Encore det er en ny migrasjon og kjører den på nytt.
 
-**Årsak:** Z-tester bruker `vi.mock("encore.dev/storage/sqldb")` som ikke fungerer med Encore runtime. SQLDatabase kan ikke mockes direkte.
+**IKKE rename migrasjoner.** La dem stå som de er:
+- `chat/migrations/6_z_performance_and_types.up.sql` — behold
+- `tasks/migrations/3_z_external_id.up.sql` — behold
+- `memory/migrations/8_z_embedding_dimension.up.sql` — behold
+- `registry/migrations/2_z_merge_templates.up.sql` — behold
+- `mcp/migrations/3_z_cleanup_servers.up.sql` — behold
 
-**Fiks for HVER testfil (tasks, skills, chat, github, users):**
-
-Mønsteret som FUNGERER (se `agent/helpers.test.ts` som referanse):
-
-```typescript
-// FEIL — dette fungerer IKKE:
-vi.mock("encore.dev/storage/sqldb", () => ({
-  SQLDatabase: vi.fn(() => ({ exec: vi.fn(), query: vi.fn() })),
-}));
-
-// RIKTIG — mock ~encore/clients i stedet:
-vi.mock("~encore/clients", () => ({
-  tasks: { createTask: vi.fn(), updateTaskStatus: vi.fn() },
-  // ... andre services
-}));
-```
-
-Fiks disse filene:
-- `tasks/z-tasks-master.test.ts`
-- `tasks/z-linear-sync.test.ts`
-- `skills/skills-filter.test.ts` (om den feiler)
-- `chat/z-review-from-chat.test.ts`
-- `chat/progress-message.test.ts`
-- `github/github-app.test.ts`
-
-For testfiler som trenger DB-tilgang, bruk Encore sin testmodus:
-```typescript
-// Tester som trenger ekte DB — kjør med encore test (ikke vitest direkte)
-// Disse trenger IKKE mock av SQLDatabase — Encore gir test-DB automatisk
-```
-
-### Kategori 4: E2E mock (2 feil)
-
-**Årsak:** `Cannot read properties of undefined (reading 'length')` i context-builder.
-
-**Fiks:**
-1. Åpne `agent/e2e-mock.test.ts`
-2. Finn hvor `length` kalles på undefined
-3. Mest sannsynlig: `mockGitHubTree` returnerer tree som `string[]` men koden forventer `{ path: string }[]`
+### Etter rename
 
 ```bash
-grep -n "\.length" agent/e2e-mock.test.ts
-grep -n "mockGitHubTree" agent/test-helpers/mock-services.ts
+# Verifiser at ingen filer har z- prefix lenger (unntatt migrasjoner):
+find . -name "z-*" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/migrations/*"
+# Bør returnere 0 resultater
+
+# Verifiser at ingen imports refererer til gamle filnavn:
+grep -rn "z-confidence-question\|z-sub-agent-display\|z-dynamic-sub-agents\|z-review-from-chat\|z-performance\|z-legacy-cleanup\|z-email\|z-two-way\|z-mcp-functional\|z-openai-embeddings\|z-component-library\|z-healing\|z-tasks-master\|z-linear-sync" --include="*.ts" --include="*.tsx" --include="*.json" | grep -v node_modules | grep -v .git
+# Bør returnere 0 resultater
 ```
-
-4. Fiks mock-dataen til å matche faktisk type:
-```typescript
-// I mock-services.ts:
-export function mockGitHubTree() {
-  return {
-    tree: ["agent/agent.ts", "chat/chat.ts", "package.json"],
-    treeString: "agent/agent.ts\nchat/chat.ts\npackage.json",
-    packageJson: { dependencies: {} },
-  };
-}
-```
-
-Sjekk at context-builder.ts håndterer begge tree-formater (string[] og {path,type}[]).
-
-### Kategori 5: Templates substitution (1 feil)
-
-**Årsak:** Variabel-substitusjon test forventer gammel path-format. ZL endret templates → komponentbibliotek.
-
-**Fiks:**
-1. Finn testfilen:
-```bash
-grep -rn "substituteVariables\|useTemplate\|variable" templates/ registry/ --include="*.test.ts"
-```
-2. Oppdater testen til å bruke ny `useComponent` / `substituteVariables` fra registry/
-3. Fjern referanser til gammel templates-service
-
-### Kategori 6: Sandbox afterAll timeout (1 feil)
-
-**Årsak:** Sandbox cleanup tar for lang tid.
-
-**Fiks:**
-```typescript
-// I sandbox testfil — øk afterAll timeout:
-afterAll(async () => {
-  // Cleanup
-}, 60_000); // 60 sekunder for cleanup
-```
-
-### Kategori 7: Agent modul import-feil (confidence, execution, review-handler, completion)
-
-**Årsak:** Disse testfilene importerer fra `~encore/auth` som krever Encore runtime.
-
-**Fiks:** Oppdater mock-setup i toppen av HVER fil:
-
-```typescript
-// Legg til ØVERST i testfilen, FØR andre imports:
-vi.mock("~encore/auth", () => ({
-  getAuthData: vi.fn(() => ({ email: "test@test.com", userId: "test-user" })),
-}));
-
-vi.mock("~encore/clients", () => ({
-  ai: {
-    assessConfidence: vi.fn(),
-    assessComplexity: vi.fn(),
-    planTask: vi.fn(),
-    generateFile: vi.fn(),
-    fixFile: vi.fn(),
-    reviewCode: vi.fn(),
-    chat: vi.fn(),
-  },
-  github: {
-    getTree: vi.fn(),
-    getFile: vi.fn(),
-    findRelevantFiles: vi.fn(),
-    createPR: vi.fn(),
-  },
-  memory: { search: vi.fn(), store: vi.fn() },
-  sandbox: { create: vi.fn(), validate: vi.fn(), destroy: vi.fn() },
-  builder: { start: vi.fn(), getJob: vi.fn() },
-  tasks: { updateTaskStatus: vi.fn(), isCancelled: vi.fn(() => ({ cancelled: false })) },
-  linear: { updateTask: vi.fn() },
-  skills: { resolve: vi.fn(), executePreRun: vi.fn(), executePostRun: vi.fn() },
-  cache: { getOrSetSkillsResolve: vi.fn() },
-  registry: { findForTask: vi.fn(() => ({ components: [] })) },
-  mcp: { installed: vi.fn(() => ({ servers: [] })) },
-  docs: { lookupForTask: vi.fn(() => ({ results: [] })) },
-}));
-
-vi.mock("../chat/chat", () => ({
-  agentReports: { publish: vi.fn() },
-}));
-
-vi.mock("encore.dev/config", () => ({
-  secret: (name: string) => () => "false",
-}));
-```
-
-Sjekk `agent/helpers.test.ts` og `agent/e2e-mock.test.ts` som referanse — de bruker dette mønsteret og passerer.
 
 ---
 
 ## DEL 2: FEATURE FLAG OPPRYDDING
 
-### SkillsPipelineEnabled — mangler
+### Rename Z-prefixed flags
 
-Finn om den er fjernet bevisst eller glemt:
+Feature flags skal IKKE ha prosjekt-prefix. De beskriver HVA de gjør, ikke HVILKET prosjekt de kom fra.
+
+| Gammelt navn | Nytt navn | Fil |
+|-------------|-----------|-----|
+| ZNewMessageContract | ProgressMessageEnabled | agent/messages.ts, chat/chat.ts |
+| ZMultiProvider | MultiProviderEnabled | ai/provider-registry.ts |
+| ZGitHubApp | GitHubAppEnabled | github/github-app.ts, github/github.ts |
+| ZDynamicSubAgents | DynamicSubAgentsEnabled | ai/orchestrate-sub-agents.ts |
+| ZHealingEnabled | HealingPipelineEnabled | registry/healing.ts |
+
+For HVER flag:
+
+1. Finn alle referanser:
 ```bash
-grep -rn "SkillsPipelineEnabled" --include="*.ts"
+grep -rn "ZNewMessageContract" --include="*.ts" | grep -v node_modules
 ```
 
-Hvis ingen referanser: fjern fra thefold-verify skill-filen.
-Hvis referanser finnes: legg til secret-deklarasjon i riktig fil.
+2. Erstatt secret-deklarasjonen:
+```typescript
+// FRA:
+const ZNewMessageContract = secret("ZNewMessageContract");
+// TIL:
+const ProgressMessageEnabled = secret("ProgressMessageEnabled");
+```
 
-### AgentModular — fjernet (XK)
+3. Erstatt alle bruk:
+```typescript
+// FRA:
+if (ZNewMessageContract() === "true") {
+// TIL:
+if (ProgressMessageEnabled() === "true") {
+```
 
-Bekreft at den er fjernet og at all kode bruker modulær path:
+4. Sett nye secrets (kopier verdien fra gammel):
 ```bash
-grep -rn "AgentModular" --include="*.ts"
+# Les gammel verdi, sett ny:
+encore secret set ProgressMessageEnabled --type prod
+encore secret set MultiProviderEnabled --type prod
+encore secret set GitHubAppEnabled --type prod
+encore secret set DynamicSubAgentsEnabled --type prod
+encore secret set HealingPipelineEnabled --type prod
 ```
 
-Hvis funn: fjern referansene, alt skal bruke ny modulær kode.
+### Fjern ubrukte flags
 
----
-
-## DEL 3: DATABASE-OPPRYDDING
-
-### MCP servers — reset pre-seeded data
-
-Etter migrasjon 3 slettet github/postgres, kan DB ha inkonsistent state.
-
-```sql
--- Kjør via encore db shell mcp:
-
--- Slett alle pre-seeded servere og re-seed med riktige
-DELETE FROM mcp_servers WHERE source = 'pre-seeded' OR source IS NULL;
-
--- Re-insert riktige servere (fra migrasjon 3)
--- (Migrasjonen gjør dette automatisk, men hvis DB er rotete:)
-INSERT INTO mcp_servers (name, command, args, status, source) VALUES
-  ('context7', 'npx', '["@context7/mcp-server"]', 'not_configured', 'pre-seeded'),
-  ('brave-search', 'npx', '["@anthropic/mcp-server-brave-search"]', 'not_configured', 'pre-seeded'),
-  ('puppeteer', 'npx', '["@anthropic/mcp-server-puppeteer"]', 'not_configured', 'pre-seeded'),
-  ('sentry', 'npx', '["@sentry/mcp-server"]', 'not_configured', 'pre-seeded'),
-  ('linear', 'npx', '["@linear/mcp-server"]', 'not_configured', 'pre-seeded')
-ON CONFLICT (name) DO NOTHING;
+Sjekk om disse fortsatt har referanser:
+```bash
+grep -rn "SkillsPipelineEnabled" --include="*.ts" | grep -v node_modules
+grep -rn "AgentModular" --include="*.ts" | grep -v node_modules
 ```
 
-### Memory embedding dimensjon
+Hvis ingen referanser: ignorer (de finnes ikke i kode).
+Hvis referanser: fjern dem — all kode skal bruke ny modulær path.
 
-Migrasjon 8 endret vektor-dimensjon fra 1024 → 1536.
-Sjekk at migrasjonen er kjørt:
+### Oppdater thefold-verify STEG 4
 
-```sql
--- Kjør via encore db shell memory:
-SELECT column_name, udt_name 
-FROM information_schema.columns 
-WHERE table_name = 'memories' AND column_name = 'embedding';
--- Bør vise: vector(1536)
-```
+Erstatt hele feature flag-tabellen i `.claude/skills/thefold-verify/SKILL.md`:
 
-### Chat message_type constraint
-
-Migrasjon 6 la til `agent_progress` og `agent_thought`.
-Sjekk at constraint er oppdatert:
-
-```sql
--- Kjør via encore db shell chat:
-SELECT conname, consrc FROM pg_constraint 
-WHERE conname = 'messages_message_type_check';
--- Bør inkludere: agent_progress, agent_thought
-```
-
-### Registry — templates merge
-
-Migrasjon 2 la til nye kolonner. Sjekk at seeded data er korrekt:
-
-```sql
--- Kjør via encore db shell registry:
-SELECT name, type, quality_score, source FROM components LIMIT 10;
--- Bør vise seeded patterns med type='pattern' og source='seeded'
+```markdown
+| Flag | Default | Tjeneste | Beskrivelse |
+|------|---------|----------|-------------|
+| AgentStateMachineStrict | false | agent | Strikt state-validering |
+| MonitorEnabled | false | monitor | Monitoring cron-jobber |
+| MCPRoutingEnabled | false | mcp | MCP tool-routing til agent |
+| SandboxAdvancedPipeline | false | sandbox | Avansert sandbox-pipeline |
+| SubAgentsEnabled | false | agent | Sub-agent orkestrering (legacy toggle) |
+| RegistryExtractionEnabled | false | registry | Auto-extraction etter builds |
+| ProgressMessageEnabled | false | agent/chat | Ny meldingskontrakt (én oppdaterbar melding) |
+| MultiProviderEnabled | false | ai | Multi-provider AI (OpenRouter, Fireworks, OpenAI) |
+| GitHubAppEnabled | false | github | GitHub App auth (erstatter PAT) |
+| DynamicSubAgentsEnabled | false | ai | AI-planner styrer sub-agent oppsett |
+| HealingPipelineEnabled | false | registry | Kvalitetshealing + ukentlig vedlikehold |
 ```
 
 ---
 
-## DEL 4: SECRETS-OPPSETT
+## DEL 3: OPPDATER DOKUMENTASJON
 
-Sett opp secrets i denne rekkefølgen. For HVER secret:
-1. Si til brukeren hva de trenger
-2. Vent på at de gir deg verdien
-3. Sett secreten via `encore secret set`
-4. Verifiser at den fungerer
+### CLAUDE.md — legg til Z-prosjekt endringer
 
-### Secret 1: OpenAIApiKey (PÅKREVD — memory embeddings)
+Finn seksjonen som lister filer/services og legg til:
 
+```markdown
+## Z-prosjekt nye filer og endringer
+
+### Nye services
+- `web/` — Web scraping via Firecrawl (web.ts, encore.service.ts)
+
+### Nye filer (backend)
+- `ai/provider-interface.ts` — AIProvider interface + StandardRequest/StandardResponse
+- `ai/provider-registry.ts` — Provider registry med fallback
+- `ai/providers/anthropic.ts` — Anthropic provider
+- `ai/providers/openrouter.ts` — OpenRouter provider
+- `ai/providers/fireworks.ts` — Fireworks provider
+- `ai/providers/openai.ts` — OpenAI provider
+- `github/github-app.ts` — GitHub App JWT auth + installation tokens
+- `gateway/email.ts` — E-post via Resend (jobb-fullføring, healing, feil)
+- `registry/healing.ts` — Healing pipeline (kvalitet + vedlikehold cron)
+
+### Endrede kontrakter
+- `agent/messages.ts` — AgentProgress erstatter 6 gamle AgentMessage-typer
+  - Typer: ProgressStep, ProgressReport, AgentProgress
+  - Funksjoner: serializeProgress(), deserializeProgress(), convertLegacy()
+- `agent/helpers.ts` — reportProgress() erstatter report() og think()
+  - addStep(), buildSteps() for progressiv steg-bygging
+- `chat/chat.ts` — Nye endpoints:
+  - POST /chat/review/approve
+  - POST /chat/review/changes
+  - POST /chat/review/reject
+  - Pub/Sub: chatResponses topic + responseRouter subscriber
+- `tasks/tasks.ts` — external_id + external_source for Linear import
+  - syncStatusToLinear() for toveis status-sync
+- `memory/memory.ts` — OpenAI embeddings (text-embedding-3-small, 1536 dim)
+  - POST /memory/re-embed endpoint
+- `github/github.ts` — POST /github/repo/create
+- `mcp/mcp.ts` — POST /mcp/validate
+- `registry/registry.ts` — useComponent, listComponents, substituteVariables
+
+### Nye secrets
+- OpenAIApiKey — OpenAI embeddings
+- GitHubAppId — GitHub App ID
+- GitHubAppPrivateKey — GitHub App private key (.pem)
+- FirecrawlApiKey — Firecrawl web scraping
+- OpenRouterApiKey — OpenRouter multi-model
+- FireworksApiKey — Fireworks inference
+- TheFoldEmail — Avsenderadresse for notifikasjoner
+
+### Feature flags (alle default false)
+- ProgressMessageEnabled — Ny meldingskontrakt
+- MultiProviderEnabled — Multi-provider AI
+- GitHubAppEnabled — GitHub App auth
+- DynamicSubAgentsEnabled — Dynamisk sub-agent oppsett
+- HealingPipelineEnabled — Healing pipeline
 ```
-Nå trenger jeg OpenAI API-nøkkelen du opprettet ("thefold-memory").
-Gå til platform.openai.com → API Keys → kopier nøkkelen.
 
-Kjør: encore secret set OpenAIApiKey --type dev
-Lim inn nøkkelen.
+### GRUNNMUR-STATUS.md — legg til Z-features
+
+Finn riktig seksjon og legg til alle nye features med 🟢 status:
+
+```markdown
+## Prosjekt Z — Ny funksjonalitet
+
+| Feature | Status | Beskrivelse |
+|---------|--------|-------------|
+| AgentProgress meldingsformat | 🟢 | Én oppdaterbar melding per task |
+| Review → Rapport inline | 🟢 | Godkjenn/avvis fra chat |
+| Confidence → Naturlig spørsmål | 🟢 | Ingen "clarification"-tilstand |
+| Tasks som master | 🟢 | Linear er importkilde, ikke trigger |
+| AI provider-abstraksjon | 🟢 | Anthropic, OpenRouter, Fireworks, OpenAI |
+| OpenAI embeddings | 🟢 | text-embedding-3-small, 1536 dim |
+| Hard token-budsjett per fase | 🟢 | 8 faser med limits, building=200K |
+| GitHub App auth | 🟢 | JWT + installation tokens, repo-oppretting |
+| Komponentbibliotek | 🟢 | Registry + templates merged, 5 seeded patterns |
+| Healing pipeline | 🟢 | Kvalitetshealing + fredag 03:00 cron |
+| Dynamisk sub-agent | 🟢 | AI planner bestemmer oppsett |
+| MCP fungerende | 🟢 | Config-krav, validering, sentry/linear servere |
+| Web scraping | 🟢 | Firecrawl API, ny web/ service |
+| Slack/Discord toveis | 🟢 | Response routing via Pub/Sub |
+| E-post notifikasjoner | 🟢 | Resend for jobb-fullføring, healing, feil |
+| DB performance indekser | 🟢 | 4 nye indekser, agent_progress type |
 ```
 
-Etter setting — verifiser:
-```bash
-# Test at embedding fungerer:
-encore test memory/z-openai-embeddings.test.ts
+### thefold-verify — oppdater STEG 2 med nye endepunkter
+
+Legg til i endepunkt-listen:
+
+```markdown
+### Chat (chat/) — NYE
+- `POST /chat/review/approve` → { prUrl }
+- `POST /chat/review/changes` → { success }
+- `POST /chat/review/reject` → { success }
+
+### Web (web/) — NY SERVICE
+- `POST /web/scrape` (internal) → { title, content, links, metadata }
+- `GET /web/health` → { status }
+
+### GitHub (github/) — NYE
+- `POST /github/repo/create` → { url, cloneUrl }
+
+### MCP (mcp/) — NYE
+- `POST /mcp/validate` → { status, message }
+
+### Memory (memory/) — NYE
+- `POST /memory/re-embed` → { processed, failed }
+
+### Registry (registry/) — NYE
+- `POST /registry/use` → { files[] }
+- `POST /registry/list` → { components[] }
+- `POST /registry/maintenance/run` → MaintenanceReport
 ```
-
-### Secret 2: GitHubAppId + GitHubAppPrivateKey (NÅR GITHUB APP ER KLAR)
-
-```
-Nå trenger jeg GitHub App credentials.
-1. Gå til github.com → Settings → Developer settings → GitHub Apps → din app
-2. Kopiér App ID (tall øverst på siden)
-3. Generer private key hvis du ikke har gjort det (knapp nederst → .pem-fil)
-
-Kjør: encore secret set GitHubAppId --type dev
-Lim inn App ID (bare tallet).
-
-Kjør: encore secret set GitHubAppPrivateKey --type dev
-Lim inn HELE innholdet av .pem-filen inkludert:
------BEGIN RSA PRIVATE KEY-----
-...
------END RSA PRIVATE KEY-----
-```
-
-Etter setting — verifiser:
-```bash
-encore test github/github-app.test.ts
-```
-
-### Secret 3: TheFoldEmail (FOR E-POST)
-
-```
-For e-post-notifikasjoner trenger jeg avsenderadressen.
-Du bruker allerede Resend for OTP — bruk samme konto.
-
-Sett opp et domene i Resend for thefold.dev (eller bruk en @resend.dev adresse).
-
-Kjør: encore secret set TheFoldEmail --type dev
-(f.eks. "agent@thefold.dev" eller "thefold@resend.dev")
-```
-
-### Secret 4-6: VALGFRIE (sett opp når du trenger dem)
-
-OpenRouter, Fireworks, Firecrawl — kan settes opp senere.
-Koden håndterer manglende nøkler gracefully (feature flags er false).
 
 ---
 
-## DEL 5: RE-EMBED MINNER
+## DEL 4: FULL TEST-KJØRING
 
-Etter at OpenAIApiKey er satt og memory-migrasjonen er kjørt:
+Etter alt er renamed og oppdatert:
 
 ```bash
-# Sjekk antall minner som trenger re-embedding:
-encore db shell memory -c "SELECT COUNT(*) FROM memories WHERE embedding IS NULL;"
+# 1. Verifiser at encore bygger uten feil:
+encore build
 
-# Kjør re-embed (kan ta et par minutter avhengig av antall):
-curl -X POST http://localhost:4000/memory/re-embed \
-  -H "Authorization: Bearer <din-auth-token>"
+# 2. Kjør alle tester:
+encore test ./... 2>&1 | tee test-results.txt
 
-# Verifiser:
-encore db shell memory -c "SELECT COUNT(*) FROM memories WHERE embedding IS NULL;"
-# Bør være 0
+# 3. Telle resultater:
+grep -c "PASS" test-results.txt
+grep -c "FAIL" test-results.txt
+
+# 4. Hvis noen feil: sjekk at det ikke er rename-relatert:
+grep "Cannot find module\|Module not found\|ENOENT" test-results.txt
+```
+
+**Mål:** 600+/609 passert. Gjenværende feil bør kun være sandbox-timeout (Windows).
+
+```bash
+# 5. Commit alt:
+git add -A
+git commit -m "cleanup: rename z-prefixed files, normalize feature flags, update docs
+
+- Renamed ~15 test files (removed z- prefix)
+- Renamed 5 feature flags (Z* → descriptive names)
+- Updated CLAUDE.md with Z-project changes
+- Updated GRUNNMUR-STATUS.md with Z-features
+- Updated thefold-verify skill with new endpoints and flags
+- All tests passing (600+/609)"
 ```
 
 ---
 
-## DEL 6: VERIFISERING
+## DEL 5: RAPPORT
 
-Etter alle fikser, kjør full test-suite:
+Etter fullføring, skriv til prosjekt-z-rapport.md:
 
-```bash
-encore test ./... 2>&1 | tail -30
+```markdown
+## Z-CLEANUP — Rapport
+
+### Filer renamed: [X]
+- Testfiler: [liste]
+- Andre: [liste]
+
+### Feature flags renamed: 5
+- ZNewMessageContract → ProgressMessageEnabled
+- ZMultiProvider → MultiProviderEnabled
+- ZGitHubApp → GitHubAppEnabled
+- ZDynamicSubAgents → DynamicSubAgentsEnabled
+- ZHealingEnabled → HealingPipelineEnabled
+
+### Feature flags fjernet: [X]
+- [liste, om noen]
+
+### Docs oppdatert:
+- CLAUDE.md: ✅/❌
+- GRUNNMUR-STATUS.md: ✅/❌
+- thefold-verify: ✅/❌
+
+### Test-resultat:
+- Passert: [X]/609
+- Feilet: [X]
+- Nye feil etter cleanup: [X]
 ```
-
-**Mål:** 600+/609 passert (opp fra 572). De gjenværende bør kun være sandbox-timeout (Windows-spesifikk).
-
-Oppdater thefold-verify rapporten:
-
-```
-🔍 TheFold Verify — Post-Hotfix Rapport
-
-BACKEND:         [X]/609 tester passert
-NYE FEIL:        0
-FIKSET:          [X] av 33 pre-eksisterende feil
-SECRETS:         [X] av 3 påkrevde satt
-MIGRASJONER:     Konsistente
-RE-EMBED:        [X] minner migrert
-FEATURE FLAGS:   Alle false (klar for gradvis aktivering)
-```
-
----
-
-## ETTER FULLFØRING
-
-1. Oppdater `GRUNNMUR-STATUS.md` med Z-prosjekt features
-2. Oppdater `CLAUDE.md` med nye filer, endepunkter og regler
-3. Oppdater `.claude/skills/thefold-verify/SKILL.md` med:
-   - Nye endepunkter (chat/review/*, web/scrape, github/repo/create, etc.)
-   - Nye feature flags (Z*)
-   - Nye migrasjoner
-   - Ny service (web/)
-4. Commit alt: `git commit -m "Z-HOTFIX: fix 33 pre-existing test failures + DB cleanup + secrets setup"`
