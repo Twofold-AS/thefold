@@ -20,7 +20,8 @@
       "mcp__firecrawl__firecrawl_scrape",
       "Bash(for page in home chat ai repos components settings login)",
       "Bash(do echo -n \"$page: \")",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(find:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

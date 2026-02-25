@@ -1,0 +1,32 @@
+export const T = {
+  bg: "#000000",
+  raised: "#0D0D0D",
+  surface: "#141414",
+  subtle: "#1A1A1A",
+  border: "#2A2A2A",
+  borderHover: "#3D3D3D",
+  text: "#F5F5F5",
+  textSec: "rgba(255,255,255,0.68)",
+  textMuted: "rgba(255,255,255,0.44)",
+  textFaint: "rgba(255,255,255,0.24)",
+  accent: "#6366F1",
+  accentDim: "rgba(99,102,241,0.12)",
+  brand: "#6366F1",
+  brandLight: "#A5B4FC",
+  success: "#34D399",
+  warning: "#FBBF24",
+  error: "#EF4444",
+  mono: "'Geist Mono', ui-monospace, monospace",
+  sans: "'Suisse Intl', 'SuisseIntl', 'Inter', -apple-system, system-ui, sans-serif",
+  brandFont: "'TheFold Brand', 'Suisse Intl', 'Inter', -apple-system, system-ui, sans-serif",
+  r: 8,
+} as const;
+
+export const Layout = {
+  sidebarWidth: 255,
+  sidebarCollapsed: 56,
+  contentWidth: 1636,
+  innerWidth: 1232,
+  headerHeight: 64,
+  sidePadding: (1636 - 1232) / 2,
+} as const;

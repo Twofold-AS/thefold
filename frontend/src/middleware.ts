@@ -19,7 +19,7 @@ export function middleware(request: NextRequest) {
   // Only positive redirect: logged-in user on /login -> send to /home
   // Route protection is handled client-side by useRequireAuth
   if (token && pathname === "/login") {
-    return NextResponse.redirect(new URL("/home", request.url));
+    return NextResponse.redirect(new URL("/", request.url));
   }
 
   return NextResponse.next();

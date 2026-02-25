@@ -1,326 +1,539 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { T } from "@/lib/tokens";
+import { GR } from "@/components/GridRow";
+import PixelCorners from "@/components/PixelCorners";
+import SectionLabel from "@/components/SectionLabel";
+import Btn from "@/components/Btn";
+import Tag from "@/components/Tag";
+import { useApiData } from "@/lib/hooks";
 import {
   listTheFoldTasks,
-  cancelTask,
+  listReviews,
+  syncLinearTasks,
+  approveReview,
+  requestReviewChanges,
+  rejectReview,
   type TheFoldTask,
+  type ReviewSummary,
 } from "@/lib/api";
-import { GridSection } from "@/components/ui/corner-ornament";
-import { Search, X, ChevronDown } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 
-const STATUSES = ["all", "in_progress", "planned", "in_review", "backlog", "done", "blocked"] as const;
-
-function statusDot(status: string) {
-  const color =
-    status === "in_progress" ? "var(--tf-heat)"
-    : status === "done" ? "var(--tf-success)"
-    : status === "blocked" ? "var(--tf-error)"
-    : status === "in_review" ? "var(--tf-warning)"
-    : "var(--tf-text-faint)";
-
-  const pulse = status === "in_progress";
-
-  return (
-    <span className="relative flex items-center justify-center w-2 h-2">
-      {pulse && (
-        <span
-          className="absolute inline-flex h-full w-full rounded-full opacity-50 animate-ping"
-          style={{ background: color }}
-        />
-      )}
-      <span
-        className="relative inline-flex rounded-full w-1.5 h-1.5"
-        style={{ background: color }}
-      />
-    </span>
-  );
+function timeAgo(date: string): string {
+  const now = Date.now();
+  const then = new Date(date).getTime();
+  const diff = now - then;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "na";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}t`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  return `${months}mnd`;
 }
 
-function formatDate(dateStr: string | null) {
-  if (!dateStr) return "—";
-  const d = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffH = Math.floor(diffMs / 3600000);
-  if (diffH < 1) return "just now";
-  if (diffH < 24) return `${diffH}h ago`;
-  const diffD = Math.floor(diffH / 24);
-  if (diffD < 7) return `${diffD}d ago`;
-  return d.toLocaleDateString("en", { month: "short", day: "numeric" });
+function mapStatus(status: string): "done" | "active" | "pending" {
+  if (status === "done" || status === "completed") return "done";
+  if (status === "in_progress" || status === "in_review") return "active";
+  return "pending";
+}
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case "done":
+    case "completed":
+      return "done";
+    case "in_progress":
+      return "aktiv";
+    case "in_review":
+      return "review";
+    case "planned":
+      return "planlagt";
+    case "backlog":
+      return "backlog";
+    case "blocked":
+      return "blokkert";
+    default:
+      return status;
+  }
 }
 
 export default function TasksPage() {
-  const router = useRouter();
-  const [tasks, setTasks] = useState<TheFoldTask[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [repoFilter, setRepoFilter] = useState<string>("all");
+  const [sel, setSel] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
 
-  useEffect(() => {
-    loadTasks();
-  }, []);
+  const { data: taskData, loading: tasksLoading, refresh: refreshTasks } = useApiData(
+    () => listTheFoldTasks(),
+    [],
+  );
+  const { data: reviewData } = useApiData(() => listReviews({}), []);
 
-  async function loadTasks() {
+  const tasks: TheFoldTask[] = taskData?.tasks ?? [];
+  const reviews: ReviewSummary[] = reviewData?.reviews ?? [];
+
+  const t = sel !== null ? tasks.find((x) => x.id === sel) : null;
+  const tReview = t ? reviews.find((r) => r.taskId === t.id) : null;
+  const tStatus = t ? mapStatus(t.status) : "pending";
+
+  const handleSync = async () => {
+    setSyncing(true);
     try {
-      setLoading(true);
-      const result = await listTheFoldTasks({ limit: 200 });
-      setTasks(result.tasks);
-      setTotal(result.total);
-    } catch {
-      // silently handle — empty list shown
+      const result = await syncLinearTasks();
+      alert(`Linear sync: ${result.created} opprettet, ${result.updated} oppdatert (${result.total} totalt)`);
+      refreshTasks();
+    } catch (e) {
+      alert(`Sync feilet: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setLoading(false);
+      setSyncing(false);
     }
-  }
+  };
 
-  const repos = useMemo(() => {
-    const set = new Set<string>();
-    tasks.forEach((t) => { if (t.repo) set.add(t.repo); });
-    return Array.from(set).sort();
-  }, [tasks]);
-
-  const filtered = useMemo(() => {
-    return tasks.filter((t) => {
-      if (statusFilter !== "all" && t.status !== statusFilter) return false;
-      if (repoFilter !== "all" && t.repo !== repoFilter) return false;
-      if (search) {
-        const q = search.toLowerCase();
-        if (!t.title.toLowerCase().includes(q) && !t.description.toLowerCase().includes(q)) return false;
-      }
-      return true;
-    });
-  }, [tasks, statusFilter, repoFilter, search]);
-
-  function handleClick(task: TheFoldTask) {
-    // Navigate to chat — if task has a known conversation, use it
-    const repoPrefix = task.repo ? `repo-${task.repo.split("/").pop()}-` : "main-";
-    router.push(`/chat?repo=${encodeURIComponent(task.repo || "")}`);
-  }
-
-  async function handleCancel(e: React.MouseEvent, taskId: string) {
-    e.stopPropagation();
+  const handleApprove = async () => {
+    const reviewId = t?.reviewId || tReview?.id;
+    if (!reviewId) {
+      alert("Ingen review tilgjengelig for denne oppgaven.");
+      return;
+    }
+    setActionLoading("approve");
     try {
-      await cancelTask(taskId);
-      loadTasks();
-    } catch {
-      // ignore
+      const result = await approveReview(reviewId);
+      alert(`Godkjent! PR: ${result.prUrl}`);
+      refreshTasks();
+    } catch (e) {
+      alert(`Feil: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setActionLoading(null);
     }
-  }
+  };
+
+  const handleRequestChanges = async () => {
+    const reviewId = t?.reviewId || tReview?.id;
+    if (!reviewId) {
+      alert("Ingen review tilgjengelig for denne oppgaven.");
+      return;
+    }
+    const feedback = prompt("Hva skal endres?");
+    if (!feedback) return;
+    setActionLoading("changes");
+    try {
+      await requestReviewChanges(reviewId, feedback);
+      alert("Endringer forespurt.");
+      refreshTasks();
+    } catch (e) {
+      alert(`Feil: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleReject = async () => {
+    const reviewId = t?.reviewId || tReview?.id;
+    if (!reviewId) {
+      alert("Ingen review tilgjengelig for denne oppgaven.");
+      return;
+    }
+    const reason = prompt("Grunn for avvisning (valgfritt):");
+    setActionLoading("reject");
+    try {
+      await rejectReview(reviewId, reason || undefined);
+      alert("Avvist.");
+      refreshTasks();
+    } catch (e) {
+      alert(`Feil: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
 
   return (
-    <div className="min-h-full page-enter" style={{ background: "var(--tf-bg-base)" }}>
-      {/* Header */}
-      <GridSection showTop={false} className="px-6 pt-8 pb-6">
-        <div className="max-w-4xl">
-          <h1 className="text-display-lg mb-1" style={{ color: "var(--tf-text-primary)" }}>
-            Tasks
-          </h1>
-          <p className="text-sm mb-5" style={{ color: "var(--tf-text-muted)" }}>
-            {total} total — {tasks.filter((t) => t.status === "in_progress").length} active
-          </p>
-
-          {/* Filters row */}
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Search */}
-            <div className="relative flex-1 min-w-[200px] max-w-sm">
-              <Search
-                className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5"
-                style={{ color: "var(--tf-text-faint)" }}
-              />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search tasks..."
-                className="w-full rounded-lg py-2 pl-9 pr-8 text-sm outline-none transition-colors"
-                style={{
-                  background: "var(--tf-surface)",
-                  border: "1px solid var(--tf-border-faint)",
-                  color: "var(--tf-text-primary)",
-                }}
-                onFocus={(e) => { e.currentTarget.style.borderColor = "var(--tf-heat)"; }}
-                onBlur={(e) => { e.currentTarget.style.borderColor = "var(--tf-border-faint)"; }}
-              />
-              {search && (
-                <button
-                  onClick={() => setSearch("")}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2"
-                  style={{ color: "var(--tf-text-faint)" }}
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            {/* Status filter */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className="control-chip">
-                  <span className="text-xs">
-                    {statusFilter === "all" ? "All statuses" : statusFilter.replace(/_/g, " ")}
-                  </span>
-                  <ChevronDown className="w-2.5 h-2.5" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-44">
-                {STATUSES.map((s) => (
-                  <DropdownMenuItem key={s} onClick={() => setStatusFilter(s)}>
-                    {s === "all" ? "All statuses" : s.replace(/_/g, " ")}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            {/* Repo filter */}
-            {repos.length > 0 && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="control-chip">
-                    <span className="text-xs">
-                      {repoFilter === "all" ? "All repos" : repoFilter.split("/").pop()}
-                    </span>
-                    <ChevronDown className="w-2.5 h-2.5" />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-56">
-                  <DropdownMenuItem onClick={() => setRepoFilter("all")}>
-                    All repos
-                  </DropdownMenuItem>
-                  {repos.map((r) => (
-                    <DropdownMenuItem key={r} onClick={() => setRepoFilter(r)}>
-                      {r}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-          </div>
-        </div>
-      </GridSection>
-
-      {/* Task list */}
-      <GridSection className="px-6 py-2">
-        {loading ? (
-          <div className="space-y-1">
-            {[1, 2, 3, 4, 5].map((i) => (
-              <div
-                key={i}
-                className="h-14 rounded-lg animate-pulse"
-                style={{ background: "var(--tf-surface-raised)" }}
-              />
-            ))}
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="py-16 text-center">
-            <p className="text-sm" style={{ color: "var(--tf-text-muted)" }}>
-              {tasks.length === 0 ? "No tasks yet" : "No tasks match your filters"}
+    <>
+      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <h2
+              style={{
+                fontSize: 28,
+                fontWeight: 600,
+                color: T.text,
+                letterSpacing: "-0.03em",
+                fontFamily: T.brandFont,
+                marginBottom: 8,
+              }}
+            >
+              Tasks
+            </h2>
+            <p style={{ fontSize: 13, color: T.textMuted }}>
+              Oppgaver utfort av agenten med kvalitetsrapport.
             </p>
           </div>
-        ) : (
-          <div className="divide-y" style={{ borderColor: "var(--tf-border-faint)" }}>
-            {/* Table header */}
-            <div
-              className="grid grid-cols-[1fr_120px_120px_100px] gap-4 px-3 py-2 text-[11px] font-medium tracking-wider uppercase"
-              style={{ color: "var(--tf-text-faint)" }}
-            >
-              <span>Task</span>
-              <span>Status</span>
-              <span>Repo</span>
-              <span className="text-right">Updated</span>
-            </div>
-
-            {/* Rows */}
-            {filtered.map((task) => (
-              <button
-                key={task.id}
-                onClick={() => handleClick(task)}
-                className="w-full grid grid-cols-[1fr_120px_120px_100px] gap-4 px-3 py-3 text-left transition-colors rounded-lg group"
-                style={{ color: "var(--tf-text-primary)" }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--tf-surface-raised)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "transparent";
-                }}
+          <div style={{ display: "flex", gap: 8 }}>
+            <Btn sm onClick={() => alert("Ny task-modal kommer snart.")}>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 14 14"
+                fill="none"
+                style={{ marginRight: 4 }}
               >
-                {/* Title + source badge */}
-                <div className="min-w-0 flex items-center gap-2">
-                  {statusDot(task.status)}
-                  <span
-                    className="truncate text-sm"
+                <path
+                  d="M7 1v12M1 7h12"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                />
+              </svg>
+              Ny task
+            </Btn>
+            <Btn primary sm onClick={handleSync}>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 14 14"
+                fill="none"
+                style={{ marginRight: 4 }}
+              >
+                <rect
+                  x="2"
+                  y="2"
+                  width="10"
+                  height="10"
+                  rx="1"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  fill="none"
+                />
+                <path d="M5 5l4 2-4 2V5z" fill="currentColor" />
+              </svg>
+              {syncing ? "Synkroniserer..." : "Importer fra Linear"}
+            </Btn>
+          </div>
+        </div>
+      </div>
+
+      <GR>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: t ? "1fr 1fr" : "1fr",
+            border: `1px solid ${T.border}`,
+            minHeight: 400,
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          <PixelCorners />
+          {/* Task list */}
+          <div style={{ borderRight: t ? `1px solid ${T.border}` : "none" }}>
+            {tasksLoading ? (
+              <div style={{ padding: "40px 20px", textAlign: "center" }}>
+                <span style={{ fontSize: 13, color: T.textMuted }}>Laster oppgaver...</span>
+              </div>
+            ) : tasks.length === 0 ? (
+              <div style={{ padding: "40px 20px", textAlign: "center" }}>
+                <span style={{ fontSize: 13, color: T.textFaint }}>Ingen oppgaver enna</span>
+              </div>
+            ) : (
+              tasks.map((tk, i) => {
+                const st = mapStatus(tk.status);
+                const review = reviews.find((r) => r.taskId === tk.id);
+                return (
+                  <div
+                    key={tk.id}
+                    onClick={() => setSel(tk.id === sel ? null : tk.id)}
                     style={{
-                      fontWeight: task.status === "in_progress" ? 500 : 400,
-                      opacity: task.status === "done" ? 0.6 : 1,
+                      padding: "14px 20px",
+                      cursor: "pointer",
+                      background: sel === tk.id ? T.subtle : "transparent",
+                      borderBottom: i < tasks.length - 1 ? `1px solid ${T.border}` : "none",
+                      borderLeft:
+                        sel === tk.id ? `3px solid ${T.accent}` : "3px solid transparent",
+                      transition: "all 0.1s",
                     }}
                   >
-                    {task.title}
-                  </span>
-                  {task.source !== "manual" && (
-                    <span
-                      className="text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0"
+                    <div
                       style={{
-                        color: "var(--tf-text-faint)",
-                        background: "var(--tf-surface-raised)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        marginBottom: 4,
                       }}
                     >
-                      {task.source}
-                    </span>
-                  )}
-                </div>
+                      <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                        {tk.id.substring(0, 8)}
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 500, color: T.text, flex: 1 }}>
+                        {tk.title}
+                      </span>
+                      <Tag
+                        variant={
+                          st === "done"
+                            ? "success"
+                            : st === "active"
+                              ? "accent"
+                              : "default"
+                        }
+                      >
+                        {statusLabel(tk.status)}
+                      </Tag>
+                    </div>
+                    <div style={{ display: "flex", gap: 12 }}>
+                      <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                        {tk.repo}
+                      </span>
+                      {tk.source === "linear" && (
+                        <span style={{ fontSize: 10, fontFamily: T.mono, color: "#A5B4FC" }}>
+                          linear
+                        </span>
+                      )}
+                      {review && review.qualityScore !== null && (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            fontFamily: T.mono,
+                            color:
+                              review.qualityScore >= 8
+                                ? T.success
+                                : review.qualityScore >= 6
+                                  ? T.warning
+                                  : T.error,
+                          }}
+                        >
+                          kvalitet: {review.qualityScore}/10
+                        </span>
+                      )}
+                      <span style={{ fontSize: 10, color: T.textFaint, marginLeft: "auto" }}>
+                        {timeAgo(tk.createdAt)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
 
-                {/* Status text */}
-                <span
-                  className="text-xs capitalize self-center"
+          {/* Detail panel */}
+          {t && (
+            <div style={{ padding: 24, overflow: "auto" }}>
+              <div style={{ marginBottom: 20 }}>
+                <div
                   style={{
-                    color:
-                      task.status === "in_progress" ? "var(--tf-heat)"
-                      : task.status === "done" ? "var(--tf-success)"
-                      : task.status === "blocked" ? "var(--tf-error)"
-                      : "var(--tf-text-muted)",
+                    fontSize: 18,
+                    fontWeight: 600,
+                    color: T.text,
+                    fontFamily: T.brandFont,
+                    marginBottom: 4,
                   }}
                 >
-                  {task.status.replace(/_/g, " ")}
-                  {task.status === "in_progress" && (
-                    <button
-                      onClick={(e) => handleCancel(e, task.id)}
-                      className="ml-2 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] underline"
-                      style={{ color: "var(--tf-text-faint)" }}
+                  {t.title}
+                </div>
+                <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                  <Tag variant={tStatus === "done" ? "success" : "accent"}>{statusLabel(t.status)}</Tag>
+                  <Tag>{t.repo}</Tag>
+                  {t.source === "linear" && <Tag variant="info">linear</Tag>}
+                  {t.source === "manual" && <Tag>manuell</Tag>}
+                  {t.source === "chat" && <Tag variant="brand">chat</Tag>}
+                </div>
+                {t.description && (
+                  <p style={{ fontSize: 12, color: T.textSec, lineHeight: 1.5, marginBottom: 12 }}>
+                    {t.description}
+                  </p>
+                )}
+              </div>
+
+              {tReview && tReview.qualityScore !== null ? (
+                <>
+                  <SectionLabel>KVALITETSRAPPORT</SectionLabel>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr 1fr",
+                      gap: 1,
+                      marginBottom: 20,
+                    }}
+                  >
+                    {[
+                      {
+                        l: "KVALITET",
+                        v: `${tReview.qualityScore}/10`,
+                        c:
+                          tReview.qualityScore >= 8
+                            ? T.success
+                            : tReview.qualityScore >= 6
+                              ? T.warning
+                              : T.error,
+                      },
+                      { l: "FILER", v: `${tReview.fileCount}` },
+                      { l: "STATUS", v: tReview.status },
+                    ].map((m, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          background: T.subtle,
+                          padding: "12px 16px",
+                          borderRadius: 6,
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 10,
+                            color: T.textMuted,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            marginBottom: 4,
+                          }}
+                        >
+                          {m.l}
+                        </div>
+                        <div style={{ fontSize: 20, fontWeight: 600, color: m.c || T.text }}>
+                          {m.v}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{ marginBottom: 20 }}>
+                    <div
+                      style={{
+                        height: 8,
+                        background: T.subtle,
+                        borderRadius: 4,
+                        overflow: "hidden",
+                        marginBottom: 4,
+                      }}
                     >
-                      cancel
-                    </button>
-                  )}
-                </span>
+                      <div
+                        style={{
+                          width: `${tReview.qualityScore * 10}%`,
+                          height: "100%",
+                          background:
+                            tReview.qualityScore >= 8
+                              ? T.success
+                              : tReview.qualityScore >= 6
+                                ? T.warning
+                                : T.error,
+                        }}
+                      />
+                    </div>
+                    <div style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                      Score: {tReview.qualityScore * 10}%
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <SectionLabel>KVALITETSRAPPORT</SectionLabel>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr 1fr",
+                      gap: 1,
+                      marginBottom: 20,
+                    }}
+                  >
+                    {[
+                      { l: "KVALITET", v: "\u2014" },
+                      { l: "FILER", v: "\u2014" },
+                      { l: "STATUS", v: "\u2014" },
+                    ].map((m, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          background: T.subtle,
+                          padding: "12px 16px",
+                          borderRadius: 6,
+                        }}
+                      >
+                        <div
+                          style={{
+                            fontSize: 10,
+                            color: T.textMuted,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            marginBottom: 4,
+                          }}
+                        >
+                          {m.l}
+                        </div>
+                        <div style={{ fontSize: 20, fontWeight: 600, color: T.textFaint }}>
+                          {m.v}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
 
-                {/* Repo */}
-                <span
-                  className="text-xs truncate self-center font-mono"
-                  style={{ color: "var(--tf-text-faint)" }}
-                >
-                  {task.repo ? task.repo.split("/").pop() : "—"}
-                </span>
+              <SectionLabel>LABELS</SectionLabel>
+              <div style={{ marginBottom: 20 }}>
+                {t.labels && t.labels.length > 0 ? (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {t.labels.map((label, i) => (
+                      <Tag key={i}>{label}</Tag>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12, color: T.textFaint }}>Ingen labels</div>
+                )}
+              </div>
 
-                {/* Updated */}
-                <span
-                  className="text-xs text-right self-center tabular-nums"
-                  style={{ color: "var(--tf-text-faint)" }}
-                >
-                  {formatDate(task.updatedAt)}
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
-      </GridSection>
-    </div>
+              {t.errorMessage && (
+                <>
+                  <SectionLabel>FEILMELDING</SectionLabel>
+                  <div
+                    style={{
+                      padding: "10px 14px",
+                      background: "rgba(239,68,68,0.08)",
+                      border: "1px solid rgba(239,68,68,0.2)",
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontFamily: T.mono,
+                      color: T.error,
+                      marginBottom: 20,
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    {t.errorMessage}
+                  </div>
+                </>
+              )}
+
+              {t.prUrl && (
+                <>
+                  <SectionLabel>PR</SectionLabel>
+                  <div style={{ marginBottom: 20 }}>
+                    <a
+                      href={t.prUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ fontSize: 12, fontFamily: T.mono, color: T.accent }}
+                    >
+                      {t.prUrl}
+                    </a>
+                  </div>
+                </>
+              )}
+
+              <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
+                <Btn primary sm onClick={handleApprove}>
+                  {actionLoading === "approve" ? "..." : "Godkjenn"}
+                </Btn>
+                <Btn sm onClick={handleRequestChanges}>
+                  {actionLoading === "changes" ? "..." : "Be om endringer"}
+                </Btn>
+                <Btn sm onClick={handleReject} style={{ color: T.error, borderColor: "rgba(99,102,241,0.3)" }}>
+                  {actionLoading === "reject" ? "..." : "Avvis"}
+                </Btn>
+              </div>
+            </div>
+          )}
+        </div>
+      </GR>
+      <GR mb={40}>
+        <div style={{ height: 1 }} />
+      </GR>
+    </>
   );
 }

@@ -1,915 +1,482 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useState, useEffect, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+import { T } from "@/lib/tokens";
+import PixelCorners from "@/components/PixelCorners";
+import ChatComposer from "@/components/ChatComposer";
+import ChatInput from "@/components/ChatInput";
+import AgentStream from "@/components/AgentStream";
+import RobotIcon from "@/components/icons/RobotIcon";
+import Btn from "@/components/Btn";
+import Tag from "@/components/Tag";
+import { useApiData } from "@/lib/hooks";
 import {
-  sendMessage,
-  getChatHistory,
-  getMainConversations,
-  getRepoConversations,
-  getInkognitoConversations,
-  getAllRepoConversations,
   getConversations,
-  mainConversationId,
-  repoConversationId,
+  getChatHistory,
+  sendMessage,
   inkognitoConversationId,
-  transferContext,
-  deleteConversation,
-  cancelChatGeneration,
-  cancelTask,
-  uploadChatFile,
-  approveReview,
-  rejectReview,
-  getTask,
-  listSkills,
-  type Message,
+  repoConversationId,
   type ConversationSummary,
-  type Skill,
+  type Message,
 } from "@/lib/api";
-import {
-  Plus,
-  Trash2,
-  ArrowRightLeft,
-  MessageSquare,
-  PanelLeftClose,
-  PanelLeft,
-  Sparkles,
-  Ghost,
-} from "lucide-react";
-import { ChatBubble } from "@/components/chat/chat-bubble";
-import { AgentProgressCard, type AgentProgressData, type ProgressStep } from "@/components/chat/agent-progress";
-import { ChatInput } from "@/components/chat/chat-input";
-import { ChatControls } from "@/components/chat/chat-controls";
-import { ThinkingIndicator } from "@/components/chat/thinking-indicator";
-import { usePreferences } from "@/contexts/UserPreferencesContext";
-import { useRepoContext } from "@/lib/repo-context";
 
-function parseAgentStatus(content: string): AgentProgressData | null {
-  try {
-    const parsed = JSON.parse(content);
-    return {
-      phase: parsed.phase || "unknown",
-      title: parsed.title || parsed.phase || "Working",
-      steps: (parsed.steps || []).map((s: { label: string; status: string }) => ({
-        label: s.label,
-        status: s.status === "done" ? "done" : s.status === "active" ? "active" : s.status === "error" ? "error" : "pending",
-      })) as ProgressStep[],
-      error: parsed.error,
-      reviewData: parsed.reviewData,
-      taskId: parsed.taskId,
-    };
-  } catch {
-    return null;
-  }
+function timeAgo(date: string): string {
+  const now = Date.now();
+  const then = new Date(date).getTime();
+  const diff = now - then;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "na";
+  if (mins < 60) return `${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}t`;
+  const days = Math.floor(hrs / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  return `${months}mnd`;
 }
 
-function parseAgentProgress(content: string): AgentProgressData | null {
-  try {
-    const parsed = JSON.parse(content);
-    if (parsed.status) {
-      return {
-        phase: parsed.phase || parsed.status,
-        title: parsed.summary || parsed.title || parsed.status,
-        steps: (parsed.steps || []).map((s: { label: string; status: string }) => ({
-          label: s.label,
-          status: s.status === "done" ? "done" : s.status === "active" ? "active" : s.status === "error" ? "error" : "pending",
-        })) as ProgressStep[],
-        error: parsed.error,
-        reviewData: parsed.report || parsed.reviewData,
-        taskId: parsed.taskId,
-      };
-    }
-    return parseAgentStatus(content);
-  } catch {
-    return parseAgentStatus(content);
-  }
+function GhostIcon({ color }: { color?: string }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
+      <path
+        d="M7 1C5 1 3.5 2.5 3 4c-.7 0-1.5.3-1.5 1.5C1.5 7 3 8 3 8s-.5 2 1 3.5c1 1 2 1.5 3 1.5s2-.5 3-1.5c1.5-1.5 1-3.5 1-3.5s1.5-1 1.5-2.5C12.5 4.3 11.7 4 11 4c-.5-1.5-2-3-4-3z"
+        stroke={color || T.textFaint}
+        strokeWidth="1.1"
+        fill="none"
+      />
+    </svg>
+  );
 }
 
-type ConvFilter = "all" | "repo" | "inkognito";
+function extractRepoFromId(id: string): string | null {
+  if (!id.startsWith("repo-")) return null;
+  // Format: "repo-{repoName}-{uuid}"
+  const rest = id.substring(5);
+  const lastDash = rest.lastIndexOf("-");
+  if (lastDash === -1) return rest;
+  // UUID has 4 dashes, so find the first segment before UUID
+  // repo-thefold-api-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+  const parts = rest.split("-");
+  // UUID is last 5 parts (8-4-4-4-12)
+  if (parts.length >= 6) {
+    return parts.slice(0, parts.length - 5).join("-");
+  }
+  return rest;
+}
 
-export default function ChatPage() {
-  const router = useRouter();
+function ChatPageInner() {
   const searchParams = useSearchParams();
-  const { preferences } = usePreferences();
-  const { repos, selectedRepo } = useRepoContext();
+  const autoMsg = searchParams.get("msg");
 
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
-  const [activeConvId, setActiveConvId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
+  const [ac, setAc] = useState<string | null>(null);
+  const [newChat, setNewChat] = useState(false);
+  const [tab, setTab] = useState<"Repo" | "Privat">("Repo");
   const [sending, setSending] = useState(false);
-  const [showConvList, setShowConvList] = useState(true);
-  const [transferring, setTransferring] = useState(false);
-  const [transferred, setTransferred] = useState<string | null>(null);
-  const [pollMode, setPollMode] = useState<"idle" | "waiting" | "cooldown">("idle");
-  const [cancelled, setCancelled] = useState(false);
-  const [statusOverride, setStatusOverride] = useState<Record<string, unknown> | null>(null);
-  const [statusDismissed, setStatusDismissed] = useState(false);
-  const [showRepoSelector, setShowRepoSelector] = useState(false);
+  const autoMsgSent = useRef(false);
+  const msgEndRef = useRef<HTMLDivElement>(null);
 
-  // Chat controls state
-  const [inkognito, setInkognito] = useState(false);
-  const [agentMode, setAgentMode] = useState(true);
-  const [subAgents, setSubAgents] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
-  const [chatRepo, setChatRepo] = useState<string | null>(null);
-  const [convFilter, setConvFilter] = useState<ConvFilter>("all");
-  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
-  const [availableSkills, setAvailableSkills] = useState<Skill[]>([]);
+  const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
+    () => getConversations(),
+    [],
+  );
+  const conversations: ConversationSummary[] = convData?.conversations ?? [];
 
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const isNearBottomRef = useRef(true);
+  const { data: msgData, loading: msgsLoading, refresh: refreshMsgs } = useApiData(
+    () => (ac ? getChatHistory(ac, 50) : Promise.resolve({ messages: [], hasMore: false })),
+    [ac],
+  );
+  const msgs: Message[] = msgData?.messages ?? [];
 
-  const checkNearBottom = useCallback(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    isNearBottomRef.current =
-      container.scrollHeight - container.scrollTop - container.clientHeight < 100;
-  }, []);
+  // Filter conversations by tab
+  const filtered = conversations.filter((c) =>
+    tab === "Privat" ? c.id.startsWith("inkognito-") : c.id.startsWith("repo-"),
+  );
 
-  const scrollToBottom = useCallback(() => {
-    if (isNearBottomRef.current) {
-      setTimeout(() => {
-        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-      }, 100);
+  // Select first conversation when loaded and none selected
+  useEffect(() => {
+    if (!ac && !newChat && filtered.length > 0 && !convsLoading) {
+      setAc(filtered[0].id);
     }
-  }, []);
+  }, [ac, newChat, filtered, convsLoading]);
 
-  // Load conversations based on current filter + repo
-  const loadConversations = useCallback(async () => {
-    try {
-      if (convFilter === "inkognito") {
-        const res = await getInkognitoConversations();
-        setConversations(res.conversations);
-      } else if (convFilter === "repo") {
-        if (chatRepo) {
-          const res = await getRepoConversations(chatRepo);
-          setConversations(res.conversations);
-        } else {
-          const res = await getAllRepoConversations();
-          setConversations(res.conversations);
+  // Auto-send msg from search params
+  useEffect(() => {
+    if (autoMsg && !autoMsgSent.current) {
+      autoMsgSent.current = true;
+      const convId = repoConversationId("thefold-api");
+      setAc(convId);
+      setNewChat(false);
+      (async () => {
+        setSending(true);
+        try {
+          await sendMessage(convId, autoMsg);
+          refreshConvs();
+          refreshMsgs();
+        } catch {
+          // silent
+        } finally {
+          setSending(false);
         }
-      } else {
-        // "all" — show everything
-        const res = await getConversations();
-        setConversations(res.conversations);
-      }
-    } catch {}
-  }, [convFilter, chatRepo]);
-
-  // Load skills on mount
-  useEffect(() => {
-    listSkills(undefined, true)
-      .then((res) => setAvailableSkills(res.skills))
-      .catch(() => {});
-  }, []);
-
-  // On mount: check for initial query from overview
-  useEffect(() => {
-    const freshId = mainConversationId();
-    setActiveConvId(freshId);
-    setMessages([]);
-    loadConversations();
-
-    const q = searchParams.get("q");
-    if (q) {
-      setInput(q);
+      })();
     }
-  }, []);
+  }, [autoMsg, refreshConvs, refreshMsgs]);
 
-  // Reload conversations when filter or repo changes
+  // Scroll to bottom on new messages
   useEffect(() => {
-    loadConversations();
-  }, [convFilter, chatRepo, loadConversations]);
+    msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [msgs.length]);
 
-  // Sync repo context
-  useEffect(() => {
-    if (selectedRepo) {
-      setChatRepo(selectedRepo.fullName);
-    }
-  }, [selectedRepo]);
+  const cur = ac ? conversations.find((c) => c.id === ac) : null;
+  const isGhost = ac ? ac.startsWith("inkognito-") : false;
+  const curRepo = ac ? extractRepoFromId(ac) : null;
 
-  useEffect(() => {
-    if (!activeConvId) return;
-    loadHistory();
-  }, [activeConvId]);
-
-  // Smart polling
-  useEffect(() => {
-    if (pollMode === "idle" || !activeConvId) return;
-    const interval = pollMode === "waiting" ? 2000 : 1000;
-
-    const timer = setInterval(async () => {
-      try {
-        const res = await getChatHistory(activeConvId, 100);
-        setMessages(res.messages);
-
-        const lastMsg = res.messages[res.messages.length - 1];
-        if (
-          lastMsg &&
-          lastMsg.role === "assistant" &&
-          lastMsg.messageType !== "agent_status" &&
-          lastMsg.messageType !== "agent_thought" &&
-          lastMsg.messageType !== "agent_progress" &&
-          lastMsg.content?.trim()
-        ) {
-          setPollMode(pollMode === "waiting" ? "cooldown" : "idle");
-        }
-      } catch {}
-    }, interval);
-
-    return () => clearInterval(timer);
-  }, [pollMode, activeConvId]);
-
-  useEffect(() => scrollToBottom(), [messages, scrollToBottom]);
-
-  async function loadHistory() {
-    if (!activeConvId) return;
-    try {
-      const res = await getChatHistory(activeConvId, 100);
-      setMessages(res.messages);
-    } catch {}
-  }
-
-  // Generate conversation ID based on current mode
-  function generateConvId(): string {
-    if (inkognito) return inkognitoConversationId();
-    if (chatRepo) return repoConversationId(chatRepo);
-    return mainConversationId();
-  }
-
-  async function handleSend() {
-    const text = input.trim();
-    if (!text || sending) return;
-
-    const convId = activeConvId || generateConvId();
-    if (!activeConvId) setActiveConvId(convId);
-
-    if (!conversations.some((c) => c.id === convId)) {
-      setConversations((prev) => [
-        { id: convId, title: text.substring(0, 80), lastMessage: text, lastActivity: new Date().toISOString() },
-        ...prev,
-      ]);
-    }
-
-    const optimisticMsg: Message = {
-      id: "temp-" + Date.now(),
-      conversationId: convId,
-      role: "user",
-      content: text,
-      messageType: "chat",
-      createdAt: new Date().toISOString(),
-      metadata: null,
-    };
-    setMessages((prev) => [...prev, optimisticMsg]);
-    setInput("");
+  const startNewChat = (msg: string, repo: string | null, ghost: boolean) => {
+    const convId = ghost
+      ? inkognitoConversationId()
+      : repo
+        ? repoConversationId(repo)
+        : repoConversationId("thefold-api");
+    setAc(convId);
+    setNewChat(false);
     setSending(true);
-    setPollMode("waiting");
+    sendMessage(convId, msg, { repoName: repo || undefined })
+      .then(() => {
+        refreshConvs();
+        refreshMsgs();
+      })
+      .catch(() => {})
+      .finally(() => setSending(false));
+  };
 
-    try {
-      await sendMessage(convId, text, {
-        chatOnly: !agentMode || inkognito,
-        modelOverride: selectedModel,
-        skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
-        repoName: chatRepo || undefined,
-      });
-      await loadHistory();
-      try {
-        await loadConversations();
-      } catch {}
-    } catch {}
-    finally {
-      setSending(false);
-    }
-  }
+  const handleSend = (value: string, repo?: string | null) => {
+    if (!ac || !value) return;
+    setSending(true);
+    sendMessage(ac, value, { repoName: repo || curRepo || undefined })
+      .then(() => {
+        refreshMsgs();
+        refreshConvs();
+      })
+      .catch(() => {})
+      .finally(() => setSending(false));
+  };
 
-  function handleNewConversation() {
-    const id = generateConvId();
-    setActiveConvId(id);
-    setMessages([]);
-    setTransferred(null);
-  }
-
-  async function handleDeleteConversation(convId: string) {
-    try {
-      await deleteConversation(convId);
-      setConversations((prev) => prev.filter((c) => c.id !== convId));
-      if (activeConvId === convId) handleNewConversation();
-    } catch {}
-  }
-
-  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const convId = activeConvId || generateConvId();
-    if (!activeConvId) setActiveConvId(convId);
-    try {
-      const content = await file.text();
-      await uploadChatFile(convId, file.name, file.type || "text/plain", content, file.size);
-      const preview = content.length > 10000 ? content.substring(0, 10000) + "\n\n... (truncated)" : content;
-      setInput(`[File: ${file.name}]\n\n${preview}`);
-    } catch {}
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }
-
-  async function handleTransferToRepo(repoName: string) {
-    if (!activeConvId || transferring) return;
-    setTransferring(true);
-    try {
-      const result = await transferContext(activeConvId, repoName);
-      setShowRepoSelector(false);
-      setTransferred(repoName);
-      setChatRepo(repoName);
-      setActiveConvId(result.targetConversationId);
-    } catch {}
-    finally { setTransferring(false); }
-  }
-
-  function handleCancel() {
-    setCancelled(true);
-    if (activeConvId) {
-      cancelChatGeneration(activeConvId).catch(() => {});
-      setPollMode("idle");
-    }
-  }
-
-  function formatDate(dateStr: string) {
-    const d = new Date(dateStr);
-    const now = new Date();
-    if (d.toDateString() === now.toDateString()) {
-      return d.toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" });
-    }
-    return d.toLocaleDateString("en", { day: "numeric", month: "short" });
-  }
-
-  const isReadOnly = !!transferred;
-
-  // Agent status tracking
-  const lastAgentStatus = useMemo((): AgentProgressData | null => {
-    if (statusDismissed) return null;
-    if (statusOverride) return statusOverride as unknown as AgentProgressData;
-
-    const progressMsgs = messages.filter((m) => m.messageType === "agent_progress");
-    if (progressMsgs.length > 0) {
-      const last = progressMsgs[progressMsgs.length - 1];
-      return parseAgentProgress(last.content);
-    }
-
-    const statusMsgs = messages.filter((m) => m.messageType === "agent_status");
-    if (statusMsgs.length === 0) return null;
-    const last = statusMsgs[statusMsgs.length - 1];
-    const parsed = parseAgentStatus(last.content);
-    if (!parsed) return null;
-    try {
-      const meta = typeof last.metadata === "string" ? JSON.parse(last.metadata) : last.metadata;
-      if (meta?.taskId) parsed.taskId = meta.taskId;
-    } catch {}
-    return parsed;
-  }, [messages, statusOverride, statusDismissed]);
-
-  const agentActive = useMemo(() => {
-    if (!lastAgentStatus) return false;
-    const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"];
-    return !terminal.includes(lastAgentStatus.phase);
-  }, [lastAgentStatus]);
-
-  // Poll task status for external stops
-  useEffect(() => {
-    const taskId = lastAgentStatus?.taskId;
-    if (!taskId || !agentActive) return;
-    const interval = setInterval(async () => {
-      try {
-        const result = await getTask(taskId);
-        if (["backlog", "cancelled", "done"].includes(result.task.status)) {
-          setStatusOverride({
-            phase: "Stopped",
-            title: "Task stopped",
-            steps: [{ label: "Task was stopped externally", status: "error" }],
-          });
-          setPollMode("idle");
-        }
-      } catch {}
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [lastAgentStatus?.taskId, agentActive]);
-
-  // Review handlers
-  async function handleApprove(reviewId: string) {
-    try {
-      setStatusOverride({
-        phase: "Bygger",
-        title: "Creating PR...",
-        steps: [
-          { label: "Code written", status: "done" },
-          { label: "Validated", status: "done" },
-          { label: "Review approved", status: "done" },
-          { label: "Creating PR", status: "active" },
-        ],
-      });
-      await approveReview(reviewId);
-      setStatusOverride({
-        phase: "Ferdig",
-        title: "PR created",
-        steps: [
-          { label: "Code written", status: "done" },
-          { label: "Validated", status: "done" },
-          { label: "Review approved", status: "done" },
-          { label: "PR created", status: "done" },
-        ],
-      });
-      loadHistory();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Unknown error";
-      setStatusOverride({
-        phase: "Feilet",
-        title: "Approval failed",
-        error: msg,
-        steps: [],
-      });
-    }
-  }
-
-  function handleRequestChanges(reviewId: string) {
-    router.push(`/review/${reviewId}`);
-  }
-
-  async function handleReject(reviewId: string) {
-    try {
-      await rejectReview(reviewId, "Rejected from chat");
-      setStatusOverride({
-        phase: "Feilet",
-        title: "Review rejected",
-        error: "Rejected from chat",
-        steps: [
-          { label: "Code written", status: "done" },
-          { label: "Validated", status: "done" },
-          { label: "Review rejected", status: "error" },
-        ],
-      });
-    } catch {}
-  }
-
-  function handleCancelTask(taskId: string) {
-    cancelTask(taskId).catch(() => {});
-    setStatusDismissed(true);
-    setStatusOverride(null);
-    setPollMode("idle");
-  }
-
-  // Reset flags on new messages
-  useEffect(() => {
-    setCancelled(false);
-    setStatusDismissed(false);
-    setStatusOverride(null);
-  }, [messages.length]);
-
-  // Waiting state
-  const waitingForReply = useMemo(() => {
-    if (messages.length === 0) return false;
-    const last = messages[messages.length - 1];
-    if (last.role === "user") return true;
-    if (last.role === "assistant" && (!last.content || !last.content.trim())) return true;
-    if (last.messageType === "agent_status" || last.messageType === "agent_progress") {
-      const parsed = parseAgentProgress(last.content) || parseAgentStatus(last.content);
-      if (parsed && ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"].includes(parsed.phase)) return false;
-      return true;
-    }
-    return false;
-  }, [messages]);
-
-  const showThinking = (sending || waitingForReply) && !cancelled && !statusDismissed && !agentActive;
-
-  function getMeta(msg: Message) {
-    if (!msg.metadata) return null;
-    try {
-      return typeof msg.metadata === "string" ? JSON.parse(msg.metadata) : msg.metadata;
-    } catch {
-      return null;
-    }
-  }
-
-  // Check if a conversation is inkognito
-  function isInkognitoConv(convId: string) {
-    return convId.startsWith("inkognito-");
-  }
+  const isAgentMessage = (m: Message) =>
+    m.messageType === "agent_status" ||
+    m.messageType === "agent_thought" ||
+    m.messageType === "agent_progress" ||
+    m.messageType === "agent_report";
 
   return (
-    <div className="flex h-full">
-      {/* Conversation list */}
-      {showConvList && (
+    <div
+      style={{
+        border: `1px solid ${T.border}`,
+        borderRadius: T.r,
+        display: "grid",
+        gridTemplateColumns: "280px 1fr",
+        minHeight: "calc(100vh - 130px)",
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <PixelCorners />
+
+      {/* Sidebar */}
+      <div
+        style={{
+          borderRight: `1px solid ${T.border}`,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
         <div
-          className="w-[260px] flex-shrink-0 flex flex-col border-r overflow-hidden hidden sm:flex"
-          style={{ borderColor: "var(--tf-border-faint)", background: "var(--tf-bg-base)" }}
+          style={{
+            padding: "16px 16px 12px",
+            borderBottom: `1px solid ${T.border}`,
+          }}
         >
-          <div
-            className="flex items-center justify-between px-4 h-12 border-b flex-shrink-0"
-            style={{ borderColor: "var(--tf-border-faint)" }}
+          <Btn
+            primary
+            sm
+            style={{ width: "100%" }}
+            onClick={() => {
+              setNewChat(true);
+              setAc(null);
+            }}
           >
-            <span className="text-xs font-medium" style={{ color: "var(--tf-text-muted)" }}>
-              Conversations
-            </span>
-            <button
-              onClick={handleNewConversation}
-              className="w-6 h-6 rounded-md flex items-center justify-center transition-colors hover:bg-[var(--tf-surface-raised)]"
-              style={{ color: "var(--tf-text-faint)" }}
+            + Ny samtale
+          </Btn>
+        </div>
+        <div
+          style={{
+            padding: "8px",
+            display: "flex",
+            gap: 4,
+            borderBottom: `1px solid ${T.border}`,
+          }}
+        >
+          {(["Repo", "Privat"] as const).map((f) => (
+            <div
+              key={f}
+              onClick={() => {
+                setTab(f);
+                setAc(null);
+              }}
+              style={{
+                fontSize: 11,
+                fontFamily: T.mono,
+                padding: "4px 8px",
+                background: tab === f ? T.subtle : "transparent",
+                color: tab === f ? T.text : T.textMuted,
+                cursor: "pointer",
+                border: `1px solid ${tab === f ? T.border : "transparent"}`,
+                borderRadius: 6,
+              }}
             >
-              <Plus className="w-3.5 h-3.5" />
-            </button>
+              {f}
+            </div>
+          ))}
+        </div>
+        <div style={{ flex: 1, overflow: "auto" }}>
+          {convsLoading ? (
+            <div style={{ padding: "20px 16px", textAlign: "center" }}>
+              <span style={{ fontSize: 12, color: T.textMuted }}>Laster...</span>
+            </div>
+          ) : filtered.length === 0 ? (
+            <div style={{ padding: "20px 16px", textAlign: "center" }}>
+              <span style={{ fontSize: 12, color: T.textFaint }}>Ingen samtaler enna</span>
+            </div>
+          ) : (
+            filtered.map((c) => {
+              const isPrivate = c.id.startsWith("inkognito-");
+              const repo = extractRepoFromId(c.id);
+              return (
+                <div
+                  key={c.id}
+                  onClick={() => {
+                    setAc(c.id);
+                    setNewChat(false);
+                  }}
+                  style={{
+                    padding: "12px 16px",
+                    cursor: "pointer",
+                    background: ac === c.id && !newChat ? T.subtle : "transparent",
+                    borderBottom: `1px solid ${T.border}`,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginBottom: 4,
+                    }}
+                  >
+                    {isPrivate && <GhostIcon />}
+                    <span
+                      style={{
+                        fontSize: 13,
+                        fontWeight: c.activeTask ? 600 : 400,
+                        color: c.activeTask ? T.text : T.textSec,
+                        flex: 1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {c.title || "Ny samtale"}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {repo && (
+                      <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                        {repo}
+                      </span>
+                    )}
+                    <span style={{ fontSize: 10, color: T.textFaint, marginLeft: "auto" }}>
+                      {timeAgo(c.lastActivity)}
+                    </span>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* Main content */}
+      {newChat ? (
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <ChatComposer onSubmit={startNewChat} />
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          {/* Header */}
+          <div
+            style={{
+              padding: "14px 20px",
+              borderBottom: `1px solid ${T.border}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>
+                {cur ? cur.title || "Ny samtale" : "\u2014"}
+              </div>
+              {curRepo && (
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontFamily: T.mono,
+                    color: T.textFaint,
+                    marginTop: 2,
+                  }}
+                >
+                  {curRepo}
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <Tag variant="brand">sonnet-4-6</Tag>
+            </div>
           </div>
 
-          {/* Filter tabs */}
-          <div className="flex items-center gap-1 px-3 py-2 border-b" style={{ borderColor: "var(--tf-border-faint)" }}>
-            {(["all", "repo", "inkognito"] as ConvFilter[]).map((f) => (
-              <button
-                key={f}
-                onClick={() => setConvFilter(f)}
-                className="text-[10px] px-2 py-1 rounded-md transition-colors capitalize flex items-center gap-1"
-                style={{
-                  background: convFilter === f ? "rgba(53, 88, 114, 0.08)" : "transparent",
-                  color: convFilter === f ? "var(--tf-heat)" : "var(--tf-text-faint)",
-                }}
-              >
-                {f === "inkognito" && <Ghost className="w-3 h-3" />}
-                {f}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex-1 overflow-y-auto">
-            {conversations.length === 0 ? (
-              <div className="px-4 py-6 text-center">
-                <span className="text-xs" style={{ color: "var(--tf-text-faint)" }}>
-                  No conversations yet
+          {/* Messages */}
+          <div
+            style={{
+              flex: 1,
+              overflow: "auto",
+              padding: "20px 24px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 20,
+            }}
+          >
+            {msgsLoading ? (
+              <div style={{ textAlign: "center", padding: 40 }}>
+                <span style={{ fontSize: 13, color: T.textMuted }}>Laster meldinger...</span>
+              </div>
+            ) : msgs.length === 0 && ac ? (
+              <div style={{ textAlign: "center", padding: 40 }}>
+                <span style={{ fontSize: 13, color: T.textFaint }}>
+                  Ingen meldinger enna. Skriv noe nedenfor.
                 </span>
               </div>
             ) : (
-              conversations.map((c) => (
+              msgs.map((m) => (
                 <div
-                  key={c.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => {
-                    setActiveConvId(c.id);
-                    setTransferred(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      setActiveConvId(c.id);
-                      setTransferred(null);
-                    }
-                  }}
-                  className="w-full text-left px-4 py-3 transition-colors border-b group cursor-pointer"
+                  key={m.id}
                   style={{
-                    borderColor: "var(--tf-border-faint)",
-                    background: c.id === activeConvId ? "var(--tf-surface)" : "transparent",
+                    display: "flex",
+                    gap: 10,
+                    alignItems: "flex-start",
+                    justifyContent: m.role === "user" ? "flex-end" : "flex-start",
                   }}
                 >
-                  <div className="flex items-center gap-2">
-                    {isInkognitoConv(c.id) && (
-                      <Ghost className="w-3 h-3 flex-shrink-0" style={{ color: "#9061FF" }} />
-                    )}
-                    <span
-                      className="text-sm block truncate flex-1"
+                  {m.role === "assistant" && (
+                    <div
                       style={{
-                        color: c.id === activeConvId ? "var(--tf-text-primary)" : "var(--tf-text-secondary)",
+                        width: 28,
+                        height: 28,
+                        borderRadius: T.r,
+                        flexShrink: 0,
+                        background: T.surface,
+                        border: `1px solid ${T.border}`,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
                       }}
                     >
-                      {c.title || "New conversation"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between mt-0.5">
-                    <span className="text-[10px]" style={{ color: "var(--tf-text-faint)" }}>
-                      {formatDate(c.lastActivity)}
-                    </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteConversation(c.id);
-                      }}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity"
-                      style={{ color: "var(--tf-text-faint)" }}
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
+                      <RobotIcon size={16} />
+                    </div>
+                  )}
+                  <div style={{ maxWidth: 540 }}>
+                    {isAgentMessage(m) ? (
+                      <AgentStream />
+                    ) : m.role === "user" ? (
+                      <div
+                        style={{
+                          background: T.subtle,
+                          border: `1px solid ${T.border}`,
+                          borderRadius: T.r,
+                          padding: "10px 16px",
+                          fontSize: 13,
+                          lineHeight: 1.6,
+                          color: T.text,
+                          fontFamily: T.sans,
+                        }}
+                      >
+                        {m.content}
+                      </div>
+                    ) : (
+                      <div
+                        style={{
+                          fontSize: 13,
+                          lineHeight: 1.65,
+                          color: T.text,
+                          fontFamily: T.sans,
+                          paddingTop: 4,
+                        }}
+                      >
+                        {m.content}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))
             )}
-          </div>
-        </div>
-      )}
-
-      {/* Main chat area */}
-      <div
-        className="flex-1 flex flex-col min-w-0 relative"
-        style={inkognito ? { background: "rgba(144, 97, 255, 0.02)" } : undefined}
-      >
-        {/* Chat header */}
-        <div
-          className="flex items-center justify-between h-12 px-4 border-b flex-shrink-0"
-          style={{ borderColor: "var(--tf-border-faint)" }}
-        >
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => setShowConvList(!showConvList)}
-              className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors hidden sm:flex"
-              style={{ color: "var(--tf-text-faint)" }}
-            >
-              {showConvList ? <PanelLeftClose className="w-4 h-4" /> : <PanelLeft className="w-4 h-4" />}
-            </button>
-            <span className="text-sm font-medium" style={{ color: "var(--tf-text-primary)" }}>
-              Chat
-            </span>
-            {inkognito && (
-              <span
-                className="text-[10px] px-1.5 py-0.5 rounded-md font-medium flex items-center gap-1"
-                style={{ background: "rgba(144, 97, 255, 0.08)", color: "#9061FF" }}
+            {sending && (
+              <div
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                }}
               >
-                <Ghost className="w-3.5 h-3.5" />
-                Inkognito
-              </span>
-            )}
-            {chatRepo && !inkognito && (
-              <span
-                className="text-[10px] px-1.5 py-0.5 rounded-md font-medium"
-                style={{ background: "rgba(53, 88, 114, 0.08)", color: "var(--tf-heat)" }}
-              >
-                {chatRepo}
-              </span>
-            )}
-            {agentActive && (
-              <span
-                className="text-[10px] px-1.5 py-0.5 rounded-md font-medium"
-                style={{ background: "rgba(53, 88, 114, 0.08)", color: "var(--tf-heat)" }}
-              >
-                Agent active
-              </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            {messages.length > 0 && !inkognito && (
-              <button
-                onClick={() => setShowRepoSelector(true)}
-                className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-colors hover:bg-[var(--tf-surface-raised)]"
-                style={{ color: "var(--tf-text-faint)" }}
-              >
-                <ArrowRightLeft className="w-3 h-3" />
-                <span className="hidden sm:inline">Transfer</span>
-              </button>
-            )}
-            <button
-              onClick={handleNewConversation}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-colors hover:bg-[var(--tf-surface-raised)]"
-              style={{ color: "var(--tf-text-faint)" }}
-            >
-              <Plus className="w-3 h-3" />
-              <span className="hidden sm:inline">New chat</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Transferred notice */}
-        {transferred && (
-          <div
-            className="text-xs px-4 py-2 border-b"
-            style={{
-              background: "rgba(66, 195, 102, 0.04)",
-              borderColor: "var(--tf-border-faint)",
-              color: "var(--tf-text-muted)",
-            }}
-          >
-            Transferred to <strong style={{ color: "var(--tf-success)" }}>{transferred}</strong>
-          </div>
-        )}
-
-        {/* Messages */}
-        <div
-          ref={messagesContainerRef}
-          onScroll={checkNearBottom}
-          className="flex-1 overflow-y-auto px-4 py-4"
-        >
-          {messages.length === 0 ? (
-            <div className="flex items-center justify-center h-full relative overflow-hidden">
-              <div className="text-center w-full max-w-2xl px-4 relative z-10 page-enter">
-                <div className="w-12 h-12 rounded-xl flex items-center justify-center mx-auto mb-6" style={{ background: "rgba(53, 88, 114, 0.1)" }}>
-                  <Sparkles className="w-6 h-6" style={{ color: "var(--tf-heat)" }} />
-                </div>
-
-                <h1
-                  className="text-3xl sm:text-4xl font-bold mb-3 tracking-tight"
-                  style={{ color: "var(--tf-text-primary)" }}
-                >
-                  What do you want to build?
-                </h1>
-                <p className="text-sm mb-8" style={{ color: "var(--tf-text-muted)" }}>
-                  Describe a task or ask a question about your codebase
-                </p>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 stagger-children">
-                  {[
-                    { text: "Analyze the codebase and suggest improvements", icon: "🔍" },
-                    { text: "Build a new feature with tests and documentation", icon: "🔨" },
-                    { text: "Find and fix bugs in the latest changes", icon: "🐛" },
-                  ].map((q) => (
-                    <button
-                      key={q.text}
-                      onClick={() => setInput(q.text)}
-                      className="text-left text-sm p-4 rounded-lg transition-all active:scale-[0.98]"
-                      style={{
-                        border: "1px solid var(--tf-border-faint)",
-                        color: "var(--tf-text-secondary)",
-                        background: "var(--tf-surface)",
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.borderColor = "rgba(53, 88, 114, 0.2)";
-                        e.currentTarget.style.background = "var(--tf-surface-raised)";
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.borderColor = "var(--tf-border-faint)";
-                        e.currentTarget.style.background = "var(--tf-surface)";
-                      }}
-                    >
-                      {q.text}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-4 max-w-3xl mx-auto">
-              {messages
-                .filter((m) => {
-                  if (m.messageType === "agent_thought") return false;
-                  if (m.messageType === "agent_report") return false;
-                  if (m.messageType === "agent_status") {
-                    const parsed = parseAgentStatus(m.content);
-                    const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"];
-                    return parsed && terminal.includes(parsed.phase);
-                  }
-                  if (m.messageType === "agent_progress") {
-                    const parsed = parseAgentProgress(m.content);
-                    const terminal = ["Ferdig", "Feilet", "Stopped", "completed", "failed", "done"];
-                    return parsed && terminal.includes(parsed.phase);
-                  }
-                  if (m.role === "assistant" && (!m.content || !m.content.trim())) return false;
-                  return true;
-                })
-                .map((msg) => {
-                  if (msg.messageType === "agent_status" || msg.messageType === "agent_progress") {
-                    const parsed = msg.messageType === "agent_progress"
-                      ? parseAgentProgress(msg.content)
-                      : parseAgentStatus(msg.content);
-                    if (!parsed) return null;
-                    return <AgentProgressCard key={msg.id} data={parsed} />;
-                  }
-
-                  if (msg.messageType === "context_transfer") {
-                    return <ChatBubble key={msg.id} role="assistant" content={msg.content} isContextTransfer />;
-                  }
-
-                  const meta = getMeta(msg);
-                  return (
-                    <ChatBubble
-                      key={msg.id}
-                      role={msg.role}
-                      content={msg.content}
-                      timestamp={msg.createdAt}
-                      model={meta?.model}
-                      tokens={meta?.tokens?.totalTokens}
-                      cost={meta?.cost}
-                    />
-                  );
-                })}
-
-              {lastAgentStatus && agentActive && (
-                <AgentProgressCard
-                  data={lastAgentStatus}
-                  onApprove={handleApprove}
-                  onRequestChanges={handleRequestChanges}
-                  onReject={handleReject}
-                  onCancel={handleCancelTask}
-                />
-              )}
-
-              {lastAgentStatus && lastAgentStatus.phase === "Venter" && (
-                <AgentProgressCard
-                  data={lastAgentStatus}
-                  onApprove={handleApprove}
-                  onRequestChanges={handleRequestChanges}
-                  onReject={handleReject}
-                  onCancel={handleCancelTask}
-                />
-              )}
-
-              {showThinking && <ThinkingIndicator />}
-
-              <div ref={bottomRef} />
-            </div>
-          )}
-        </div>
-
-        {/* Input area */}
-        {!isReadOnly && (
-          <div className="flex-shrink-0 px-4 pb-4 pt-2">
-            <input
-              type="file"
-              ref={fileInputRef}
-              className="hidden"
-              accept=".md,.txt,.json,.ts,.tsx,.js,.jsx,.py,.yaml,.yml,.csv,.html,.css,.sql,.sh,.toml"
-              onChange={handleFileUpload}
-            />
-            <div className="max-w-3xl mx-auto">
-              <ChatControls
-                repos={repos}
-                selectedRepo={chatRepo}
-                onRepoChange={(repo) => setChatRepo(repo)}
-                inkognito={inkognito}
-                onInkognitoToggle={() => setInkognito(!inkognito)}
-                agentMode={agentMode}
-                onAgentModeToggle={() => setAgentMode(!agentMode)}
-                subAgents={subAgents}
-                onSubAgentsToggle={() => setSubAgents(!subAgents)}
-                selectedModel={selectedModel}
-                onModelChange={setSelectedModel}
-                skills={availableSkills}
-                selectedSkillIds={selectedSkillIds}
-                onSkillsChange={setSelectedSkillIds}
-              />
-
-              <ChatInput
-                value={input}
-                onChange={setInput}
-                onSubmit={handleSend}
-                onFileUpload={() => fileInputRef.current?.click()}
-                disabled={sending}
-                isStreaming={pollMode === "waiting" && !cancelled}
-                onStop={handleCancel}
-              />
-              <div className="flex items-center justify-center mt-2">
-                <span className="text-[10px]" style={{ color: "var(--tf-text-faint)" }}>
-                  TheFold can make mistakes. Review important output carefully.
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Repo Selector Modal */}
-      {showRepoSelector && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center"
-          style={{ background: "rgba(0, 0, 0, 0.6)" }}
-          onClick={() => setShowRepoSelector(false)}
-        >
-          <div
-            className="rounded-xl p-6 max-w-sm w-[90%]"
-            style={{ background: "var(--tf-surface)", border: "1px solid var(--tf-border-muted)" }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-2 mb-4">
-              <MessageSquare className="w-4 h-4" style={{ color: "var(--tf-text-secondary)" }} />
-              <h3 className="text-sm font-medium" style={{ color: "var(--tf-text-primary)" }}>
-                Transfer to repository
-              </h3>
-            </div>
-
-            <div className="space-y-2">
-              {repos.map((repo) => (
-                <button
-                  key={repo.fullName}
-                  onClick={() => handleTransferToRepo(repo.name)}
-                  disabled={transferring}
-                  className="w-full text-left p-3 rounded-lg transition-colors hover:bg-[var(--tf-surface-raised)]"
+                <div
                   style={{
-                    border: "1px solid var(--tf-border-faint)",
-                    background: "transparent",
-                    color: "var(--tf-text-primary)",
-                    opacity: transferring ? 0.6 : 1,
+                    width: 28,
+                    height: 28,
+                    borderRadius: T.r,
+                    flexShrink: 0,
+                    background: T.surface,
+                    border: `1px solid ${T.border}`,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
                   }}
                 >
-                  <div className="text-sm">{repo.fullName}</div>
-                </button>
-              ))}
-            </div>
+                  <RobotIcon size={16} />
+                </div>
+                <div style={{ paddingTop: 6 }}>
+                  <span style={{ fontSize: 13, color: T.textMuted }}>Tenker...</span>
+                </div>
+              </div>
+            )}
+            <div ref={msgEndRef} />
+          </div>
 
-            <button
-              onClick={() => setShowRepoSelector(false)}
-              className="w-full mt-4 px-3 py-2 rounded-lg text-sm transition-colors hover:bg-[var(--tf-surface-raised)]"
-              style={{
-                border: "1px solid var(--tf-border-faint)",
-                color: "var(--tf-text-secondary)",
-                background: "transparent",
-              }}
-            >
-              Cancel
-            </button>
+          {/* Input */}
+          <div style={{ padding: "12px 20px", borderTop: `1px solid ${T.border}` }}>
+            <ChatInput
+              compact
+              repo={curRepo || undefined}
+              ghost={isGhost}
+              onSubmit={handleSend}
+            />
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense fallback={<div style={{ padding: 40, textAlign: "center", color: T.textMuted }}>Laster...</div>}>
+      <ChatPageInner />
+    </Suspense>
   );
 }
