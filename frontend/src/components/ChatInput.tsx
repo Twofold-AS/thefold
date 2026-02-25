@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { T } from "@/lib/tokens";
+import { Ghost } from "lucide-react";
 import PillIcon from "@/components/PillIcon";
 import ModelPill from "@/components/ModelPill";
 import TypewriterPlaceholder from "@/components/TypewriterPlaceholder";
@@ -14,6 +15,11 @@ interface ChatInputProps {
   ghost?: boolean;
   onGhostChange?: (ghost: boolean) => void;
   isPrivate?: boolean;
+  skills?: Array<{ id: string; name: string; enabled: boolean }>;
+  selectedSkillIds?: string[];
+  onSkillsChange?: (ids: string[]) => void;
+  subAgentsEnabled?: boolean;
+  onSubAgentsToggle?: () => void;
 }
 
 const repos = ["thefold-api", "thefold-frontend"];
@@ -26,11 +32,17 @@ export default function ChatInput({
   ghost,
   onGhostChange,
   isPrivate,
+  skills,
+  selectedSkillIds,
+  onSkillsChange,
+  subAgentsEnabled,
+  onSubAgentsToggle,
 }: ChatInputProps) {
   const [v, setV] = useState("");
   const [st, setSt] = useState(false);
   const ty = v.length > 0;
   const [rd, setRd] = useState(false);
+  const [skillsOpen, setSkillsOpen] = useState(false);
 
   const doSend = () => {
     if (v && onSubmit) {
@@ -45,7 +57,7 @@ export default function ChatInput({
     <div
       style={{
         width: "100%",
-        maxWidth: compact ? undefined : 672,
+        maxWidth: undefined,
         background: T.surface,
         borderRadius: T.r * 1.5,
         position: "relative",
@@ -122,22 +134,17 @@ export default function ChatInput({
             active={ghost}
             onClick={() => onGhostChange && onGhostChange(!ghost)}
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path
-                d="M7 1C5 1 3.5 2.5 3 4c-.7 0-1.5.3-1.5 1.5C1.5 7 3 8 3 8s-.5 2 1 3.5c1 1 2 1.5 3 1.5s2-.5 3-1.5c1.5-1.5 1-3.5 1-3.5s1.5-1 1.5-2.5C12.5 4.3 11.7 4 11 4c-.5-1.5-2-3-4-3z"
-                stroke="currentColor"
-                strokeWidth="1.1"
-                fill="none"
-              />
-              <circle cx="5.5" cy="6" r="1" fill="currentColor" />
-              <circle cx="8.5" cy="6" r="1" fill="currentColor" />
-            </svg>
+            <Ghost size={14} />
           </PillIcon>
           {/* Conditional icons: sub-agents, skills, repo dropdown — hidden when isPrivate */}
           {!ghost && !isPrivate && (
             <>
               {/* Sub-agents */}
-              <PillIcon tooltip="Sub-agenter">
+              <PillIcon
+                tooltip="Sub-agenter"
+                active={subAgentsEnabled}
+                onClick={() => onSubAgentsToggle && onSubAgentsToggle()}
+              >
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                   <circle cx="7" cy="4" r="2.5" stroke="currentColor" strokeWidth="1.1" />
                   <circle cx="3.5" cy="6" r="1.5" stroke="currentColor" strokeWidth="1" />
@@ -150,17 +157,82 @@ export default function ChatInput({
                   />
                 </svg>
               </PillIcon>
-              {/* Skills */}
-              <PillIcon tooltip="Skills">
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <path
-                    d="M8 2L4 8h3l-1 4 4-6H7l1-4z"
-                    stroke="currentColor"
-                    strokeWidth="1.1"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </PillIcon>
+              {/* Skills dropdown */}
+              <div style={{ position: "relative" }}>
+                <PillIcon
+                  tooltip="Skills"
+                  active={(selectedSkillIds?.length ?? 0) > 0}
+                  onClick={() => setSkillsOpen((p) => !p)}
+                >
+                  {/* Wand2 icon */}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z" />
+                    <path d="m14 7 3 3" />
+                    <path d="M5 6v4" /><path d="M19 14v4" />
+                    <path d="M10 2v2" /><path d="M7 8H3" /><path d="M21 16h-4" /><path d="M11 3H9" />
+                  </svg>
+                </PillIcon>
+                {skillsOpen && skills && skills.length > 0 && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      bottom: "100%",
+                      left: 0,
+                      marginBottom: 6,
+                      background: T.surface,
+                      border: `1px solid ${T.border}`,
+                      borderRadius: T.r,
+                      padding: "4px 0",
+                      minWidth: 200,
+                      maxHeight: 240,
+                      overflow: "auto",
+                      zIndex: 100,
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                    }}
+                  >
+                    {skills
+                      .filter((s) => s.enabled)
+                      .map((skill) => {
+                        const selected = selectedSkillIds?.includes(skill.id) ?? false;
+                        return (
+                          <div
+                            key={skill.id}
+                            onClick={() => {
+                              if (!onSkillsChange || !selectedSkillIds) return;
+                              onSkillsChange(
+                                selected
+                                  ? selectedSkillIds.filter((id) => id !== skill.id)
+                                  : [...selectedSkillIds, skill.id]
+                              );
+                            }}
+                            style={{
+                              padding: "6px 12px",
+                              fontSize: 12,
+                              fontFamily: T.sans,
+                              color: selected ? T.accent : T.textSec,
+                              background: selected ? T.accentDim : "transparent",
+                              cursor: "pointer",
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                            }}
+                          >
+                            <div
+                              style={{
+                                width: 10,
+                                height: 10,
+                                borderRadius: 2,
+                                border: `1px solid ${selected ? T.accent : T.border}`,
+                                background: selected ? T.accent : "transparent",
+                              }}
+                            />
+                            {skill.name}
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
               {/* Repo dropdown */}
               <div style={{ marginLeft: 4, position: "relative", zIndex: 50 }}>
                 <div

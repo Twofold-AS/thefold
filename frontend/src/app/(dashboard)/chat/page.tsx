@@ -18,6 +18,7 @@ import {
   cancelChatGeneration,
   inkognitoConversationId,
   repoConversationId,
+  listSkills,
   type ConversationSummary,
   type Message,
 } from "@/lib/api";
@@ -52,14 +53,8 @@ function GhostIcon({ color }: { color?: string }) {
 
 function extractRepoFromId(id: string): string | null {
   if (!id.startsWith("repo-")) return null;
-  // Format: "repo-{repoName}-{uuid}"
   const rest = id.substring(5);
-  const lastDash = rest.lastIndexOf("-");
-  if (lastDash === -1) return rest;
-  // UUID has 4 dashes, so find the first segment before UUID
-  // repo-thefold-api-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
   const parts = rest.split("-");
-  // UUID is last 5 parts (8-4-4-4-12)
   if (parts.length >= 6) {
     return parts.slice(0, parts.length - 5).join("-");
   }
@@ -74,6 +69,8 @@ function ChatPageInner() {
   const [newChat, setNewChat] = useState(true);
   const [tab, setTab] = useState<"Repo" | "Privat">("Repo");
   const [sending, setSending] = useState(false);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
   const autoMsgSent = useRef(false);
   const msgEndRef = useRef<HTMLDivElement>(null);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -90,37 +87,14 @@ function ChatPageInner() {
   );
   const msgs: Message[] = msgData?.messages ?? [];
 
+  // Skills data
+  const { data: skillsData } = useApiData(() => listSkills(), []);
+  const availableSkills = skillsData?.skills ?? [];
+
   // Filter conversations by tab
   const filtered = conversations.filter((c) =>
     tab === "Privat" ? c.id.startsWith("inkognito-") : c.id.startsWith("repo-"),
   );
-
-  // Auto-send msg from search params
-  useEffect(() => {
-    if (autoMsg && !autoMsgSent.current) {
-      autoMsgSent.current = true;
-      const convId = repoConversationId("thefold-api");
-      setAc(convId);
-      setNewChat(false);
-      (async () => {
-        setSending(true);
-        try {
-          await sendMessage(convId, autoMsg);
-          refreshConvs();
-          refreshMsgs();
-        } catch {
-          // silent
-        } finally {
-          setSending(false);
-        }
-      })();
-    }
-  }, [autoMsg, refreshConvs, refreshMsgs]);
-
-  // Scroll to bottom on new messages
-  useEffect(() => {
-    msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [msgs.length]);
 
   // Cleanup polling on unmount
   useEffect(() => {
@@ -143,6 +117,45 @@ function ChatPageInner() {
     }, 2000);
   }, [stopPolling, refreshMsgs]);
 
+  // Auto-send msg from search params (overview redirect)
+  useEffect(() => {
+    if (autoMsg && !autoMsgSent.current) {
+      autoMsgSent.current = true;
+      setNewChat(false);
+
+      const repoParam = searchParams.get("repo");
+      const ghostParam = searchParams.get("ghost") === "1";
+
+      // Sett riktig tab basert på ghost
+      if (ghostParam) {
+        setTab("Privat");
+      }
+
+      const convId = ghostParam
+        ? inkognitoConversationId()
+        : repoParam
+          ? repoConversationId(repoParam)
+          : repoConversationId("thefold-api");
+
+      setAc(convId);
+      setSending(true);
+      sendMessage(convId, autoMsg, { repoName: repoParam || undefined })
+        .then((result) => {
+          refreshConvs();
+          if (result.agentTriggered) {
+            startPolling();
+          }
+        })
+        .catch(() => {})
+        .finally(() => setSending(false));
+    }
+  }, [autoMsg]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [msgs.length]);
+
   // Check if polling should stop: latest message is not a working agent_progress
   useEffect(() => {
     if (!pollingRef.current) return;
@@ -155,11 +168,9 @@ function ChatPageInner() {
           stopPolling();
         }
       } catch {
-        // can't parse, stop polling
         stopPolling();
       }
     } else if (last.messageType !== "agent_status" && last.messageType !== "agent_thought") {
-      // Not an active agent message type, stop polling
       stopPolling();
     }
   }, [msgs, stopPolling]);
@@ -178,7 +189,10 @@ function ChatPageInner() {
     setAc(convId);
     setNewChat(false);
     setSending(true);
-    sendMessage(convId, msg, { repoName: repo || undefined })
+    sendMessage(convId, msg, {
+      repoName: repo || undefined,
+      skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
+    })
       .then((result) => {
         refreshConvs();
         refreshMsgs();
@@ -193,7 +207,10 @@ function ChatPageInner() {
   const handleSend = (value: string, repo?: string | null) => {
     if (!ac || !value) return;
     setSending(true);
-    sendMessage(ac, value, { repoName: repo || curRepo || undefined })
+    sendMessage(ac, value, {
+      repoName: repo || curRepo || undefined,
+      skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
+    })
       .then((result) => {
         refreshMsgs();
         refreshConvs();
@@ -442,7 +459,13 @@ function ChatPageInner() {
                       )}
                       <div style={{ maxWidth: 540 }}>
                         {isAgentMessage(m) ? (
-                          <AgentStream content={m.content} onCancel={() => ac && cancelChatGeneration(ac)} />
+                          <AgentStream
+                            content={m.content}
+                            onCancel={() => {
+                              if (ac) cancelChatGeneration(ac).catch(() => {});
+                              stopPolling();
+                            }}
+                          />
                         ) : m.role === "user" ? (
                           <div
                             style={{
@@ -529,6 +552,11 @@ function ChatPageInner() {
               ghost={isGhost}
               onSubmit={handleSend}
               isPrivate={tab === "Privat"}
+              skills={availableSkills}
+              selectedSkillIds={selectedSkillIds}
+              onSkillsChange={setSelectedSkillIds}
+              subAgentsEnabled={subAgentsEnabled}
+              onSubAgentsToggle={() => setSubAgentsEnabled((p) => !p)}
             />
           </div>
         </div>

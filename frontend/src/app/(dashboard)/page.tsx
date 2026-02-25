@@ -58,18 +58,16 @@ export default function OverviewPage() {
   const { data: skillsData, loading: skillsLoading } = useApiData(() => listSkills(), []);
   const { data: memoryStats, loading: memoryLoading } = useApiData(() => getMemoryStats(), []);
 
-  const [agentOn, setAgentOn] = useState(() => {
-    if (typeof window === "undefined") return true;
-    return localStorage.getItem("tf_agentMode") !== "false";
-  });
-  const [subAgOn, setSubAgOn] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("tf_subAgents") === "true";
-  });
-  const [privat, setPrivat] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("tf_private") === "true";
-  });
+  const [agentOn, setAgentOn] = useState(true);
+  const [subAgOn, setSubAgOn] = useState(false);
+  const [privat, setPrivat] = useState(false);
+
+  // Les fra localStorage etter hydration
+  useEffect(() => {
+    setAgentOn(localStorage.getItem("tf_agentMode") !== "false");
+    setSubAgOn(localStorage.getItem("tf_subAgents") === "true");
+    setPrivat(localStorage.getItem("tf_private") === "true");
+  }, []);
 
   useEffect(() => { localStorage.setItem("tf_agentMode", String(agentOn)); }, [agentOn]);
   useEffect(() => { localStorage.setItem("tf_subAgents", String(subAgOn)); }, [subAgOn]);
@@ -85,7 +83,11 @@ export default function OverviewPage() {
   const statsLoading = taskLoading || costLoading || auditLoading;
 
   const onStartChat = (msg: string, repo: string | null, ghost: boolean) => {
-    router.push("/chat");
+    const params = new URLSearchParams();
+    if (msg) params.set("msg", msg);
+    if (repo) params.set("repo", repo);
+    if (ghost) params.set("ghost", "1");
+    router.push(`/chat?${params.toString()}`);
   };
 
   // Skills data

@@ -1,432 +1,587 @@
-# PROMPT — Synkroniser TheFold design-system med Tailwind/ShadCN oppsett
+# PROMPT — Dither, Chat-bugs, AgentStatus, knapper, ikon-fixes
 
 ## Kontekst
 
-TheFold-frontenden har to parallelle stilsystemer som må samkjøres. TheFold-designet er kilden til sannhet — ShadCN-oppsettet skal tilpasses TheFold. Fonten byttes fra Suisse Intl til **Inter (24pt-varianten)** som hoved-font.
+TheFold frontend (Next.js 14, App Router). Stiler via `T`-objekt fra `@/lib/tokens`. Ingen backend-endringer.
+
+**Bugs som skal fikses:**
+1. Dither-bakgrunnsanimasjon bak ChatComposer (overview + chat "ny samtale")
+2. ChatComposer-bredde: skal fylle hele content-bredden (1636px, ikke 672px)
+3. Chat-redirect fra overview mister meldingen — må sende dobbelt
+4. Når ghost/privat er aktiv på overview og bruker sender melding → skal lande i Privat-tab på chat
+5. AgentStream vises ikke (mangler content-prop)
+6. Knapper i ChatInput (skills, sub-agent, modell-valg) gjør ingenting
+7. Skills-ikon → Wand2 (tryllestav) i sidebar og chat
+8. Privat-ikon → ordentlig spøkelse (Ghost fra lucide-react)
+9. Hydration mismatch — Toggle bruker localStorage i initial state
 
 ---
 
-## HVA SOM SKAL GJØRES
+## BUG 9: Hydration mismatch (fiks FØRST)
 
-### 1. Legg Inter 24pt font-filer i `public/fonts/`
+### Problemet
 
-Kopier disse filene til `public/fonts/`:
-```
-public/fonts/
-├── thefold.woff2                          ← TheFold Brand (finnes allerede)
-├── Inter_24pt-Regular.woff2               ← Inter 400
-├── Inter_24pt-Medium.woff2                ← Inter 500
-├── Inter_24pt-SemiBold.woff2              ← Inter 600
-├── Inter_24pt-Bold.woff2                  ← Inter 700
-└── Inter_24pt-ExtraBold.woff2             ← Inter 800
-```
-
-Hvis du har `.ttf`-filer istedenfor `.woff2`, konverter dem først eller bruk `.ttf` direkte (endre `format('woff2')` til `format('truetype')` i `@font-face`).
-
----
-
-### 2. Erstatt `globals.css`
-
-Erstatt HELE filen med dette:
-
-```css
-@import "tailwindcss";
-
-/* ─── Inter 24pt (self-hosted) ─── */
-@font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-Regular.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-Medium.woff2') format('woff2');
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-SemiBold.woff2') format('woff2');
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-Bold.woff2') format('woff2');
-  font-weight: 700;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-ExtraBold.woff2') format('woff2');
-  font-weight: 800;
-  font-style: normal;
-  font-display: swap;
-}
-
-/* ─── Geist Mono (CDN) ─── */
-@import url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.css');
-
-/* ─── TheFold Brand font (kun for "TheFold" logotekst) ─── */
-@font-face {
-  font-family: 'TheFold Brand';
-  src: url('/fonts/thefold.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-/* ─── TheFold dark palette (alltid mørkt, ingen light mode) ─── */
-:root {
-  /* Surfaces */
-  --background: #000000;
-  --foreground: #F5F5F5;
-  --card: #141414;
-  --card-foreground: #F5F5F5;
-  --popover: #1A1A1A;
-  --popover-foreground: #F5F5F5;
-
-  /* Brand */
-  --primary: #6366F1;
-  --primary-foreground: #F5F5F5;
-  --secondary: #1A1A1A;
-  --secondary-foreground: rgba(255,255,255,0.68);
-
-  /* Muted / subtle */
-  --muted: #141414;
-  --muted-foreground: rgba(255,255,255,0.44);
-  --accent: #6366F1;
-  --accent-foreground: #F5F5F5;
-
-  /* Semantic */
-  --destructive: #EF4444;
-  --destructive-foreground: #F5F5F5;
-  --success: #34D399;
-  --warning: #FBBF24;
-
-  /* Borders & inputs */
-  --border: #2A2A2A;
-  --input: #1A1A1A;
-  --ring: #6366F1;
-
-  /* Chart */
-  --chart-1: #6366F1;
-  --chart-2: #A5B4FC;
-  --chart-3: #34D399;
-  --chart-4: #FBBF24;
-  --chart-5: #EF4444;
-
-  /* Sidebar */
-  --sidebar: #000000;
-  --sidebar-foreground: #F5F5F5;
-  --sidebar-primary: #6366F1;
-  --sidebar-primary-foreground: #F5F5F5;
-  --sidebar-accent: #1A1A1A;
-  --sidebar-accent-foreground: #F5F5F5;
-  --sidebar-border: #2A2A2A;
-  --sidebar-ring: #6366F1;
-
-  /* Fonts */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  --font-serif: 'Inter', -apple-system, system-ui, sans-serif;
-  --font-mono: 'Geist Mono', ui-monospace, monospace;
-  --font-brand: 'TheFold Brand', 'Inter', -apple-system, system-ui, sans-serif;
-
-  /* Radius */
-  --radius: 0.5rem;
-
-  /* TheFold custom tokens (brukes av T-objekt via inline styles) */
-  --tf-bg: #000000;
-  --tf-raised: #0D0D0D;
-  --tf-surface: #141414;
-  --tf-subtle: #1A1A1A;
-  --tf-border: #2A2A2A;
-  --tf-border-hover: #3D3D3D;
-  --tf-border-faint: #2A2A2A;
-  --tf-text: #F5F5F5;
-  --tf-text-sec: rgba(255,255,255,0.68);
-  --tf-text-muted: rgba(255,255,255,0.44);
-  --tf-text-faint: rgba(255,255,255,0.24);
-  --tf-accent: #6366F1;
-  --tf-accent-dim: rgba(99,102,241,0.12);
-  --tf-brand: #6366F1;
-  --tf-brand-light: #A5B4FC;
-  --tf-success: #34D399;
-  --tf-warning: #FBBF24;
-  --tf-error: #EF4444;
-
-  /* Shadows */
-  --shadow-2xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.15);
-  --shadow-xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.15);
-  --shadow-sm: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 1px 2px -1px hsl(0 0% 0% / 0.25);
-  --shadow: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 1px 2px -1px hsl(0 0% 0% / 0.25);
-  --shadow-md: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 2px 4px -1px hsl(0 0% 0% / 0.25);
-  --shadow-lg: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 4px 6px -1px hsl(0 0% 0% / 0.25);
-  --shadow-xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 8px 10px -1px hsl(0 0% 0% / 0.25);
-  --shadow-2xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.55);
-}
-
-/* Ingen .dark {} blokk — TheFold er alltid mørkt */
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
-
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
-  --font-serif: var(--font-serif);
-
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-
-  --shadow-2xs: var(--shadow-2xs);
-  --shadow-xs: var(--shadow-xs);
-  --shadow-sm: var(--shadow-sm);
-  --shadow: var(--shadow);
-  --shadow-md: var(--shadow-md);
-  --shadow-lg: var(--shadow-lg);
-  --shadow-xl: var(--shadow-xl);
-  --shadow-2xl: var(--shadow-2xl);
-}
-
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground;
-    font-family: var(--font-sans);
-  }
-}
-
-/* ─── TheFold animasjoner ─── */
-@keyframes spin { to { transform: rotate(360deg) } }
-@keyframes blink { 50% { opacity: 0 } }
-@keyframes shimmerMove { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
-
-/* ─── Scrollbar ─── */
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--tf-border); border-radius: 3px; }
-
-/* ─── Selection ─── */
-::selection { background: var(--tf-accent-dim); color: var(--tf-accent); }
-
-/* ─── Brand shimmer (agent working) ─── */
-.brand-shimmer {
-  background: linear-gradient(90deg, var(--tf-accent) 0%, var(--tf-brand-light) 50%, var(--tf-accent) 100%);
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: shimmerMove 2s ease-in-out infinite;
-}
-```
-
----
-
-### 3. Erstatt `layout.tsx`
-
-Fjern alle `next/font`-imports. Inter lastes via `@font-face` i globals.css.
+I `page.tsx` (overview) bruker Toggle-states `localStorage` i initial useState:
 
 ```tsx
-import type { Metadata } from "next";
-import "./globals.css";
+const [agentOn, setAgentOn] = useState(() => {
+  if (typeof window === "undefined") return true;  // server: true
+  return localStorage.getItem("tf_agentMode") !== "false";  // client: kan være false
+});
+```
 
-export const metadata: Metadata = {
-  title: "TheFold",
-  description: "Autonomous development agent",
-};
+Server renderer `checked=true`, client renderer `checked=false` → hydration mismatch.
 
-export default function RootLayout({
-  children,
-}: Readonly<{
+### Fix i `frontend/src/app/(dashboard)/page.tsx`
+
+Erstatt alle tre useState-initialisatorene med defaultverdier, og bruk useEffect for å lese fra localStorage:
+
+```tsx
+const [agentOn, setAgentOn] = useState(true);
+const [subAgOn, setSubAgOn] = useState(false);
+const [privat, setPrivat] = useState(false);
+
+// Les fra localStorage etter hydration
+useEffect(() => {
+  setAgentOn(localStorage.getItem("tf_agentMode") !== "false");
+  setSubAgOn(localStorage.getItem("tf_subAgents") === "true");
+  setPrivat(localStorage.getItem("tf_private") === "true");
+}, []);
+```
+
+Behold de eksisterende useEffect-ene som skriver til localStorage.
+
+---
+
+## BUG 1: Dither-bakgrunnsanimasjon
+
+### 1a. Installer avhengigheter
+
+```bash
+cd frontend
+npm install three @react-three/fiber @react-three/postprocessing postprocessing
+npm install -D @types/three
+```
+
+### 1b. Opprett `frontend/src/components/Dither.tsx`
+
+Kopier **hele** Dither-komponenten uendret fra vedlegget til denne chatten (den med waveVertexShader, waveFragmentShader, ditherFragmentShader, RetroEffectImpl, DitheredWaves, default export Dither). Ca 280 linjer. Bruk den eksakt som gitt.
+
+### 1c. Opprett `frontend/src/components/DitherBackground.tsx`
+
+```tsx
+"use client";
+
+import dynamic from "next/dynamic";
+import { T } from "@/lib/tokens";
+
+const Dither = dynamic(() => import("./Dither"), { ssr: false });
+
+interface DitherBackgroundProps {
   children: React.ReactNode;
-}>) {
+}
+
+export default function DitherBackground({ children }: DitherBackgroundProps) {
   return (
-    <html lang="no" suppressHydrationWarning>
-      <body className="antialiased">
+    <div style={{ position: "relative", width: "100%", flex: 1, display: "flex", flexDirection: "column" }}>
+      {/* Dither canvas — absolutt posisjonert bak innholdet */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 0,
+          overflow: "hidden",
+          pointerEvents: "none",
+        }}
+      >
+        <Dither
+          waveColor={[0.39, 0.4, 0.95]}
+          waveSpeed={0.03}
+          waveFrequency={3}
+          waveAmplitude={0.3}
+          colorNum={4}
+          pixelSize={2}
+          disableAnimation={false}
+          enableMouseInteraction={false}
+          mouseRadius={0.3}
+        />
+      </div>
+      {/* Gradient overlay — gjør tekst lesbart */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 1,
+          background: `radial-gradient(ellipse at center 40%, transparent 0%, ${T.bg}ee 60%, ${T.bg} 80%)`,
+          pointerEvents: "none",
+        }}
+      />
+      {/* Innhold over dither */}
+      <div style={{ position: "relative", zIndex: 2, flex: 1, display: "flex", flexDirection: "column" }}>
         {children}
-      </body>
-    </html>
+      </div>
+    </div>
   );
 }
 ```
 
 ---
 
-### 4. Oppdater `tokens.ts` — Bytt fra Suisse Intl til Inter
+## BUG 2: ChatComposer-bredde — full content-bredde
 
-```ts
-export const T = {
-  bg: "#000000",
-  raised: "#0D0D0D",
-  surface: "#141414",
-  subtle: "#1A1A1A",
-  border: "#2A2A2A",
-  borderHover: "#3D3D3D",
-  text: "#F5F5F5",
-  textSec: "rgba(255,255,255,0.68)",
-  textMuted: "rgba(255,255,255,0.44)",
-  textFaint: "rgba(255,255,255,0.24)",
-  accent: "#6366F1",
-  accentDim: "rgba(99,102,241,0.12)",
-  brand: "#6366F1",
-  brandLight: "#A5B4FC",
-  success: "#34D399",
-  warning: "#FBBF24",
-  error: "#EF4444",
-  mono: "'Geist Mono', ui-monospace, monospace",
-  sans: "'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
-  brandFont: "'TheFold Brand', 'Inter', -apple-system, system-ui, sans-serif",
-  r: 8,
-} as const;
+### Problemet
 
-export const Layout = {
-  sidebarWidth: 255,
-  sidebarCollapsed: 56,
-  contentWidth: 1636,
-  innerWidth: 1232,
-  headerHeight: 64,
-  sidePadding: (1636 - 1232) / 2,
-} as const;
+ChatComposer har `maxWidth: 672` på input-wrapperen. Den skal fylle hele innholdsområdet (parent er content-area som allerede er 1636px bred).
+
+### Fix i `frontend/src/components/ChatComposer.tsx`
+
+Erstatt **hele filen**:
+
+```tsx
+"use client";
+
+import { useState } from "react";
+import { T } from "@/lib/tokens";
+import ChatInput from "@/components/ChatInput";
+import DitherBackground from "@/components/DitherBackground";
+
+interface ChatComposerProps {
+  onSubmit?: (msg: string, repo: string | null, ghost: boolean) => void;
+  heading?: string;
+}
+
+export default function ChatComposer({ onSubmit, heading }: ChatComposerProps) {
+  const [repo, setRepo] = useState<string | null>("thefold-api");
+  const [ghost, setGhost] = useState(false);
+
+  return (
+    <DitherBackground>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          flex: 1,
+          minHeight: 400,
+          padding: "0 24px",
+        }}
+      >
+        <div style={{ paddingBottom: 32, textAlign: "center" }}>
+          <h2
+            style={{
+              fontSize: 32,
+              fontWeight: 600,
+              color: T.text,
+              letterSpacing: "-0.03em",
+            }}
+          >
+            {heading || "Når AI sier umulig, sier Mikael Kråkenes neste"}
+          </h2>
+        </div>
+        {/* Full bredde — fyller content-area */}
+        <div style={{ width: "100%", position: "relative" }}>
+          {/* Glow under chatboksen */}
+          <div
+            style={{
+              position: "absolute",
+              bottom: -12,
+              left: "50%",
+              transform: "translateX(-50%)",
+              width: "60%",
+              height: 40,
+              background: "radial-gradient(ellipse at center, rgba(99,102,241,0.25) 0%, transparent 70%)",
+              pointerEvents: "none",
+              filter: "blur(20px)",
+              zIndex: 0,
+            }}
+          />
+          <div style={{ position: "relative", zIndex: 1 }}>
+            <ChatInput
+              repo={ghost ? null : repo}
+              onSubmit={(msg, r) => onSubmit && onSubmit(msg, r ?? null, ghost)}
+              onRepoChange={setRepo}
+              ghost={ghost}
+              onGhostChange={setGhost}
+            />
+          </div>
+        </div>
+      </div>
+    </DitherBackground>
+  );
+}
+```
+
+Endringer:
+- Fjernet `maxWidth: 672` — nå `width: "100%"` (fyller parent)
+- Lagt til `padding: "0 24px"` på ytre div for litt pust
+- Wrappet med DitherBackground
+- Når `ghost` er true, sender `repo={null}` til ChatInput
+
+Fjern også `maxWidth: 672` fra ChatInput.tsx sin rot-div dersom den finnes der (sjekk `maxWidth: compact ? undefined : 672`). Endre til:
+
+```tsx
+maxWidth: compact ? undefined : undefined,
+```
+
+Eller fjern `maxWidth`-linjen helt.
+
+---
+
+## BUG 8: Privat-ikon — bytt til ordentlig Ghost
+
+### Problemet
+
+Ghost-ikonet i ChatInput er en håndtegnet SVG som ikke ser ut som et spøkelse.
+
+### Fix i `frontend/src/components/ChatInput.tsx`
+
+Importer Ghost fra lucide-react øverst:
+
+```tsx
+import { Ghost } from "lucide-react";
+```
+
+Erstatt ghost PillIcon-innholdet (den håndtegnede SVG-en) med:
+
+```tsx
+<PillIcon
+  tooltip="Privat — kun synlig for deg"
+  active={ghost}
+  onClick={() => onGhostChange && onGhostChange(!ghost)}
+>
+  <Ghost size={14} />
+</PillIcon>
 ```
 
 ---
 
-### 5. Oppdater `tailwind.config.ts`
+## BUG 3 + 4: Chat-redirect fra overview — send melding + ghost-modus
 
-```ts
-import type { Config } from "tailwindcss";
+### Problemet
 
-const config: Config = {
-  darkMode: ["class"],
-  content: ["./src/**/*.{ts,tsx}"],
-  theme: {
-    extend: {
-      fontFamily: {
-        sans: ["'Inter'", "-apple-system", "BlinkMacSystemFont", "system-ui", "sans-serif"],
-        mono: ["'Geist Mono'", "ui-monospace", "monospace"],
-        brand: ["'TheFold Brand'", "'Inter'", "system-ui", "sans-serif"],
-      },
-      colors: {
-        "tf-bg": "#000000",
-        "tf-raised": "#0D0D0D",
-        "tf-surface": "#141414",
-        "tf-subtle": "#1A1A1A",
-        "tf-border": "#2A2A2A",
-        "tf-accent": "#6366F1",
-        "tf-accent-dim": "rgba(99,102,241,0.12)",
-        "tf-brand": "#6366F1",
-        "tf-brand-light": "#A5B4FC",
-        "tf-success": "#34D399",
-        "tf-warning": "#FBBF24",
-        "tf-error": "#EF4444",
-        background: "var(--background)",
-        foreground: "var(--foreground)",
-        card: { DEFAULT: "var(--card)", foreground: "var(--card-foreground)" },
-        popover: { DEFAULT: "var(--popover)", foreground: "var(--popover-foreground)" },
-        primary: { DEFAULT: "var(--primary)", foreground: "var(--primary-foreground)" },
-        secondary: { DEFAULT: "var(--secondary)", foreground: "var(--secondary-foreground)" },
-        muted: { DEFAULT: "var(--muted)", foreground: "var(--muted-foreground)" },
-        accent: { DEFAULT: "var(--accent)", foreground: "var(--accent-foreground)" },
-        destructive: { DEFAULT: "var(--destructive)", foreground: "var(--destructive-foreground)" },
-        border: "var(--border)",
-        input: "var(--input)",
-        ring: "var(--ring)",
-        sidebar: {
-          DEFAULT: "var(--sidebar)",
-          foreground: "var(--sidebar-foreground)",
-          primary: "var(--sidebar-primary)",
-          "primary-foreground": "var(--sidebar-primary-foreground)",
-          accent: "var(--sidebar-accent)",
-          "accent-foreground": "var(--sidebar-accent-foreground)",
-          border: "var(--sidebar-border)",
-          ring: "var(--sidebar-ring)",
-        },
-      },
-      borderRadius: {
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
-      },
-    },
-  },
-  plugins: [],
+I `page.tsx` (overview):
+```tsx
+const onStartChat = (msg: string, repo: string | null, ghost: boolean) => {
+  router.push("/chat");  // ← meldingen og ghost forsvinner!
 };
+```
 
-export default config;
+### Fix i `frontend/src/app/(dashboard)/page.tsx`
+
+```tsx
+const onStartChat = (msg: string, repo: string | null, ghost: boolean) => {
+  const params = new URLSearchParams();
+  if (msg) params.set("msg", msg);
+  if (repo) params.set("repo", repo);
+  if (ghost) params.set("ghost", "1");
+  router.push(`/chat?${params.toString()}`);
+};
+```
+
+### Fix i `frontend/src/app/(dashboard)/chat/page.tsx` — les ghost fra searchParams
+
+Oppdater autoMsg-effekten til å lese repo og ghost fra query params, og sett riktig tab:
+
+```tsx
+// Auto-send msg from search params (overview redirect)
+useEffect(() => {
+  if (autoMsg && !autoMsgSent.current) {
+    autoMsgSent.current = true;
+    setNewChat(false);
+
+    const repoParam = searchParams.get("repo");
+    const ghostParam = searchParams.get("ghost") === "1";
+
+    // Sett riktig tab basert på ghost
+    if (ghostParam) {
+      setTab("Privat");
+    }
+
+    const convId = ghostParam
+      ? inkognitoConversationId()
+      : repoParam
+        ? repoConversationId(repoParam)
+        : repoConversationId("thefold-api");
+
+    setAc(convId);
+    setSending(true);
+    sendMessage(convId, autoMsg, { repoName: repoParam || undefined })
+      .then((result) => {
+        refreshConvs();
+        if (result.agentTriggered) {
+          startPolling();
+        }
+      })
+      .catch(() => {})
+      .finally(() => setSending(false));
+  }
+}, [autoMsg]); // eslint-disable-line react-hooks/exhaustive-deps
 ```
 
 ---
 
-### 6. Søk-erstatt i alle `.tsx`-filer: fjern Suisse Intl-referanser
+## BUG 5: AgentStream vises ikke
 
-Kjør global søk-erstatt i `frontend/src/`:
+### Verifisering
 
-| Søk | Erstatt |
-|-----|---------|
-| `'Suisse Intl', 'SuisseIntl', 'Inter'` | `'Inter'` |
-| `'Suisse Intl', 'Inter'` | `'Inter'` |
-| `"Suisse Intl"` | `"Inter"` |
-| `Suisse Intl` (i kommentarer/tekst) | `Inter` |
+Sjekk i chat/page.tsx om AgentStream allerede har `content`-prop. Basert på koden er det allerede fikset:
+
+```tsx
+<AgentStream content={m.content} onCancel={() => ac && cancelChatGeneration(ac)} />
+```
+
+Hvis dette allerede er på plass, er bug 5 fikset. Hvis ikke, legg til `content={m.content}` og `onCancel`.
+
+### Ekstra: parseProgress i AgentStream.tsx
+
+Backend sender `{ type: "progress", status, phase, ... }`. Oppdater parseProgress:
+
+```tsx
+function parseProgress(content?: string): AgentProgress | null {
+  if (!content) return null;
+  try {
+    const parsed = JSON.parse(content);
+    const data = parsed?.type === "progress" ? parsed : parsed;
+    if (data && typeof data.status === "string" && typeof data.phase === "string") {
+      return data as AgentProgress;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+```
+
+Legg også til `"thinking"` i AgentProgress status-type:
+
+```tsx
+interface AgentProgress {
+  status: "thinking" | "working" | "done" | "failed" | "waiting";
+  // ...resten uendret
+}
+```
+
+Og i PHASE_LABELS, legg til:
+```tsx
+thinking: "Tenker",
+context: "Analyserer",
+confidence: "Vurderer",
+building: "Bygger",
+clarification: "Trenger avklaring",
+```
 
 ---
 
-## Font-regler
+## BUG 6: Knapper i ChatInput gjør ingenting
 
-| Font | Bruk | CSS-variabel | Tailwind-klasse |
-|------|------|-------------|-----------------|
-| **Inter 24pt** | All tekst — body, overskrifter, knapper, labels, alt | `--font-sans` | `font-sans` (default) |
-| **Geist Mono** | Kode, monospace-verdier, tekniske labels | `--font-mono` | `font-mono` |
-| **TheFold Brand** | KUN "TF" og "TheFold" logotekst i sidebar | `--font-brand` | `font-brand` |
+### Fix: Nye props i ChatInput
+
+Legg til nye props i `ChatInputProps`:
+
+```tsx
+interface ChatInputProps {
+  compact?: boolean;
+  repo?: string | null;
+  onSubmit?: (value: string, repo?: string | null) => void;
+  onRepoChange?: (repo: string | null) => void;
+  ghost?: boolean;
+  onGhostChange?: (ghost: boolean) => void;
+  isPrivate?: boolean;
+  // NYE:
+  skills?: Array<{ id: string; name: string; enabled: boolean }>;
+  selectedSkillIds?: string[];
+  onSkillsChange?: (ids: string[]) => void;
+  subAgentsEnabled?: boolean;
+  onSubAgentsToggle?: () => void;
+}
+```
+
+Legg til state: `const [skillsOpen, setSkillsOpen] = useState(false);`
+
+### Sub-agent PillIcon — legg til onClick og active:
+
+```tsx
+<PillIcon
+  tooltip="Sub-agenter"
+  active={subAgentsEnabled}
+  onClick={() => onSubAgentsToggle && onSubAgentsToggle()}
+>
+  {/* eksisterende SVG uendret */}
+</PillIcon>
+```
+
+### Skills PillIcon — erstatt med dropdown:
+
+```tsx
+<div style={{ position: "relative" }}>
+  <PillIcon
+    tooltip="Skills"
+    active={(selectedSkillIds?.length ?? 0) > 0}
+    onClick={() => setSkillsOpen(p => !p)}
+  >
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z" />
+      <path d="m14 7 3 3" />
+      <path d="M5 6v4" /><path d="M19 14v4" />
+      <path d="M10 2v2" /><path d="M7 8H3" /><path d="M21 16h-4" /><path d="M11 3H9" />
+    </svg>
+  </PillIcon>
+  {skillsOpen && skills && skills.length > 0 && (
+    <div
+      style={{
+        position: "absolute",
+        bottom: "100%",
+        left: 0,
+        marginBottom: 6,
+        background: T.surface,
+        border: `1px solid ${T.border}`,
+        borderRadius: T.r,
+        padding: "4px 0",
+        minWidth: 200,
+        maxHeight: 240,
+        overflow: "auto",
+        zIndex: 100,
+        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+      }}
+    >
+      {skills.filter(s => s.enabled).map(skill => {
+        const selected = selectedSkillIds?.includes(skill.id) ?? false;
+        return (
+          <div
+            key={skill.id}
+            onClick={() => {
+              if (!onSkillsChange || !selectedSkillIds) return;
+              onSkillsChange(
+                selected
+                  ? selectedSkillIds.filter(id => id !== skill.id)
+                  : [...selectedSkillIds, skill.id]
+              );
+            }}
+            style={{
+              padding: "6px 12px",
+              fontSize: 12,
+              fontFamily: T.sans,
+              color: selected ? T.accent : T.textSec,
+              background: selected ? T.accentDim : "transparent",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <div style={{
+              width: 10, height: 10, borderRadius: 2,
+              border: `1px solid ${selected ? T.accent : T.border}`,
+              background: selected ? T.accent : "transparent",
+            }} />
+            {skill.name}
+          </div>
+        );
+      })}
+    </div>
+  )}
+</div>
+```
+
+### Wire opp i chat/page.tsx
+
+Legg til state og API-kall i ChatPageInner:
+
+```tsx
+import { listSkills } from "@/lib/api";
+
+// inne i ChatPageInner:
+const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
+const { data: skillsData } = useApiData(() => listSkills(), []);
+const availableSkills = skillsData?.skills ?? [];
+```
+
+Send props til ChatInput i samtale-visningen:
+
+```tsx
+<ChatInput
+  compact
+  repo={curRepo || undefined}
+  ghost={isGhost}
+  onSubmit={handleSend}
+  isPrivate={tab === "Privat"}
+  skills={availableSkills}
+  selectedSkillIds={selectedSkillIds}
+  onSkillsChange={setSelectedSkillIds}
+  subAgentsEnabled={subAgentsEnabled}
+  onSubAgentsToggle={() => setSubAgentsEnabled(p => !p)}
+/>
+```
+
+Send `selectedSkillIds` med i `handleSend` og `startNewChat`:
+
+```tsx
+const handleSend = (value: string, repo?: string | null) => {
+  if (!ac || !value) return;
+  setSending(true);
+  sendMessage(ac, value, {
+    repoName: repo || curRepo || undefined,
+    skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
+  })
+    .then((result) => {
+      refreshMsgs();
+      refreshConvs();
+      if (result.agentTriggered) startPolling();
+    })
+    .catch(() => {})
+    .finally(() => setSending(false));
+};
+```
+
+---
+
+## BUG 7: Skills-ikon → Wand2 (tryllestav) i sidebar
+
+### Fix i `frontend/src/app/(dashboard)/layout.tsx`
+
+Sidebar bruker allerede Lucide-ikoner. Endre Skills-ikonet:
+
+**Nåværende:**
+```tsx
+import { ..., Sparkles, ... } from "lucide-react";
+// ...
+{ icon: Sparkles, label: "Skills", href: "/skills" },
+```
+
+**Nytt:**
+```tsx
+import { ..., Wand2, ... } from "lucide-react";
+// Fjern Sparkles fra importen (med mindre den brukes andre steder)
+// ...
+{ icon: Wand2, label: "Skills", href: "/skills" },
+```
+
+---
+
+## Filer som endres
+
+| Fil | Endring |
+|-----|---------|
+| `components/Dither.tsx` | **NY** — kopier fra vedlegg |
+| `components/DitherBackground.tsx` | **NY** — wrapper med gradient overlay |
+| `components/ChatComposer.tsx` | Full bredde, DitherBackground, ghost→repo=null |
+| `components/ChatInput.tsx` | Ghost→lucide Ghost-ikon, nye props (skills/subAgents), skills dropdown, fjern maxWidth:672 |
+| `app/(dashboard)/page.tsx` | Fix hydration (localStorage i useEffect), fix onStartChat med query params |
+| `app/(dashboard)/chat/page.tsx` | Fix autoMsg med ghost+repo params, sett tab, wire skills/subAgents, importer listSkills |
+| `components/AgentStream.tsx` | parseProgress: håndter type:"progress", legg til "thinking" status og flere PHASE_LABELS |
+| `app/(dashboard)/layout.tsx` | Sparkles → Wand2 for Skills |
 
 ## Verifisering
 
-1. `npx next build` kompilerer uten feil
-2. Body-tekst er Inter
-3. Kode/monospace er Geist Mono
-4. Kun "TheFold"-logotekst bruker TheFold Brand-fonten
-5. Alle ShadCN-komponenter bruker TheFold mørke farger
-6. Ingen `.dark`-klasse nødvendig
-7. `tokens.ts` er synkronisert med CSS-variablene
+1. `npx next build` — ingen feil
+2. Ingen hydration mismatch-warnings i konsollen
+3. Overview: dither-animasjon bak chatboksen, chatboks fyller hele bredden
+4. Overview: ghost-ikon er et tydelig spøkelse (Ghost fra lucide)
+5. Overview: skriv "hei" → sendes til `/chat?msg=hei` → meldingen sendes automatisk, AI svarer
+6. Overview: aktiver ghost, skriv melding → lander i Privat-tab på chat-siden
+7. Chat: AgentStream viser fase/steg/rapport for agent_progress-meldinger
+8. Chat: Skills-knapp åpner dropdown med tilgjengelige skills
+9. Chat: Sub-agent-knapp toggler (visuell active-state)
+10. Sidebar + ChatInput: Skills har tryllestav-ikon (Wand2)

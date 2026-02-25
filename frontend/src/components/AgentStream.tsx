@@ -18,7 +18,7 @@ interface AgentReport {
 }
 
 interface AgentProgress {
-  status: "working" | "done" | "failed" | "waiting";
+  status: "thinking" | "working" | "done" | "failed" | "waiting";
   phase: string;
   summary: string;
   steps: StepInfo[];
@@ -32,7 +32,10 @@ interface AgentStreamProps {
 }
 
 const PHASE_LABELS: Record<string, string> = {
+  thinking: "Tenker",
   preparing: "Forbereder",
+  context: "Analyserer",
+  confidence: "Vurderer",
   planning: "Planlegger",
   building: "Bygger",
   validating: "Validerer",
@@ -40,6 +43,7 @@ const PHASE_LABELS: Record<string, string> = {
   completing: "Fullforer",
   failed: "Feilet",
   needs_input: "Trenger input",
+  clarification: "Trenger avklaring",
   completed: "Ferdig",
 };
 
@@ -47,8 +51,10 @@ function parseProgress(content?: string): AgentProgress | null {
   if (!content) return null;
   try {
     const parsed = JSON.parse(content);
-    if (parsed && typeof parsed.status === "string" && typeof parsed.phase === "string") {
-      return parsed as AgentProgress;
+    // Backend may wrap in { type: "progress", ...data }
+    const data = parsed?.type === "progress" ? parsed : parsed;
+    if (data && typeof data.status === "string" && typeof data.phase === "string") {
+      return data as AgentProgress;
     }
     return null;
   } catch {
@@ -77,7 +83,7 @@ export default function AgentStream({ content, onCancel }: AgentStreamProps) {
   }
 
   const phaseLabel = PHASE_LABELS[progress.phase] ?? progress.phase;
-  const isWorking = progress.status === "working";
+  const isWorking = progress.status === "working" || progress.status === "thinking";
   const isFailed = progress.status === "failed";
   const isDone = progress.status === "done";
 

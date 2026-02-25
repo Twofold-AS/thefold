@@ -10,7 +10,7 @@ import SectionLabel from "@/components/SectionLabel";
 import PixelCorners from "@/components/PixelCorners";
 import {
   LayoutDashboard, MessageSquare, CheckSquare, Box,
-  Sparkles, Brain, Plug, Server, Database, Activity, Terminal,
+  Wand2, Brain, Plug, Server, Database, Activity, Terminal,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -41,7 +41,7 @@ const navGroups: NavGroup[] = [
       { icon: MessageSquare, label: "Chat", href: "/chat", badge: "3" },
       { icon: CheckSquare, label: "Tasks", href: "/tasks" },
       { icon: Box, label: "Komponenter", href: "/komponenter" },
-      { icon: Sparkles, label: "Skills", href: "/skills" },
+      { icon: Wand2, label: "Skills", href: "/skills" },
     ],
   },
   {
