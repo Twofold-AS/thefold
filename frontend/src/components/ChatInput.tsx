@@ -13,6 +13,7 @@ interface ChatInputProps {
   onRepoChange?: (repo: string | null) => void;
   ghost?: boolean;
   onGhostChange?: (ghost: boolean) => void;
+  isPrivate?: boolean;
 }
 
 const repos = ["thefold-api", "thefold-frontend"];
@@ -24,6 +25,7 @@ export default function ChatInput({
   onRepoChange,
   ghost,
   onGhostChange,
+  isPrivate,
 }: ChatInputProps) {
   const [v, setV] = useState("");
   const [st, setSt] = useState(false);
@@ -131,8 +133,8 @@ export default function ChatInput({
               <circle cx="8.5" cy="6" r="1" fill="currentColor" />
             </svg>
           </PillIcon>
-          {/* Conditional icons: sub-agents, skills, repo dropdown */}
-          {!ghost && (
+          {/* Conditional icons: sub-agents, skills, repo dropdown — hidden when isPrivate */}
+          {!ghost && !isPrivate && (
             <>
               {/* Sub-agents */}
               <PillIcon tooltip="Sub-agenter">

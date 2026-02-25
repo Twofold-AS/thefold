@@ -5,6 +5,7 @@ import Tag from "@/components/Tag";
 import SectionLabel from "@/components/SectionLabel";
 import PixelCorners from "@/components/PixelCorners";
 import { GR } from "@/components/GridRow";
+import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
 import { getMemoryStats, searchMemories } from "@/lib/api";
 
@@ -46,17 +47,17 @@ export default function MemoryPage() {
   return (
     <>
       <div style={{ paddingTop: 40, paddingBottom: 24 }}>
-        <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", fontFamily: T.brandFont, marginBottom: 8 }}>Memory</h2>
-        <p style={{ fontSize: 13, color: T.textMuted }}>Semantisk minne med pgvector, temporal decay og kode-m\u00f8nstre.</p>
+        <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>Memory</h2>
+        <p style={{ fontSize: 13, color: T.textMuted }}>Semantisk minne med pgvector, temporal decay og kode-mønstre.</p>
       </div>
 
       <GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
           <PixelCorners />
           {[
-            { l: "MINNER", v: statsLoading ? "\u2013" : String(totalMemories) },
-            { l: "KODE-M\u00d8NSTRE", v: statsLoading ? "\u2013" : String(codePatternCount) },
-            { l: "HYBRID-S\u00d8K", v: "60/40", sub: "semantic/keyword" },
+            { l: "MINNER", v: statsLoading ? "–" : String(totalMemories) },
+            { l: "KODE-MØNSTRE", v: statsLoading ? "–" : String(codePatternCount) },
+            { l: "HYBRID-SØK", v: "60/40", sub: "semantic/keyword" },
             { l: "DECAY", v: "30d", sub: "halvtid" },
           ].map((s, i) => (
             <div key={i} style={{ padding: "18px 20px", borderRight: i < 3 ? `1px solid ${T.border}` : "none" }}>
@@ -74,8 +75,8 @@ export default function MemoryPage() {
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>SISTE MINNER</SectionLabel>
             {memsLoading ? (
-              <div style={{ padding: "20px 0", textAlign: "center" }}>
-                <span style={{ fontSize: 13, color: T.textMuted }}>Laster minner...</span>
+              <div style={{ padding: "20px 0" }}>
+                <Skeleton rows={4} />
               </div>
             ) : mems.length === 0 ? (
               <div style={{ padding: "20px 0", textAlign: "center" }}>
@@ -101,21 +102,21 @@ export default function MemoryPage() {
           </div>
 
           <div style={{ padding: 20 }}>
-            <SectionLabel>KODE-M\u00d8NSTRE</SectionLabel>
+            <SectionLabel>KODE-MØNSTRE</SectionLabel>
             {loading ? (
-              <div style={{ padding: "20px 0", textAlign: "center" }}>
-                <span style={{ fontSize: 13, color: T.textMuted }}>Laster...</span>
+              <div style={{ padding: "20px 0" }}>
+                <Skeleton rows={4} />
               </div>
             ) : pats.length === 0 ? (
               <div style={{ padding: "20px 0", textAlign: "center" }}>
-                <span style={{ fontSize: 13, color: T.textMuted }}>Ingen m\u00f8nstre funnet.</span>
+                <span style={{ fontSize: 13, color: T.textMuted }}>Ingen mønstre funnet.</span>
               </div>
             ) : (
               pats.map((p, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: i < pats.length - 1 ? `1px solid ${T.border}` : "none" }}>
                   <span style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>{p.type}</span>
                   <div style={{ display: "flex", gap: 16 }}>
-                    <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted }}>{p.count} m\u00f8nstre</span>
+                    <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted }}>{p.count} mønstre</span>
                     <span style={{ fontSize: 11, fontFamily: T.mono, color: T.success }}>{p.reused}x gjenbrukt</span>
                   </div>
                 </div>

@@ -17,8 +17,8 @@ export const T = {
   warning: "#FBBF24",
   error: "#EF4444",
   mono: "'Geist Mono', ui-monospace, monospace",
-  sans: "'Suisse Intl', 'SuisseIntl', 'Inter', -apple-system, system-ui, sans-serif",
-  brandFont: "'TheFold Brand', 'Suisse Intl', 'Inter', -apple-system, system-ui, sans-serif",
+  sans: "'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif",
+  brandFont: "'TheFold Brand', 'Inter', -apple-system, system-ui, sans-serif",
   r: 8,
 } as const;
 

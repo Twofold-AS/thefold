@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, Suspense } from "react";
+import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { T } from "@/lib/tokens";
 import PixelCorners from "@/components/PixelCorners";
@@ -15,6 +15,7 @@ import {
   getConversations,
   getChatHistory,
   sendMessage,
+  cancelChatGeneration,
   inkognitoConversationId,
   repoConversationId,
   type ConversationSummary,
@@ -70,11 +71,12 @@ function ChatPageInner() {
   const autoMsg = searchParams.get("msg");
 
   const [ac, setAc] = useState<string | null>(null);
-  const [newChat, setNewChat] = useState(false);
+  const [newChat, setNewChat] = useState(true);
   const [tab, setTab] = useState<"Repo" | "Privat">("Repo");
   const [sending, setSending] = useState(false);
   const autoMsgSent = useRef(false);
   const msgEndRef = useRef<HTMLDivElement>(null);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
     () => getConversations(),
@@ -92,13 +94,6 @@ function ChatPageInner() {
   const filtered = conversations.filter((c) =>
     tab === "Privat" ? c.id.startsWith("inkognito-") : c.id.startsWith("repo-"),
   );
-
-  // Select first conversation when loaded and none selected
-  useEffect(() => {
-    if (!ac && !newChat && filtered.length > 0 && !convsLoading) {
-      setAc(filtered[0].id);
-    }
-  }, [ac, newChat, filtered, convsLoading]);
 
   // Auto-send msg from search params
   useEffect(() => {
@@ -127,12 +122,55 @@ function ChatPageInner() {
     msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs.length]);
 
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+    };
+  }, []);
+
+  const stopPolling = useCallback(() => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  }, []);
+
+  const startPolling = useCallback(() => {
+    stopPolling();
+    pollingRef.current = setInterval(() => {
+      refreshMsgs();
+    }, 2000);
+  }, [stopPolling, refreshMsgs]);
+
+  // Check if polling should stop: latest message is not a working agent_progress
+  useEffect(() => {
+    if (!pollingRef.current) return;
+    if (msgs.length === 0) return;
+    const last = msgs[msgs.length - 1];
+    if (last.messageType === "agent_progress") {
+      try {
+        const parsed = JSON.parse(last.content);
+        if (parsed.status !== "working") {
+          stopPolling();
+        }
+      } catch {
+        // can't parse, stop polling
+        stopPolling();
+      }
+    } else if (last.messageType !== "agent_status" && last.messageType !== "agent_thought") {
+      // Not an active agent message type, stop polling
+      stopPolling();
+    }
+  }, [msgs, stopPolling]);
+
   const cur = ac ? conversations.find((c) => c.id === ac) : null;
   const isGhost = ac ? ac.startsWith("inkognito-") : false;
   const curRepo = ac ? extractRepoFromId(ac) : null;
 
   const startNewChat = (msg: string, repo: string | null, ghost: boolean) => {
-    const convId = ghost
+    const isPrivateTab = tab === "Privat";
+    const convId = ghost || isPrivateTab
       ? inkognitoConversationId()
       : repo
         ? repoConversationId(repo)
@@ -141,9 +179,12 @@ function ChatPageInner() {
     setNewChat(false);
     setSending(true);
     sendMessage(convId, msg, { repoName: repo || undefined })
-      .then(() => {
+      .then((result) => {
         refreshConvs();
         refreshMsgs();
+        if (result.agentTriggered) {
+          startPolling();
+        }
       })
       .catch(() => {})
       .finally(() => setSending(false));
@@ -153,9 +194,12 @@ function ChatPageInner() {
     if (!ac || !value) return;
     setSending(true);
     sendMessage(ac, value, { repoName: repo || curRepo || undefined })
-      .then(() => {
+      .then((result) => {
         refreshMsgs();
         refreshConvs();
+        if (result.agentTriggered) {
+          startPolling();
+        }
       })
       .catch(() => {})
       .finally(() => setSending(false));
@@ -365,67 +409,86 @@ function ChatPageInner() {
                 </span>
               </div>
             ) : (
-              msgs.map((m) => (
-                <div
-                  key={m.id}
-                  style={{
-                    display: "flex",
-                    gap: 10,
-                    alignItems: "flex-start",
-                    justifyContent: m.role === "user" ? "flex-end" : "flex-start",
-                  }}
-                >
-                  {m.role === "assistant" && (
+              msgs.map((m) => {
+                const time = new Date(m.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
+                const meta = m.metadata ? (typeof m.metadata === "string" ? (() => { try { return JSON.parse(m.metadata as string); } catch { return null; } })() : m.metadata) : null;
+
+                return (
+                  <div key={m.id}>
                     <div
                       style={{
-                        width: 28,
-                        height: 28,
-                        borderRadius: T.r,
-                        flexShrink: 0,
-                        background: T.surface,
-                        border: `1px solid ${T.border}`,
                         display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
+                        gap: 10,
+                        alignItems: "flex-start",
+                        justifyContent: m.role === "user" ? "flex-end" : "flex-start",
                       }}
                     >
-                      <RobotIcon size={16} />
+                      {m.role === "assistant" && (
+                        <div
+                          style={{
+                            width: 28,
+                            height: 28,
+                            borderRadius: T.r,
+                            flexShrink: 0,
+                            background: T.surface,
+                            border: `1px solid ${T.border}`,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <RobotIcon size={16} />
+                        </div>
+                      )}
+                      <div style={{ maxWidth: 540 }}>
+                        {isAgentMessage(m) ? (
+                          <AgentStream content={m.content} onCancel={() => ac && cancelChatGeneration(ac)} />
+                        ) : m.role === "user" ? (
+                          <div
+                            style={{
+                              background: T.subtle,
+                              border: `1px solid ${T.border}`,
+                              borderRadius: T.r,
+                              padding: "10px 16px",
+                              fontSize: 13,
+                              lineHeight: 1.6,
+                              color: T.text,
+                              fontFamily: T.sans,
+                            }}
+                          >
+                            {m.content}
+                          </div>
+                        ) : (
+                          <div
+                            style={{
+                              fontSize: 13,
+                              lineHeight: 1.65,
+                              color: T.text,
+                              fontFamily: T.sans,
+                              paddingTop: 4,
+                            }}
+                          >
+                            {m.content}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  )}
-                  <div style={{ maxWidth: 540 }}>
-                    {isAgentMessage(m) ? (
-                      <AgentStream />
+                    {/* Message metadata */}
+                    {m.role === "assistant" && !isAgentMessage(m) ? (
+                      <div style={{ display: "flex", gap: 12, marginTop: 6, marginLeft: 38, fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                        <span>{time}</span>
+                        {meta?.tokensUsed && <span>{meta.tokensUsed.toLocaleString()} tokens</span>}
+                        {meta?.costUsd != null && <span>${meta.costUsd.toFixed(4)}</span>}
+                        {meta?.model && <span>{meta.model.split("/").pop()}</span>}
+                      </div>
                     ) : m.role === "user" ? (
-                      <div
-                        style={{
-                          background: T.subtle,
-                          border: `1px solid ${T.border}`,
-                          borderRadius: T.r,
-                          padding: "10px 16px",
-                          fontSize: 13,
-                          lineHeight: 1.6,
-                          color: T.text,
-                          fontFamily: T.sans,
-                        }}
-                      >
-                        {m.content}
+                      <div style={{ marginTop: 4, fontSize: 10, fontFamily: T.mono, color: T.textFaint, textAlign: "right" }}>
+                        {time}
                       </div>
-                    ) : (
-                      <div
-                        style={{
-                          fontSize: 13,
-                          lineHeight: 1.65,
-                          color: T.text,
-                          fontFamily: T.sans,
-                          paddingTop: 4,
-                        }}
-                      >
-                        {m.content}
-                      </div>
-                    )}
+                    ) : null}
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
             {sending && (
               <div
@@ -465,6 +528,7 @@ function ChatPageInner() {
               repo={curRepo || undefined}
               ghost={isGhost}
               onSubmit={handleSend}
+              isPrivate={tab === "Privat"}
             />
           </div>
         </div>

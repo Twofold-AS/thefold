@@ -6,6 +6,7 @@ import Tag from "@/components/Tag";
 import SectionLabel from "@/components/SectionLabel";
 import PixelCorners from "@/components/PixelCorners";
 import { GR } from "@/components/GridRow";
+import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
 import { listBuilderJobs, getBuilderJob, type BuildStepInfo, type BuilderJobSummary } from "@/lib/api";
 
@@ -24,7 +25,7 @@ function stepStatusColor(status: string): string {
 }
 
 function formatDuration(startedAt: string | null, completedAt: string | null): string {
-  if (!startedAt) return "\u2014";
+  if (!startedAt) return "—";
   const start = new Date(startedAt).getTime();
   const end = completedAt ? new Date(completedAt).getTime() : Date.now();
   const diffMs = end - start;
@@ -77,18 +78,18 @@ export default function SandboxPage() {
   return (
     <>
       <div style={{ paddingTop: 40, paddingBottom: 24 }}>
-        <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", fontFamily: T.brandFont, marginBottom: 8 }}>Sandbox</h2>
-        <p style={{ fontSize: 13, color: T.textMuted }}>Isolert kodevalidering \u2014 typecheck, lint, test, snapshot, performance.</p>
+        <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>Sandbox</h2>
+        <p style={{ fontSize: 13, color: T.textMuted }}>Isolert kodevalidering — typecheck, lint, test, snapshot, performance.</p>
       </div>
 
       <GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
           <PixelCorners />
           {[
-            { l: "KJ\u00d8RINGER", v: loading ? "\u2013" : jobs.length },
-            { l: "BEST\u00c5TT", v: loading ? "\u2013" : passCount, c: T.success },
-            { l: "ADVARSLER", v: loading ? "\u2013" : warnCount, c: T.warning },
-            { l: "FEILET", v: loading ? "\u2013" : failCount, c: T.error },
+            { l: "KJØRINGER", v: loading ? "–" : jobs.length },
+            { l: "BESTÅTT", v: loading ? "–" : passCount, c: T.success },
+            { l: "ADVARSLER", v: loading ? "–" : warnCount, c: T.warning },
+            { l: "FEILET", v: loading ? "–" : failCount, c: T.error },
           ].map((s, i) => (
             <div key={i} style={{ padding: "18px 20px", borderRight: i < 3 ? `1px solid ${T.border}` : "none" }}>
               <div style={{ fontSize: 10, fontWeight: 500, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>{s.l}</div>
@@ -103,12 +104,12 @@ export default function SandboxPage() {
           <PixelCorners />
           <div style={{ borderRight: sb ? `1px solid ${T.border}` : "none" }}>
             {loading ? (
-              <div style={{ padding: 40, textAlign: "center" }}>
-                <span style={{ fontSize: 13, color: T.textMuted }}>Laster sandbox-kj\u00f8ringer...</span>
+              <div style={{ padding: 40 }}>
+                <Skeleton rows={4} />
               </div>
             ) : jobs.length === 0 ? (
               <div style={{ padding: 40, textAlign: "center" }}>
-                <span style={{ fontSize: 13, color: T.textMuted }}>Ingen kj\u00f8ringer funnet.</span>
+                <span style={{ fontSize: 13, color: T.textMuted }}>Ingen kjøringer funnet.</span>
               </div>
             ) : (
               jobs.map((r, i) => {
@@ -143,7 +144,7 @@ export default function SandboxPage() {
 
           {sb && (
             <div style={{ padding: 24 }}>
-              <div style={{ fontSize: 16, fontWeight: 600, color: T.text, fontFamily: T.brandFont, marginBottom: 4 }}>
+              <div style={{ fontSize: 16, fontWeight: 600, color: T.text, marginBottom: 4 }}>
                 {sb.currentPhase || sb.status}
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
@@ -153,8 +154,8 @@ export default function SandboxPage() {
               </div>
               <SectionLabel>VALIDATION PIPELINE</SectionLabel>
               {stepsLoading ? (
-                <div style={{ padding: "20px 0", textAlign: "center" }}>
-                  <span style={{ fontSize: 13, color: T.textMuted }}>Laster steg...</span>
+                <div style={{ padding: "20px 0" }}>
+                  <Skeleton rows={4} />
                 </div>
               ) : steps.length === 0 ? (
                 <div style={{ padding: "20px 0", textAlign: "center" }}>
@@ -165,7 +166,7 @@ export default function SandboxPage() {
                   <div key={st.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: i < steps.length - 1 ? `1px solid ${T.border}` : "none" }}>
                     <div style={{ width: 8, height: 8, borderRadius: "50%", background: stepStatusColor(st.status) }} />
                     <span style={{ fontSize: 13, fontWeight: 500, color: T.text, width: 100 }}>{st.phase}</span>
-                    <span style={{ fontSize: 12, color: T.textMuted, flex: 1 }}>{st.action}{st.filePath ? ` \u2014 ${st.filePath}` : ""}</span>
+                    <span style={{ fontSize: 12, color: T.textMuted, flex: 1 }}>{st.action}{st.filePath ? ` — ${st.filePath}` : ""}</span>
                     {st.tokensUsed > 0 && <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>{st.tokensUsed} tok</span>}
                   </div>
                 ))

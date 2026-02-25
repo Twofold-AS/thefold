@@ -6,6 +6,7 @@ import { GR } from "@/components/GridRow";
 import PixelCorners from "@/components/PixelCorners";
 import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
+import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
 import { listComponents, useComponentApi, Component } from "@/lib/api";
 
@@ -13,6 +14,7 @@ export default function KomponenterPage() {
   const { data, loading, refresh } = useApiData(() => listComponents(), []);
   const [fi, setFi] = useState("all");
   const [se, setSe] = useState("");
+  const [useDropdown, setUseDropdown] = useState<string | null>(null);
 
   const components: Component[] = data?.components ?? [];
 
@@ -25,7 +27,6 @@ export default function KomponenterPage() {
       )
         return false;
       if (fi === "all") return true;
-      // Match by category or by tags containing the filter
       if (c.category?.toLowerCase() === fi) return true;
       return (c.tags ?? []).some((tag) => tag.toLowerCase() === fi);
     });
@@ -40,17 +41,7 @@ export default function KomponenterPage() {
   if (loading) {
     return (
       <div style={{ paddingTop: 40 }}>
-        <div
-          style={{
-            fontSize: 13,
-            color: T.textMuted,
-            fontFamily: T.mono,
-            padding: "40px 0",
-            textAlign: "center",
-          }}
-        >
-          Laster komponenter...
-        </div>
+        <Skeleton rows={4} />
       </div>
     );
   }
@@ -64,7 +55,6 @@ export default function KomponenterPage() {
             fontWeight: 600,
             color: T.text,
             letterSpacing: "-0.03em",
-            fontFamily: T.brandFont,
             marginBottom: 8,
           }}
         >
@@ -103,7 +93,7 @@ export default function KomponenterPage() {
           <input
             value={se}
             onChange={(e) => setSe(e.target.value)}
-            placeholder="S\u00f8k..."
+            placeholder="Søk..."
             style={{
               flex: 1,
               background: "transparent",
@@ -168,6 +158,11 @@ export default function KomponenterPage() {
             const ir = i % 2 === 1;
             const nl =
               i < fl.length - 2 || (fl.length % 2 === 1 && i < fl.length - 1);
+
+            const qs = c.qualityScore;
+            const qsVariant = qs == null ? "default" as const : qs >= 80 ? "success" as const : qs >= 50 ? "accent" as const : "error" as const;
+            const qsLabel = qs == null ? "—" : `${qs}%`;
+
             return (
               <div
                 key={c.id}
@@ -190,7 +185,6 @@ export default function KomponenterPage() {
                       fontSize: 15,
                       fontWeight: 600,
                       color: T.text,
-                      fontFamily: T.brandFont,
                     }}
                   >
                     {c.name}
@@ -198,6 +192,7 @@ export default function KomponenterPage() {
                   <Tag variant={statusVariant(c.validationStatus)}>
                     {c.validationStatus}
                   </Tag>
+                  <Tag variant={qsVariant}>{qsLabel}</Tag>
                 </div>
                 <p
                   style={{
@@ -221,24 +216,60 @@ export default function KomponenterPage() {
                       <Tag key={tag}>{tag}</Tag>
                     ))}
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, position: "relative" }}>
                     <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
                       {c.timesUsed}
                     </span>
                     <Btn
                       sm
                       primary
-                      onClick={async () => {
-                        try {
-                          await useComponentApi(c.id, "thefold-api");
-                          refresh();
-                        } catch {
-                          alert("Kunne ikke bruke komponent");
-                        }
-                      }}
+                      onClick={() => setUseDropdown(useDropdown === c.id ? null : c.id)}
                     >
                       Bruk
                     </Btn>
+                    {useDropdown === c.id && (
+                      <div
+                        style={{
+                          position: "absolute",
+                          top: "100%",
+                          right: 0,
+                          marginTop: 4,
+                          background: T.surface,
+                          border: `1px solid ${T.border}`,
+                          borderRadius: 6,
+                          zIndex: 20,
+                          minWidth: 160,
+                          overflow: "hidden",
+                        }}
+                      >
+                        {["thefold-api", "thefold-frontend"].map((repo) => (
+                          <div
+                            key={repo}
+                            onClick={async () => {
+                              try {
+                                await useComponentApi(c.id, repo);
+                                setUseDropdown(null);
+                                refresh();
+                              } catch {
+                                alert("Kunne ikke bruke komponent");
+                              }
+                            }}
+                            style={{
+                              padding: "10px 14px",
+                              fontSize: 12,
+                              fontFamily: T.mono,
+                              color: T.textSec,
+                              cursor: "pointer",
+                              borderBottom: repo === "thefold-api" ? `1px solid ${T.border}` : "none",
+                            }}
+                            onMouseEnter={(e) => { (e.target as HTMLElement).style.background = T.subtle; }}
+                            onMouseLeave={(e) => { (e.target as HTMLElement).style.background = "transparent"; }}
+                          >
+                            {repo}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

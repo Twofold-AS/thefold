@@ -6,10 +6,14 @@ export const metadata: Metadata = {
   description: "Autonomous development agent",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
   return (
-    <html lang="no" data-theme="dark" suppressHydrationWarning>
-      <body style={{ fontFamily: "var(--font-sans)" }}>
+    <html lang="no" suppressHydrationWarning>
+      <body className="antialiased">
         {children}
       </body>
     </html>

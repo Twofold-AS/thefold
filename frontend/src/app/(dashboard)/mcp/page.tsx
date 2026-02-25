@@ -7,6 +7,7 @@ import Btn from "@/components/Btn";
 import Toggle from "@/components/Toggle";
 import PixelCorners from "@/components/PixelCorners";
 import { GR } from "@/components/GridRow";
+import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
 import { listMCPServers, installMCPServer, uninstallMCPServer } from "@/lib/api";
 
@@ -44,14 +45,14 @@ export default function MCPPage() {
   };
 
   const handleConfigure = (name: string) => {
-    alert(`Konfigurasjon for ${name} er ikke tilgjengelig enn\u00e5.`);
+    alert(`Konfigurasjon for ${name} er ikke tilgjengelig ennå.`);
   };
 
   return (
     <>
       <div style={{ paddingTop: 40, paddingBottom: 24 }}>
-        <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", fontFamily: T.brandFont, marginBottom: 8 }}>MCP Servere</h2>
-        <p style={{ fontSize: 13, color: T.textMuted }}>Model Context Protocol \u2014 verkt\u00f8y agenten kan bruke.</p>
+        <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>MCP Servere</h2>
+        <p style={{ fontSize: 13, color: T.textMuted }}>Model Context Protocol — verktøy agenten kan bruke.</p>
       </div>
 
       <GR>
@@ -63,8 +64,8 @@ export default function MCPPage() {
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <Tag variant={rte ? "success" : "default"}>{rte ? "routing aktiv" : "routing av"}</Tag>
-            <Tag>{loading ? "\u2013" : svs.filter(s => s.status === "installed").length} installert</Tag>
-            <Tag>{loading ? "\u2013" : svs.length} totalt</Tag>
+            <Tag>{loading ? "–" : svs.filter(s => s.status === "installed").length} installert</Tag>
+            <Tag>{loading ? "–" : svs.length} totalt</Tag>
           </div>
         </div>
       </GR>
@@ -73,8 +74,8 @@ export default function MCPPage() {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, position: "relative", overflow: "hidden" }}>
           <PixelCorners />
           {loading ? (
-            <div style={{ padding: 40, textAlign: "center", gridColumn: "1 / -1" }}>
-              <span style={{ fontSize: 13, color: T.textMuted }}>Laster MCP-servere...</span>
+            <div style={{ padding: 40, gridColumn: "1 / -1" }}>
+              <Skeleton rows={4} />
             </div>
           ) : svs.length === 0 ? (
             <div style={{ padding: 40, textAlign: "center", gridColumn: "1 / -1" }}>
@@ -89,7 +90,7 @@ export default function MCPPage() {
               return (
                 <div key={s.id} style={{ padding: 20, borderRight: ir ? "none" : `1px solid ${T.border}`, borderBottom: nl ? `1px solid ${T.border}` : "none" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                    <span style={{ fontSize: 15, fontWeight: 600, color: T.text, fontFamily: T.brandFont }}>{s.name}</span>
+                    <span style={{ fontSize: 15, fontWeight: 600, color: T.text }}>{s.name}</span>
                     <Tag variant={isInstalled ? "success" : "default"}>{s.status}</Tag>
                     {isHealthy && <Tag variant="success">healthy</Tag>}
                     {s.status === "error" && <Tag variant="error">error</Tag>}
@@ -97,11 +98,11 @@ export default function MCPPage() {
                   <div style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint, marginBottom: 6 }}>{s.category}</div>
                   <p style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5, marginBottom: 10 }}>{s.description || "Ingen beskrivelse"}</p>
                   <div style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 10, color: T.textFaint, marginBottom: 4 }}>VERKT\u00d8Y</div>
+                    <div style={{ fontSize: 10, color: T.textFaint, marginBottom: 4 }}>VERKTØY</div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                       {s.config && typeof s.config === "object" && Array.isArray((s.config as Record<string, unknown>).tools)
                         ? ((s.config as Record<string, unknown>).tools as string[]).map(t => (<Tag key={t}>{t}</Tag>))
-                        : <span style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono }}>Se serverens verkt\u00f8y</span>
+                        : <span style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono }}>Se serverens verktøy</span>
                       }
                     </div>
                   </div>

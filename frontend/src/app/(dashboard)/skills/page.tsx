@@ -8,30 +8,73 @@ import SectionLabel from "@/components/SectionLabel";
 import Toggle from "@/components/Toggle";
 import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
+import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
-import { listSkills, toggleSkill, Skill } from "@/lib/api";
+import { listSkills, toggleSkill, createSkill, Skill } from "@/lib/api";
+
+const inputStyle: React.CSSProperties = {
+  background: T.subtle,
+  border: `1px solid ${T.border}`,
+  borderRadius: 6,
+  padding: "10px 14px",
+  fontSize: 13,
+  color: T.text,
+  fontFamily: T.sans,
+  width: "100%",
+  outline: "none",
+  boxSizing: "border-box",
+};
+
+const textareaStyle: React.CSSProperties = {
+  ...inputStyle,
+  minHeight: 100,
+  resize: "vertical" as const,
+};
 
 export default function SkillsPage() {
   const { data, loading, refresh } = useApiData(() => listSkills(), []);
   const [sel, setSel] = useState<string | null>(null);
 
+  // Create dialog state
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [newPrompt, setNewPrompt] = useState("");
+  const [newPhase, setNewPhase] = useState<"pre_run" | "inject" | "post_run">("inject");
+  const [creating, setCreating] = useState(false);
+
   const skills: Skill[] = data?.skills ?? [];
   const sk = sel !== null ? skills.find((s) => s.id === sel) ?? null : null;
+
+  const handleCreateSkill = async () => {
+    if (!newName.trim()) return;
+    setCreating(true);
+    try {
+      await createSkill({
+        name: newName,
+        description: newDesc,
+        promptFragment: newPrompt,
+        appliesTo: [],
+        scope: "global",
+        taskPhase: newPhase,
+      });
+      setShowCreate(false);
+      setNewName("");
+      setNewDesc("");
+      setNewPrompt("");
+      setNewPhase("inject");
+      refresh();
+    } catch (e) {
+      alert(`Feil ved opprettelse: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCreating(false);
+    }
+  };
 
   if (loading) {
     return (
       <div style={{ paddingTop: 40 }}>
-        <div
-          style={{
-            fontSize: 13,
-            color: T.textMuted,
-            fontFamily: T.mono,
-            padding: "40px 0",
-            textAlign: "center",
-          }}
-        >
-          Laster skills...
-        </div>
+        <Skeleton rows={4} />
       </div>
     );
   }
@@ -49,7 +92,6 @@ export default function SkillsPage() {
                 fontWeight: 600,
                 color: T.text,
                 letterSpacing: "-0.03em",
-                fontFamily: T.brandFont,
                 marginBottom: 8,
               }}
             >
@@ -59,7 +101,7 @@ export default function SkillsPage() {
               Modulært prompt-system med pipeline, routing og scoring.
             </p>
           </div>
-          <Btn primary sm onClick={() => alert("Ny skill — kommer snart")}>
+          <Btn primary sm onClick={() => setShowCreate(true)}>
             + Ny skill
           </Btn>
         </div>
@@ -80,7 +122,7 @@ export default function SkillsPage() {
           <PixelCorners />
           {[
             { l: "AKTIVE", v: skills.filter((s) => s.enabled).length },
-            { l: "PIPELINE-FASER", v: "pre \u2192 inject \u2192 post" },
+            { l: "PIPELINE-FASER", v: "pre → inject → post" },
             { l: "TOKEN-BUDSJETT", v: "4 000" },
           ].map((s, i) => (
             <div
@@ -178,7 +220,6 @@ export default function SkillsPage() {
                     fontSize: 18,
                     fontWeight: 600,
                     color: T.text,
-                    fontFamily: T.brandFont,
                     marginBottom: 8,
                   }}
                 >
@@ -262,6 +303,108 @@ export default function SkillsPage() {
           )}
         </div>
       </GR>
+
+      {/* Create skill dialog */}
+      {showCreate && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowCreate(false); }}
+        >
+          <div
+            style={{
+              background: T.surface,
+              border: `1px solid ${T.border}`,
+              borderRadius: T.r,
+              padding: 24,
+              width: 480,
+              maxHeight: "80vh",
+              overflow: "auto",
+            }}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600, color: T.text, marginBottom: 20 }}>
+              Ny skill
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Navn</div>
+              <input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Skill-navn..."
+                style={inputStyle}
+              />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Beskrivelse</div>
+              <textarea
+                value={newDesc}
+                onChange={(e) => setNewDesc(e.target.value)}
+                placeholder="Hva gjør denne skillen..."
+                style={textareaStyle}
+              />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Prompt-fragment</div>
+              <textarea
+                value={newPrompt}
+                onChange={(e) => setNewPrompt(e.target.value)}
+                placeholder="Prompt-tekst som injiseres..."
+                style={textareaStyle}
+              />
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Fase</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {(["pre_run", "inject", "post_run"] as const).map((ph) => (
+                  <div
+                    key={ph}
+                    onClick={() => setNewPhase(ph)}
+                    style={{
+                      flex: 1,
+                      padding: "10px 14px",
+                      background: newPhase === ph ? T.accentDim : "transparent",
+                      border: `1px solid ${newPhase === ph ? T.accent : T.border}`,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontFamily: T.mono,
+                      color: newPhase === ph ? T.accent : T.textSec,
+                      cursor: "pointer",
+                      textAlign: "center",
+                    }}
+                  >
+                    {ph}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <Btn sm onClick={() => setShowCreate(false)}>
+                Avbryt
+              </Btn>
+              <Btn
+                primary
+                sm
+                onClick={handleCreateSkill}
+                style={{ opacity: creating || !newName.trim() ? 0.5 : 1, pointerEvents: creating ? "none" : "auto" }}
+              >
+                {creating ? "Oppretter..." : "Opprett"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

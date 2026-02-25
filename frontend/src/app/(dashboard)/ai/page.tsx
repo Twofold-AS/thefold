@@ -1,13 +1,15 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { T } from "@/lib/tokens";
 import { GR } from "@/components/GridRow";
 import PixelCorners from "@/components/PixelCorners";
 import SectionLabel from "@/components/SectionLabel";
 import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
+import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
-import { listProviders, getCostSummary, getPhaseMetrics } from "@/lib/api";
+import { listProviders, getCostSummary, getPhaseMetrics, type DailyTrend } from "@/lib/api";
 
 const TOKEN_BUDGETS: Record<string, number> = {
   planning: 8000,
@@ -22,7 +24,7 @@ const PHASE_LABELS: Record<string, string> = {
   diagnosis: "Validering",
   review: "Review",
   confidence: "Confidence",
-  completing: "Fullf\u00f8ring",
+  completing: "Fullføring",
 };
 
 const DAY_NAMES: Record<string, string> = {
@@ -31,8 +33,8 @@ const DAY_NAMES: Record<string, string> = {
   Wed: "Ons",
   Thu: "Tor",
   Fri: "Fre",
-  Sat: "L\u00f8r",
-  Sun: "S\u00f8n",
+  Sat: "Lør",
+  Sun: "Søn",
 };
 
 function formatDayLabel(dateStr: string): string {
@@ -43,6 +45,29 @@ function formatDayLabel(dateStr: string): string {
   } catch {
     return dateStr;
   }
+}
+
+const PROVIDER_CONFIG: Record<string, { displayName: string; color: string }> = {
+  anthropic:  { displayName: "Anthropic",    color: "#D4A27F" },
+  fireworks:  { displayName: "Fireworks.ai", color: "#FF6B35" },
+  openrouter: { displayName: "OpenRouter",   color: "#6366F1" },
+};
+
+const PROVIDER_KEYS = ["anthropic", "fireworks", "openrouter"] as const;
+
+const PHASES = [
+  { key: "planning", label: "Planlegging", desc: "Oppgaveplanlegging og taskdeling" },
+  { key: "coding",   label: "Programmering", desc: "Kodegenerering i builder" },
+  { key: "reviewing", label: "Review", desc: "Kode-review og kvalitetssjekk" },
+  { key: "chat",     label: "Chat", desc: "Direkte samtale" },
+];
+
+function matchProviderKey(name: string): string | null {
+  const lower = name.toLowerCase();
+  if (lower.includes("anthropic")) return "anthropic";
+  if (lower.includes("fireworks")) return "fireworks";
+  if (lower.includes("openrouter")) return "openrouter";
+  return null;
 }
 
 export default function AIPage() {
@@ -56,24 +81,57 @@ export default function AIPage() {
   const dailyTrend = costData?.dailyTrend ?? [];
   const phases = phaseData?.phases ?? [];
 
+  // Map backend providers to our 3
+  const providerMap: Record<string, typeof providers[0] | null> = {
+    anthropic: null,
+    fireworks: null,
+    openrouter: null,
+  };
+  for (const p of providers) {
+    const key = matchProviderKey(p.name);
+    if (key) providerMap[key] = p;
+  }
+
+  // Flatten models from matched providers only
+  const matchedProviders = PROVIDER_KEYS.map((k) => providerMap[k]).filter(Boolean) as typeof providers;
+  const allModels = matchedProviders.flatMap((p) =>
+    (p.models ?? []).map((m) => ({ ...m, providerName: p.name }))
+  );
+
+  // Phase assignment from localStorage
+  const [phaseModels, setPhaseModels] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const loaded: Record<string, string> = {};
+    for (const ph of PHASES) {
+      const stored = localStorage.getItem(`tf_phase_${ph.key}`);
+      if (stored) loaded[ph.key] = stored;
+    }
+    setPhaseModels(loaded);
+  }, []);
+
+  const activeModels = allModels.filter((m) => m.enabled);
+  const cyclePhaseModel = (phaseKey: string) => {
+    if (activeModels.length === 0) return;
+    const current = phaseModels[phaseKey] || "";
+    const currentIdx = activeModels.findIndex((m) => m.displayName === current);
+    const nextIdx = (currentIdx + 1) % activeModels.length;
+    const next = activeModels[nextIdx].displayName;
+    setPhaseModels((prev) => ({ ...prev, [phaseKey]: next }));
+    localStorage.setItem(`tf_phase_${phaseKey}`, next);
+  };
+
   // Cost chart calculations
-  const mx = dailyTrend.length > 0 ? Math.max(...dailyTrend.map((c: any) => Number(c.total) || 0), 0.01) : 1;
+  const mx = dailyTrend.length > 0 ? Math.max(...dailyTrend.map((c: DailyTrend) => Number(c.total) || 0), 0.01) : 1;
   const weekTotal = Number(costData?.thisWeek?.total ?? 0) || 0;
-  const weekCount = Number(costData?.thisWeek?.count ?? 0) || 0;
   const avgPerDay = dailyTrend.length > 0 ? weekTotal / dailyTrend.length : 0;
 
   // Trend calc: compare last 3 days avg to first 3 days avg
   let trendPct = 0;
   if (dailyTrend.length >= 4) {
-    const first = dailyTrend.slice(0, 3).reduce((s: number, d: any) => s + (Number(d.total) || 0), 0) / 3;
-    const last = dailyTrend.slice(-3).reduce((s: number, d: any) => s + (Number(d.total) || 0), 0) / 3;
+    const first = dailyTrend.slice(0, 3).reduce((s: number, d: DailyTrend) => s + (Number(d.total) || 0), 0) / 3;
+    const last = dailyTrend.slice(-3).reduce((s: number, d: DailyTrend) => s + (Number(d.total) || 0), 0) / 3;
     if (first > 0) trendPct = Math.round(((last - first) / first) * 100);
   }
-
-  // Flatten models from providers
-  const allModels = providers.flatMap((p) =>
-    (p.models ?? []).map((m) => ({ ...m, providerName: p.name }))
-  );
 
   // Phase metrics for token budget bars
   const phaseBars = Object.entries(TOKEN_BUDGETS).map(([key, max]) => {
@@ -90,17 +148,7 @@ export default function AIPage() {
   if (loading) {
     return (
       <div style={{ paddingTop: 40 }}>
-        <div
-          style={{
-            fontSize: 13,
-            color: T.textMuted,
-            fontFamily: T.mono,
-            padding: "40px 0",
-            textAlign: "center",
-          }}
-        >
-          Laster AI-data...
-        </div>
+        <Skeleton rows={4} />
       </div>
     );
   }
@@ -114,7 +162,6 @@ export default function AIPage() {
             fontWeight: 600,
             color: T.text,
             letterSpacing: "-0.03em",
-            fontFamily: T.brandFont,
             marginBottom: 8,
           }}
         >
@@ -125,12 +172,12 @@ export default function AIPage() {
         </p>
       </div>
 
-      {/* Provider stats */}
+      {/* Provider stats — always 3 columns */}
       <GR>
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: `repeat(${Math.min(providers.length, 4)}, 1fr)`,
+            gridTemplateColumns: "repeat(3, 1fr)",
             border: `1px solid ${T.border}`,
             borderRadius: T.r,
             position: "relative",
@@ -138,62 +185,67 @@ export default function AIPage() {
           }}
         >
           <PixelCorners />
-          {providers.slice(0, 4).map((p, i) => {
-            const modelCount = p.models?.length ?? 0;
-            const enabledModels = p.models?.filter((m) => m.enabled).length ?? 0;
-            const usagePct = modelCount > 0 ? Math.round((enabledModels / modelCount) * 100) : 0;
+          {PROVIDER_KEYS.map((key, i) => {
+            const config = PROVIDER_CONFIG[key];
+            const backendProvider = providerMap[key];
+            const enabledModels = backendProvider?.models?.filter((m) => m.enabled).length ?? 0;
+            const isConnected = !!backendProvider;
             return (
               <div
-                key={p.id}
+                key={key}
                 style={{
                   padding: "18px 20px",
-                  borderRight: i < Math.min(providers.length, 4) - 1 ? `1px solid ${T.border}` : "none",
+                  borderRight: i < 2 ? `1px solid ${T.border}` : "none",
                 }}
               >
                 <div
                   style={{
                     display: "flex",
                     alignItems: "center",
-                    gap: 8,
+                    gap: 10,
                     marginBottom: 10,
                   }}
                 >
-                  <span
+                  <div
                     style={{
+                      width: 30,
+                      height: 30,
+                      borderRadius: "50%",
+                      background: config.color,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
                       fontSize: 14,
-                      fontWeight: 600,
-                      color: T.text,
-                      fontFamily: T.brandFont,
+                      fontWeight: 700,
+                      color: "#fff",
+                      flexShrink: 0,
                     }}
                   >
-                    {p.name}
-                  </span>
-                  <Tag variant={p.enabled ? "accent" : "default"}>
-                    {p.enabled ? "active" : "inactive"}
+                    {config.displayName.charAt(0)}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <span
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        color: T.text,
+                      }}
+                    >
+                      {config.displayName}
+                    </span>
+                  </div>
+                  <Tag variant={isConnected ? "success" : "default"}>
+                    {isConnected ? "Tilkoblet" : "Frakoblet"}
                   </Tag>
                 </div>
                 <div
                   style={{
-                    fontSize: 10,
+                    fontSize: 12,
+                    fontFamily: T.mono,
                     color: T.textMuted,
-                    textTransform: "uppercase",
-                    marginBottom: 4,
                   }}
                 >
-                  MODELLER
-                </div>
-                <div style={{ fontSize: 22, fontWeight: 600, color: T.text, marginBottom: 8 }}>
-                  {enabledModels}/{modelCount}
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ flex: 1, height: 4, background: T.subtle, overflow: "hidden" }}>
-                    <div
-                      style={{ width: `${usagePct}%`, height: "100%", background: T.accent }}
-                    />
-                  </div>
-                  <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                    {usagePct}%
-                  </span>
+                  {enabledModels} modeller aktive
                 </div>
               </div>
             );
@@ -265,7 +317,7 @@ export default function AIPage() {
                     color: T.textMuted,
                   }}
                 >
-                  Ingen data enn\u00e5
+                  Ingen data ennå
                 </div>
               )}
             </div>
@@ -342,13 +394,12 @@ export default function AIPage() {
         </div>
       </GR>
 
-      {/* Models table */}
-      <GR mb={40}>
+      {/* Models table — only from matched providers */}
+      <GR>
         <div
           style={{
             border: `1px solid ${T.border}`,
             borderTop: "none",
-            borderRadius: `0 0 ${T.r}px ${T.r}px`,
             position: "relative",
             overflow: "hidden",
           }}
@@ -421,7 +472,7 @@ export default function AIPage() {
                 >
                   {m.displayName}
                 </span>
-                {m.tier >= 3 && <Tag variant="accent">prim\u00e6r</Tag>}
+                {m.tier >= 3 && <Tag variant="accent">primær</Tag>}
               </div>
               <span style={{ fontSize: 12, color: T.textSec }}>{m.providerName}</span>
               <span style={{ fontSize: 12, fontFamily: T.mono, color: T.textMuted }}>
@@ -444,6 +495,76 @@ export default function AIPage() {
               <Btn sm>Endre</Btn>
             </div>
           ))}
+        </div>
+      </GR>
+
+      {/* Phase assignment */}
+      <GR mb={40}>
+        <div
+          style={{
+            border: `1px solid ${T.border}`,
+            borderTop: "none",
+            borderRadius: `0 0 ${T.r}px ${T.r}px`,
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          <PixelCorners />
+          <div
+            style={{
+              padding: "14px 20px",
+              borderBottom: `1px solid ${T.border}`,
+            }}
+          >
+            <SectionLabel>FASE-TILORDNING</SectionLabel>
+          </div>
+          {PHASES.map((ph, i) => {
+            const selected = phaseModels[ph.key] || (activeModels.length > 0 ? activeModels[0].displayName : "Ingen");
+            return (
+              <div
+                key={ph.key}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "14px 20px",
+                  borderBottom: i < PHASES.length - 1 ? `1px solid ${T.border}` : "none",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: T.text }}>{ph.label}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted }}>{ph.desc}</div>
+                </div>
+                <div
+                  onClick={() => cyclePhaseModel(ph.key)}
+                  style={{
+                    padding: "6px 14px",
+                    background: T.subtle,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontFamily: T.mono,
+                    color: T.textSec,
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  {selected}
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                    <path
+                      d="M2.5 4L5 6.5 7.5 4"
+                      stroke="currentColor"
+                      strokeWidth="1"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </GR>
     </>

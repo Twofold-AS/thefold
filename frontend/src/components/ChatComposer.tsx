@@ -31,7 +31,6 @@ export default function ChatComposer({ onSubmit, heading }: ChatComposerProps) {
             fontWeight: 600,
             color: T.text,
             letterSpacing: "-0.03em",
-            fontFamily: T.brandFont,
           }}
         >
           {heading || "Nar AI sier umulig, sier Mikael Krakenes neste"}

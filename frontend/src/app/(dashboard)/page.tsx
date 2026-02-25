@@ -4,14 +4,13 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { T } from "@/lib/tokens";
 import { useApiData } from "@/lib/hooks";
-import { getTaskStats, getCostSummary, listTheFoldTasks, getAuditStats } from "@/lib/api";
+import { getTaskStats, getCostSummary, listTheFoldTasks, getAuditStats, listSkills, getMemoryStats } from "@/lib/api";
 import ChatComposer from "@/components/ChatComposer";
 import { GR } from "@/components/GridRow";
 import PixelCorners from "@/components/PixelCorners";
 import SectionLabel from "@/components/SectionLabel";
 import Toggle from "@/components/Toggle";
-import Btn from "@/components/Btn";
-import Tag from "@/components/Tag";
+import Skeleton from "@/components/Skeleton";
 
 function formatTokens(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1) + "k";
@@ -56,6 +55,8 @@ export default function OverviewPage() {
   const { data: costData, loading: costLoading } = useApiData(() => getCostSummary(), []);
   const { data: recentTasks, loading: tasksLoading } = useApiData(() => listTheFoldTasks({ limit: 4 }), []);
   const { data: auditStats, loading: auditLoading } = useApiData(() => getAuditStats(), []);
+  const { data: skillsData, loading: skillsLoading } = useApiData(() => listSkills(), []);
+  const { data: memoryStats, loading: memoryLoading } = useApiData(() => getMemoryStats(), []);
 
   const [agentOn, setAgentOn] = useState(() => {
     if (typeof window === "undefined") return true;
@@ -86,6 +87,19 @@ export default function OverviewPage() {
   const onStartChat = (msg: string, repo: string | null, ghost: boolean) => {
     router.push("/chat");
   };
+
+  // Skills data
+  const allSkills = skillsData?.skills ?? [];
+  const activeSkillCount = allSkills.filter((s) => s.enabled).length;
+  const topSkills = [...allSkills].sort((a, b) => (b.totalUses ?? 0) - (a.totalUses ?? 0)).slice(0, 3);
+
+  // Memory data
+  const totalMemories = memoryStats?.total ?? 0;
+  const codePatterns = memoryStats?.byType?.["code_pattern"] ?? 0;
+  const byType = memoryStats?.byType ?? {};
+  const topCategories = Object.entries(byType)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 3);
 
   return (
     <>
@@ -197,7 +211,7 @@ export default function OverviewPage() {
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>SISTE AKTIVITET</SectionLabel>
             {tasksLoading ? (
-              <div style={{ fontSize: 12, color: T.textMuted, padding: "7px 0" }}>Laster...</div>
+              <Skeleton rows={4} height={16} style={{ padding: "7px 0" }} />
             ) : recentTasks?.tasks && recentTasks.tasks.length > 0 ? (
               recentTasks.tasks.map((task, i) => (
                 <div
@@ -241,7 +255,7 @@ export default function OverviewPage() {
         </div>
       </GR>
 
-      {/* Components + Typography */}
+      {/* Skills + Memory */}
       <GR mb={40}>
         <div
           style={{
@@ -256,41 +270,60 @@ export default function OverviewPage() {
         >
           <PixelCorners />
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
-            <SectionLabel>KOMPONENTER</SectionLabel>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-              <Btn primary sm>
-                Primary
-              </Btn>
-              <Btn sm>Secondary</Btn>
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              <Tag>default</Tag>
-              <Tag variant="accent">aktiv</Tag>
-              <Tag variant="success">ok</Tag>
-              <Tag variant="error">feil</Tag>
-            </div>
+            <SectionLabel>SKILLS</SectionLabel>
+            {skillsLoading ? (
+              <Skeleton rows={4} height={14} />
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 16, marginBottom: 14 }}>
+                  <div>
+                    <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", marginBottom: 2 }}>AKTIVE</div>
+                    <div style={{ fontSize: 22, fontWeight: 600, color: T.text }}>{activeSkillCount}/{allSkills.length}</div>
+                  </div>
+                </div>
+                {topSkills.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", marginBottom: 6 }}>MEST BRUKT</div>
+                    {topSkills.map((sk) => (
+                      <div key={sk.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${T.border}` }}>
+                        <span style={{ fontSize: 12, color: T.textSec }}>{sk.name}</span>
+                        <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>{sk.totalUses ?? 0}x</span>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
           </div>
           <div style={{ padding: 20 }}>
-            <SectionLabel>TYPOGRAFI</SectionLabel>
-            <div
-              style={{
-                fontSize: 24,
-                fontWeight: 600,
-                color: T.text,
-                letterSpacing: "-0.025em",
-                lineHeight: 1.2,
-                marginBottom: 8,
-                fontFamily: T.brandFont,
-              }}
-            >
-              Display
-            </div>
-            <div style={{ fontSize: 14, color: T.textSec, lineHeight: 1.5, marginBottom: 4 }}>
-              Body text i Suisse Intl 400.
-            </div>
-            <div style={{ fontSize: 11, fontFamily: T.mono, color: T.textFaint }}>
-              mono: Geist Mono
-            </div>
+            <SectionLabel>MEMORY</SectionLabel>
+            {memoryLoading ? (
+              <Skeleton rows={4} height={14} />
+            ) : (
+              <>
+                <div style={{ display: "flex", gap: 16, marginBottom: 14 }}>
+                  <div>
+                    <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", marginBottom: 2 }}>MINNER</div>
+                    <div style={{ fontSize: 22, fontWeight: 600, color: T.text }}>{totalMemories}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", marginBottom: 2 }}>KODE-MØNSTRE</div>
+                    <div style={{ fontSize: 22, fontWeight: 600, color: T.text }}>{codePatterns}</div>
+                  </div>
+                </div>
+                {topCategories.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", marginBottom: 6 }}>TOPP KATEGORIER</div>
+                    {topCategories.map(([type, count]) => (
+                      <div key={type} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 0", borderBottom: `1px solid ${T.border}` }}>
+                        <span style={{ fontSize: 12, color: T.textSec }}>{type}</span>
+                        <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>{count}</span>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </>
+            )}
           </div>
         </div>
       </GR>

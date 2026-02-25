@@ -18,7 +18,7 @@ interface UserContextValue {
 }
 
 const DEFAULT_AVATAR_COLOR = "#6366f1";
-const DEFAULT_AI_NAME = "J\u00f8rgen Andr\u00e9";
+const DEFAULT_AI_NAME = "Jørgen André";
 
 function getInitials(name: string): string {
   return name.split(" ").map(w => w.charAt(0).toUpperCase()).slice(0, 2).join("");

@@ -6,14 +6,19 @@ import Link from "next/link";
 import { T, Layout } from "@/lib/tokens";
 import Btn from "@/components/Btn";
 import NotifBell from "@/components/NotifBell";
-import Tag from "@/components/Tag";
 import SectionLabel from "@/components/SectionLabel";
 import PixelCorners from "@/components/PixelCorners";
+import {
+  LayoutDashboard, MessageSquare, CheckSquare, Box,
+  Sparkles, Brain, Plug, Server, Database, Activity, Terminal,
+  Settings,
+  type LucideIcon,
+} from "lucide-react";
 
 const { sidebarWidth: SW, sidebarCollapsed: SWC, contentWidth: CW, innerWidth: IW, headerHeight: HH, sidePadding: SP } = Layout;
 
 interface NavItem {
-  icon: string;
+  icon: LucideIcon;
   label: string;
   href: string;
   badge?: string;
@@ -27,27 +32,27 @@ interface NavGroup {
 const navGroups: NavGroup[] = [
   {
     items: [
-      { icon: "\u25C9", label: "Overview", href: "/" },
+      { icon: LayoutDashboard, label: "Overview", href: "/" },
     ],
   },
   {
     cat: "WORKSPACE",
     items: [
-      { icon: "\u25C8", label: "Chat", href: "/chat", badge: "3" },
-      { icon: "\u25A4", label: "Tasks", href: "/tasks" },
-      { icon: "\u2B21", label: "Komponenter", href: "/komponenter" },
-      { icon: "\u26A1", label: "Skills", href: "/skills" },
+      { icon: MessageSquare, label: "Chat", href: "/chat", badge: "3" },
+      { icon: CheckSquare, label: "Tasks", href: "/tasks" },
+      { icon: Box, label: "Komponenter", href: "/komponenter" },
+      { icon: Sparkles, label: "Skills", href: "/skills" },
     ],
   },
   {
     cat: "SYSTEM",
     items: [
-      { icon: "\u25CE", label: "AI", href: "/ai" },
-      { icon: "\u2B14", label: "Integrasjoner", href: "/integrasjoner" },
-      { icon: "\u229E", label: "MCP", href: "/mcp" },
-      { icon: "\u25D0", label: "Memory", href: "/memory" },
-      { icon: "\u25EB", label: "Monitor", href: "/monitor" },
-      { icon: "\u25A5", label: "Sandbox", href: "/sandbox" },
+      { icon: Brain, label: "AI", href: "/ai" },
+      { icon: Plug, label: "Integrasjoner", href: "/integrasjoner" },
+      { icon: Server, label: "MCP", href: "/mcp" },
+      { icon: Database, label: "Memory", href: "/memory" },
+      { icon: Activity, label: "Monitor", href: "/monitor" },
+      { icon: Terminal, label: "Sandbox", href: "/sandbox" },
     ],
   },
 ];
@@ -79,14 +84,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <div
         style={{
           width: "100%",
-          maxWidth: sw + CW,
+          maxWidth: SW + CW,
           minHeight: "100vh",
           position: "relative",
-          transition: "max-width 0.25s ease",
         }}
       >
         {/* HEADER */}
-        <div style={{ display: "flex", height: HH, position: "relative", zIndex: 2 }}>
+        <div style={{ display: "flex", height: HH, position: "sticky", top: 0, zIndex: 10, background: T.bg }}>
           {/* Header — sidebar area */}
           <div
             style={{
@@ -103,6 +107,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               zIndex: 3,
               transition: "all 0.25s ease",
               overflow: "hidden",
+              flexShrink: 0,
             }}
           >
             {/* TF Logo */}
@@ -174,37 +179,29 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 textDecoration: "none",
               }}
             >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.3"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M6.86 1.57a1.14 1.14 0 012.28 0c.05.64.75 1 1.28.64a1.14 1.14 0 011.61 1.61c-.36.53-.01 1.23.64 1.28a1.14 1.14 0 010 2.28c-.65.05-1 .75-.64 1.28a1.14 1.14 0 01-1.61 1.61c-.53-.36-1.23-.01-1.28.64a1.14 1.14 0 01-2.28 0c-.05-.65-.75-1-1.28-.64a1.14 1.14 0 01-1.61-1.61c.36-.53.01-1.23-.64-1.28a1.14 1.14 0 010-2.28c.65-.05 1-.75.64-1.28a1.14 1.14 0 011.61-1.61c.53.36 1.23.01 1.28-.64z" />
-                <circle cx="8" cy="8" r="2.5" />
-              </svg>
+              <Settings size={16} strokeWidth={1.3} />
             </Link>
           </div>
         </div>
 
         {/* BODY */}
-        <div style={{ display: "flex", minHeight: `calc(100vh - ${HH}px)`, position: "relative" }}>
+        <div style={{ display: "flex", position: "relative" }}>
           {/* SIDEBAR */}
           <div
             style={{
               width: sw,
+              height: `calc(100vh - ${HH}px)`,
+              position: "sticky",
+              top: HH,
+              overflowY: "auto",
+              overflowX: "hidden",
+              flexShrink: 0,
+              transition: "width 0.25s ease",
               borderRight: `1px solid ${T.border}`,
               display: "flex",
               flexDirection: "column",
               background: T.bg,
-              position: "relative",
               zIndex: 3,
-              transition: "width 0.25s ease",
-              overflow: "hidden",
             }}
           >
             {/* Nav items */}
@@ -277,15 +274,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                           />
                         )}
                         {/* Icon */}
-                        <span
-                          style={{
-                            fontSize: 14,
-                            color: active ? T.text : T.textMuted,
-                            flexShrink: 0,
-                          }}
-                        >
-                          {it.icon}
-                        </span>
+                        <it.icon size={16} strokeWidth={1.5} style={{ color: active ? T.text : T.textMuted, flexShrink: 0 }} />
                         {/* Label */}
                         {!collapsed && (
                           <span
@@ -322,54 +311,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               ))}
             </div>
 
-            {/* Quick actions */}
-            <div style={{ borderTop: `1px solid ${T.border}`, padding: collapsed ? 12 : 16, position: "relative" }}>
-              <PixelCorners />
-              {!collapsed && (
-                <>
-                  <SectionLabel>Quick actions</SectionLabel>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    <Btn sm>&#8984;K S&#xF8;k</Btn>
-                    <Btn sm>&#8984;N Ny chat</Btn>
-                  </div>
-                </>
-              )}
-              {collapsed && (
-                <div style={{ display: "flex", justifyContent: "center", color: T.textMuted, fontSize: 14 }}>
-                  &#8984;
-                </div>
-              )}
-            </div>
-
-            {/* Repo health */}
-            <div style={{ borderTop: `1px solid ${T.border}`, padding: collapsed ? 12 : 16, position: "relative" }}>
-              <PixelCorners />
-              {!collapsed && (
-                <>
-                  <SectionLabel>Repo-helse</SectionLabel>
-                  {["thefold-api", "thefold-frontend"].map((r, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "4px 0",
-                      }}
-                    >
-                      <span style={{ fontSize: 11, color: T.textSec, fontFamily: T.mono }}>{r}</span>
-                      <Tag variant="success">OK</Tag>
-                    </div>
-                  ))}
-                </>
-              )}
-              {collapsed && (
-                <div style={{ display: "flex", justifyContent: "center", color: T.textMuted, fontSize: 14 }}>
-                  &#x25C6;
-                </div>
-              )}
-            </div>
-
             {/* User section */}
             <div
               style={{
@@ -390,7 +331,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 {!collapsed && (
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 12, fontWeight: 500, color: T.text }}>
-                      J&#xF8;rgen Andr&#xE9;
+                      Jørgen André
                     </div>
                     <div style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>admin</div>
                   </div>
@@ -445,11 +386,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </div>
 
           {/* CONTENT */}
-          <div style={{ flex: 1, maxWidth: CW, position: "relative", zIndex: 1 }}>
+          <div style={{ flex: 1, minWidth: 0, position: "relative", zIndex: 1 }}>
             {useFullWidth ? (
-              <div style={{ padding: "0 20px" }}>{children}</div>
+              <div style={{ height: `calc(100vh - ${HH}px)`, overflow: "hidden" }}>
+                {children}
+              </div>
             ) : (
-              <div style={{ padding: `0 ${SP}px`, position: "relative" }}>
+              <div style={{ padding: `0 ${SP}px` }}>
                 <div style={{ maxWidth: IW, margin: "0 auto" }}>{children}</div>
               </div>
             )}

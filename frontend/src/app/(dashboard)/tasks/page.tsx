@@ -8,6 +8,7 @@ import SectionLabel from "@/components/SectionLabel";
 import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import { useApiData } from "@/lib/hooks";
+import Skeleton from "@/components/Skeleton";
 import {
   listTheFoldTasks,
   listReviews,
@@ -15,6 +16,7 @@ import {
   approveReview,
   requestReviewChanges,
   rejectReview,
+  createTask,
   type TheFoldTask,
   type ReviewSummary,
 } from "@/lib/api";
@@ -60,10 +62,36 @@ function statusLabel(status: string): string {
   }
 }
 
+const inputStyle: React.CSSProperties = {
+  background: T.subtle,
+  border: `1px solid ${T.border}`,
+  borderRadius: 6,
+  padding: "10px 14px",
+  fontSize: 13,
+  color: T.text,
+  fontFamily: T.sans,
+  width: "100%",
+  outline: "none",
+  boxSizing: "border-box",
+};
+
+const textareaStyle: React.CSSProperties = {
+  ...inputStyle,
+  minHeight: 100,
+  resize: "vertical" as const,
+};
+
 export default function TasksPage() {
   const [sel, setSel] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  // Create dialog state
+  const [showCreate, setShowCreate] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [newDesc, setNewDesc] = useState("");
+  const [newRepo, setNewRepo] = useState("thefold-api");
+  const [creating, setCreating] = useState(false);
 
   const { data: taskData, loading: tasksLoading, refresh: refreshTasks } = useApiData(
     () => listTheFoldTasks(),
@@ -148,6 +176,23 @@ export default function TasksPage() {
     }
   };
 
+  const handleCreateTask = async () => {
+    if (!newTitle.trim()) return;
+    setCreating(true);
+    try {
+      await createTask({ title: newTitle, description: newDesc, repo: newRepo });
+      setShowCreate(false);
+      setNewTitle("");
+      setNewDesc("");
+      setNewRepo("thefold-api");
+      refreshTasks();
+    } catch (e) {
+      alert(`Feil ved opprettelse: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   return (
     <>
       <div style={{ paddingTop: 40, paddingBottom: 24 }}>
@@ -159,7 +204,6 @@ export default function TasksPage() {
                 fontWeight: 600,
                 color: T.text,
                 letterSpacing: "-0.03em",
-                fontFamily: T.brandFont,
                 marginBottom: 8,
               }}
             >
@@ -170,7 +214,7 @@ export default function TasksPage() {
             </p>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <Btn sm onClick={() => alert("Ny task-modal kommer snart.")}>
+            <Btn sm onClick={() => setShowCreate(true)}>
               <svg
                 width="14"
                 height="14"
@@ -228,8 +272,8 @@ export default function TasksPage() {
           {/* Task list */}
           <div style={{ borderRight: t ? `1px solid ${T.border}` : "none" }}>
             {tasksLoading ? (
-              <div style={{ padding: "40px 20px", textAlign: "center" }}>
-                <span style={{ fontSize: 13, color: T.textMuted }}>Laster oppgaver...</span>
+              <div style={{ padding: "40px 20px" }}>
+                <Skeleton rows={5} />
               </div>
             ) : tasks.length === 0 ? (
               <div style={{ padding: "40px 20px", textAlign: "center" }}>
@@ -323,7 +367,6 @@ export default function TasksPage() {
                     fontSize: 18,
                     fontWeight: 600,
                     color: T.text,
-                    fontFamily: T.brandFont,
                     marginBottom: 4,
                   }}
                 >
@@ -434,9 +477,9 @@ export default function TasksPage() {
                     }}
                   >
                     {[
-                      { l: "KVALITET", v: "\u2014" },
-                      { l: "FILER", v: "\u2014" },
-                      { l: "STATUS", v: "\u2014" },
+                      { l: "KVALITET", v: "—" },
+                      { l: "FILER", v: "—" },
+                      { l: "STATUS", v: "—" },
                     ].map((m, i) => (
                       <div
                         key={i}
@@ -534,6 +577,98 @@ export default function TasksPage() {
       <GR mb={40}>
         <div style={{ height: 1 }} />
       </GR>
+
+      {/* Create task dialog */}
+      {showCreate && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowCreate(false); }}
+        >
+          <div
+            style={{
+              background: T.surface,
+              border: `1px solid ${T.border}`,
+              borderRadius: T.r,
+              padding: 24,
+              width: 480,
+              maxHeight: "80vh",
+              overflow: "auto",
+            }}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600, color: T.text, marginBottom: 20 }}>
+              Ny oppgave
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Tittel</div>
+              <input
+                value={newTitle}
+                onChange={(e) => setNewTitle(e.target.value)}
+                placeholder="Beskriv oppgaven..."
+                style={inputStyle}
+              />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Beskrivelse</div>
+              <textarea
+                value={newDesc}
+                onChange={(e) => setNewDesc(e.target.value)}
+                placeholder="Valgfri beskrivelse..."
+                style={textareaStyle}
+              />
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Repo</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {["thefold-api", "thefold-frontend"].map((r) => (
+                  <div
+                    key={r}
+                    onClick={() => setNewRepo(r)}
+                    style={{
+                      flex: 1,
+                      padding: "10px 14px",
+                      background: newRepo === r ? T.accentDim : "transparent",
+                      border: `1px solid ${newRepo === r ? T.accent : T.border}`,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontFamily: T.mono,
+                      color: newRepo === r ? T.accent : T.textSec,
+                      cursor: "pointer",
+                      textAlign: "center",
+                    }}
+                  >
+                    {r}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <Btn sm onClick={() => setShowCreate(false)}>
+                Avbryt
+              </Btn>
+              <Btn
+                primary
+                sm
+                onClick={handleCreateTask}
+                style={{ opacity: creating || !newTitle.trim() ? 0.5 : 1, pointerEvents: creating ? "none" : "auto" }}
+              >
+                {creating ? "Oppretter..." : "Opprett"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

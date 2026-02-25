@@ -1071,6 +1071,7 @@ export interface Component {
   usedByRepos: string[];
   timesUsed: number;
   validationStatus: string;
+  qualityScore: number | null;
   tags: string[];
   createdAt: string;
   updatedAt: string;
@@ -1207,7 +1208,7 @@ export async function estimateSubAgentCost(complexity: number, budgetMode?: stri
 export interface IntegrationConfig {
   id: string;
   userId: string;
-  platform: "slack" | "discord";
+  platform: string;
   webhookUrl: string | null;
   channelId: string | null;
   teamId: string | null;
@@ -1222,7 +1223,7 @@ export async function listIntegrations() {
 }
 
 export async function saveIntegration(req: {
-  platform: "slack" | "discord";
+  platform: string;
   webhookUrl?: string;
   botToken?: string;
   channelId?: string;

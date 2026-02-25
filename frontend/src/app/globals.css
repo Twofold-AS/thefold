@@ -1,5 +1,50 @@
+@import "tailwindcss";
+
+/* ─── Geist Mono (CDN) ─── */
 @import url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.css');
 
+/* ─── Inter 24pt (self-hosted) ─── */
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter_24pt-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter_24pt-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter_24pt-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter_24pt-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/Inter_24pt-ExtraBold.woff2') format('woff2');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ─── TheFold Brand font (kun for "TheFold" logotekst) ─── */
 @font-face {
   font-family: 'TheFold Brand';
   src: url('/fonts/thefold.woff2') format('woff2');
@@ -8,61 +53,179 @@
   font-display: swap;
 }
 
-@font-face {
-  font-family: 'Suisse Intl';
-  src: url('/fonts/SuisseIntl-Regular.woff2') format('woff2');
-  font-weight: 400;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Suisse Intl';
-  src: url('/fonts/SuisseIntl-Medium.woff2') format('woff2');
-  font-weight: 500;
-  font-style: normal;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'Suisse Intl';
-  src: url('/fonts/SuisseIntl-SemiBold.woff2') format('woff2');
-  font-weight: 600;
-  font-style: normal;
-  font-display: swap;
-}
-
+/* ─── TheFold dark palette (alltid mørkt, ingen light mode) ─── */
 :root {
-  --bg: #000000;
-  --raised: #0D0D0D;
-  --surface: #141414;
-  --subtle: #1A1A1A;
-  --border: #2A2A2A;
-  --border-hover: #3D3D3D;
-  --text: #F5F5F5;
-  --text-sec: rgba(255,255,255,0.68);
-  --text-muted: rgba(255,255,255,0.44);
-  --text-faint: rgba(255,255,255,0.24);
+  /* Surfaces */
+  --background: #000000;
+  --foreground: #F5F5F5;
+  --card: #141414;
+  --card-foreground: #F5F5F5;
+  --popover: #1A1A1A;
+  --popover-foreground: #F5F5F5;
+
+  /* Brand */
+  --primary: #6366F1;
+  --primary-foreground: #F5F5F5;
+  --secondary: #1A1A1A;
+  --secondary-foreground: rgba(255,255,255,0.68);
+
+  /* Muted / subtle */
+  --muted: #141414;
+  --muted-foreground: rgba(255,255,255,0.44);
   --accent: #6366F1;
-  --accent-dim: rgba(99,102,241,0.12);
-  --brand: #6366F1;
-  --brand-light: #A5B4FC;
+  --accent-foreground: #F5F5F5;
+
+  /* Semantic */
+  --destructive: #EF4444;
+  --destructive-foreground: #F5F5F5;
   --success: #34D399;
   --warning: #FBBF24;
-  --error: #EF4444;
-  --radius: 8px;
-  --font-sans: 'Suisse Intl', 'SuisseIntl', 'Inter', -apple-system, system-ui, sans-serif;
-  --font-brand: 'TheFold Brand', 'Suisse Intl', 'Inter', -apple-system, system-ui, sans-serif;
+
+  /* Borders & inputs */
+  --border: #2A2A2A;
+  --input: #1A1A1A;
+  --ring: #6366F1;
+
+  /* Chart */
+  --chart-1: #6366F1;
+  --chart-2: #A5B4FC;
+  --chart-3: #34D399;
+  --chart-4: #FBBF24;
+  --chart-5: #EF4444;
+
+  /* Sidebar */
+  --sidebar: #000000;
+  --sidebar-foreground: #F5F5F5;
+  --sidebar-primary: #6366F1;
+  --sidebar-primary-foreground: #F5F5F5;
+  --sidebar-accent: #1A1A1A;
+  --sidebar-accent-foreground: #F5F5F5;
+  --sidebar-border: #2A2A2A;
+  --sidebar-ring: #6366F1;
+
+  /* Fonts */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-serif: 'Inter', -apple-system, system-ui, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, monospace;
+  --font-brand: 'TheFold Brand', 'Inter', -apple-system, system-ui, sans-serif;
+
+  /* Radius */
+  --radius: 0.5rem;
+
+  /* TheFold custom tokens (brukes av T-objekt via inline styles) */
+  --tf-bg: #000000;
+  --tf-raised: #0D0D0D;
+  --tf-surface: #141414;
+  --tf-subtle: #1A1A1A;
+  --tf-border: #2A2A2A;
+  --tf-border-hover: #3D3D3D;
+  --tf-border-faint: #2A2A2A;
+  --tf-text: #F5F5F5;
+  --tf-text-sec: rgba(255,255,255,0.68);
+  --tf-text-muted: rgba(255,255,255,0.44);
+  --tf-text-faint: rgba(255,255,255,0.24);
+  --tf-accent: #6366F1;
+  --tf-accent-dim: rgba(99,102,241,0.12);
+  --tf-brand: #6366F1;
+  --tf-brand-light: #A5B4FC;
+  --tf-success: #34D399;
+  --tf-warning: #FBBF24;
+  --tf-error: #EF4444;
+
+  /* Shadows */
+  --shadow-2xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.15);
+  --shadow-xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.15);
+  --shadow-sm: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 1px 2px -1px hsl(0 0% 0% / 0.25);
+  --shadow: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 1px 2px -1px hsl(0 0% 0% / 0.25);
+  --shadow-md: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 2px 4px -1px hsl(0 0% 0% / 0.25);
+  --shadow-lg: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 4px 6px -1px hsl(0 0% 0% / 0.25);
+  --shadow-xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 8px 10px -1px hsl(0 0% 0% / 0.25);
+  --shadow-2xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.55);
 }
 
+/* Ingen .dark {} blokk — TheFold er alltid mørkt */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --shadow-2xs: var(--shadow-2xs);
+  --shadow-xs: var(--shadow-xs);
+  --shadow-sm: var(--shadow-sm);
+  --shadow: var(--shadow);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+  }
+}
+
+/* ─── TheFold animasjoner ─── */
 @keyframes spin { to { transform: rotate(360deg) } }
 @keyframes blink { 50% { opacity: 0 } }
 @keyframes shimmerMove { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
 
-* { box-sizing: border-box; margin: 0; padding: 0 }
-body { background: var(--bg); color: var(--text); font-family: var(--font-sans) }
-::selection { background: var(--accent-dim); color: var(--accent) }
-::-webkit-scrollbar { width: 5px }
-::-webkit-scrollbar-track { background: transparent }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px }
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--tf-border); border-radius: 3px; }
+
+/* ─── Selection ─── */
+::selection { background: var(--tf-accent-dim); color: var(--tf-accent); }
+
+/* ─── Brand shimmer (agent working) ─── */
+.brand-shimmer {
+  background: linear-gradient(90deg, var(--tf-accent) 0%, var(--tf-brand-light) 50%, var(--tf-accent) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmerMove 2s ease-in-out infinite;
+}
