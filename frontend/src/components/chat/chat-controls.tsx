@@ -135,6 +135,7 @@ export function ChatControls({
                         }
                       }}
                       className="flex items-center gap-2"
+                      style={{ background: "transparent" }}
                     >
                       <div
                         className="w-3 h-3 rounded-sm border flex items-center justify-center flex-shrink-0"
@@ -193,7 +194,7 @@ export function ChatControls({
                 Auto (recommended)
               </DropdownMenuItem>
               {models.map((m) => (
-                <DropdownMenuItem key={m.id} onClick={() => onModelChange(m.displayName)}>
+                <DropdownMenuItem key={m.id} onClick={() => onModelChange(m.id)}>
                   {m.displayName}
                 </DropdownMenuItem>
               ))}

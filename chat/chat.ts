@@ -769,6 +769,7 @@ export const send = api(
         req.skillIds,
         req.repoName,
         userAiName,
+        req.modelOverride ?? undefined,
       ).catch((err) => {
         console.error("AI processing failed:", err);
         updateMessageContent(placeholderMsg.id, "Beklager, noe gikk galt. Prøv igjen.").catch(() => {});
@@ -783,6 +784,20 @@ export const send = api(
 
 // --- Async AI processing (fire-and-forget from sendMessage) ---
 
+// C2: Quick complexity heuristic for auto model routing
+function quickComplexity(msg: string): number {
+  const len = msg.length;
+  const hasCode = /```|function |const |import /.test(msg);
+  const hasQuestion = msg.includes("?");
+  const wordCount = msg.split(/\s+/).length;
+
+  if (wordCount <= 5 && !hasCode) return 2; // "Hei", "Takk", etc.
+  if (wordCount <= 20 && !hasCode && hasQuestion) return 4; // Simple question
+  if (hasCode || len > 500) return 7; // Code or long
+  if (len > 1500 || wordCount > 200) return 9; // Very complex
+  return 5; // Default medium
+}
+
 async function processAIResponse(
   conversationId: string,
   userContent: string,
@@ -791,6 +806,7 @@ async function processAIResponse(
   skillIds?: string[],
   repoName?: string,
   aiName?: string,
+  modelOverride?: string,
 ) {
   // Start heartbeat — updates updated_at every 10s so frontend knows we're alive
   const heartbeat = setInterval(async () => {
@@ -918,15 +934,29 @@ async function processAIResponse(
 
     if (isCancelled(conversationId)) return;
 
-    // Step 5: Call AI with tools (ALWAYS includes CHAT_TOOLS — AI decides whether to use them)
+    // Step 5: Determine model — manual override or auto-routing (C1/C2)
+    let selectedModel: string | undefined;
+    if (modelOverride) {
+      selectedModel = modelOverride;
+      console.log("[DEBUG-AF] Using manual model override:", selectedModel);
+    } else {
+      // C2: Auto-routing based on message complexity
+      const complexity = quickComplexity(userContent);
+      if (complexity <= 3) selectedModel = "claude-haiku-4-5-20251001";
+      else if (complexity <= 7) selectedModel = undefined; // Sonnet default
+      else selectedModel = "claude-opus-4-5-20251101";
+      console.log("[DEBUG-AF] Auto-routed, complexity:", complexity, "model:", selectedModel || "(default sonnet)");
+    }
+
+    // Call AI with tools (ALWAYS includes CHAT_TOOLS — AI decides whether to use them)
     console.log("[DEBUG-AF] Calling ai.chat with", history.length, "messages, intent:", intent);
-    console.log("[DEBUG-AG] ai.chat always includes tools now, repoName:", repoName || "(none)");
     let aiResponse;
     try {
       aiResponse = await ai.chat({
         messages: history.map((m) => ({ role: m.role, content: m.content })),
         memoryContext: (memories.results || []).map((r) => r.content),
         systemContext: "direct_chat",
+        model: selectedModel,
         repoName,
         repoContext: repoContext || undefined,
         conversationId,
@@ -1520,5 +1550,35 @@ export const rejectFromChat = api(
     const { agent } = await import("~encore/clients");
     await agent.rejectReview({ reviewId: req.reviewId, reason: req.feedback });
     return { success: true };
+  }
+);
+
+// G5: Notifications endpoint — returns recent agent reports and status messages
+export const notifications = api(
+  { method: "GET", path: "/chat/notifications", expose: true, auth: true },
+  async (): Promise<{ notifications: Array<{ id: string; content: string; type: string; createdAt: string }> }> => {
+    const authData = getAuthData();
+    if (!authData) throw APIError.unauthenticated("Not authenticated");
+
+    const rows = db.query<{ id: string; content: string; message_type: string; created_at: Date }>`
+      SELECT m.id, m.content, m.message_type, m.created_at
+      FROM messages m
+      JOIN conversations c ON m.conversation_id = c.id
+      WHERE c.owner_email = ${authData.email}
+        AND m.message_type IN ('agent_report', 'agent_status', 'task_start')
+        AND m.created_at > NOW() - INTERVAL '24 hours'
+      ORDER BY m.created_at DESC
+      LIMIT 20
+    `;
+    const result: Array<{ id: string; content: string; type: string; createdAt: string }> = [];
+    for await (const row of rows) {
+      result.push({
+        id: row.id,
+        content: String(row.content).substring(0, 100),
+        type: row.message_type,
+        createdAt: String(row.created_at),
+      });
+    }
+    return { notifications: result };
   }
 );

@@ -1,28 +1,83 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { T } from "@/lib/tokens";
 import BellIcon from "@/components/icons/BellIcon";
 import Tag from "@/components/Tag";
+import { getNotifications } from "@/lib/api";
+
+interface Notification {
+  id: string;
+  content: string;
+  type: string;
+  createdAt: string;
+}
 
 interface NotifBellProps {
   onGoTask?: (id: string) => void;
 }
 
-const alerts = [
-  { id: "T-003", title: "Database migrasjon v12", status: "active", repo: "thefold-api" },
-  { id: "T-005", title: "Legg til dark mode toggle", status: "pending", repo: "thefold-frontend" },
-  { id: "T-004", title: "Oppdater README med nye endepunkter", status: "done", quality: 7, repo: "thefold-api" },
-] as const;
-
 export default function NotifBell({ onGoTask }: NotifBellProps) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
-  const count = alerts.length;
+  const [notifs, setNotifs] = useState<Notification[]>([]);
+  const [lastSeen, setLastSeen] = useState<string>("");
+
+  // Load last seen from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem("tf_notif_last_seen");
+    if (saved) setLastSeen(saved);
+  }, []);
+
+  const fetchNotifs = useCallback(async () => {
+    try {
+      const data = await getNotifications();
+      setNotifs(data.notifications ?? []);
+    } catch {
+      // Non-critical
+    }
+  }, []);
+
+  // Poll every 30 seconds
+  useEffect(() => {
+    fetchNotifs();
+    const interval = setInterval(fetchNotifs, 30000);
+    return () => clearInterval(interval);
+  }, [fetchNotifs]);
+
+  const unreadCount = lastSeen
+    ? notifs.filter((n) => new Date(n.createdAt) > new Date(lastSeen)).length
+    : notifs.length;
+
+  const handleOpen = () => {
+    setOpen((p) => !p);
+    if (!open && notifs.length > 0) {
+      const newest = notifs[0]?.createdAt;
+      if (newest) {
+        setLastSeen(newest);
+        localStorage.setItem("tf_notif_last_seen", newest);
+      }
+    }
+  };
+
+  const typeLabel = (type: string) => {
+    if (type === "agent_report") return "rapport";
+    if (type === "agent_status") return "status";
+    if (type === "task_start") return "oppgave";
+    return type;
+  };
+
+  const typeVariant = (type: string) => {
+    if (type === "agent_report") return "accent" as const;
+    if (type === "task_start") return "success" as const;
+    return "default" as const;
+  };
 
   return (
     <div style={{ position: "relative", zIndex: 60 }}>
       <div
-        onClick={() => setOpen((p) => !p)}
+        onClick={handleOpen}
         style={{
           cursor: "pointer",
           color: T.textMuted,
@@ -33,19 +88,29 @@ export default function NotifBell({ onGoTask }: NotifBellProps) {
         }}
       >
         <BellIcon />
-        {count > 0 && (
+        {unreadCount > 0 && (
           <div
             style={{
               position: "absolute",
-              top: 2,
-              right: 2,
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              background: T.warning,
+              top: 0,
+              right: 0,
+              minWidth: 16,
+              height: 16,
+              borderRadius: 8,
+              background: T.error,
               border: `2px solid ${T.bg}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 9,
+              fontWeight: 700,
+              color: "#fff",
+              fontFamily: T.mono,
+              padding: "0 3px",
             }}
-          />
+          >
+            {unreadCount > 9 ? "9+" : unreadCount}
+          </div>
         )}
       </div>
       {open && (
@@ -55,13 +120,15 @@ export default function NotifBell({ onGoTask }: NotifBellProps) {
             top: "100%",
             right: 0,
             marginTop: 4,
-            width: 320,
+            width: 340,
             background: T.surface,
             border: `1px solid ${T.border}`,
             borderRadius: T.r,
             overflow: "hidden",
             boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
             zIndex: 100,
+            maxHeight: 400,
+            overflowY: "auto",
           }}
         >
           <div
@@ -76,85 +143,63 @@ export default function NotifBell({ onGoTask }: NotifBellProps) {
               fontFamily: T.mono,
             }}
           >
-            Krever oppmerksomhet ({count})
+            Varsler ({notifs.length})
           </div>
-          {alerts.map((a, i) => (
-            <div
-              key={i}
-              onClick={() => {
-                onGoTask && onGoTask(a.id);
-                setOpen(false);
-              }}
-              style={{
-                padding: "10px 16px",
-                cursor: "pointer",
-                borderBottom: i < alerts.length - 1 ? `1px solid ${T.border}` : "none",
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-              }}
-            >
-              <div
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  flexShrink: 0,
-                  background:
-                    a.status === "active"
-                      ? T.accent
-                      : a.status === "pending"
-                        ? T.warning
-                        : "quality" in a && a.quality && a.quality < 8
-                          ? T.warning
-                          : T.success,
-                }}
-              />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div
-                  style={{
-                    fontSize: 12,
-                    color: T.text,
-                    fontWeight: 500,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {a.title}
-                </div>
-                <div
-                  style={{
-                    fontSize: 10,
-                    fontFamily: T.mono,
-                    color: T.textFaint,
-                    marginTop: 1,
-                  }}
-                >
-                  {a.id} · {a.repo}
-                </div>
-              </div>
-              <Tag
-                variant={
-                  a.status === "active"
-                    ? "accent"
-                    : a.status === "pending"
-                      ? "default"
-                      : "quality" in a && a.quality && a.quality < 8
-                        ? "error"
-                        : "success"
-                }
-              >
-                {a.status === "active"
-                  ? "pågår"
-                  : a.status === "pending"
-                    ? "venter"
-                    : "quality" in a && a.quality && a.quality < 8
-                      ? "review"
-                      : "ok"}
-              </Tag>
+          {notifs.length === 0 ? (
+            <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: T.textMuted }}>
+              Ingen varsler siste 24 timer
             </div>
-          ))}
+          ) : (
+            notifs.map((n, i) => (
+              <div
+                key={n.id}
+                onClick={() => {
+                  if (n.type === "task_start") {
+                    router.push("/tasks");
+                  } else {
+                    router.push("/chat");
+                  }
+                  setOpen(false);
+                }}
+                style={{
+                  padding: "10px 16px",
+                  cursor: "pointer",
+                  borderBottom: i < notifs.length - 1 ? `1px solid ${T.border}` : "none",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: T.text,
+                      fontWeight: 500,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {n.content}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      fontFamily: T.mono,
+                      color: T.textFaint,
+                      marginTop: 1,
+                    }}
+                  >
+                    {new Date(n.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" })}
+                  </div>
+                </div>
+                <Tag variant={typeVariant(n.type)}>
+                  {typeLabel(n.type)}
+                </Tag>
+              </div>
+            ))
+          )}
         </div>
       )}
     </div>

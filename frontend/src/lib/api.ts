@@ -128,6 +128,12 @@ export async function getConversations() {
   }>("/chat/conversations", { method: "GET" });
 }
 
+export async function getNotifications() {
+  return apiFetch<{
+    notifications: Array<{ id: string; content: string; type: string; createdAt: string }>;
+  }>("/chat/notifications", { method: "GET" });
+}
+
 // --- Linear Tasks ---
 
 export async function getTasks() {
@@ -292,6 +298,18 @@ export async function getMonitorHealth() {
       createdAt?: string;
     }>>;
   }>("/monitor/health", { method: "GET" });
+}
+
+export async function runMonitorCheck(repo: string) {
+  return apiFetch<{ results: Array<{ repo: string; checkType: string; status: string; details: Record<string, unknown> }> }>(
+    "/monitor/run-check", { method: "POST", body: { repo } }
+  );
+}
+
+export async function getMonitorHistory(repo: string, limit?: number) {
+  return apiFetch<{ checks: Array<{ id: string; repo: string; checkType: string; status: string; details: Record<string, unknown>; createdAt: string }> }>(
+    "/monitor/history", { method: "POST", body: { repo, limit: limit || 20 } }
+  );
 }
 
 // --- GitHub ---
@@ -1123,6 +1141,13 @@ export async function getHealingStatus(options?: { componentId?: string; status?
   if (options?.limit) params.set("limit", String(options.limit));
   const qs = params.toString();
   return apiFetch<{ events: HealingEvent[]; total: number }>(`/registry/healing-status${qs ? `?${qs}` : ""}`);
+}
+
+export async function healComponent(componentId: string) {
+  return apiFetch<{ action: string; reason?: string }>("/registry/heal", {
+    method: "POST",
+    body: { componentId },
+  });
 }
 
 // --- Templates ---

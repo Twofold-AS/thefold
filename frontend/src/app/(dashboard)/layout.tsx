@@ -11,9 +11,10 @@ import PixelCorners from "@/components/PixelCorners";
 import {
   LayoutDashboard, MessageSquare, CheckSquare, Box,
   Wand2, Brain, Plug, Server, Database, Activity, Terminal,
-  Settings,
+  Settings, FileText,
   type LucideIcon,
 } from "lucide-react";
+import { useUser } from "@/contexts/UserPreferencesContext";
 
 const { sidebarWidth: SW, sidebarCollapsed: SWC, contentWidth: CW, innerWidth: IW, headerHeight: HH, sidePadding: SP } = Layout;
 
@@ -52,6 +53,7 @@ const navGroups: NavGroup[] = [
       { icon: Server, label: "MCP", href: "/mcp" },
       { icon: Database, label: "Memory", href: "/memory" },
       { icon: Activity, label: "Monitor", href: "/monitor" },
+      { icon: FileText, label: "Docs", href: "/docs" },
       { icon: Terminal, label: "Sandbox", href: "/sandbox" },
     ],
   },
@@ -65,6 +67,7 @@ function isActiveRoute(pathname: string, href: string): boolean {
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  const { user, initial, avatarColor } = useUser();
   const [collapsed, setCollapsed] = useState(false);
   const sw = collapsed ? SWC : SW;
   const useFullWidth = pathname === "/chat" || pathname.startsWith("/chat/");
@@ -259,20 +262,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                           textDecoration: "none",
                         }}
                       >
-                        {/* Active indicator bar */}
-                        {active && (
-                          <div
-                            style={{
-                              position: "absolute",
-                              left: 0,
-                              top: "50%",
-                              transform: "translateY(-50%)",
-                              width: 3,
-                              height: 16,
-                              background: T.accent,
-                            }}
-                          />
-                        )}
+                        {/* Active indicator removed (G2) */}
                         {/* Icon */}
                         <it.icon size={16} strokeWidth={1.5} style={{ color: active ? T.text : T.textMuted, flexShrink: 0 }} />
                         {/* Label */}
@@ -328,16 +318,30 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                   justifyContent: collapsed ? "center" : "flex-start",
                 }}
               >
+                <div
+                  style={{
+                    width: collapsed ? 8 : 24,
+                    height: collapsed ? 8 : 24,
+                    borderRadius: "50%",
+                    background: avatarColor,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                    transition: "all 0.25s ease",
+                  }}
+                >
+                  {!collapsed && (
+                    <span style={{ fontSize: 10, fontWeight: 600, color: "#fff" }}>{initial}</span>
+                  )}
+                </div>
                 {!collapsed && (
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 12, fontWeight: 500, color: T.text }}>
-                      Jørgen André
+                      {user?.name || "\u2014"}
                     </div>
-                    <div style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>admin</div>
+                    <div style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>{user?.role || "\u2014"}</div>
                   </div>
-                )}
-                {collapsed && (
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.success }} />
                 )}
               </div>
             </div>

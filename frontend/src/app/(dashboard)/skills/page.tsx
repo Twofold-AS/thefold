@@ -175,8 +175,7 @@ export default function SkillsPage() {
                   cursor: "pointer",
                   background: sel === s.id ? T.subtle : "transparent",
                   borderBottom: `1px solid ${T.border}`,
-                  borderLeft:
-                    sel === s.id ? `3px solid ${T.accent}` : "3px solid transparent",
+                  borderLeft: "none",
                 }}
               >
                 <div

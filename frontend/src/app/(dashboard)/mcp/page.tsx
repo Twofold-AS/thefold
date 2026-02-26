@@ -24,7 +24,7 @@ export default function MCPPage() {
     localStorage.setItem("mcp-routing", String(rte));
   }, [rte]);
 
-  const svs = data?.servers ?? [];
+  const svs = (data?.servers ?? []).filter(s => s.name !== "linear-mcp");
 
   const handleInstall = async (id: string) => {
     try {

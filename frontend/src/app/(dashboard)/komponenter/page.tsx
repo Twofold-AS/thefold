@@ -8,13 +8,13 @@ import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
-import { listComponents, useComponentApi, Component } from "@/lib/api";
+import { listComponents, healComponent, Component } from "@/lib/api";
 
 export default function KomponenterPage() {
   const { data, loading, refresh } = useApiData(() => listComponents(), []);
   const [fi, setFi] = useState("all");
   const [se, setSe] = useState("");
-  const [useDropdown, setUseDropdown] = useState<string | null>(null);
+  const [healStatus, setHealStatus] = useState<Record<string, string>>({});
 
   const components: Component[] = data?.components ?? [];
 
@@ -216,59 +216,30 @@ export default function KomponenterPage() {
                       <Tag key={tag}>{tag}</Tag>
                     ))}
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, position: "relative" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                     <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
                       {c.timesUsed}
                     </span>
-                    <Btn
-                      sm
-                      primary
-                      onClick={() => setUseDropdown(useDropdown === c.id ? null : c.id)}
-                    >
-                      Bruk
-                    </Btn>
-                    {useDropdown === c.id && (
-                      <div
-                        style={{
-                          position: "absolute",
-                          top: "100%",
-                          right: 0,
-                          marginTop: 4,
-                          background: T.surface,
-                          border: `1px solid ${T.border}`,
-                          borderRadius: 6,
-                          zIndex: 20,
-                          minWidth: 160,
-                          overflow: "hidden",
+                    {healStatus[c.id] ? (
+                      <span style={{ fontSize: 11, fontFamily: T.mono, color: healStatus[c.id] === "healed" ? T.success : healStatus[c.id] === "skipped" ? T.textMuted : T.error }}>
+                        {healStatus[c.id] === "healed" ? "Oppdatert \u2713" : healStatus[c.id] === "skipped" ? "Allerede oppdatert" : "Feil ved oppdatering"}
+                      </span>
+                    ) : (
+                      <Btn
+                        sm
+                        primary
+                        onClick={async () => {
+                          try {
+                            const result = await healComponent(c.id);
+                            setHealStatus(prev => ({ ...prev, [c.id]: result.action || "healed" }));
+                            refresh();
+                          } catch {
+                            setHealStatus(prev => ({ ...prev, [c.id]: "failed" }));
+                          }
                         }}
                       >
-                        {["thefold-api", "thefold-frontend"].map((repo) => (
-                          <div
-                            key={repo}
-                            onClick={async () => {
-                              try {
-                                await useComponentApi(c.id, repo);
-                                setUseDropdown(null);
-                                refresh();
-                              } catch {
-                                alert("Kunne ikke bruke komponent");
-                              }
-                            }}
-                            style={{
-                              padding: "10px 14px",
-                              fontSize: 12,
-                              fontFamily: T.mono,
-                              color: T.textSec,
-                              cursor: "pointer",
-                              borderBottom: repo === "thefold-api" ? `1px solid ${T.border}` : "none",
-                            }}
-                            onMouseEnter={(e) => { (e.target as HTMLElement).style.background = T.subtle; }}
-                            onMouseLeave={(e) => { (e.target as HTMLElement).style.background = "transparent"; }}
-                          >
-                            {repo}
-                          </div>
-                        ))}
-                      </div>
+                        Oppdater
+                      </Btn>
                     )}
                   </div>
                 </div>

@@ -16,12 +16,16 @@ import {
   getChatHistory,
   sendMessage,
   cancelChatGeneration,
+  deleteConversation,
   inkognitoConversationId,
   repoConversationId,
   listSkills,
+  listRepos,
+  listProviders,
   type ConversationSummary,
   type Message,
 } from "@/lib/api";
+import { Trash2 } from "lucide-react";
 
 function timeAgo(date: string): string {
   const now = Date.now();
@@ -91,6 +95,17 @@ function ChatPageInner() {
   const { data: skillsData } = useApiData(() => listSkills(), []);
   const availableSkills = skillsData?.skills ?? [];
 
+  // Dynamic repos
+  const { data: repoData } = useApiData(() => listRepos("Twofold-AS"), []);
+  const dynamicRepos = repoData?.repos?.map(r => r.name) ?? ["thefold-api", "thefold-frontend"];
+
+  // Models
+  const { data: providerData } = useApiData(() => listProviders(), []);
+  const allModels = (providerData?.providers ?? []).flatMap(p =>
+    p.models.filter(m => m.enabled).map(m => ({ id: m.id, displayName: m.displayName, provider: p.name }))
+  );
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+
   // Filter conversations by tab
   const filtered = conversations.filter((c) =>
     tab === "Privat" ? c.id.startsWith("inkognito-") : c.id.startsWith("repo-"),
@@ -125,6 +140,11 @@ function ChatPageInner() {
 
       const repoParam = searchParams.get("repo");
       const ghostParam = searchParams.get("ghost") === "1";
+      const skillsParam = searchParams.get("skills");
+      const subagentsParam = searchParams.get("subagents") === "1";
+
+      if (skillsParam) setSelectedSkillIds(skillsParam.split(",").filter(Boolean));
+      if (subagentsParam) setSubAgentsEnabled(true);
 
       // Sett riktig tab basert på ghost
       if (ghostParam) {
@@ -139,7 +159,10 @@ function ChatPageInner() {
 
       setAc(convId);
       setSending(true);
-      sendMessage(convId, autoMsg, { repoName: repoParam || undefined })
+      sendMessage(convId, autoMsg, {
+        repoName: repoParam || undefined,
+        skillIds: skillsParam ? skillsParam.split(",").filter(Boolean) : undefined,
+      })
         .then((result) => {
           refreshConvs();
           if (result.agentTriggered) {
@@ -192,6 +215,7 @@ function ChatPageInner() {
     sendMessage(convId, msg, {
       repoName: repo || undefined,
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
+      modelOverride: selectedModel,
     })
       .then((result) => {
         refreshConvs();
@@ -210,6 +234,7 @@ function ChatPageInner() {
     sendMessage(ac, value, {
       repoName: repo || curRepo || undefined,
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
+      modelOverride: selectedModel,
     })
       .then((result) => {
         refreshMsgs();
@@ -314,6 +339,7 @@ function ChatPageInner() {
               return (
                 <div
                   key={c.id}
+                  className="conv-row"
                   onClick={() => {
                     setAc(c.id);
                     setNewChat(false);
@@ -323,6 +349,7 @@ function ChatPageInner() {
                     cursor: "pointer",
                     background: ac === c.id && !newChat ? T.subtle : "transparent",
                     borderBottom: `1px solid ${T.border}`,
+                    position: "relative",
                   }}
                 >
                   <div
@@ -347,6 +374,30 @@ function ChatPageInner() {
                     >
                       {c.title || "Ny samtale"}
                     </span>
+                    <span
+                      className="conv-delete"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (window.confirm("Slett denne samtalen?")) {
+                          deleteConversation(c.id).then(() => {
+                            if (ac === c.id) { setAc(null); setNewChat(true); }
+                            refreshConvs();
+                          }).catch(() => {});
+                        }
+                      }}
+                      style={{
+                        opacity: 0,
+                        transition: "opacity 0.15s",
+                        cursor: "pointer",
+                        color: T.textFaint,
+                        display: "flex",
+                        alignItems: "center",
+                        padding: 2,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {repo && (
@@ -358,6 +409,7 @@ function ChatPageInner() {
                       {timeAgo(c.lastActivity)}
                     </span>
                   </div>
+                  <style>{`.conv-row:hover .conv-delete { opacity: 1 !important; }`}</style>
                 </div>
               );
             })
@@ -368,7 +420,14 @@ function ChatPageInner() {
       {/* Main content */}
       {newChat ? (
         <div style={{ display: "flex", flexDirection: "column" }}>
-          <ChatComposer onSubmit={startNewChat} />
+          <ChatComposer
+            onSubmit={startNewChat}
+            skills={availableSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
+            selectedSkillIds={selectedSkillIds}
+            onSkillsChange={setSelectedSkillIds}
+            subAgentsEnabled={subAgentsEnabled}
+            onSubAgentsToggle={() => setSubAgentsEnabled(p => !p)}
+          />
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column" }}>
@@ -557,6 +616,7 @@ function ChatPageInner() {
               onSkillsChange={setSelectedSkillIds}
               subAgentsEnabled={subAgentsEnabled}
               onSubAgentsToggle={() => setSubAgentsEnabled((p) => !p)}
+              repos={dynamicRepos}
             />
           </div>
         </div>

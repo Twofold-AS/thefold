@@ -123,7 +123,7 @@ export default function SandboxPage() {
                       cursor: "pointer",
                       background: sel === r.id ? T.subtle : "transparent",
                       borderBottom: i < jobs.length - 1 ? `1px solid ${T.border}` : "none",
-                      borderLeft: sel === r.id ? `3px solid ${T.accent}` : "3px solid transparent",
+                      borderLeft: "none",
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>

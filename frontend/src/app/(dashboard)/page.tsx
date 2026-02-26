@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { T } from "@/lib/tokens";
+import { T, Layout } from "@/lib/tokens";
 import { useApiData } from "@/lib/hooks";
 import { getTaskStats, getCostSummary, listTheFoldTasks, getAuditStats, listSkills, getMemoryStats } from "@/lib/api";
 import ChatComposer from "@/components/ChatComposer";
@@ -61,6 +61,7 @@ export default function OverviewPage() {
   const [agentOn, setAgentOn] = useState(true);
   const [subAgOn, setSubAgOn] = useState(false);
   const [privat, setPrivat] = useState(false);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
 
   // Les fra localStorage etter hydration
   useEffect(() => {
@@ -87,6 +88,8 @@ export default function OverviewPage() {
     if (msg) params.set("msg", msg);
     if (repo) params.set("repo", repo);
     if (ghost) params.set("ghost", "1");
+    if (selectedSkillIds.length > 0) params.set("skills", selectedSkillIds.join(","));
+    if (subAgOn) params.set("subagents", "1");
     router.push(`/chat?${params.toString()}`);
   };
 
@@ -103,12 +106,21 @@ export default function OverviewPage() {
     .sort(([, a], [, b]) => b - a)
     .slice(0, 3);
 
+  const SP = Layout.sidePadding;
+
   return (
     <>
-      <ChatComposer
-        heading="Når AI sier umulig, sier Mikael Kråkenes neste"
-        onSubmit={(msg, repo, ghost) => onStartChat(msg, repo, ghost)}
-      />
+      <div style={{ margin: `0 -${SP}px`, position: "relative" }}>
+        <ChatComposer
+          heading="Når AI sier umulig, sier Mikael Kråkenes neste"
+          onSubmit={(msg, repo, ghost) => onStartChat(msg, repo, ghost)}
+          skills={allSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
+          selectedSkillIds={selectedSkillIds}
+          onSkillsChange={setSelectedSkillIds}
+          subAgentsEnabled={subAgOn}
+          onSubAgentsToggle={() => setSubAgOn(p => !p)}
+        />
+      </div>
 
       {/* Stats grid */}
       <GR>

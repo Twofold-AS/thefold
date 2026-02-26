@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { T } from "@/lib/tokens";
 import { useApiData } from "@/lib/hooks";
-import { getMe, logout, updateProfile, updatePreferences } from "@/lib/api";
+import { getMe, logout, updateProfile, updatePreferences, listIntegrations } from "@/lib/api";
 import { clearToken } from "@/lib/auth";
 import Tag from "@/components/Tag";
 import Btn from "@/components/Btn";
@@ -15,14 +15,14 @@ import Skeleton from "@/components/Skeleton";
 import { GR } from "@/components/GridRow";
 
 function formatDate(dateStr: string | null | undefined): string {
-  if (!dateStr) return "—";
+  if (!dateStr) return "\u2014";
   try {
     const d = new Date(dateStr);
     return d.toLocaleDateString("nb-NO", { day: "numeric", month: "short", year: "numeric" })
       + ", "
       + d.toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
   } catch {
-    return "—";
+    return "\u2014";
   }
 }
 
@@ -41,8 +41,17 @@ const inputStyle: React.CSSProperties = {
 export default function InnstillingerPage() {
   const router = useRouter();
   const { data: meData, loading: meLoading } = useApiData(() => getMe(), []);
+  const { data: integrationsData } = useApiData(() => listIntegrations(), []);
 
   const user = meData?.user;
+
+  // Check integrations for Slack
+  const slackConfigured = (integrationsData?.configs ?? []).some(
+    (c) => c.platform === "slack" && c.enabled
+  );
+
+  // Check push notification permission
+  const pushGranted = typeof Notification !== "undefined" && Notification.permission === "granted";
 
   // --- Notification toggles ---
   const [notif, setNotif] = useState(() => {
@@ -67,7 +76,8 @@ export default function InnstillingerPage() {
   const [nameVal, setNameVal] = useState("");
   const [aiName, setAiName] = useState("");
   const [savingName, setSavingName] = useState(false);
-  const [savingAiName, setSavingAiName] = useState(false);
+  const [aiNameSaved, setAiNameSaved] = useState(false);
+  const aiNameSavedTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (user?.name) setNameVal(user.name);
@@ -89,14 +99,14 @@ export default function InnstillingerPage() {
     }
   };
 
-  const handleSaveAiName = async () => {
-    setSavingAiName(true);
+  const handleAiNameBlur = async () => {
     try {
       await updatePreferences({ aiName });
-    } catch (e) {
-      alert(e instanceof Error ? e.message : "Feil ved lagring");
-    } finally {
-      setSavingAiName(false);
+      setAiNameSaved(true);
+      if (aiNameSavedTimeout.current) clearTimeout(aiNameSavedTimeout.current);
+      aiNameSavedTimeout.current = setTimeout(() => setAiNameSaved(false), 2000);
+    } catch {
+      // Silent fail
     }
   };
 
@@ -145,26 +155,36 @@ export default function InnstillingerPage() {
                 ) : (
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>
-                      {meLoading ? <Skeleton width={100} height={14} /> : (user?.name || "—")}
+                      {meLoading ? <Skeleton width={100} height={14} /> : (user?.name || "\u2014")}
                     </span>
                     <Btn sm onClick={() => setEditName(true)}>Endre</Btn>
                   </div>
                 )}
               </div>
 
-              {/* AI-navn row */}
+              {/* AI-navn row with auto-save on blur */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textMuted }}>AI-navn</span>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <input
                     value={aiName}
                     onChange={(e) => setAiName(e.target.value)}
+                    onBlur={handleAiNameBlur}
                     placeholder="Navn agenten bruker"
                     style={{ ...inputStyle, width: 160 }}
                   />
-                  <Btn sm primary onClick={handleSaveAiName} style={{ opacity: savingAiName ? 0.5 : 1 }}>
-                    {savingAiName ? "..." : "Lagre"}
-                  </Btn>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      color: T.success,
+                      fontFamily: T.mono,
+                      opacity: aiNameSaved ? 1 : 0,
+                      transition: "opacity 0.3s",
+                      minWidth: 50,
+                    }}
+                  >
+                    &#10003; Lagret
+                  </span>
                 </div>
               </div>
 
@@ -172,7 +192,7 @@ export default function InnstillingerPage() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textMuted }}>E-post</span>
                 <span style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>
-                  {meLoading ? <Skeleton width={100} height={14} /> : (user?.email || "—")}
+                  {meLoading ? <Skeleton width={100} height={14} /> : (user?.email || "\u2014")}
                 </span>
               </div>
 
@@ -180,7 +200,7 @@ export default function InnstillingerPage() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textMuted }}>Rolle</span>
                 <span style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>
-                  {meLoading ? <Skeleton width={100} height={14} /> : (user?.role || "—")}
+                  {meLoading ? <Skeleton width={100} height={14} /> : (user?.role || "\u2014")}
                 </span>
               </div>
 
@@ -195,7 +215,7 @@ export default function InnstillingerPage() {
             <div style={{ marginBottom: 16 }}>
               {[
                 { l: "Auth-metode", v: "OTP via Resend" },
-                { l: "Token-utløp", v: "30 dager" },
+                { l: "Token-utl\u00F8p", v: "30 dager" },
                 { l: "Siste innlogging", v: meLoading ? null : formatDate(user?.lastLoginAt) },
               ].map((f, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < 2 ? `1px solid ${T.border}` : "none" }}>
@@ -217,8 +237,26 @@ export default function InnstillingerPage() {
           <div style={{ padding: 24 }}>
             <SectionLabel>VARSLER</SectionLabel>
             <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-              <Toggle checked={notif} onChange={setNotif} label="Push-varsler" />
-              <Toggle checked={slackNotif} onChange={setSlackNotif} label="Slack-varsler" />
+              <div
+                style={{ opacity: pushGranted ? 1 : 0.5 }}
+                title={pushGranted ? undefined : "Aktiver push-varsler i nettleseren f\u00F8rst"}
+              >
+                <Toggle
+                  checked={notif && pushGranted}
+                  onChange={(v) => { if (pushGranted) setNotif(v); }}
+                  label="Push-varsler"
+                />
+              </div>
+              <div
+                style={{ opacity: slackConfigured ? 1 : 0.5 }}
+                title={slackConfigured ? undefined : "Koble til Slack under Integrasjoner f\u00F8rst"}
+              >
+                <Toggle
+                  checked={slackNotif && slackConfigured}
+                  onChange={(v) => { if (slackConfigured) setSlackNotif(v); }}
+                  label="Slack-varsler"
+                />
+              </div>
               <Toggle checked={emailNotif} onChange={setEmailNotif} label="E-postvarsler" />
             </div>
 

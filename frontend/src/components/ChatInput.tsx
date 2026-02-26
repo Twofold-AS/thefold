@@ -20,9 +20,10 @@ interface ChatInputProps {
   onSkillsChange?: (ids: string[]) => void;
   subAgentsEnabled?: boolean;
   onSubAgentsToggle?: () => void;
+  repos?: string[];
 }
 
-const repos = ["thefold-api", "thefold-frontend"];
+const defaultRepos = ["thefold-api", "thefold-frontend"];
 
 export default function ChatInput({
   compact,
@@ -37,7 +38,9 @@ export default function ChatInput({
   onSkillsChange,
   subAgentsEnabled,
   onSubAgentsToggle,
+  repos: reposProp,
 }: ChatInputProps) {
+  const repos = reposProp ?? defaultRepos;
   const [v, setV] = useState("");
   const [st, setSt] = useState(false);
   const ty = v.length > 0;
@@ -209,8 +212,8 @@ export default function ChatInput({
                               padding: "6px 12px",
                               fontSize: 12,
                               fontFamily: T.sans,
-                              color: selected ? T.accent : T.textSec,
-                              background: selected ? T.accentDim : "transparent",
+                              color: selected ? T.text : T.textSec,
+                              background: "transparent",
                               cursor: "pointer",
                               display: "flex",
                               alignItems: "center",

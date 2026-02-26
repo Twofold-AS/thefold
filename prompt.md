@@ -1,587 +1,542 @@
-# PROMPT — Dither, Chat-bugs, AgentStatus, knapper, ikon-fixes
+# MASTER PROMPT — TheFold Sprint 4: 28 gjenstående bugs
+
+> **Legg denne filen i prosjektets rot (ved siden av CLAUDE.md)**
+> **Dato:** 26. februar 2026
+> **Scope:** Frontend + backend
+> **Forutsetning:** Sprint 1-3 er fullført (22 oppgaver, 19 filer). Se `sprint1-3.md` for hva som allerede er gjort. IKKE gjør noe av det som er i sprint 1-3 rapporten på nytt.
+
+---
 
 ## Kontekst
 
-TheFold frontend (Next.js 14, App Router). Stiler via `T`-objekt fra `@/lib/tokens`. Ingen backend-endringer.
+Du jobber på TheFold — en autonom utviklingsagent bygget med Encore.ts (backend) og Next.js 15 (frontend). Les `CLAUDE.md` i prosjektets rot for full arkitekturoversikt, filstruktur og konvensjoner.
 
-**Bugs som skal fikses:**
-1. Dither-bakgrunnsanimasjon bak ChatComposer (overview + chat "ny samtale")
-2. ChatComposer-bredde: skal fylle hele content-bredden (1636px, ikke 672px)
-3. Chat-redirect fra overview mister meldingen — må sende dobbelt
-4. Når ghost/privat er aktiv på overview og bruker sender melding → skal lande i Privat-tab på chat
-5. AgentStream vises ikke (mangler content-prop)
-6. Knapper i ChatInput (skills, sub-agent, modell-valg) gjør ingenting
-7. Skills-ikon → Wand2 (tryllestav) i sidebar og chat
-8. Privat-ikon → ordentlig spøkelse (Ghost fra lucide-react)
-9. Hydration mismatch — Toggle bruker localStorage i initial state
+**Viktige konvensjoner:**
+- Frontend: Next.js 15 App Router, `T` design tokens fra `lib/tokens.ts`, Lucide React-ikoner, shadcn/ui komponenter, `useApiData` hook for datahenting
+- Backend: Encore.ts med SQLDatabase, Pub/Sub, CronJob, `secret()` for API-nøkler
+- Alle norske labels i UI (ikke engelsk)
+- `npx next build` MÅ passere etter alle endringer (16/16 sider)
+- Ikke bruk `fontFamily: T.brandFont` på noe annet enn logo
 
 ---
 
-## BUG 9: Hydration mismatch (fiks FØRST)
+## Sub-agenter
 
-### Problemet
+Denne prompten er designet for å kjøres med sub-agenter. Hver gruppe (A-G) er en selvstendig enhet som kan parallelliseres. Avhengigheter er markert.
 
-I `page.tsx` (overview) bruker Toggle-states `localStorage` i initial useState:
+**Kjørerekkefølge:**
+1. **Fase 1** (parallelt): Gruppe A, D, E, F, G
+2. **Fase 2** (etter A): Gruppe B
+3. **Fase 3** (etter B): Gruppe C
 
+---
+
+## Gruppe A — Overview & ChatComposer (3 bugs)
+
+### A1 — DitherBackground for smal
+**Fil:** `frontend/src/components/ChatComposer.tsx` og `frontend/src/app/(dashboard)/page.tsx`
+
+DitherBackground er inne i ChatComposer og skal FORBLI der. Problemet er at den kun dekker ChatComposer sin bredde (~1232px). Den skal dekke hele content-area (1636px) — fra sidebar-kanten til høyre skjermkant.
+
+**Fix:** DitherBackground må bryte ut av ChatComposers bredde. I overview-sidens layout (`page.tsx`): sett content-wrapperen som inneholder ChatComposer til `position: relative`. I ChatComposer: gi DitherBackground `position: absolute`, `left: -SP` (negativ sidePadding), `right: -SP`, `top: 0`, `bottom: 0` slik at den strekker seg til kantene av content-area. Alternativt: bruk `width: calc(100% + 2 * SP)` med `margin-left: -SP`. Content-wrapperen i `layout.tsx` bruker `maxWidth: IW` og `padding: SP` — Dither må kompensere for denne paddingen.
+
+ChatComposer-innholdet (heading + input) forblir sentrert med `position: relative; z-index: 1` over Dither.
+
+### A2 — Knapper (skills, sub-agent, +) fungerer ikke på overview
+**Filer:** `frontend/src/app/(dashboard)/page.tsx`, `frontend/src/components/ChatComposer.tsx`
+
+ChatComposer sender kun `repo`, `ghost`, og `onSubmit` til ChatInput. Overview mangler hele kontroll-panelet som chat-siden har via `ChatControls`.
+
+**Fix:**
+1. I `page.tsx` (overview): importer og bruk `listSkills`, `listProviders`, `listRepos` fra `lib/api`
+2. Opprett state: `selectedSkillIds`, `subAgentsEnabled`, `selectedModel`, `selectedRepo`, `ghost`
+3. Send disse som props til ChatComposer, som videresender til ChatInput
+4. ChatComposer må akseptere og sende videre: `skills`, `selectedSkillIds`, `onSkillsChange`, `subAgentsEnabled`, `onSubAgentsToggle`, `models`, `selectedModel`, `onModelChange`
+5. `onStartChat` → videresend alt via URL-params: `/chat?msg=X&repo=Y&ghost=1&skills=id1,id2&model=Z`
+6. Chat-siden (`chat/page.tsx`) må lese disse parameterene og bruke dem ved første `sendMessage`
+
+### A3 — "Kontrollere"-boks
+**Fil:** `frontend/src/app/(dashboard)/page.tsx`
+
+Sjekk om det finnes en boks med teksten "Kontrollere" eller "KONTROLLERE" i overview. Sprint 1.8 erstattet bunn-grid med Skills + Memory widgets, men sjekk at det ikke er et tredje element som gjenstår. Hvis den finnes → fjern den eller erstatt med data fra `listTheFoldTasks()` (aktive tasks-oversikt).
+
+---
+
+## Gruppe B — Chat: kontroller, samtaler & visning (5 bugs)
+
+**Avhengighet:** Gruppe A (ChatComposer props-wiring)
+
+### B1 — AgentStatus vises ikke i chat
+**Fil:** `frontend/src/app/(dashboard)/chat/page.tsx`, `frontend/src/components/AgentStream.tsx`
+
+AgentStream-komponenten ble omskrevet i Sprint 2.3 og parser AgentProgress JSON. Men chat-sidens meldingsloop rendrer kanskje ikke AgentStream for riktige meldingstyper.
+
+**Fix:** I chat-sidens meldings-render-loop, sjekk `m.messageType`:
 ```tsx
-const [agentOn, setAgentOn] = useState(() => {
-  if (typeof window === "undefined") return true;  // server: true
-  return localStorage.getItem("tf_agentMode") !== "false";  // client: kan være false
+if (m.messageType === "agent_status" || m.messageType === "agent_progress" || m.messageType === "agent_report") {
+  return <AgentStream key={m.id} content={m.content} />;
+}
+```
+Verifiser også at `getChatHistory` / `listMessages` API-kallet returnerer ALLE meldingstyper (ikke filtrerer bort agent-meldinger i backend eller frontend).
+
+### B2 — Slette-ikon for samtaler
+**Fil:** `frontend/src/app/(dashboard)/chat/page.tsx`
+
+Legg til `Trash2`-ikon (Lucide) i samtale-listen. Backend finnes: `POST /chat/delete` med `deleteConversation(conversationId)`.
+
+**Fix:**
+1. I samtale-listen: vis `<Trash2 size={14} />` som vises on hover (opacity 0 → 1 ved hover på samtale-raden)
+2. onClick → `window.confirm("Slett denne samtalen?")` → kall `deleteConversation(id)` → refresh samtale-listen
+3. Gjelder BÅDE repo- og privat-samtaler
+
+### B3 — Repo-valg viser feil repos
+**Fil:** `frontend/src/app/(dashboard)/chat/page.tsx`, `frontend/src/contexts/RepoProvider.tsx`
+
+Repo-dropdown viser kun repos fra `listRepos("Twofold-AS")` med hardkodet org-navn.
+
+**Fix:** Verifiser at `listRepos` kalles med korrekt org eller uten org-filter. Sjekk at alle repos fra GitHub-responsen vises med `fullName` (owner/name). Hvis API feiler → vis feilmelding i dropdown i stedet for tom liste. Sjekk `CLAUDE.md` for info om GitHub-tilkobling (GitHub App vs PAT).
+
+### B4 — Skills-dropdown: hele raden blir blå
+**Fil:** `frontend/src/components/chat/chat-controls.tsx`
+
+Når man velger en skill i dropdown-menyen, får hele `DropdownMenuItem`-raden blå bakgrunn.
+
+**Fix:** Overstyr DropdownMenuItem styling for skills:
+- Fjern default hover/aktiv bakgrunnsfarge på selve raden
+- Behold KUN checkbox-indikatoren (det lille `div` med `w-3 h-3 rounded-sm border` + `var(--tf-heat)`) som visuell indikator
+- Raden selv skal ha transparent bakgrunn, kun subtle hover-effekt
+
+### B5 — Knapper fungerer ikke i ny-samtale-modus
+**Fil:** `frontend/src/app/(dashboard)/chat/page.tsx`
+
+Når `newChat === true`, kan ChatControls eller ChatInput være disabled/ikke rendret.
+
+**Fix:** ChatControls (repo, skills, model, sub-agents, ghost) skal rendres ALLTID, uavhengig av `newChat`-state. Brukerens valg fra kontrollene sendes med i `sendMessage()` når de skriver sin første melding.
+
+---
+
+## Gruppe C — AI-modeller, auto-routing & fasetilordning (7 bugs)
+
+**Avhengighet:** Gruppe B (modellvalg i chat fungerer)
+
+### C1 — Modellvalg fungerer ikke (sender displayName, ikke model_id)
+**Filer:** `frontend/src/components/chat/chat-controls.tsx`, `frontend/src/app/(dashboard)/chat/page.tsx`, `backend: chat/chat.ts`
+
+**Frontend-fix:**
+1. `ChatControls.onModelChange` mottar nå `displayName` (string) → endre til å sende `model.id`
+2. Hent modeller fra `listProviders()` → flat-map til `Array<{ id: string, displayName: string, provider: string }>`
+3. I `sendMessage()`: inkluder `modelId` i request body
+4. Modell-dropdown: vis "Auto (anbefalt)" som default + alle enabled modeller gruppert per provider
+
+**Backend-fix:**
+1. I `chat.ts` `processAIResponse` (eller `send`-endepunktet): les `modelId` fra request
+2. Når `modelId` er satt → bruk den direkte (mode="manual")
+3. Når `modelId` er null/undefined → bruk auto-routing (mode="auto", se C2)
+
+### C2 — Auto-modell: Sonnet brukes alltid
+**Fil:** `backend: chat/chat.ts`, `backend: ai/router.ts`
+
+`selectOptimalModel()` i `router.ts` finnes og er testet. Men `processAIResponse` bruker den ikke.
+
+**Backend-fix:**
+1. Legg til et kjapt pre-kall i `processAIResponse` som vurderer meldingskompleksitet (1-10)
+2. Bruk eksisterende `selectOptimalModel(complexity)` for å velge modell
+3. Kortslutning for enkle meldinger (kompleksitet 1-3): dropp `skills.resolve` og `getTree` — svar direkte med Haiku/Moonshot
+4. Medium (4-7): standard pipeline med Sonnet
+5. Komplekse (8-10): full pipeline med Opus
+
+Kompleksitetsvurderingen kan være enkel heuristikk:
+```typescript
+function quickComplexity(msg: string): number {
+  const len = msg.length;
+  const hasCode = /```|function |const |import /.test(msg);
+  const hasQuestion = msg.includes("?");
+  const wordCount = msg.split(/\s+/).length;
+  
+  if (wordCount <= 5 && !hasCode) return 2; // "Hei", "Takk", etc.
+  if (wordCount <= 20 && !hasCode && hasQuestion) return 4; // Enkelt spørsmål
+  if (hasCode || len > 500) return 7; // Kode eller langt
+  if (len > 1500 || wordCount > 200) return 9; // Veldig komplekst
+  return 5; // Default middels
+}
+```
+
+**VIKTIG:** Ikke ødelegg eksisterende flyt. Dette er en pre-routing sjekk FØR hovedkallet. Fallback til Sonnet hvis noe feiler.
+
+### C3 — OpenRouter/Fireworks modeller: "Legg til modell"-knapp
+**Fil:** `frontend/src/app/(dashboard)/ai/page.tsx`
+
+Brukeren trenger å legge til vilkårlige modeller fra OpenRouter og Fireworks (generell API-nøkkel, ikke per-modell).
+
+**Fix:** Per provider-kort: legg til "Legg til modell"-knapp → modal med:
+- Modell-ID (tekst, f.eks. `moonshotai/moonshot-v1-128k` for OpenRouter)
+- Display name (tekst)
+- Tier (dropdown: 1=rask/billig, 3=balansert, 5=best kvalitet)
+- Tags (multi-select: coding, chat, planning, review)
+- Lagre via `saveModel()` endpoint (finnes i backend)
+
+### C4 — Fasetilordning: dropdown fungerer ikke
+**Fil:** `frontend/src/app/(dashboard)/ai/page.tsx`
+
+Sprint 2.5 la til FASE-TILORDNING seksjon med localStorage. Dropdowns fungerer ikke.
+
+**Fix:**
+1. Erstatt custom dropdown med shadcn `DropdownMenu` + multi-select
+2. Hent alle enabled modeller fra `listProviders()` → flat-map
+3. Per fase (planlegging, programmering, review, chat): vis dropdown med alle modeller
+4. Bruker kan velge FLERE modeller per fase (multi-select med checkmarks)
+5. Vis valgt som: "Anthropic → Sonnet 4.5, OpenRouter → Moonshot v1"
+6. Auto-lagre ved endring via `updatePreferences({ phaseModels: { planning: [...ids], coding: [...ids], ... } })`
+
+### C5 — Flytt fasetilordning over modell-listen
+**Fil:** `frontend/src/app/(dashboard)/ai/page.tsx`
+
+Flytt hele FASE-TILORDNING-seksjonen til rett ETTER provider-kortene, FØR modell-tabellen. Visuell rekkefølge:
+1. Provider-kort (Anthropic, Fireworks, OpenRouter)
+2. **Fasetilordning** (planlegging, programmering, review, chat)
+3. Modell-tabell
+
+### C6 — Fjern endre/slett-knapper per modell, bruk "Legg til"
+**Fil:** `frontend/src/app/(dashboard)/ai/page.tsx`
+
+Fjern inline endre/slett-knapper per modell-rad. Modeller administreres via "Legg til modell"-knappen fra C3 og kan brukes i fasetilordning fra C4.
+
+### C7 — Leverandør-logoer
+**Fil:** `frontend/public/logos/`, `frontend/src/app/(dashboard)/ai/page.tsx`
+
+Legg SVG-logoer i `public/logos/`: `anthropic.svg`, `openrouter.svg`, `fireworks.svg`.
+
+Bruk i provider-kort: `<img src={"/logos/" + provider.slug + ".svg"} />` med fallback til farget sirkel med initialer. Hent logoer fra offisielle kilder eller lag enkle tekst-baserte SVG-er.
+
+---
+
+## Gruppe D — Tasks & Komponenter (4 bugs)
+
+### D1 — Godkjenn/avvis-knapper vises for blokkerte/godkjente tasks
+**Fil:** `frontend/src/app/(dashboard)/tasks/page.tsx`
+
+Handlingsknappene (Godkjenn, Avvis, Be om endringer) vises uavhengig av task-status.
+
+**Fix:** Vis kun handlingsknapper når BEGGE er sant:
+- `task.status === "in_review"`
+- det finnes en tilhørende review med `status === "pending"`
+
+For status `blocked`, `done`, `completed`, `planned`, `backlog` → vis INGEN action-knapper. Vis kun info (status-tag, beskrivelse, tidspunkt).
+
+### D2 — Linear-ikon: play → refresh
+**Fil:** `frontend/src/app/(dashboard)/tasks/page.tsx`
+
+"Importer fra Linear"-knappen bruker feil ikon.
+
+**Fix:** Importer `RefreshCw` fra `lucide-react`. Erstatt nåværende ikon (Play/Triangle/annet) med `<RefreshCw size={14} />`.
+
+### D3 — Ny oppgave: dynamisk repo-dropdown + skills
+**Fil:** `frontend/src/app/(dashboard)/tasks/page.tsx`
+
+Sprint 2.7 la til opprett-modal med hardkodet repo-velger (`thefold-api`/`thefold-frontend`).
+
+**Fix:**
+1. Erstatt hardkodede repo-knapper med dropdown fra `listRepos()` (dynamisk)
+2. Legg til skills-dropdown (multi-select) fra `listSkills()`
+3. Send valgte `skillIds` i `createTask()` request body
+
+### D4 — Komponenter: "Bruk" → "Oppdater" via healing
+**Fil:** `frontend/src/app/(dashboard)/komponenter/page.tsx`
+
+Sprint 3.3 la til "Bruk"-knapp med repo-dropdown. Brukeren ønsker "Oppdater" som trigger self-healing.
+
+**Fix:**
+1. Endre knapp-tekst fra "Bruk" til "Oppdater"
+2. Fjern repo-dropdown (healing er ikke repo-spesifikt)
+3. onClick → kall `healComponentEndpoint({ componentId })` — API: `POST /registry/heal`
+4. Vis resultat: "Oppdatert ✓" (healed), "Allerede oppdatert" (skipped), "Feil ved oppdatering" (failed)
+5. Importer `healComponentEndpoint` i `lib/api.ts` hvis den ikke finnes:
+```typescript
+export async function healComponent(componentId: string) {
+  return apiFetch<{ action: string; reason?: string }>("/registry/heal", {
+    method: "POST", body: { componentId }
+  });
+}
+```
+
+---
+
+## Gruppe E — Integrasjoner, MCP & Monitor (4 bugs)
+
+### E1 — Firecrawl viser "Frakoblet"
+**Fil:** `frontend/src/app/(dashboard)/integrasjoner/page.tsx`
+
+Firecrawl er en server-side integrasjon (API-nøkkel er Encore secret). Men `SERVER_SIDE_PLATFORMS` inkluderer den ikke — frontend sjekker `IntegrationConfig` i DB som ikke finnes for Firecrawl.
+
+**Fix:** Legg `"firecrawl"` til `SERVER_SIDE_PLATFORMS` array:
+```typescript
+const SERVER_SIDE_PLATFORMS = ["linear", "github", "resend", "brave-search", "firecrawl"];
+```
+Server-side integrasjoner viser allerede `<Tag>Konfigurert via server</Tag>` i stedet for "Koble til" (Sprint 3.2).
+
+### E2 — Fjern linear-mcp fra MCP-servere
+**Filer:** `frontend/src/app/(dashboard)/mcp/page.tsx` + eventuelt backend-migrasjon
+
+**Fix (frontend — rask):** Filtrer ut linear-mcp fra listen:
+```typescript
+const servers = (data?.servers ?? []).filter(s => s.name !== "linear-mcp");
+```
+
+**Fix (backend — permanent):** Opprett ny migrasjon i `mcp/migrations/`:
+```sql
+DELETE FROM mcp_servers WHERE name = 'linear-mcp';
+```
+
+Gjør begge for å være sikker.
+
+### E3 — Monitor: "Kjør nå" fungerer ikke
+**Fil:** `frontend/src/app/(dashboard)/monitor/page.tsx`
+
+"Kjør nå"-knappen kaller trolig `runDailyChecks` som er feature-flagget og returnerer `{ ran: false }`.
+
+**Fix:**
+1. Legg til repo-velger dropdown (fra `listRepos()`)
+2. "Kjør nå"-knapp → kall `runCheck({ repo: selectedRepo })` (POST /monitor/run-check) — IKKE `runDailyChecks`
+3. Vis resultater fra responsen (results[] med checkType, status, details)
+4. Legg til historikk-visning: kall `history({ repo })` og vis i tabell
+
+Importer i `lib/api.ts` hvis de mangler:
+```typescript
+export async function runMonitorCheck(repo: string) {
+  return apiFetch<{ results: Array<{ repo: string; checkType: string; status: string; details: Record<string, unknown> }> }>(
+    "/monitor/run-check", { method: "POST", body: { repo } }
+  );
+}
+export async function getMonitorHistory(repo: string, limit?: number) {
+  return apiFetch<{ checks: Array<{ id: string; repo: string; checkType: string; status: string; details: Record<string, unknown>; createdAt: string }> }>(
+    "/monitor/history", { method: "POST", body: { repo, limit: limit || 20 } }
+  );
+}
+```
+
+### E4 — Monitor: info om daglig vs fredag cron
+**Fil:** `frontend/src/app/(dashboard)/monitor/page.tsx`
+
+Brukeren er forvirret fordi det står "daglig 03:00" men forventet fredag self-healing.
+
+**Fix:** Legg til en info-seksjon øverst på monitor-siden:
+```
+AUTOMATISKE SJEKKER
+
+Daglig kl 03:00 — Repo-helssjekk
+Sjekker avhengigheter, testdekning, kodekvalitet og dokumentasjon.
+Status: [Aktivert/Deaktivert] (MonitorEnabled)
+
+Fredag kl 03:00 — Self-healing
+Reparerer komponenter med kvalitetsscore under 60.
+Status: [Aktivert/Deaktivert] (HealingPipelineEnabled)
+```
+
+Hent feature-flag status fra `getSecretsStatus()` hvis tilgjengelig, ellers vis statisk tekst.
+
+---
+
+## Gruppe F — Innstillinger & E-post (3 bugs)
+
+### F1 — AI-navn: auto-lagring
+**Fil:** `frontend/src/app/(dashboard)/innstillinger/page.tsx`
+
+Sprint 3.4 la til AI-navn input med "Lagre"-knapp.
+
+**Fix:**
+1. Fjern "Lagre"-knappen ved AI-navn
+2. Legg til `onBlur` handler: lagre via `updatePreferences({ aiName })` automatisk
+3. Legg til debounce (500ms) for å unngå for mange API-kall
+4. Vis diskret "✓ Lagret" indikator som fader ut etter 2 sekunder
+5. Gjør det identisk med hvordan profil-navn fungerer (etter fix: begge auto-save)
+
+### F2 — Push/Slack-varsler uten oppsett
+**Fil:** `frontend/src/app/(dashboard)/innstillinger/page.tsx`
+
+Toggles for push-varsler og Slack-varsler kan aktiveres selv når tjenestene ikke er konfigurert.
+
+**Fix:**
+1. Ved mount: kall `listIntegrations()` og sjekk om `platform: "slack"` har `enabled: true`
+2. Slack-toggle: vis som disabled med `opacity: 0.5` og tooltip "Koble til Slack under Integrasjoner først" hvis Slack ikke er konfigurert
+3. Push-toggle: sjekk `typeof Notification !== "undefined" && Notification.permission === "granted"` — vis disabled med tooltip "Nettleser-varsler er ikke aktivert" hvis ikke
+
+### F3 — E-post-varsler for ferdigstilte tasks
+**Fil:** `backend: gateway/email.ts` (eller `chat/chat.ts`)
+
+Task-completion-events publiseres via Pub/Sub (`taskEvents` topic), men ingen subscriber sender e-post.
+
+**Backend-fix:**
+```typescript
+import { Subscription } from "encore.dev/pubsub";
+import { taskEvents } from "../tasks/tasks";
+import { sendEmail } from "./email"; // eller direkte Resend-kall
+
+const _taskEmailSub = new Subscription(taskEvents, "email-task-completed", {
+  handler: async (event) => {
+    if (event.action !== "completed") return;
+    
+    // Hent brukerens e-post
+    const user = await users.getUser();
+    if (!user?.email) return;
+    
+    // Sjekk om bruker har e-post-varsler aktivert
+    const prefs = user.preferences;
+    if (prefs?.emailNotifications === false) return;
+    
+    await sendEmail({
+      to: user.email,
+      subject: `TheFold: Oppgave fullført — ${event.title || event.taskId}`,
+      html: `<p>Oppgaven "${event.title || event.taskId}" er fullført.</p>
+             <p>Repo: ${event.repo || "Ingen"}</p>
+             <p><a href="https://app.thefold.dev/tasks">Se oppgaver →</a></p>`,
+    });
+  },
 });
 ```
 
-Server renderer `checked=true`, client renderer `checked=false` → hydration mismatch.
-
-### Fix i `frontend/src/app/(dashboard)/page.tsx`
-
-Erstatt alle tre useState-initialisatorene med defaultverdier, og bruk useEffect for å lese fra localStorage:
-
-```tsx
-const [agentOn, setAgentOn] = useState(true);
-const [subAgOn, setSubAgOn] = useState(false);
-const [privat, setPrivat] = useState(false);
-
-// Les fra localStorage etter hydration
-useEffect(() => {
-  setAgentOn(localStorage.getItem("tf_agentMode") !== "false");
-  setSubAgOn(localStorage.getItem("tf_subAgents") === "true");
-  setPrivat(localStorage.getItem("tf_private") === "true");
-}, []);
-```
-
-Behold de eksisterende useEffect-ene som skriver til localStorage.
-
 ---
 
-## BUG 1: Dither-bakgrunnsanimasjon
+## Gruppe G — Sidebar, UX & nye sider (6 bugs)
 
-### 1a. Installer avhengigheter
+### G1 — Sidebar: hardkodet "Jørgen Andre" og "admin"
+**Fil:** `frontend/src/app/(dashboard)/layout.tsx`
 
-```bash
-cd frontend
-npm install three @react-three/fiber @react-three/postprocessing postprocessing
-npm install -D @types/three
-```
+Sidebar-bunnen viser hardkodet navn og rolle.
 
-### 1b. Opprett `frontend/src/components/Dither.tsx`
+**Fix:**
+1. Importer `useUser` fra `@/contexts/UserPreferencesContext`
+2. Erstatt hardkodet "Jørgen Andre" med `user?.name || "—"`
+3. Erstatt hardkodet "admin" med `user?.role || "—"`
+4. Erstatt hardkodet avatar-initial med `initial` fra context
+5. Bruk `avatarColor` fra context for avatar-bakgrunn
 
-Kopier **hele** Dither-komponenten uendret fra vedlegget til denne chatten (den med waveVertexShader, waveFragmentShader, ditherFragmentShader, RetroEffectImpl, DitheredWaves, default export Dither). Ca 280 linjer. Bruk den eksakt som gitt.
+### G2 — Blå venstre-border på ALLE aktive valg-knapper
+**Filer:** ALLE frontend-sider med seleksjon/aktiv-state
 
-### 1c. Opprett `frontend/src/components/DitherBackground.tsx`
+`borderLeft: 3px solid ${T.accent}` (eller `"3px solid transparent"` → accent) finnes på nesten alle sider med valg-elementer.
 
+**Fix:** Søk i hele `frontend/src/` etter `borderLeft` som inneholder `accent` eller `3px solid`. Fjern ALLE forekomster. Filer inkluderer men er ikke begrenset til:
+- `tasks/page.tsx`
+- `chat/page.tsx`
+- `skills/page.tsx`
+- `komponenter/page.tsx`
+- `mcp/page.tsx`
+- `integrasjoner/page.tsx`
+- `ai/page.tsx`
+- `monitor/page.tsx`
+- `memory/page.tsx`
+- `sandbox/page.tsx`
+- `innstillinger/page.tsx`
+
+Erstatt med kun `background: T.subtle` for valgt element. Ingen blå venstre-kant noe sted i hele appen.
+
+### G3 — Skeleton loaders: forbedring
+**Filer:** Alle sider med `<Skeleton rows={N} />`
+
+Sprint 3.6 la til generiske skeleton-rader. Brukeren ønsker bedre match med layout, eller en enkel spinner.
+
+**Fix:** Erstatt `<Skeleton rows={N} />` med sentrert spinner der skeleton ikke matcher innholdet:
 ```tsx
-"use client";
+import { Loader2 } from "lucide-react";
 
-import dynamic from "next/dynamic";
-import { T } from "@/lib/tokens";
+// Erstatt:
+<Skeleton rows={4} />
 
-const Dither = dynamic(() => import("./Dither"), { ssr: false });
-
-interface DitherBackgroundProps {
-  children: React.ReactNode;
-}
-
-export default function DitherBackground({ children }: DitherBackgroundProps) {
-  return (
-    <div style={{ position: "relative", width: "100%", flex: 1, display: "flex", flexDirection: "column" }}>
-      {/* Dither canvas — absolutt posisjonert bak innholdet */}
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          zIndex: 0,
-          overflow: "hidden",
-          pointerEvents: "none",
-        }}
-      >
-        <Dither
-          waveColor={[0.39, 0.4, 0.95]}
-          waveSpeed={0.03}
-          waveFrequency={3}
-          waveAmplitude={0.3}
-          colorNum={4}
-          pixelSize={2}
-          disableAnimation={false}
-          enableMouseInteraction={false}
-          mouseRadius={0.3}
-        />
-      </div>
-      {/* Gradient overlay — gjør tekst lesbart */}
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          zIndex: 1,
-          background: `radial-gradient(ellipse at center 40%, transparent 0%, ${T.bg}ee 60%, ${T.bg} 80%)`,
-          pointerEvents: "none",
-        }}
-      />
-      {/* Innhold over dither */}
-      <div style={{ position: "relative", zIndex: 2, flex: 1, display: "flex", flexDirection: "column" }}>
-        {children}
-      </div>
-    </div>
-  );
-}
-```
-
----
-
-## BUG 2: ChatComposer-bredde — full content-bredde
-
-### Problemet
-
-ChatComposer har `maxWidth: 672` på input-wrapperen. Den skal fylle hele innholdsområdet (parent er content-area som allerede er 1636px bred).
-
-### Fix i `frontend/src/components/ChatComposer.tsx`
-
-Erstatt **hele filen**:
-
-```tsx
-"use client";
-
-import { useState } from "react";
-import { T } from "@/lib/tokens";
-import ChatInput from "@/components/ChatInput";
-import DitherBackground from "@/components/DitherBackground";
-
-interface ChatComposerProps {
-  onSubmit?: (msg: string, repo: string | null, ghost: boolean) => void;
-  heading?: string;
-}
-
-export default function ChatComposer({ onSubmit, heading }: ChatComposerProps) {
-  const [repo, setRepo] = useState<string | null>("thefold-api");
-  const [ghost, setGhost] = useState(false);
-
-  return (
-    <DitherBackground>
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          flex: 1,
-          minHeight: 400,
-          padding: "0 24px",
-        }}
-      >
-        <div style={{ paddingBottom: 32, textAlign: "center" }}>
-          <h2
-            style={{
-              fontSize: 32,
-              fontWeight: 600,
-              color: T.text,
-              letterSpacing: "-0.03em",
-            }}
-          >
-            {heading || "Når AI sier umulig, sier Mikael Kråkenes neste"}
-          </h2>
-        </div>
-        {/* Full bredde — fyller content-area */}
-        <div style={{ width: "100%", position: "relative" }}>
-          {/* Glow under chatboksen */}
-          <div
-            style={{
-              position: "absolute",
-              bottom: -12,
-              left: "50%",
-              transform: "translateX(-50%)",
-              width: "60%",
-              height: 40,
-              background: "radial-gradient(ellipse at center, rgba(99,102,241,0.25) 0%, transparent 70%)",
-              pointerEvents: "none",
-              filter: "blur(20px)",
-              zIndex: 0,
-            }}
-          />
-          <div style={{ position: "relative", zIndex: 1 }}>
-            <ChatInput
-              repo={ghost ? null : repo}
-              onSubmit={(msg, r) => onSubmit && onSubmit(msg, r ?? null, ghost)}
-              onRepoChange={setRepo}
-              ghost={ghost}
-              onGhostChange={setGhost}
-            />
-          </div>
-        </div>
-      </div>
-    </DitherBackground>
-  );
-}
-```
-
-Endringer:
-- Fjernet `maxWidth: 672` — nå `width: "100%"` (fyller parent)
-- Lagt til `padding: "0 24px"` på ytre div for litt pust
-- Wrappet med DitherBackground
-- Når `ghost` er true, sender `repo={null}` til ChatInput
-
-Fjern også `maxWidth: 672` fra ChatInput.tsx sin rot-div dersom den finnes der (sjekk `maxWidth: compact ? undefined : 672`). Endre til:
-
-```tsx
-maxWidth: compact ? undefined : undefined,
-```
-
-Eller fjern `maxWidth`-linjen helt.
-
----
-
-## BUG 8: Privat-ikon — bytt til ordentlig Ghost
-
-### Problemet
-
-Ghost-ikonet i ChatInput er en håndtegnet SVG som ikke ser ut som et spøkelse.
-
-### Fix i `frontend/src/components/ChatInput.tsx`
-
-Importer Ghost fra lucide-react øverst:
-
-```tsx
-import { Ghost } from "lucide-react";
-```
-
-Erstatt ghost PillIcon-innholdet (den håndtegnede SVG-en) med:
-
-```tsx
-<PillIcon
-  tooltip="Privat — kun synlig for deg"
-  active={ghost}
-  onClick={() => onGhostChange && onGhostChange(!ghost)}
->
-  <Ghost size={14} />
-</PillIcon>
-```
-
----
-
-## BUG 3 + 4: Chat-redirect fra overview — send melding + ghost-modus
-
-### Problemet
-
-I `page.tsx` (overview):
-```tsx
-const onStartChat = (msg: string, repo: string | null, ghost: boolean) => {
-  router.push("/chat");  // ← meldingen og ghost forsvinner!
-};
-```
-
-### Fix i `frontend/src/app/(dashboard)/page.tsx`
-
-```tsx
-const onStartChat = (msg: string, repo: string | null, ghost: boolean) => {
-  const params = new URLSearchParams();
-  if (msg) params.set("msg", msg);
-  if (repo) params.set("repo", repo);
-  if (ghost) params.set("ghost", "1");
-  router.push(`/chat?${params.toString()}`);
-};
-```
-
-### Fix i `frontend/src/app/(dashboard)/chat/page.tsx` — les ghost fra searchParams
-
-Oppdater autoMsg-effekten til å lese repo og ghost fra query params, og sett riktig tab:
-
-```tsx
-// Auto-send msg from search params (overview redirect)
-useEffect(() => {
-  if (autoMsg && !autoMsgSent.current) {
-    autoMsgSent.current = true;
-    setNewChat(false);
-
-    const repoParam = searchParams.get("repo");
-    const ghostParam = searchParams.get("ghost") === "1";
-
-    // Sett riktig tab basert på ghost
-    if (ghostParam) {
-      setTab("Privat");
-    }
-
-    const convId = ghostParam
-      ? inkognitoConversationId()
-      : repoParam
-        ? repoConversationId(repoParam)
-        : repoConversationId("thefold-api");
-
-    setAc(convId);
-    setSending(true);
-    sendMessage(convId, autoMsg, { repoName: repoParam || undefined })
-      .then((result) => {
-        refreshConvs();
-        if (result.agentTriggered) {
-          startPolling();
-        }
-      })
-      .catch(() => {})
-      .finally(() => setSending(false));
-  }
-}, [autoMsg]); // eslint-disable-line react-hooks/exhaustive-deps
-```
-
----
-
-## BUG 5: AgentStream vises ikke
-
-### Verifisering
-
-Sjekk i chat/page.tsx om AgentStream allerede har `content`-prop. Basert på koden er det allerede fikset:
-
-```tsx
-<AgentStream content={m.content} onCancel={() => ac && cancelChatGeneration(ac)} />
-```
-
-Hvis dette allerede er på plass, er bug 5 fikset. Hvis ikke, legg til `content={m.content}` og `onCancel`.
-
-### Ekstra: parseProgress i AgentStream.tsx
-
-Backend sender `{ type: "progress", status, phase, ... }`. Oppdater parseProgress:
-
-```tsx
-function parseProgress(content?: string): AgentProgress | null {
-  if (!content) return null;
-  try {
-    const parsed = JSON.parse(content);
-    const data = parsed?.type === "progress" ? parsed : parsed;
-    if (data && typeof data.status === "string" && typeof data.phase === "string") {
-      return data as AgentProgress;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-```
-
-Legg også til `"thinking"` i AgentProgress status-type:
-
-```tsx
-interface AgentProgress {
-  status: "thinking" | "working" | "done" | "failed" | "waiting";
-  // ...resten uendret
-}
-```
-
-Og i PHASE_LABELS, legg til:
-```tsx
-thinking: "Tenker",
-context: "Analyserer",
-confidence: "Vurderer",
-building: "Bygger",
-clarification: "Trenger avklaring",
-```
-
----
-
-## BUG 6: Knapper i ChatInput gjør ingenting
-
-### Fix: Nye props i ChatInput
-
-Legg til nye props i `ChatInputProps`:
-
-```tsx
-interface ChatInputProps {
-  compact?: boolean;
-  repo?: string | null;
-  onSubmit?: (value: string, repo?: string | null) => void;
-  onRepoChange?: (repo: string | null) => void;
-  ghost?: boolean;
-  onGhostChange?: (ghost: boolean) => void;
-  isPrivate?: boolean;
-  // NYE:
-  skills?: Array<{ id: string; name: string; enabled: boolean }>;
-  selectedSkillIds?: string[];
-  onSkillsChange?: (ids: string[]) => void;
-  subAgentsEnabled?: boolean;
-  onSubAgentsToggle?: () => void;
-}
-```
-
-Legg til state: `const [skillsOpen, setSkillsOpen] = useState(false);`
-
-### Sub-agent PillIcon — legg til onClick og active:
-
-```tsx
-<PillIcon
-  tooltip="Sub-agenter"
-  active={subAgentsEnabled}
-  onClick={() => onSubAgentsToggle && onSubAgentsToggle()}
->
-  {/* eksisterende SVG uendret */}
-</PillIcon>
-```
-
-### Skills PillIcon — erstatt med dropdown:
-
-```tsx
-<div style={{ position: "relative" }}>
-  <PillIcon
-    tooltip="Skills"
-    active={(selectedSkillIds?.length ?? 0) > 0}
-    onClick={() => setSkillsOpen(p => !p)}
-  >
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z" />
-      <path d="m14 7 3 3" />
-      <path d="M5 6v4" /><path d="M19 14v4" />
-      <path d="M10 2v2" /><path d="M7 8H3" /><path d="M21 16h-4" /><path d="M11 3H9" />
-    </svg>
-  </PillIcon>
-  {skillsOpen && skills && skills.length > 0 && (
-    <div
-      style={{
-        position: "absolute",
-        bottom: "100%",
-        left: 0,
-        marginBottom: 6,
-        background: T.surface,
-        border: `1px solid ${T.border}`,
-        borderRadius: T.r,
-        padding: "4px 0",
-        minWidth: 200,
-        maxHeight: 240,
-        overflow: "auto",
-        zIndex: 100,
-        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-      }}
-    >
-      {skills.filter(s => s.enabled).map(skill => {
-        const selected = selectedSkillIds?.includes(skill.id) ?? false;
-        return (
-          <div
-            key={skill.id}
-            onClick={() => {
-              if (!onSkillsChange || !selectedSkillIds) return;
-              onSkillsChange(
-                selected
-                  ? selectedSkillIds.filter(id => id !== skill.id)
-                  : [...selectedSkillIds, skill.id]
-              );
-            }}
-            style={{
-              padding: "6px 12px",
-              fontSize: 12,
-              fontFamily: T.sans,
-              color: selected ? T.accent : T.textSec,
-              background: selected ? T.accentDim : "transparent",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <div style={{
-              width: 10, height: 10, borderRadius: 2,
-              border: `1px solid ${selected ? T.accent : T.border}`,
-              background: selected ? T.accent : "transparent",
-            }} />
-            {skill.name}
-          </div>
-        );
-      })}
-    </div>
-  )}
+// Med:
+<div style={{ display: "flex", justifyContent: "center", alignItems: "center", padding: "60px 0" }}>
+  <Loader2 size={24} style={{ color: T.textFaint, animation: "spin 1s linear infinite" }} />
 </div>
 ```
 
-### Wire opp i chat/page.tsx
+Behold skeleton-rader KUN der de ligner reell layout (tabeller med kjente kolonner, profil-felt med kjent bredde). Alle andre → spinner.
 
-Legg til state og API-kall i ChatPageInner:
+### G4 — Docs-side
+**Filer:** `frontend/src/app/(dashboard)/docs/page.tsx` (NY), `frontend/src/app/(dashboard)/layout.tsx`
 
-```tsx
-import { listSkills } from "@/lib/api";
+**Fix:**
+1. Opprett `/app/(dashboard)/docs/page.tsx`
+2. Innhold: to seksjoner:
+   - "Healing-rapporter" → data fra `getHealingStatus({ limit: 20 })`
+   - "Helse-sjekker" → data fra `getMonitorHealth()`
+3. Vis som tidslinje/tabell med dato, type, status, detaljer
+4. Legg til i sidebar-navigasjon i `layout.tsx`:
+   - Ikon: `FileText` fra Lucide
+   - Label: "Docs"
+   - Href: `/docs`
+   - Plasser i SYSTEM-gruppen (etter Monitor)
 
-// inne i ChatPageInner:
-const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
-const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
-const { data: skillsData } = useApiData(() => listSkills(), []);
-const availableSkills = skillsData?.skills ?? [];
+### G5 — Varslinger (NotifBell)
+**Filer:** `frontend/src/components/NotifBell.tsx`, `backend: chat/chat.ts`
+
+**Backend-fix:** Opprett nytt endpoint:
+```typescript
+export const notifications = api(
+  { method: "GET", path: "/chat/notifications", expose: true, auth: true },
+  async (): Promise<{ notifications: Array<{ id: string; content: string; type: string; createdAt: string }> }> => {
+    const rows = db.query`
+      SELECT id, content, message_type, created_at
+      FROM messages
+      WHERE message_type IN ('agent_report', 'agent_status')
+        AND created_at > NOW() - INTERVAL '24 hours'
+      ORDER BY created_at DESC
+      LIMIT 20
+    `;
+    const notifications = [];
+    for await (const row of rows) {
+      notifications.push({
+        id: row.id,
+        content: String(row.content).substring(0, 100),
+        type: row.message_type,
+        createdAt: String(row.created_at),
+      });
+    }
+    return { notifications };
+  }
+);
 ```
 
-Send props til ChatInput i samtale-visningen:
+**Frontend-fix:** Oppdater `NotifBell.tsx`:
+1. Poll `/chat/notifications` hvert 30 sekunder
+2. Vis rødt badge med antall uleste (basert på sist sett tidspunkt i localStorage)
+3. Klikk → dropdown med siste hendelser
+4. Klikk på hendelse → naviger til `/tasks` eller `/chat`
 
-```tsx
-<ChatInput
-  compact
-  repo={curRepo || undefined}
-  ghost={isGhost}
-  onSubmit={handleSend}
-  isPrivate={tab === "Privat"}
-  skills={availableSkills}
-  selectedSkillIds={selectedSkillIds}
-  onSkillsChange={setSelectedSkillIds}
-  subAgentsEnabled={subAgentsEnabled}
-  onSubAgentsToggle={() => setSubAgentsEnabled(p => !p)}
-/>
-```
+### G6 — Token/kostnad oppdateres ikke på overview
+**Filer:** `frontend/src/app/(dashboard)/page.tsx`, `backend: chat/chat.ts`
 
-Send `selectedSkillIds` med i `handleSend` og `startNewChat`:
+Overview-widgets for tokens og kostnad viser samme tall etter bruk.
 
-```tsx
-const handleSend = (value: string, repo?: string | null) => {
-  if (!ac || !value) return;
-  setSending(true);
-  sendMessage(ac, value, {
-    repoName: repo || curRepo || undefined,
-    skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
-  })
-    .then((result) => {
-      refreshMsgs();
-      refreshConvs();
-      if (result.agentTriggered) startPolling();
-    })
-    .catch(() => {})
-    .finally(() => setSending(false));
-};
-```
+**Fix:**
+1. **Backend:** Verifiser at `processAIResponse` lagrer `tokens_used` og `cost_usd` i messages-metadata (JSON-felt)
+2. **Backend:** Verifiser at stats-endpoint (`getStats` eller tilsvarende) aggregerer fra messages-metadata korrekt
+3. **Frontend:** Overview-widgets bruker `useApiData` — legg til refresh-mekanisme. Enklest: legg til `key`-prop som endres ved navigasjon tilbake til overview, eller bruk `router.refresh()`.
 
 ---
 
-## BUG 7: Skills-ikon → Wand2 (tryllestav) i sidebar
+## Sjekkliste etter alle endringer
 
-### Fix i `frontend/src/app/(dashboard)/layout.tsx`
+```bash
+# 1. Frontend build
+cd frontend && npx next build
+# Forventet: 17/17 sider (16 + ny docs-side) kompilerer uten feil
 
-Sidebar bruker allerede Lucide-ikoner. Endre Skills-ikonet:
+# 2. Backend tester (hvis endret)
+encore test ./chat/... ./gateway/... ./mcp/...
 
-**Nåværende:**
-```tsx
-import { ..., Sparkles, ... } from "lucide-react";
-// ...
-{ icon: Sparkles, label: "Skills", href: "/skills" },
+# 3. Verifiser visuelt
+# - Overview: Dither fyller hele content-bredden (1636px)
+# - Overview: Skills/sub-agent/modell-knapper fungerer
+# - Chat: AgentProgress rendres for agent-meldinger
+# - Chat: Slett-ikon på samtaler
+# - Chat: Modellvalg sender model_id til backend
+# - AI-side: Fasetilordning øverst, dropdown fungerer, "Legg til modell" fungerer
+# - Tasks: Ingen action-knapper på blokkerte/godkjente tasks
+# - Tasks: RefreshCw-ikon for Linear-sync
+# - Integrasjoner: Firecrawl viser "Konfigurert via server"
+# - MCP: linear-mcp er borte
+# - Monitor: "Kjør nå" fungerer med repo-valg
+# - Innstillinger: AI-navn auto-lagrer
+# - Sidebar: Viser brukerens navn og rolle (ikke hardkodet)
+# - INGEN blå venstre-border noe sted
+# - Docs-side fungerer med rapporter
 ```
-
-**Nytt:**
-```tsx
-import { ..., Wand2, ... } from "lucide-react";
-// Fjern Sparkles fra importen (med mindre den brukes andre steder)
-// ...
-{ icon: Wand2, label: "Skills", href: "/skills" },
-```
-
----
-
-## Filer som endres
-
-| Fil | Endring |
-|-----|---------|
-| `components/Dither.tsx` | **NY** — kopier fra vedlegg |
-| `components/DitherBackground.tsx` | **NY** — wrapper med gradient overlay |
-| `components/ChatComposer.tsx` | Full bredde, DitherBackground, ghost→repo=null |
-| `components/ChatInput.tsx` | Ghost→lucide Ghost-ikon, nye props (skills/subAgents), skills dropdown, fjern maxWidth:672 |
-| `app/(dashboard)/page.tsx` | Fix hydration (localStorage i useEffect), fix onStartChat med query params |
-| `app/(dashboard)/chat/page.tsx` | Fix autoMsg med ghost+repo params, sett tab, wire skills/subAgents, importer listSkills |
-| `components/AgentStream.tsx` | parseProgress: håndter type:"progress", legg til "thinking" status og flere PHASE_LABELS |
-| `app/(dashboard)/layout.tsx` | Sparkles → Wand2 for Skills |
-
-## Verifisering
-
-1. `npx next build` — ingen feil
-2. Ingen hydration mismatch-warnings i konsollen
-3. Overview: dither-animasjon bak chatboksen, chatboks fyller hele bredden
-4. Overview: ghost-ikon er et tydelig spøkelse (Ghost fra lucide)
-5. Overview: skriv "hei" → sendes til `/chat?msg=hei` → meldingen sendes automatisk, AI svarer
-6. Overview: aktiver ghost, skriv melding → lander i Privat-tab på chat-siden
-7. Chat: AgentStream viser fase/steg/rapport for agent_progress-meldinger
-8. Chat: Skills-knapp åpner dropdown med tilgjengelige skills
-9. Chat: Sub-agent-knapp toggler (visuell active-state)
-10. Sidebar + ChatInput: Skills har tryllestav-ikon (Wand2)

@@ -31,7 +31,7 @@ const staticIntegrations: StaticIntegration[] = [
   { n: "Firecrawl", cat: "Web", platform: "firecrawl", desc: "Web-scraping — agenten kan lese nettsider som kontekst", ev: ["agent.browse_url"] },
 ];
 
-const SERVER_SIDE_PLATFORMS = ["linear", "github", "resend", "brave-search"];
+const SERVER_SIDE_PLATFORMS = ["linear", "github", "resend", "brave-search", "firecrawl"];
 
 const INTEGRATION_FIELDS: Record<string, { label: string; field: string; placeholder: string }[]> = {
   slack:    [{ label: "Webhook URL", field: "webhookUrl", placeholder: "https://hooks.slack.com/..." }],

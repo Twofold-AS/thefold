@@ -8,9 +8,14 @@ import DitherBackground from "@/components/DitherBackground";
 interface ChatComposerProps {
   onSubmit?: (msg: string, repo: string | null, ghost: boolean) => void;
   heading?: string;
+  skills?: Array<{ id: string; name: string; enabled: boolean }>;
+  selectedSkillIds?: string[];
+  onSkillsChange?: (ids: string[]) => void;
+  subAgentsEnabled?: boolean;
+  onSubAgentsToggle?: () => void;
 }
 
-export default function ChatComposer({ onSubmit, heading }: ChatComposerProps) {
+export default function ChatComposer({ onSubmit, heading, skills, selectedSkillIds, onSkillsChange, subAgentsEnabled, onSubAgentsToggle }: ChatComposerProps) {
   const [repo, setRepo] = useState<string | null>("thefold-api");
   const [ghost, setGhost] = useState(false);
 
@@ -64,6 +69,11 @@ export default function ChatComposer({ onSubmit, heading }: ChatComposerProps) {
               onRepoChange={setRepo}
               ghost={ghost}
               onGhostChange={setGhost}
+              skills={skills}
+              selectedSkillIds={selectedSkillIds}
+              onSkillsChange={onSkillsChange}
+              subAgentsEnabled={subAgentsEnabled}
+              onSubAgentsToggle={onSubAgentsToggle}
             />
           </div>
         </div>

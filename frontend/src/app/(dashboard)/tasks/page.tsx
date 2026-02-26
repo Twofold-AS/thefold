@@ -9,6 +9,7 @@ import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import { useApiData } from "@/lib/hooks";
 import Skeleton from "@/components/Skeleton";
+import { RefreshCw } from "lucide-react";
 import {
   listTheFoldTasks,
   listReviews,
@@ -17,6 +18,8 @@ import {
   requestReviewChanges,
   rejectReview,
   createTask,
+  listRepos,
+  listSkills,
   type TheFoldTask,
   type ReviewSummary,
 } from "@/lib/api";
@@ -98,6 +101,11 @@ export default function TasksPage() {
     [],
   );
   const { data: reviewData } = useApiData(() => listReviews({}), []);
+  const { data: repoData } = useApiData(() => listRepos("Twofold-AS"), []);
+  const { data: skillsData } = useApiData(() => listSkills(), []);
+  const dynamicRepos = repoData?.repos?.map(r => r.name) ?? ["thefold-api", "thefold-frontend"];
+  const availableSkills = (skillsData?.skills ?? []).filter(s => s.enabled);
+  const [newSkillIds, setNewSkillIds] = useState<string[]>([]);
 
   const tasks: TheFoldTask[] = taskData?.tasks ?? [];
   const reviews: ReviewSummary[] = reviewData?.reviews ?? [];
@@ -232,25 +240,7 @@ export default function TasksPage() {
               Ny task
             </Btn>
             <Btn primary sm onClick={handleSync}>
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 14 14"
-                fill="none"
-                style={{ marginRight: 4 }}
-              >
-                <rect
-                  x="2"
-                  y="2"
-                  width="10"
-                  height="10"
-                  rx="1"
-                  stroke="currentColor"
-                  strokeWidth="1.2"
-                  fill="none"
-                />
-                <path d="M5 5l4 2-4 2V5z" fill="currentColor" />
-              </svg>
+              <RefreshCw size={14} style={{ marginRight: 4 }} />
               {syncing ? "Synkroniserer..." : "Importer fra Linear"}
             </Btn>
           </div>
@@ -292,8 +282,7 @@ export default function TasksPage() {
                       cursor: "pointer",
                       background: sel === tk.id ? T.subtle : "transparent",
                       borderBottom: i < tasks.length - 1 ? `1px solid ${T.border}` : "none",
-                      borderLeft:
-                        sel === tk.id ? `3px solid ${T.accent}` : "3px solid transparent",
+                      borderLeft: "none",
                       transition: "all 0.1s",
                     }}
                   >
@@ -559,17 +548,19 @@ export default function TasksPage() {
                 </>
               )}
 
-              <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
-                <Btn primary sm onClick={handleApprove}>
-                  {actionLoading === "approve" ? "..." : "Godkjenn"}
-                </Btn>
-                <Btn sm onClick={handleRequestChanges}>
-                  {actionLoading === "changes" ? "..." : "Be om endringer"}
-                </Btn>
-                <Btn sm onClick={handleReject} style={{ color: T.error, borderColor: "rgba(99,102,241,0.3)" }}>
-                  {actionLoading === "reject" ? "..." : "Avvis"}
-                </Btn>
-              </div>
+              {t.status === "in_review" && tReview && tReview.status === "pending" && (
+                <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
+                  <Btn primary sm onClick={handleApprove}>
+                    {actionLoading === "approve" ? "..." : "Godkjenn"}
+                  </Btn>
+                  <Btn sm onClick={handleRequestChanges}>
+                    {actionLoading === "changes" ? "..." : "Be om endringer"}
+                  </Btn>
+                  <Btn sm onClick={handleReject} style={{ color: T.error, borderColor: "rgba(99,102,241,0.3)" }}>
+                    {actionLoading === "reject" ? "..." : "Avvis"}
+                  </Btn>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -627,29 +618,50 @@ export default function TasksPage() {
               />
             </div>
 
-            <div style={{ marginBottom: 20 }}>
+            <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Repo</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                {["thefold-api", "thefold-frontend"].map((r) => (
-                  <div
-                    key={r}
-                    onClick={() => setNewRepo(r)}
-                    style={{
-                      flex: 1,
-                      padding: "10px 14px",
-                      background: newRepo === r ? T.accentDim : "transparent",
-                      border: `1px solid ${newRepo === r ? T.accent : T.border}`,
-                      borderRadius: 6,
-                      fontSize: 12,
-                      fontFamily: T.mono,
-                      color: newRepo === r ? T.accent : T.textSec,
-                      cursor: "pointer",
-                      textAlign: "center",
-                    }}
-                  >
-                    {r}
-                  </div>
+              <select
+                value={newRepo}
+                onChange={(e) => setNewRepo(e.target.value)}
+                style={{
+                  ...inputStyle,
+                  cursor: "pointer",
+                  appearance: "auto",
+                }}
+              >
+                {dynamicRepos.map((r) => (
+                  <option key={r} value={r}>{r}</option>
                 ))}
+              </select>
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Skills</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {availableSkills.map((sk) => {
+                  const selected = newSkillIds.includes(sk.id);
+                  return (
+                    <div
+                      key={sk.id}
+                      onClick={() => setNewSkillIds(prev => selected ? prev.filter(id => id !== sk.id) : [...prev, sk.id])}
+                      style={{
+                        padding: "6px 12px",
+                        fontSize: 11,
+                        fontFamily: T.mono,
+                        border: `1px solid ${selected ? T.accent : T.border}`,
+                        borderRadius: 6,
+                        color: selected ? T.accent : T.textSec,
+                        background: selected ? T.accentDim : "transparent",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {sk.name}
+                    </div>
+                  );
+                })}
+                {availableSkills.length === 0 && (
+                  <span style={{ fontSize: 11, color: T.textFaint }}>Ingen skills tilgjengelig</span>
+                )}
               </div>
             </div>
 

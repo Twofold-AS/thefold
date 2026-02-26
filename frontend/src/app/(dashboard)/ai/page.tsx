@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { T } from "@/lib/tokens";
 import { GR } from "@/components/GridRow";
 import PixelCorners from "@/components/PixelCorners";
@@ -9,7 +9,8 @@ import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
-import { listProviders, getCostSummary, getPhaseMetrics, type DailyTrend } from "@/lib/api";
+import { listProviders, getCostSummary, getPhaseMetrics, saveModel, type DailyTrend } from "@/lib/api";
+import { Plus, ChevronDown, Check, X } from "lucide-react";
 
 const TOKEN_BUDGETS: Record<string, number> = {
   planning: 8000,
@@ -47,10 +48,10 @@ function formatDayLabel(dateStr: string): string {
   }
 }
 
-const PROVIDER_CONFIG: Record<string, { displayName: string; color: string }> = {
-  anthropic:  { displayName: "Anthropic",    color: "#D4A27F" },
-  fireworks:  { displayName: "Fireworks.ai", color: "#FF6B35" },
-  openrouter: { displayName: "OpenRouter",   color: "#6366F1" },
+const PROVIDER_CONFIG: Record<string, { displayName: string; color: string; logo: string }> = {
+  anthropic:  { displayName: "Anthropic",    color: "#D4A27F", logo: "/logos/anthropic.svg" },
+  fireworks:  { displayName: "Fireworks.ai", color: "#FF6B35", logo: "/logos/fireworks.svg" },
+  openrouter: { displayName: "OpenRouter",   color: "#6366F1", logo: "/logos/openrouter.svg" },
 };
 
 const PROVIDER_KEYS = ["anthropic", "fireworks", "openrouter"] as const;
@@ -62,6 +63,21 @@ const PHASES = [
   { key: "chat",     label: "Chat", desc: "Direkte samtale" },
 ];
 
+const AVAILABLE_TAGS = ["coding", "chat", "planning", "review", "analysis"];
+
+const inputStyle: React.CSSProperties = {
+  background: T.subtle,
+  border: `1px solid ${T.border}`,
+  borderRadius: 6,
+  padding: "10px 14px",
+  fontSize: 13,
+  color: T.text,
+  fontFamily: T.sans,
+  width: "100%",
+  outline: "none",
+  boxSizing: "border-box",
+};
+
 function matchProviderKey(name: string): string | null {
   const lower = name.toLowerCase();
   if (lower.includes("anthropic")) return "anthropic";
@@ -70,8 +86,48 @@ function matchProviderKey(name: string): string | null {
   return null;
 }
 
+function ProviderLogo({ providerKey, size = 30 }: { providerKey: string; size?: number }) {
+  const config = PROVIDER_CONFIG[providerKey];
+  const [imgError, setImgError] = useState(false);
+
+  if (!config) return null;
+
+  if (imgError) {
+    return (
+      <div
+        style={{
+          width: size,
+          height: size,
+          borderRadius: "50%",
+          background: config.color,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: size * 0.47,
+          fontWeight: 700,
+          color: "#fff",
+          flexShrink: 0,
+        }}
+      >
+        {config.displayName.charAt(0)}
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={config.logo}
+      alt={config.displayName}
+      width={size}
+      height={size}
+      style={{ borderRadius: "50%", flexShrink: 0 }}
+      onError={() => setImgError(true)}
+    />
+  );
+}
+
 export default function AIPage() {
-  const { data: providerData, loading: loadingProviders } = useApiData(() => listProviders(), []);
+  const { data: providerData, loading: loadingProviders, refresh: refreshProviders } = useApiData(() => listProviders(), []);
   const { data: costData, loading: loadingCost } = useApiData(() => getCostSummary(), []);
   const { data: phaseData, loading: loadingPhases } = useApiData(() => getPhaseMetrics(7), []);
 
@@ -95,29 +151,83 @@ export default function AIPage() {
   // Flatten models from matched providers only
   const matchedProviders = PROVIDER_KEYS.map((k) => providerMap[k]).filter(Boolean) as typeof providers;
   const allModels = matchedProviders.flatMap((p) =>
-    (p.models ?? []).map((m) => ({ ...m, providerName: p.name }))
+    (p.models ?? []).map((m) => ({ ...m, providerName: p.name, providerId: p.id }))
   );
 
-  // Phase assignment from localStorage
-  const [phaseModels, setPhaseModels] = useState<Record<string, string>>({});
+  // Phase assignment from localStorage — stores model IDs (multi-select)
+  const [phaseModels, setPhaseModels] = useState<Record<string, string[]>>({});
+  const [openPhaseDropdown, setOpenPhaseDropdown] = useState<string | null>(null);
+  const phaseDropdownRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
-    const loaded: Record<string, string> = {};
+    const loaded: Record<string, string[]> = {};
     for (const ph of PHASES) {
       const stored = localStorage.getItem(`tf_phase_${ph.key}`);
-      if (stored) loaded[ph.key] = stored;
+      if (stored) {
+        try {
+          loaded[ph.key] = JSON.parse(stored);
+        } catch {
+          loaded[ph.key] = [stored];
+        }
+      }
     }
     setPhaseModels(loaded);
   }, []);
 
+  // Close phase dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (phaseDropdownRef.current && !phaseDropdownRef.current.contains(e.target as Node)) {
+        setOpenPhaseDropdown(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
   const activeModels = allModels.filter((m) => m.enabled);
-  const cyclePhaseModel = (phaseKey: string) => {
-    if (activeModels.length === 0) return;
-    const current = phaseModels[phaseKey] || "";
-    const currentIdx = activeModels.findIndex((m) => m.displayName === current);
-    const nextIdx = (currentIdx + 1) % activeModels.length;
-    const next = activeModels[nextIdx].displayName;
-    setPhaseModels((prev) => ({ ...prev, [phaseKey]: next }));
-    localStorage.setItem(`tf_phase_${phaseKey}`, next);
+
+  const togglePhaseModel = (phaseKey: string, modelId: string) => {
+    setPhaseModels((prev) => {
+      const current = prev[phaseKey] || [];
+      const next = current.includes(modelId)
+        ? current.filter((id) => id !== modelId)
+        : [...current, modelId];
+      localStorage.setItem(`tf_phase_${phaseKey}`, JSON.stringify(next));
+      return { ...prev, [phaseKey]: next };
+    });
+  };
+
+  // "Legg til modell" modal state (C3)
+  const [addModelProvider, setAddModelProvider] = useState<string | null>(null);
+  const [newModel, setNewModel] = useState({ modelId: "", displayName: "", tier: 3, tags: [] as string[] });
+  const [savingModel, setSavingModel] = useState(false);
+
+  const handleSaveNewModel = async () => {
+    if (!addModelProvider || !newModel.modelId || !newModel.displayName) return;
+    const provider = providerMap[addModelProvider];
+    if (!provider) return;
+    setSavingModel(true);
+    try {
+      await saveModel({
+        providerId: provider.id,
+        modelId: newModel.modelId,
+        displayName: newModel.displayName,
+        inputPrice: 0,
+        outputPrice: 0,
+        contextWindow: 128000,
+        tags: newModel.tags,
+        tier: newModel.tier,
+        enabled: true,
+      });
+      setAddModelProvider(null);
+      setNewModel({ modelId: "", displayName: "", tier: 3, tags: [] });
+      refreshProviders();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Lagring feilet");
+    } finally {
+      setSavingModel(false);
+    }
   };
 
   // Cost chart calculations
@@ -153,6 +263,17 @@ export default function AIPage() {
     );
   }
 
+  const getPhaseModelLabels = (phaseKey: string): string => {
+    const ids = phaseModels[phaseKey] || [];
+    if (ids.length === 0) return "Auto (anbefalt)";
+    return ids
+      .map((id) => {
+        const m = activeModels.find((am) => am.id === id);
+        return m ? m.displayName : id;
+      })
+      .join(", ");
+  };
+
   return (
     <>
       <div style={{ paddingTop: 40, paddingBottom: 24 }}>
@@ -172,7 +293,7 @@ export default function AIPage() {
         </p>
       </div>
 
-      {/* Provider stats — always 3 columns */}
+      {/* Provider stats — always 3 columns (C7: logos) */}
       <GR>
         <div
           style={{
@@ -206,23 +327,7 @@ export default function AIPage() {
                     marginBottom: 10,
                   }}
                 >
-                  <div
-                    style={{
-                      width: 30,
-                      height: 30,
-                      borderRadius: "50%",
-                      background: config.color,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: 14,
-                      fontWeight: 700,
-                      color: "#fff",
-                      flexShrink: 0,
-                    }}
-                  >
-                    {config.displayName.charAt(0)}
-                  </div>
+                  <ProviderLogo providerKey={key} size={30} />
                   <div style={{ flex: 1 }}>
                     <span
                       style={{
@@ -240,12 +345,26 @@ export default function AIPage() {
                 </div>
                 <div
                   style={{
-                    fontSize: 12,
-                    fontFamily: T.mono,
-                    color: T.textMuted,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
                   }}
                 >
-                  {enabledModels} modeller aktive
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontFamily: T.mono,
+                      color: T.textMuted,
+                    }}
+                  >
+                    {enabledModels} modeller aktive
+                  </span>
+                  {/* C3: "Legg til modell" per provider */}
+                  {isConnected && (
+                    <Btn sm onClick={() => setAddModelProvider(key)} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <Plus size={12} /> Legg til
+                    </Btn>
+                  )}
                 </div>
               </div>
             );
@@ -261,7 +380,6 @@ export default function AIPage() {
             gridTemplateColumns: "1fr 1fr",
             border: `1px solid ${T.border}`,
             borderTop: "none",
-            borderRadius: `0 0 ${T.r}px ${T.r}px`,
             position: "relative",
             overflow: "hidden",
           }}
@@ -394,7 +512,7 @@ export default function AIPage() {
         </div>
       </GR>
 
-      {/* Models table — only from matched providers */}
+      {/* C5: Phase assignment BEFORE models table */}
       <GR>
         <div
           style={{
@@ -411,18 +529,163 @@ export default function AIPage() {
               borderBottom: `1px solid ${T.border}`,
             }}
           >
+            <SectionLabel>FASE-TILORDNING</SectionLabel>
+          </div>
+          {PHASES.map((ph, i) => {
+            const selectedIds = phaseModels[ph.key] || [];
+            const isOpen = openPhaseDropdown === ph.key;
+            return (
+              <div
+                key={ph.key}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "14px 20px",
+                  borderBottom: i < PHASES.length - 1 ? `1px solid ${T.border}` : "none",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: T.text }}>{ph.label}</div>
+                  <div style={{ fontSize: 11, color: T.textMuted }}>{ph.desc}</div>
+                </div>
+                {/* C4: Proper dropdown with multi-select */}
+                <div style={{ position: "relative" }} ref={isOpen ? phaseDropdownRef : undefined}>
+                  <div
+                    onClick={() => setOpenPhaseDropdown(isOpen ? null : ph.key)}
+                    style={{
+                      padding: "6px 14px",
+                      background: T.subtle,
+                      border: `1px solid ${T.border}`,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontFamily: T.mono,
+                      color: T.textSec,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      maxWidth: 300,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {getPhaseModelLabels(ph.key)}
+                    <ChevronDown size={12} />
+                  </div>
+                  {isOpen && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: "100%",
+                        right: 0,
+                        marginTop: 4,
+                        background: T.surface,
+                        border: `1px solid ${T.border}`,
+                        borderRadius: 6,
+                        minWidth: 260,
+                        zIndex: 50,
+                        maxHeight: 240,
+                        overflowY: "auto",
+                        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                      }}
+                    >
+                      {/* Auto option */}
+                      <div
+                        onClick={() => {
+                          setPhaseModels((prev) => ({ ...prev, [ph.key]: [] }));
+                          localStorage.setItem(`tf_phase_${ph.key}`, JSON.stringify([]));
+                        }}
+                        style={{
+                          padding: "8px 12px",
+                          fontSize: 12,
+                          color: selectedIds.length === 0 ? T.text : T.textMuted,
+                          cursor: "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          borderBottom: `1px solid ${T.border}`,
+                          background: selectedIds.length === 0 ? T.subtle : "transparent",
+                        }}
+                      >
+                        {selectedIds.length === 0 && <Check size={12} />}
+                        <span>Auto (anbefalt)</span>
+                      </div>
+                      {/* Group by provider */}
+                      {PROVIDER_KEYS.map((pk) => {
+                        const providerModels = activeModels.filter((m) => matchProviderKey(m.providerName) === pk);
+                        if (providerModels.length === 0) return null;
+                        return (
+                          <div key={pk}>
+                            <div style={{ padding: "6px 12px", fontSize: 10, fontWeight: 600, color: T.textFaint, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                              {PROVIDER_CONFIG[pk]?.displayName ?? pk}
+                            </div>
+                            {providerModels.map((m) => {
+                              const isSelected = selectedIds.includes(m.id);
+                              return (
+                                <div
+                                  key={m.id}
+                                  onClick={() => togglePhaseModel(ph.key, m.id)}
+                                  style={{
+                                    padding: "8px 12px",
+                                    fontSize: 12,
+                                    fontFamily: T.mono,
+                                    color: isSelected ? T.text : T.textMuted,
+                                    cursor: "pointer",
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 8,
+                                    background: isSelected ? T.subtle : "transparent",
+                                  }}
+                                >
+                                  {isSelected ? <Check size={12} /> : <div style={{ width: 12 }} />}
+                                  {m.displayName}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </GR>
+
+      {/* Models table — C6: removed "Endre" column */}
+      <GR mb={40}>
+        <div
+          style={{
+            border: `1px solid ${T.border}`,
+            borderTop: "none",
+            borderRadius: `0 0 ${T.r}px ${T.r}px`,
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          <PixelCorners />
+          <div
+            style={{
+              padding: "14px 20px",
+              borderBottom: `1px solid ${T.border}`,
+            }}
+          >
             <SectionLabel>MODELLER</SectionLabel>
           </div>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "2fr 1fr 1.2fr 1fr 1fr 80px",
+              gridTemplateColumns: "2fr 1fr 1.2fr 1fr 1fr",
               padding: "10px 20px",
               borderBottom: `1px solid ${T.border}`,
               background: T.subtle,
             }}
           >
-            {["MODELL", "PROVIDER", "PRIS", "TAGS", "STATUS", ""].map((h, i) => (
+            {["MODELL", "PROVIDER", "PRIS", "TAGS", "STATUS"].map((h, i) => (
               <div
                 key={i}
                 style={{
@@ -455,7 +718,7 @@ export default function AIPage() {
               key={m.id}
               style={{
                 display: "grid",
-                gridTemplateColumns: "2fr 1fr 1.2fr 1fr 1fr 80px",
+                gridTemplateColumns: "2fr 1fr 1.2fr 1fr 1fr",
                 padding: "12px 20px",
                 borderBottom: i < allModels.length - 1 ? `1px solid ${T.border}` : "none",
                 alignItems: "center",
@@ -492,81 +755,137 @@ export default function AIPage() {
               >
                 {m.enabled ? "aktiv" : "av"}
               </span>
-              <Btn sm>Endre</Btn>
             </div>
           ))}
         </div>
       </GR>
 
-      {/* Phase assignment */}
-      <GR mb={40}>
+      {/* C3: "Legg til modell" modal */}
+      {addModelProvider && (
         <div
           style={{
-            border: `1px solid ${T.border}`,
-            borderTop: "none",
-            borderRadius: `0 0 ${T.r}px ${T.r}px`,
-            position: "relative",
-            overflow: "hidden",
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
           }}
+          onClick={(e) => { if (e.target === e.currentTarget) setAddModelProvider(null); }}
         >
-          <PixelCorners />
           <div
             style={{
-              padding: "14px 20px",
-              borderBottom: `1px solid ${T.border}`,
+              background: T.surface,
+              border: `1px solid ${T.border}`,
+              borderRadius: T.r,
+              padding: 24,
+              width: 420,
+              maxHeight: "80vh",
+              overflow: "auto",
             }}
           >
-            <SectionLabel>FASE-TILORDNING</SectionLabel>
-          </div>
-          {PHASES.map((ph, i) => {
-            const selected = phaseModels[ph.key] || (activeModels.length > 0 ? activeModels[0].displayName : "Ingen");
-            return (
-              <div
-                key={ph.key}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "14px 20px",
-                  borderBottom: i < PHASES.length - 1 ? `1px solid ${T.border}` : "none",
-                }}
-              >
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: T.text }}>{ph.label}</div>
-                  <div style={{ fontSize: 11, color: T.textMuted }}>{ph.desc}</div>
-                </div>
-                <div
-                  onClick={() => cyclePhaseModel(ph.key)}
-                  style={{
-                    padding: "6px 14px",
-                    background: T.subtle,
-                    border: `1px solid ${T.border}`,
-                    borderRadius: 6,
-                    fontSize: 12,
-                    fontFamily: T.mono,
-                    color: T.textSec,
-                    cursor: "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                  }}
-                >
-                  {selected}
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                    <path
-                      d="M2.5 4L5 6.5 7.5 4"
-                      stroke="currentColor"
-                      strokeWidth="1"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+              <div style={{ fontSize: 16, fontWeight: 600, color: T.text }}>
+                Legg til modell — {PROVIDER_CONFIG[addModelProvider]?.displayName}
               </div>
-            );
-          })}
+              <X size={16} style={{ cursor: "pointer", color: T.textMuted }} onClick={() => setAddModelProvider(null)} />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Modell-ID</div>
+              <input
+                value={newModel.modelId}
+                onChange={(e) => setNewModel((prev) => ({ ...prev, modelId: e.target.value }))}
+                placeholder="f.eks. moonshotai/moonshot-v1-128k"
+                style={inputStyle}
+              />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Visningsnavn</div>
+              <input
+                value={newModel.displayName}
+                onChange={(e) => setNewModel((prev) => ({ ...prev, displayName: e.target.value }))}
+                placeholder="f.eks. Moonshot v1 128k"
+                style={inputStyle}
+              />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Tier</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[
+                  { v: 1, l: "1 — Rask/billig" },
+                  { v: 3, l: "3 — Balansert" },
+                  { v: 5, l: "5 — Best kvalitet" },
+                ].map((t) => (
+                  <div
+                    key={t.v}
+                    onClick={() => setNewModel((prev) => ({ ...prev, tier: t.v }))}
+                    style={{
+                      padding: "6px 12px",
+                      fontSize: 12,
+                      fontFamily: T.mono,
+                      background: newModel.tier === t.v ? T.subtle : "transparent",
+                      color: newModel.tier === t.v ? T.text : T.textMuted,
+                      border: `1px solid ${newModel.tier === t.v ? T.border : "transparent"}`,
+                      borderRadius: 6,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {t.l}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Tags</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {AVAILABLE_TAGS.map((tag) => {
+                  const selected = newModel.tags.includes(tag);
+                  return (
+                    <div
+                      key={tag}
+                      onClick={() => {
+                        setNewModel((prev) => ({
+                          ...prev,
+                          tags: selected ? prev.tags.filter((t) => t !== tag) : [...prev.tags, tag],
+                        }));
+                      }}
+                      style={{
+                        padding: "4px 10px",
+                        fontSize: 11,
+                        fontFamily: T.mono,
+                        background: selected ? T.subtle : "transparent",
+                        color: selected ? T.text : T.textMuted,
+                        border: `1px solid ${selected ? T.border : "transparent"}`,
+                        borderRadius: 6,
+                        cursor: "pointer",
+                      }}
+                    >
+                      {tag}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
+              <Btn sm onClick={() => setAddModelProvider(null)}>Avbryt</Btn>
+              <Btn
+                primary
+                sm
+                onClick={handleSaveNewModel}
+                style={{ opacity: savingModel ? 0.5 : 1, pointerEvents: savingModel ? "none" : "auto" }}
+              >
+                {savingModel ? "Lagrer..." : "Lagre"}
+              </Btn>
+            </div>
+          </div>
         </div>
-      </GR>
+      )}
     </>
   );
 }
