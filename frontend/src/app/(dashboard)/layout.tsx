@@ -11,7 +11,7 @@ import PixelCorners from "@/components/PixelCorners";
 import {
   LayoutDashboard, MessageSquare, CheckSquare, Box,
   Wand2, Brain, Plug, Server, Database, Activity, Terminal,
-  Settings, FileText,
+  Settings,
   type LucideIcon,
 } from "lucide-react";
 import { useUser } from "@/contexts/UserPreferencesContext";
@@ -53,7 +53,6 @@ const navGroups: NavGroup[] = [
       { icon: Server, label: "MCP", href: "/mcp" },
       { icon: Database, label: "Memory", href: "/memory" },
       { icon: Activity, label: "Monitor", href: "/monitor" },
-      { icon: FileText, label: "Docs", href: "/docs" },
       { icon: Terminal, label: "Sandbox", href: "/sandbox" },
     ],
   },
@@ -67,7 +66,7 @@ function isActiveRoute(pathname: string, href: string): boolean {
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, initial, avatarColor } = useUser();
+  const { user } = useUser();
   const [collapsed, setCollapsed] = useState(false);
   const sw = collapsed ? SWC : SW;
   const useFullWidth = pathname === "/chat" || pathname.startsWith("/chat/");
@@ -302,48 +301,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
 
             {/* User section */}
-            <div
-              style={{
-                borderTop: `1px solid ${T.border}`,
-                padding: collapsed ? "12px 8px" : "12px 16px",
-                position: "relative",
-              }}
-            >
+            <div style={{
+              borderTop: `1px solid ${T.border}`,
+              padding: collapsed ? "12px 8px" : "12px 16px",
+              position: "relative",
+            }}>
               <PixelCorners />
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  justifyContent: collapsed ? "center" : "flex-start",
-                }}
-              >
-                <div
-                  style={{
-                    width: collapsed ? 8 : 24,
-                    height: collapsed ? 8 : 24,
-                    borderRadius: "50%",
-                    background: avatarColor,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    flexShrink: 0,
-                    transition: "all 0.25s ease",
-                  }}
-                >
-                  {!collapsed && (
-                    <span style={{ fontSize: 10, fontWeight: 600, color: "#fff" }}>{initial}</span>
-                  )}
-                </div>
-                {!collapsed && (
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 12, fontWeight: 500, color: T.text }}>
-                      {user?.name || "\u2014"}
-                    </div>
-                    <div style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>{user?.role || "\u2014"}</div>
+              {!collapsed && (
+                <div style={{ padding: "0 4px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: T.text }}>
+                    {user?.name || "\u2014"}
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </div>
 
             {/* Collapse button */}

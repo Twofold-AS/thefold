@@ -24,7 +24,7 @@ function extractDetail(details: Record<string, unknown>): string {
 export default function MonitorPage() {
   const { data: healthData, loading: healthLoading } = useApiData(() => getMonitorHealth(), []);
   const { data: healingData, loading: healingLoading } = useApiData(() => getHealingStatus({ limit: 10 }), []);
-  const { data: reposData, loading: reposLoading } = useApiData(() => listRepos("Twofold-AS"), []);
+  const { data: reposData, loading: reposLoading } = useApiData(() => listRepos("thefold-dev"), []);
 
   const [selectedRepo, setSelectedRepo] = useState<string>("");
   const [running, setRunning] = useState(false);

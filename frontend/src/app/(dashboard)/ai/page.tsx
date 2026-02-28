@@ -127,9 +127,18 @@ function ProviderLogo({ providerKey, size = 30 }: { providerKey: string; size?: 
 }
 
 export default function AIPage() {
-  const { data: providerData, loading: loadingProviders, refresh: refreshProviders } = useApiData(() => listProviders(), []);
-  const { data: costData, loading: loadingCost } = useApiData(() => getCostSummary(), []);
-  const { data: phaseData, loading: loadingPhases } = useApiData(() => getPhaseMetrics(7), []);
+  const { data: providerData, loading: loadingProviders, refresh: refreshProviders } = useApiData(async () => {
+    try { return await listProviders(); }
+    catch { await new Promise(r => setTimeout(r, 2000)); return await listProviders(); }
+  }, []);
+  const { data: costData, loading: loadingCost } = useApiData(async () => {
+    try { return await getCostSummary(); }
+    catch { await new Promise(r => setTimeout(r, 2000)); return await getCostSummary(); }
+  }, []);
+  const { data: phaseData, loading: loadingPhases } = useApiData(async () => {
+    try { return await getPhaseMetrics(7); }
+    catch { await new Promise(r => setTimeout(r, 2000)); return await getPhaseMetrics(7); }
+  }, []);
 
   const loading = loadingProviders || loadingCost || loadingPhases;
 
@@ -519,7 +528,7 @@ export default function AIPage() {
             border: `1px solid ${T.border}`,
             borderTop: "none",
             position: "relative",
-            overflow: "hidden",
+            overflow: "visible",
           }}
         >
           <PixelCorners />

@@ -101,7 +101,7 @@ export default function TasksPage() {
     [],
   );
   const { data: reviewData } = useApiData(() => listReviews({}), []);
-  const { data: repoData } = useApiData(() => listRepos("Twofold-AS"), []);
+  const { data: repoData } = useApiData(() => listRepos("thefold-dev"), []);
   const { data: skillsData } = useApiData(() => listSkills(), []);
   const dynamicRepos = repoData?.repos?.map(r => r.name) ?? ["thefold-api", "thefold-frontend"];
   const availableSkills = (skillsData?.skills ?? []).filter(s => s.enabled);

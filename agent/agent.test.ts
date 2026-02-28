@@ -3,7 +3,7 @@ import { getTree } from "../github/github";
 import { planTask } from "../ai/ai";
 import { create, writeFile, validate, destroy } from "../sandbox/sandbox";
 
-const REPO_OWNER = "Twofold-AS";
+const REPO_OWNER = "thefold-dev";
 const REPO_NAME = "thefold";
 
 describe("Agent integration loop", () => {

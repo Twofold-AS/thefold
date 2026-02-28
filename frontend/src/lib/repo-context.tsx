@@ -27,7 +27,7 @@ export function useRepoContext() {
 }
 
 const FALLBACK_REPOS: Repo[] = [
-  { owner: "Twofold-AS", name: "thefold", fullName: "Twofold-AS/thefold", status: "healthy", errorCount: 0 },
+  { owner: "thefold-dev", name: "thefold", fullName: "thefold-dev/thefold", status: "healthy", errorCount: 0 },
 ];
 
 function repoInfoToRepo(info: RepoInfo): Repo {
@@ -67,7 +67,7 @@ export function RepoProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    listRepos("Twofold-AS")
+    listRepos("thefold-dev")
       .then((res) => {
         if (res.repos.length > 0) {
           const mapped = res.repos

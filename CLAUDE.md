@@ -440,7 +440,7 @@ encore run              # all services + local infra
 - `registry/registry.ts` — useComponent, listComponents, substituteVariables
 
 ### Nye secrets
-- OpenAIApiKey — OpenAI embeddings
+- OpenAIAPIKey — OpenAI embeddings + provider registry
 - GitHubAppId — GitHub App ID
 - GitHubAppPrivateKey — GitHub App private key (.pem)
 - FirecrawlApiKey — Firecrawl web scraping

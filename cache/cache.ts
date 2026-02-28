@@ -10,6 +10,11 @@ export const db = new SQLDatabase("cache", {
   migrations: "./migrations",
 });
 
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[cache] db warmed"); }
+  catch (e) { console.warn("[cache] warmup failed:", e); }
+})();
+
 // --- Helpers ---
 
 function hashContent(content: string): string {

@@ -23,7 +23,7 @@ export { aiBreaker, githubBreaker, sandboxBreaker } from "./circuit-breaker";
 
 // --- Constants ---
 
-export const REPO_OWNER = "Twofold-AS";
+export const REPO_OWNER = "thefold-dev";
 export const REPO_NAME = "thefold";
 export const MAX_RETRIES = 5;
 export const MAX_PLAN_REVISIONS = 2;

@@ -10,6 +10,11 @@ import type { Task, TaskStatus, TaskSource } from "./types";
 
 const db = new SQLDatabase("tasks", { migrations: "./migrations" });
 
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[tasks] db warmed"); }
+  catch (e) { console.warn("[tasks] warmup failed:", e); }
+})();
+
 // --- Pub/Sub ---
 
 export interface TaskEvent {
@@ -511,7 +516,7 @@ export const listTasks = api(
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
         SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE status != 'deleted'
-        ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
+        ORDER BY created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
       for await (const row of rows) tasks.push(parseTask(row));

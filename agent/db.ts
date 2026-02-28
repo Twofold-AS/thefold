@@ -3,6 +3,11 @@ import { SQLDatabase } from "encore.dev/storage/sqldb";
 // Shared database reference for the agent service
 export const db = new SQLDatabase("agent", { migrations: "./migrations" });
 
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[agent] db warmed"); }
+  catch (e) { console.warn("[agent] warmup failed:", e); }
+})();
+
 // --- Advisory Lock per Repo (concurrency protection) ---
 
 /**

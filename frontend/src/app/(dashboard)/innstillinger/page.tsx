@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { T } from "@/lib/tokens";
 import { useApiData } from "@/lib/hooks";
@@ -76,8 +76,8 @@ export default function InnstillingerPage() {
   const [nameVal, setNameVal] = useState("");
   const [aiName, setAiName] = useState("");
   const [savingName, setSavingName] = useState(false);
-  const [aiNameSaved, setAiNameSaved] = useState(false);
-  const aiNameSavedTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [editAiName, setEditAiName] = useState(false);
+  const [savingAiName, setSavingAiName] = useState(false);
 
   useEffect(() => {
     if (user?.name) setNameVal(user.name);
@@ -96,17 +96,6 @@ export default function InnstillingerPage() {
     } finally {
       setSavingName(false);
       setEditName(false);
-    }
-  };
-
-  const handleAiNameBlur = async () => {
-    try {
-      await updatePreferences({ aiName });
-      setAiNameSaved(true);
-      if (aiNameSavedTimeout.current) clearTimeout(aiNameSavedTimeout.current);
-      aiNameSavedTimeout.current = setTimeout(() => setAiNameSaved(false), 2000);
-    } catch {
-      // Silent fail
     }
   };
 
@@ -162,30 +151,33 @@ export default function InnstillingerPage() {
                 )}
               </div>
 
-              {/* AI-navn row with auto-save on blur */}
+              {/* AI-navn row */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textMuted }}>AI-navn</span>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <input
-                    value={aiName}
-                    onChange={(e) => setAiName(e.target.value)}
-                    onBlur={handleAiNameBlur}
-                    placeholder="Navn agenten bruker"
-                    style={{ ...inputStyle, width: 160 }}
-                  />
-                  <span
-                    style={{
-                      fontSize: 11,
-                      color: T.success,
-                      fontFamily: T.mono,
-                      opacity: aiNameSaved ? 1 : 0,
-                      transition: "opacity 0.3s",
-                      minWidth: 50,
-                    }}
-                  >
-                    &#10003; Lagret
-                  </span>
-                </div>
+                {editAiName ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <input
+                      value={aiName}
+                      onChange={(e) => setAiName(e.target.value)}
+                      placeholder="Navn agenten bruker"
+                      style={{ ...inputStyle, width: 160 }}
+                    />
+                    <Btn sm primary onClick={async () => {
+                      setSavingAiName(true);
+                      try { await updatePreferences({ aiName }); } catch { alert("Feil ved lagring"); }
+                      finally { setSavingAiName(false); setEditAiName(false); }
+                    }} style={{ opacity: savingAiName ? 0.5 : 1 }}>
+                      {savingAiName ? "..." : "Lagre"}
+                    </Btn>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>
+                      {aiName || "\u2014"}
+                    </span>
+                    <Btn sm onClick={() => setEditAiName(true)}>Endre</Btn>
+                  </div>
+                )}
               </div>
 
               {/* E-post row */}

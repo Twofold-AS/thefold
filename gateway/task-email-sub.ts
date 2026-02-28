@@ -9,12 +9,23 @@ const _taskEmailSub = new Subscription(taskEvents, "email-task-completed", {
     if (event.action !== "completed") return;
 
     try {
-      // Get the user who should receive the notification
-      const { users: usersClient } = await import("~encore/clients");
+      const { users: usersClient, tasks: tasksClient } = await import("~encore/clients");
 
-      // Use getUser with a known approach — fetch the task creator's info
-      // Since we don't have userId in event, get the first admin user
-      const userInfo = await usersClient.getUser({ userId: "" });
+      // Look up the task to find who created it
+      let userId: string | null = null;
+      try {
+        const taskData = await tasksClient.getTaskInternal({ id: event.taskId });
+        userId = taskData.task.createdBy;
+      } catch {
+        // Task lookup failed — skip
+      }
+
+      if (!userId) {
+        log.info("Task completion email skipped — no creator", { taskId: event.taskId });
+        return;
+      }
+
+      const userInfo = await usersClient.getUser({ userId });
       if (!userInfo?.email) return;
 
       // Check if user has email notifications enabled

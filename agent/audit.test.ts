@@ -9,14 +9,14 @@ const db = SQLDatabase.named("agent");
 async function seedTestData() {
   const testSessionId = "test-session-audit";
   const testTaskId = "TEST-AUDIT-001";
-  const testRepo = "Twofold-AS/thefold";
+  const testRepo = "thefold-dev/thefold";
 
   // Insert a series of entries that simulate a task execution
   await db.exec`
     INSERT INTO agent_audit_log (session_id, action_type, details, success, task_id, repo_name, duration_ms, confidence_score)
     VALUES
       (${testSessionId}, 'task_read', '{"taskId": "TEST-AUDIT-001"}'::jsonb, TRUE, ${testTaskId}, ${testRepo}, 150, NULL),
-      (${testSessionId}, 'project_tree_read', '{"owner": "Twofold-AS"}'::jsonb, TRUE, ${testTaskId}, ${testRepo}, 320, NULL),
+      (${testSessionId}, 'project_tree_read', '{"owner": "thefold-dev"}'::jsonb, TRUE, ${testTaskId}, ${testRepo}, 320, NULL),
       (${testSessionId}, 'confidence_details', '{"overall": 85, "breakdown": {"task_understanding": 90}}'::jsonb, TRUE, ${testTaskId}, ${testRepo}, 2100, 85),
       (${testSessionId}, 'plan_created', '{"stepCount": 3}'::jsonb, TRUE, ${testTaskId}, ${testRepo}, 4500, NULL),
       (${testSessionId}, 'file_written', '{"path": "src/test.ts", "action": "create_file"}'::jsonb, TRUE, ${testTaskId}, ${testRepo}, 50, NULL),

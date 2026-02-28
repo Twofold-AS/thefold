@@ -17,7 +17,7 @@ import type { ExecuteTaskOptions, ExecuteTaskResult } from "./agent";
 
 // --- Constants ---
 
-const REPO_OWNER = "Twofold-AS";
+const REPO_OWNER = "thefold-dev";
 const REPO_NAME = "thefold";
 const MAX_CONTEXT_TOKENS = 30000;
 

@@ -16,10 +16,15 @@ function hashContent(content: string): string {
 // ZI: Switched from Voyage AI to OpenAI text-embedding-3-small (1536 dimensions)
 // Previous provider kept commented out for rollback capability:
 // const voyageKey = secret("VoyageAPIKey");
-// NOTE: OpenAIApiKey secret must be configured in Encore secrets for this to work.
-const OpenAIApiKey = secret("OpenAIApiKey");
+// NOTE: OpenAIAPIKey secret must be configured in Encore secrets for this to work.
+const OpenAIApiKey = secret("OpenAIAPIKey");
 
 const db = new SQLDatabase("memory", { migrations: "./migrations" });
+
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[memory] db warmed"); }
+  catch (e) { console.warn("[memory] warmup failed:", e); }
+})();
 
 /** Hybrid search weighting: 60% semantic (vector), 40% keyword (BM25) */
 export const HYBRID_ALPHA = 0.6;

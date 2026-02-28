@@ -1,15 +1,17 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
+import dynamic from "next/dynamic";
 import { T } from "@/lib/tokens";
 import PixelCorners from "@/components/PixelCorners";
 import ChatComposer from "@/components/ChatComposer";
 import ChatInput from "@/components/ChatInput";
-import AgentStream from "@/components/AgentStream";
 import RobotIcon from "@/components/icons/RobotIcon";
 import Btn from "@/components/Btn";
-import Tag from "@/components/Tag";
+
+const PixelBlast = dynamic(() => import("@/components/effects/PixelBlast"), { ssr: false });
+
 import { useApiData } from "@/lib/hooks";
 import {
   getConversations,
@@ -73,11 +75,12 @@ function ChatPageInner() {
   const [newChat, setNewChat] = useState(true);
   const [tab, setTab] = useState<"Repo" | "Privat">("Repo");
   const [sending, setSending] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
+  const [thinkSeconds, setThinkSeconds] = useState(0);
   const autoMsgSent = useRef(false);
   const msgEndRef = useRef<HTMLDivElement>(null);
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
     () => getConversations(),
@@ -85,7 +88,7 @@ function ChatPageInner() {
   );
   const conversations: ConversationSummary[] = convData?.conversations ?? [];
 
-  const { data: msgData, loading: msgsLoading, refresh: refreshMsgs } = useApiData(
+  const { data: msgData, loading: msgsLoading, refresh: refreshMsgs, setData: setMsgData } = useApiData(
     () => (ac ? getChatHistory(ac, 50) : Promise.resolve({ messages: [], hasMore: false })),
     [ac],
   );
@@ -96,7 +99,7 @@ function ChatPageInner() {
   const availableSkills = skillsData?.skills ?? [];
 
   // Dynamic repos
-  const { data: repoData } = useApiData(() => listRepos("Twofold-AS"), []);
+  const { data: repoData } = useApiData(() => listRepos("thefold-dev"), []);
   const dynamicRepos = repoData?.repos?.map(r => r.name) ?? ["thefold-api", "thefold-frontend"];
 
   // Models
@@ -111,26 +114,39 @@ function ChatPageInner() {
     tab === "Privat" ? c.id.startsWith("inkognito-") : c.id.startsWith("repo-"),
   );
 
-  // Cleanup polling on unmount
+  // Think seconds timer
   useEffect(() => {
-    return () => {
-      if (pollingRef.current) clearInterval(pollingRef.current);
+    if (!sending) { setThinkSeconds(0); return; }
+    const start = Date.now();
+    const iv = setInterval(() => setThinkSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(iv);
+  }, [sending]);
+
+  // Poll for replies while sending
+  useEffect(() => {
+    if (!sending || !ac) return;
+
+    const poll = async () => {
+      try {
+        const data = await getChatHistory(ac, 50);
+        if (data?.messages?.length) {
+          setMsgData(data);
+          const hasReply = data.messages.some(
+            (m: any) => m.role === "assistant" &&
+              m.messageType !== "agent_status" &&
+              m.messageType !== "agent_progress"
+          );
+          if (hasReply) setSending(false);
+        }
+      } catch {}
     };
-  }, []);
 
-  const stopPolling = useCallback(() => {
-    if (pollingRef.current) {
-      clearInterval(pollingRef.current);
-      pollingRef.current = null;
-    }
-  }, []);
+    const first = setTimeout(poll, 1500);
+    const interval = setInterval(poll, 2000);
+    const max = setTimeout(() => setSending(false), 60000);
 
-  const startPolling = useCallback(() => {
-    stopPolling();
-    pollingRef.current = setInterval(() => {
-      refreshMsgs();
-    }, 2000);
-  }, [stopPolling, refreshMsgs]);
+    return () => { clearTimeout(first); clearInterval(interval); clearTimeout(max); };
+  }, [sending, ac]);
 
   // Auto-send msg from search params (overview redirect)
   useEffect(() => {
@@ -155,9 +171,25 @@ function ChatPageInner() {
         ? inkognitoConversationId()
         : repoParam
           ? repoConversationId(repoParam)
-          : repoConversationId("thefold-api");
+          : inkognitoConversationId();
 
       setAc(convId);
+
+      // Optimistic user message
+      const optimisticMsg: Message = {
+        id: crypto.randomUUID(),
+        conversationId: convId,
+        role: "user" as const,
+        content: autoMsg,
+        messageType: "chat",
+        metadata: null,
+        createdAt: new Date().toISOString(),
+      };
+      setMsgData(prev => ({
+        messages: [...(prev?.messages ?? []), optimisticMsg],
+        hasMore: prev?.hasMore ?? false,
+      }));
+
       setSending(true);
       sendMessage(convId, autoMsg, {
         repoName: repoParam || undefined,
@@ -165,12 +197,14 @@ function ChatPageInner() {
       })
         .then((result) => {
           refreshConvs();
-          if (result.agentTriggered) {
-            startPolling();
-          }
         })
-        .catch(() => {})
-        .finally(() => setSending(false));
+        .catch((e: unknown) => {
+          setSending(false);
+          const msg = e instanceof Error ? e.message : "Noe gikk galt";
+          if (msg.includes("rate limit") || msg.includes("quota")) setChatError("Du har brukt opp token-kvoten. Vent litt eller oppgrader.");
+          else if (msg.includes("insufficient")) setChatError("Ikke nok credits. Sjekk API-nøklene.");
+          else setChatError(msg);
+        });
     }
   }, [autoMsg]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -178,25 +212,6 @@ function ChatPageInner() {
   useEffect(() => {
     msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs.length]);
-
-  // Check if polling should stop: latest message is not a working agent_progress
-  useEffect(() => {
-    if (!pollingRef.current) return;
-    if (msgs.length === 0) return;
-    const last = msgs[msgs.length - 1];
-    if (last.messageType === "agent_progress") {
-      try {
-        const parsed = JSON.parse(last.content);
-        if (parsed.status !== "working") {
-          stopPolling();
-        }
-      } catch {
-        stopPolling();
-      }
-    } else if (last.messageType !== "agent_status" && last.messageType !== "agent_thought") {
-      stopPolling();
-    }
-  }, [msgs, stopPolling]);
 
   const cur = ac ? conversations.find((c) => c.id === ac) : null;
   const isGhost = ac ? ac.startsWith("inkognito-") : false;
@@ -208,28 +223,63 @@ function ChatPageInner() {
       ? inkognitoConversationId()
       : repo
         ? repoConversationId(repo)
-        : repoConversationId("thefold-api");
+        : inkognitoConversationId();
     setAc(convId);
     setNewChat(false);
+
+    // Optimistic user message
+    const optimisticMsg: Message = {
+      id: crypto.randomUUID(),
+      conversationId: convId,
+      role: "user" as const,
+      content: msg,
+      messageType: "chat",
+      metadata: null,
+      createdAt: new Date().toISOString(),
+    };
+    setMsgData(prev => ({
+      messages: [...(prev?.messages ?? []), optimisticMsg],
+      hasMore: prev?.hasMore ?? false,
+    }));
+
     setSending(true);
     sendMessage(convId, msg, {
-      repoName: repo || undefined,
+      ...(repo ? { repoName: repo } : {}),
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
     })
       .then((result) => {
         refreshConvs();
         refreshMsgs();
-        if (result.agentTriggered) {
-          startPolling();
-        }
       })
-      .catch(() => {})
-      .finally(() => setSending(false));
+      .catch((e: unknown) => {
+        setSending(false);
+        const msg = e instanceof Error ? e.message : "Noe gikk galt";
+        if (msg.includes("rate limit") || msg.includes("quota")) setChatError("Du har brukt opp token-kvoten. Vent litt eller oppgrader.");
+        else if (msg.includes("insufficient")) setChatError("Ikke nok credits. Sjekk API-nøklene.");
+        else setChatError(msg);
+      });
   };
 
   const handleSend = (value: string, repo?: string | null) => {
     if (!ac || !value) return;
+    setChatError(null);
+
+    // Optimistic user message
+    const optimisticMsg: Message = {
+      id: crypto.randomUUID(),
+      conversationId: ac,
+      role: "user" as const,
+      content: value,
+      messageType: "chat",
+      metadata: null,
+      createdAt: new Date().toISOString(),
+    };
+    setMsgData(prev => ({
+      messages: [...(prev?.messages ?? []), optimisticMsg],
+      hasMore: prev?.hasMore ?? false,
+    }));
+
     setSending(true);
     sendMessage(ac, value, {
       repoName: repo || curRepo || undefined,
@@ -239,19 +289,22 @@ function ChatPageInner() {
       .then((result) => {
         refreshMsgs();
         refreshConvs();
-        if (result.agentTriggered) {
-          startPolling();
-        }
       })
-      .catch(() => {})
-      .finally(() => setSending(false));
+      .catch((e: unknown) => {
+        setSending(false);
+        const msg = e instanceof Error ? e.message : "Noe gikk galt";
+        if (msg.includes("rate limit") || msg.includes("quota")) setChatError("Du har brukt opp token-kvoten. Vent litt eller oppgrader.");
+        else if (msg.includes("insufficient")) setChatError("Ikke nok credits. Sjekk API-nøklene.");
+        else setChatError(msg);
+      });
   };
 
   const isAgentMessage = (m: Message) =>
     m.messageType === "agent_status" ||
     m.messageType === "agent_thought" ||
     m.messageType === "agent_progress" ||
-    m.messageType === "agent_report";
+    m.messageType === "agent_report" ||
+    (m.role === "assistant" && m.content.startsWith("{") && m.content.includes("\"type\":"));
 
   return (
     <div
@@ -260,12 +313,34 @@ function ChatPageInner() {
         borderRadius: T.r,
         display: "grid",
         gridTemplateColumns: "280px 1fr",
-        minHeight: "calc(100vh - 130px)",
+        height: "100%",
         position: "relative",
         overflow: "hidden",
       }}
     >
       <PixelCorners />
+
+      {/* PixelBlast background */}
+      <div style={{
+        position: "absolute", inset: 0,
+        pointerEvents: "none", zIndex: 0, opacity: 0.08,
+      }}>
+        <PixelBlast
+          variant="square"
+          pixelSize={4}
+          color="#B19EEF"
+          patternScale={2}
+          patternDensity={1}
+          pixelSizeJitter={0}
+          enableRipples
+          rippleSpeed={0.4}
+          rippleThickness={0.12}
+          rippleIntensityScale={1.5}
+          speed={0.3}
+          edgeFade={0.25}
+          transparent
+        />
+      </div>
 
       {/* Sidebar */}
       <div
@@ -273,6 +348,8 @@ function ChatPageInner() {
           borderRight: `1px solid ${T.border}`,
           display: "flex",
           flexDirection: "column",
+          height: "100%",
+          minHeight: 0,
         }}
       >
         <div
@@ -323,14 +400,14 @@ function ChatPageInner() {
             </div>
           ))}
         </div>
-        <div style={{ flex: 1, overflow: "auto" }}>
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
           {convsLoading ? (
             <div style={{ padding: "20px 16px", textAlign: "center" }}>
               <span style={{ fontSize: 12, color: T.textMuted }}>Laster...</span>
             </div>
           ) : filtered.length === 0 ? (
             <div style={{ padding: "20px 16px", textAlign: "center" }}>
-              <span style={{ fontSize: 12, color: T.textFaint }}>Ingen samtaler enna</span>
+              <span style={{ fontSize: 12, color: T.textFaint }}>Ingen samtaler enda</span>
             </div>
           ) : (
             filtered.map((c) => {
@@ -422,6 +499,7 @@ function ChatPageInner() {
         <div style={{ display: "flex", flexDirection: "column" }}>
           <ChatComposer
             onSubmit={startNewChat}
+            defaultGhost={tab === "Privat"}
             skills={availableSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
             selectedSkillIds={selectedSkillIds}
             onSkillsChange={setSelectedSkillIds}
@@ -430,7 +508,7 @@ function ChatPageInner() {
           />
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
           {/* Header */}
           <div
             style={{
@@ -458,8 +536,20 @@ function ChatPageInner() {
                 </div>
               )}
             </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              <Tag variant="brand">sonnet-4-6</Tag>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <select
+                value={selectedModel || "auto"}
+                onChange={e => setSelectedModel(e.target.value === "auto" ? null : e.target.value)}
+                style={{
+                  background: T.surface, border: `1px solid ${T.border}`,
+                  borderRadius: T.r, padding: "4px 8px", fontSize: 11,
+                  color: T.text, fontFamily: T.mono, outline: "none",
+                  cursor: "pointer",
+                }}
+              >
+                <option value="auto">Auto (anbefalt)</option>
+                {allModels.map(m => <option key={m.id} value={m.id}>{m.displayName || m.id}</option>)}
+              </select>
             </div>
           </div>
 
@@ -467,7 +557,8 @@ function ChatPageInner() {
           <div
             style={{
               flex: 1,
-              overflow: "auto",
+              overflowY: "auto",
+              minHeight: 0,
               padding: "20px 24px",
               display: "flex",
               flexDirection: "column",
@@ -481,11 +572,15 @@ function ChatPageInner() {
             ) : msgs.length === 0 && ac ? (
               <div style={{ textAlign: "center", padding: 40 }}>
                 <span style={{ fontSize: 13, color: T.textFaint }}>
-                  Ingen meldinger enna. Skriv noe nedenfor.
+                  Ingen meldinger enda. Skriv noe nedenfor.
                 </span>
               </div>
             ) : (
               msgs.map((m) => {
+                // Filter: skip agent_status during sending, agent_progress always
+                if (sending && m.messageType === "agent_status") return null;
+                if (m.messageType === "agent_progress") return null;
+
                 const time = new Date(m.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
                 const meta = m.metadata ? (typeof m.metadata === "string" ? (() => { try { return JSON.parse(m.metadata as string); } catch { return null; } })() : m.metadata) : null;
 
@@ -499,7 +594,7 @@ function ChatPageInner() {
                         justifyContent: m.role === "user" ? "flex-end" : "flex-start",
                       }}
                     >
-                      {m.role === "assistant" && (
+                      {m.role === "assistant" && m.messageType !== "agent_status" && (
                         <div
                           style={{
                             width: 28,
@@ -517,15 +612,7 @@ function ChatPageInner() {
                         </div>
                       )}
                       <div style={{ maxWidth: 540 }}>
-                        {isAgentMessage(m) ? (
-                          <AgentStream
-                            content={m.content}
-                            onCancel={() => {
-                              if (ac) cancelChatGeneration(ac).catch(() => {});
-                              stopPolling();
-                            }}
-                          />
-                        ) : m.role === "user" ? (
+                        {m.role === "user" && (
                           <div
                             style={{
                               background: T.subtle,
@@ -540,7 +627,8 @@ function ChatPageInner() {
                           >
                             {m.content}
                           </div>
-                        ) : (
+                        )}
+                        {m.role === "assistant" && m.messageType !== "agent_status" && m.content && (
                           <div
                             style={{
                               fontSize: 13,
@@ -573,38 +661,49 @@ function ChatPageInner() {
               })
             )}
             {sending && (
-              <div
-                style={{
-                  display: "flex",
-                  gap: 10,
-                  alignItems: "flex-start",
-                }}
-              >
-                <div
-                  style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: T.r,
-                    flexShrink: 0,
-                    background: T.surface,
-                    border: `1px solid ${T.border}`,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: T.r, flexShrink: 0,
+                  background: T.surface, border: `1px solid ${T.border}`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
                   <RobotIcon size={16} />
                 </div>
-                <div style={{ paddingTop: 6 }}>
-                  <span style={{ fontSize: 13, color: T.textMuted }}>Tenker...</span>
-                </div>
+                <span style={{
+                  fontSize: 13, fontWeight: 500, fontFamily: T.mono,
+                  position: "relative", overflow: "hidden",
+                  color: T.text, padding: "2px 0",
+                }}>
+                  TheFold tenker
+                  <span style={{
+                    position: "absolute",
+                    top: 0, left: 0, right: 0, bottom: 0,
+                    background: "linear-gradient(90deg, transparent 0%, rgba(99,102,241,0.18) 50%, transparent 100%)",
+                    backgroundSize: "200% 100%",
+                    animation: "shimmerMove 2s linear infinite",
+                    pointerEvents: "none",
+                  }} />
+                </span>
+                <span style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono }}>&middot; {thinkSeconds}s</span>
+              </div>
+            )}
+            {chatError && (
+              <div style={{
+                padding: "10px 16px",
+                background: "rgba(239,68,68,0.1)",
+                border: "1px solid rgba(239,68,68,0.25)",
+                borderRadius: T.r, fontSize: 12, color: T.error,
+                display: "flex", alignItems: "center", gap: 8,
+              }}>
+                <span>{chatError}</span>
+                <span onClick={() => setChatError(null)} style={{ cursor: "pointer", marginLeft: "auto", fontSize: 14 }}>&times;</span>
               </div>
             )}
             <div ref={msgEndRef} />
           </div>
 
           {/* Input */}
-          <div style={{ padding: "12px 20px", borderTop: `1px solid ${T.border}` }}>
+          <div style={{ padding: "12px 20px", borderTop: `1px solid ${T.border}`, flexShrink: 0 }}>
             <ChatInput
               compact
               repo={curRepo || undefined}

@@ -9,6 +9,11 @@ export const db = new SQLDatabase("builder", {
   migrations: "./migrations",
 });
 
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[builder] db warmed"); }
+  catch (e) { console.warn("[builder] warmup failed:", e); }
+})();
+
 export const buildProgress = new Topic<BuildProgressEvent>("build-progress", {
   deliveryGuarantee: "at-least-once",
 });

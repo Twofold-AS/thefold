@@ -38,16 +38,16 @@ const db = new SQLDatabase("agent", { migrations: "./migrations" });
 
 describe("GitHub scope validation (ASI02)", () => {
   const baseCtx = {
-    repoOwner: "Twofold-AS",
+    repoOwner: "thefold-dev",
     repoName: "thefold",
   } as AgentExecutionContext;
 
   it("should allow operations on correct repo", () => {
-    expect(() => validateAgentScope(baseCtx, "Twofold-AS", "thefold")).not.toThrow();
+    expect(() => validateAgentScope(baseCtx, "thefold-dev", "thefold")).not.toThrow();
   });
 
   it("should throw on mismatched repo", () => {
-    expect(() => validateAgentScope(baseCtx, "Twofold-AS", "other-repo"))
+    expect(() => validateAgentScope(baseCtx, "thefold-dev", "other-repo"))
       .toThrow("Scope violation");
   });
 

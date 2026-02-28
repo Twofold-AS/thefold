@@ -49,7 +49,7 @@ function createMockCtx(overrides?: Partial<AgentExecutionContext>): AgentExecuti
     taskId: "task-1",
     taskDescription: "Test task",
     userMessage: "Do something",
-    repoOwner: "Twofold-AS",
+    repoOwner: "thefold-dev",
     repoName: "thefold",
     branch: "main",
     modelMode: "auto",
@@ -178,7 +178,7 @@ describe("helpers", () => {
   });
 
   it("should export correct constants", () => {
-    expect(REPO_OWNER).toBe("Twofold-AS");
+    expect(REPO_OWNER).toBe("thefold-dev");
     expect(REPO_NAME).toBe("thefold");
     expect(MAX_RETRIES).toBe(5);
     expect(MAX_PLAN_REVISIONS).toBe(2);

@@ -9,6 +9,11 @@ const db = new SQLDatabase("chat", {
   migrations: "./migrations",
 });
 
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[chat] db warmed"); }
+  catch (e) { console.warn("[chat] warmup failed:", e); }
+})();
+
 // --- Pub/Sub: Agent reports back to chat ---
 
 export interface AgentReport {
@@ -642,7 +647,7 @@ export const send = api(
         // Get project structure (try/catch — empty repos return fallback)
         let treeString = "(Tomt repo — ingen eksisterende filer)";
         try {
-          const tree = await ghClient.getTree({ owner: "Twofold-AS", repo: "thefold" });
+          const tree = await ghClient.getTree({ owner: "thefold-dev", repo: "thefold" });
           treeString = tree.treeString || treeString;
         } catch (e) {
           console.warn("getTree failed for project decomposition (likely empty repo):", e);
@@ -651,7 +656,7 @@ export const send = api(
         // Decompose project
         const decomposition = await aiClient.decomposeProject({
           userMessage: req.message,
-          repoOwner: "Twofold-AS",
+          repoOwner: "thefold-dev",
           repoName: "thefold",
           projectStructure: treeString,
         });
@@ -711,7 +716,7 @@ export const send = api(
         userMessage: req.message,
         modelOverride: req.modelOverride ?? undefined,
         repoName: req.repoName,
-        repoOwner: "Twofold-AS",
+        repoOwner: "thefold-dev",
       });
 
       // Store a "task started" message
@@ -879,7 +884,7 @@ async function processAIResponse(
         // Fetch file tree (try/catch — empty repos return fallback)
         let tree: { tree: string[]; treeString: string; empty?: boolean } = { tree: [], treeString: "" };
         try {
-          tree = await github.getTree({ owner: "Twofold-AS", repo: repoName });
+          tree = await github.getTree({ owner: "thefold-dev", repo: repoName });
         } catch (e) {
           console.warn(`getTree failed for ${repoName} (likely empty repo):`, e);
         }
@@ -890,7 +895,7 @@ async function processAIResponse(
         // Find relevant files based on the user's message
         try {
           const relevant = await github.findRelevantFiles({
-            owner: "Twofold-AS",
+            owner: "thefold-dev",
             repo: repoName,
             taskDescription: userContent,
             tree: tree.tree,
@@ -900,7 +905,7 @@ async function processAIResponse(
           const filesToFetch = (relevant.paths || []).slice(0, 5);
           for (const filePath of filesToFetch) {
             try {
-              const file = await github.getFile({ owner: "Twofold-AS", repo: repoName, path: filePath });
+              const file = await github.getFile({ owner: "thefold-dev", repo: repoName, path: filePath });
               if (file?.content) {
                 const trimmed = file.content.split("\n").slice(0, 200).join("\n");
                 repoContext += `\n\n--- ${filePath} ---\n${trimmed}`;
@@ -913,7 +918,7 @@ async function processAIResponse(
           // Fallback: fetch key files
           for (const keyFile of ["package.json", "README.md", "encore.app"]) {
             try {
-              const file = await github.getFile({ owner: "Twofold-AS", repo: repoName, path: keyFile });
+              const file = await github.getFile({ owner: "thefold-dev", repo: repoName, path: keyFile });
               if (file?.content) {
                 repoContext += `\n\n--- ${keyFile} ---\n${file.content.slice(0, 3000)}`;
               }

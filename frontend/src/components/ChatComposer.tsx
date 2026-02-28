@@ -1,13 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { T } from "@/lib/tokens";
 import ChatInput from "@/components/ChatInput";
-import DitherBackground from "@/components/DitherBackground";
+import dynamic from "next/dynamic";
+
+const Particles = dynamic(() => import("@/components/effects/Particles"), { ssr: false });
 
 interface ChatComposerProps {
   onSubmit?: (msg: string, repo: string | null, ghost: boolean) => void;
   heading?: string;
+  defaultGhost?: boolean;
   skills?: Array<{ id: string; name: string; enabled: boolean }>;
   selectedSkillIds?: string[];
   onSkillsChange?: (ids: string[]) => void;
@@ -15,69 +18,77 @@ interface ChatComposerProps {
   onSubAgentsToggle?: () => void;
 }
 
-export default function ChatComposer({ onSubmit, heading, skills, selectedSkillIds, onSkillsChange, subAgentsEnabled, onSubAgentsToggle }: ChatComposerProps) {
-  const [repo, setRepo] = useState<string | null>("thefold-api");
-  const [ghost, setGhost] = useState(false);
+export default function ChatComposer({ onSubmit, heading, defaultGhost, skills, selectedSkillIds, onSkillsChange, subAgentsEnabled, onSubAgentsToggle }: ChatComposerProps) {
+  const [repo, setRepo] = useState<string | null>(null);
+  const [ghost, setGhost] = useState(defaultGhost ?? false);
+
+  useEffect(() => { setGhost(defaultGhost ?? false); }, [defaultGhost]);
 
   return (
-    <DitherBackground>
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          flex: 1,
-          minHeight: 400,
-          padding: "0 24px",
-        }}
-      >
-        <div style={{ paddingBottom: 32, textAlign: "center" }}>
-          <h2
-            style={{
-              fontSize: 32,
-              fontWeight: 600,
-              color: T.text,
-              letterSpacing: "-0.03em",
-            }}
-          >
-            {heading || "Nar AI sier umulig, sier Mikael Krakenes neste"}
-          </h2>
-        </div>
-        {/* Full bredde — fyller content-area */}
-        <div style={{ width: "100%", position: "relative" }}>
-          {/* Glow under chatboksen */}
-          <div
-            style={{
-              position: "absolute",
-              bottom: -12,
-              left: "50%",
-              transform: "translateX(-50%)",
-              width: "60%",
-              height: 40,
-              background:
-                "radial-gradient(ellipse at center, rgba(99,102,241,0.25) 0%, transparent 70%)",
-              pointerEvents: "none",
-              filter: "blur(20px)",
-              zIndex: 0,
-            }}
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        flex: 1,
+        minHeight: 400,
+        position: "relative",
+      }}
+    >
+      {/* Particles background */}
+      <div style={{
+        position: "absolute",
+        inset: 0,
+        pointerEvents: "none",
+        zIndex: 0,
+      }}>
+        <Particles
+          particleColors={["#ffffff"]}
+          particleCount={800}
+          particleSpread={30}
+          speed={0.1}
+          particleBaseSize={200}
+          moveParticlesOnHover={false}
+          alphaParticles={false}
+          disableRotation={false}
+          pixelRatio={2}
+        />
+      </div>
+
+      {/* Heading */}
+      <div style={{ paddingBottom: 32, textAlign: "center", position: "relative", zIndex: 1 }}>
+        <h2 style={{
+          fontSize: 32, fontWeight: 600, color: T.text,
+          letterSpacing: "-0.03em",
+        }}>
+          {heading || "Når AI sier umulig, sier Mikael Kråkenes neste"}
+        </h2>
+      </div>
+
+      {/* ChatInput wrapper — max 800px */}
+      <div style={{ width: "100%", maxWidth: 800, position: "relative", zIndex: 1 }}>
+        <div style={{
+          position: "absolute", bottom: -12, left: "50%", transform: "translateX(-50%)",
+          width: "80%", height: 40,
+          background: "radial-gradient(ellipse at center, rgba(99,102,241,0.15) 0%, transparent 70%)",
+          pointerEvents: "none", filter: "blur(20px)", zIndex: 0,
+        }} />
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <ChatInput
+            repo={ghost ? null : repo}
+            onSubmit={(msg, r) => onSubmit && onSubmit(msg, r ?? null, ghost)}
+            onRepoChange={setRepo}
+            ghost={ghost}
+            onGhostChange={setGhost}
+            skills={skills}
+            selectedSkillIds={selectedSkillIds}
+            onSkillsChange={onSkillsChange}
+            subAgentsEnabled={subAgentsEnabled}
+            onSubAgentsToggle={onSubAgentsToggle}
           />
-          <div style={{ position: "relative", zIndex: 1 }}>
-            <ChatInput
-              repo={ghost ? null : repo}
-              onSubmit={(msg, r) => onSubmit && onSubmit(msg, r ?? null, ghost)}
-              onRepoChange={setRepo}
-              ghost={ghost}
-              onGhostChange={setGhost}
-              skills={skills}
-              selectedSkillIds={selectedSkillIds}
-              onSkillsChange={onSkillsChange}
-              subAgentsEnabled={subAgentsEnabled}
-              onSubAgentsToggle={onSubAgentsToggle}
-            />
-          </div>
         </div>
       </div>
-    </DitherBackground>
+    </div>
   );
 }

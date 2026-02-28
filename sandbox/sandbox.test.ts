@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from "vitest";
 import { create, writeFile, validate, validateIncremental, destroy } from "./sandbox";
 
 describe("Sandbox service", () => {
-  const testOwner = "Twofold-AS";
+  const testOwner = "thefold-dev";
   const testRepo = "thefold";
   const createdSandboxes: string[] = [];
 

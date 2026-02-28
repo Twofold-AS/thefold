@@ -568,7 +568,8 @@ ${BASE_RULES}
 
 Regler:
 - Svar ALLTID på norsk
-- Bruk ALDRI emojier — ingen emojier overhodet. Ren tekst. Bruk markdown for struktur (overskrifter, lister, kodeblokker) men ALDRI emojier.
+- Svar ALLTID i ren tekst uten markdown-formatering. Aldri bruk **stjerner**, # headings, - bullets, eller annen markdown-syntaks. Skriv naturlig norsk prosa med avsnitt og linjeskift for struktur.
+- Bruk ALDRI emojier — ingen emojier overhodet. Ren tekst.
 - Vær konsis og direkte — korte svar, ikke lange utredninger
 - Ikke generer kode med mindre brukeren ber om det
 - Ikke lag lister med emojier
@@ -586,6 +587,8 @@ Du har tilgang til verktøy for å gjøre handlinger:
 - list_tasks: Se status på tasks
 - read_file: Les en fil fra repoet
 - search_code: Søk i kodebasen
+
+Du har tilgang til GitHub via en installert GitHub App i thefold-dev organisasjonen. Du KAN opprette nye repositories, lese og skrive til repos, commite kode, og opprette branches. Ikke si at du ikke kan gjøre dette.
 
 NÅR BRUKEREN BER DEG GJØRE NOE: Bruk verktøyene. Ikke bare forklar — GJØR det.
 - "Lag en plan for X" → bruk create_task for hvert steg
@@ -796,7 +799,7 @@ async function executeToolCall(
   repoName?: string,
   conversationId?: string,
 ): Promise<Record<string, unknown>> {
-  const owner = "Twofold-AS";
+  const owner = "thefold-dev";
 
   switch (name) {
     case "create_task": {
@@ -942,7 +945,7 @@ async function executeToolCall(
           userMessage: "Start oppgave: " + taskData.title,
           thefoldTaskId: taskId,
           repoName: taskData.repo || repoName,
-          repoOwner: "Twofold-AS",
+          repoOwner: "thefold-dev",
         };
 
         console.log("[DEBUG-AF] Calling agent.startTask with:", JSON.stringify(startPayload).substring(0, 500));

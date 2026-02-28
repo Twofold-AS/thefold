@@ -62,6 +62,7 @@ export class MCPClient {
         this.process = spawn(this.command, this.args, {
           stdio: ["pipe", "pipe", "pipe"],
           env: { ...process.env, ...this.envVars },
+          shell: true,
         });
 
         this.process.stdout?.on("data", (chunk: Buffer) => {

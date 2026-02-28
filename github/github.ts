@@ -1,17 +1,50 @@
 import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
+import log from "encore.dev/log";
 import { cache } from "~encore/clients";
 import { isGitHubAppEnabled, getInstallationToken } from "./github-app";
 
 const githubToken = secret("GitHubToken");
 
+// --- Token resolution ---
+
+/**
+ * Resolve the best available GitHub token for a given owner.
+ * Prefers GitHub App installation token when enabled, falls back to PAT.
+ */
+async function resolveToken(owner?: string): Promise<string> {
+  if (owner && isGitHubAppEnabled()) {
+    try {
+      const token = await getInstallationToken(owner);
+      return token;
+    } catch (err) {
+      log.warn("GitHub App token failed, falling back to PAT", {
+        owner,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return githubToken();
+}
+
 // --- GitHub API helper ---
 
-async function ghApi(path: string, options?: { method?: string; body?: unknown; headers?: Record<string, string> }) {
-  const res = await fetch(`https://api.github.com${path}`, {
+async function ghApi(
+  path: string,
+  options?: {
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+    token?: string;
+  },
+) {
+  const token = options?.token || githubToken();
+  const url = `https://api.github.com${path}`;
+
+  const res = await fetch(url, {
     method: options?.method,
     headers: {
-      Authorization: `Bearer ${githubToken()}`,
+      Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github.v3+json",
       "Content-Type": "application/json",
       ...options?.headers,
@@ -21,6 +54,12 @@ async function ghApi(path: string, options?: { method?: string; body?: unknown; 
 
   if (!res.ok) {
     const error = await res.text();
+    log.warn("GitHub API request failed", {
+      path,
+      method: options?.method || "GET",
+      status: res.status,
+      error: error.substring(0, 500),
+    });
     throw APIError.internal(`GitHub API error ${res.status}: ${error}`);
   }
 
@@ -117,11 +156,12 @@ export const getTree = api(
     }
 
     // Cache miss — fetch from GitHub (handle empty repos)
+    const token = await resolveToken(req.owner);
     const treeRes = await fetch(
       `https://api.github.com/repos/${req.owner}/${req.repo}/git/trees/${ref}?recursive=1`,
       {
         headers: {
-          Authorization: `Bearer ${githubToken()}`,
+          Authorization: `Bearer ${token}`,
           Accept: "application/vnd.github.v3+json",
         },
       }
@@ -183,8 +223,10 @@ export const getFile = api(
   { method: "POST", path: "/github/file", expose: false },
   async (req: FileRequest): Promise<FileResponse> => {
     const ref = req.ref || "main";
+    const token = await resolveToken(req.owner);
     const data = await ghApi(
-      `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${ref}`
+      `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${ref}`,
+      { token },
     );
 
     const content = Buffer.from(data.content, "base64").toString("utf-8");
@@ -210,8 +252,10 @@ export const getFileMetadata = api(
   { method: "POST", path: "/github/file-metadata", expose: false },
   async (req: FileMetadataRequest): Promise<FileMetadataResponse> => {
     const ref = req.ref || "main";
+    const token = await resolveToken(req.owner);
     const data = await ghApi(
-      `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${ref}`
+      `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${ref}`,
+      { token },
     );
 
     const content = Buffer.from(data.content, "base64").toString("utf-8");
@@ -254,8 +298,10 @@ export const getFileChunk = api(
     const maxLines = Math.min(req.maxLines || 100, 500);
 
     // Fetch full file from GitHub
+    const token = await resolveToken(req.owner);
     const data = await ghApi(
-      `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${ref}`
+      `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${ref}`,
+      { token },
     );
 
     const fullContent = Buffer.from(data.content, "base64").toString("utf-8");
@@ -334,9 +380,9 @@ export const findRelevantFiles = api(
 );
 
 // Helper: get SHA of a ref, returns null if ref doesn't exist (404/409)
-async function getRefSha(owner: string, repo: string, branch: string): Promise<string | null> {
+async function getRefSha(owner: string, repo: string, branch: string, token?: string): Promise<string | null> {
   try {
-    const data = await ghApi(`/repos/${owner}/${repo}/git/ref/heads/${branch}`);
+    const data = await ghApi(`/repos/${owner}/${repo}/git/ref/heads/${branch}`, { token });
     return data.object.sha;
   } catch (error: any) {
     const msg = error?.message || "";
@@ -350,17 +396,48 @@ async function getRefSha(owner: string, repo: string, branch: string): Promise<s
 export const createPR = api(
   { method: "POST", path: "/github/pr", expose: false },
   async (req: CreatePRRequest): Promise<CreatePRResponse> => {
+    // Resolve the best available token for this org
+    const token = await resolveToken(req.owner);
+
+    // 0. Verify the repo exists and is accessible before proceeding
+    try {
+      const repoData = await ghApi(`/repos/${req.owner}/${req.repo}`, { token });
+      log.info("createPR: repo verified", {
+        owner: req.owner,
+        repo: req.repo,
+        defaultBranch: repoData.default_branch,
+        empty: repoData.size === 0,
+      });
+    } catch (repoErr: any) {
+      const msg = repoErr?.message || String(repoErr);
+      if (msg.includes("404")) {
+        log.error("createPR: repo not found — verify the repo exists and the token has access", {
+          owner: req.owner,
+          repo: req.repo,
+          usingGitHubApp: isGitHubAppEnabled(),
+        });
+        throw APIError.notFound(
+          `Repository ${req.owner}/${req.repo} not found. ` +
+          `Verify: (1) the repo exists on GitHub, (2) the ${isGitHubAppEnabled() ? "GitHub App is installed on the org" : "GitHubToken PAT has access to the repo"}.`
+        );
+      }
+      throw repoErr;
+    }
+
     // 1. Get the SHA of the base branch (main, fallback master)
-    let baseSha = await getRefSha(req.owner, req.repo, "main");
+    let baseSha = await getRefSha(req.owner, req.repo, "main", token);
     if (!baseSha) {
-      baseSha = await getRefSha(req.owner, req.repo, "master");
+      baseSha = await getRefSha(req.owner, req.repo, "master", token);
     }
 
     // 2. If repo is empty, create an initial commit on main first
     if (!baseSha) {
       // Empty repo — GitHub Git Data API doesn't work on empty repos.
       // Must use Contents API for the initial commit.
-      console.log(`[createPR] Empty repo detected: ${req.owner}/${req.repo}, creating initial commit via Contents API`);
+      log.info("createPR: empty repo detected, creating initial commit", {
+        owner: req.owner,
+        repo: req.repo,
+      });
 
       await ghApi(`/repos/${req.owner}/${req.repo}/contents/README.md`, {
         method: "PUT",
@@ -368,22 +445,28 @@ export const createPR = api(
           message: "Initial commit — TheFold",
           content: Buffer.from(`# ${req.repo}\n\nInitialized by TheFold\n`).toString("base64"),
         },
+        token,
       });
 
       // GitHub needs a moment to propagate the new branch
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      baseSha = await getRefSha(req.owner, req.repo, "main");
+      baseSha = await getRefSha(req.owner, req.repo, "main", token);
       if (!baseSha) {
         // Retry once with extra delay
-        console.log(`[createPR] getRefSha returned null after 2s, retrying in 3s...`);
+        log.info("createPR: getRefSha returned null after 2s, retrying in 3s...", {
+          owner: req.owner,
+          repo: req.repo,
+        });
         await new Promise(resolve => setTimeout(resolve, 3000));
-        baseSha = await getRefSha(req.owner, req.repo, "main");
+        baseSha = await getRefSha(req.owner, req.repo, "main", token);
       }
       if (!baseSha) {
-        throw APIError.internal("Failed to initialize empty repository — branch not propagated after 5s");
+        throw APIError.internal(
+          `Failed to initialize empty repository ${req.owner}/${req.repo} — branch not propagated after 5s`
+        );
       }
-      console.log(`[createPR] Initial commit created, baseSha: ${baseSha}`);
+      log.info("createPR: initial commit created", { baseSha, owner: req.owner, repo: req.repo });
     }
 
     // 3. Create blobs for all files
@@ -394,6 +477,7 @@ export const createPR = api(
           const blob = await ghApi(`/repos/${req.owner}/${req.repo}/git/blobs`, {
             method: "POST",
             body: { content: f.content, encoding: "utf-8" },
+            token,
           });
           return {
             path: f.path,
@@ -418,13 +502,15 @@ export const createPR = api(
 
     // 4. Get the base tree
     const baseCommit = await ghApi(
-      `/repos/${req.owner}/${req.repo}/git/commits/${baseSha}`
+      `/repos/${req.owner}/${req.repo}/git/commits/${baseSha}`,
+      { token },
     );
 
     // 5. Create new tree with base
     const newTree = await ghApi(`/repos/${req.owner}/${req.repo}/git/trees`, {
       method: "POST",
       body: { base_tree: baseCommit.tree.sha, tree: treeItems },
+      token,
     });
 
     // 6. Create commit
@@ -435,6 +521,7 @@ export const createPR = api(
         tree: newTree.sha,
         parents: [baseSha],
       },
+      token,
     });
 
     // 7. Create branch
@@ -442,12 +529,14 @@ export const createPR = api(
       await ghApi(`/repos/${req.owner}/${req.repo}/git/refs`, {
         method: "POST",
         body: { ref: `refs/heads/${req.branch}`, sha: commit.sha },
+        token,
       });
     } catch {
       // Branch might already exist — update it
       await ghApi(`/repos/${req.owner}/${req.repo}/git/refs/heads/${req.branch}`, {
         method: "PATCH",
         body: { sha: commit.sha, force: true },
+        token,
       });
     }
 
@@ -462,20 +551,23 @@ export const createPR = api(
           head: req.branch,
           base: "main",
         },
+        token,
       });
     } catch (e: any) {
       const msg = e?.message || String(e);
       if (msg.includes("422") && msg.toLowerCase().includes("already exists")) {
         // PR already exists for this branch — find and return it
         const existing = await ghApi(
-          `/repos/${req.owner}/${req.repo}/pulls?head=${req.owner}:${req.branch}&state=open`
+          `/repos/${req.owner}/${req.repo}/pulls?head=${req.owner}:${req.branch}&state=open`,
+          { token },
         );
         if (Array.isArray(existing) && existing.length > 0) {
           return { url: existing[0].html_url, number: existing[0].number };
         }
         // Also check closed PRs
         const closed = await ghApi(
-          `/repos/${req.owner}/${req.repo}/pulls?head=${req.owner}:${req.branch}&state=closed`
+          `/repos/${req.owner}/${req.repo}/pulls?head=${req.owner}:${req.branch}&state=closed`,
+          { token },
         );
         if (Array.isArray(closed) && closed.length > 0) {
           return { url: closed[0].html_url, number: closed[0].number };
@@ -515,7 +607,8 @@ interface ListReposResponse {
 export const listRepos = api(
   { method: "POST", path: "/github/repos", expose: true, auth: true },
   async (req: ListReposRequest): Promise<ListReposResponse> => {
-    const data = await ghApi(`/orgs/${req.owner}/repos?sort=pushed&per_page=30&type=all`);
+    const token = await resolveToken(req.owner);
+    const data = await ghApi(`/orgs/${req.owner}/repos?sort=pushed&per_page=30&type=all`, { token });
 
     const repos: RepoInfo[] = (data as Array<Record<string, unknown>>)
       .filter((r) => !r.archived)

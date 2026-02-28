@@ -6,9 +6,7 @@ import dynamic from "next/dynamic";
 import { setToken } from "@/lib/auth";
 import { requestOtp, verifyOtp } from "@/lib/api";
 import { ArrowRight, Mail, KeyRound, RotateCw } from "lucide-react";
-import { ParticleField } from "@/components/effects/ParticleField";
-
-const Dither = dynamic(() => import("@/components/effects/Dither"), {
+const PixelBlast = dynamic(() => import("@/components/effects/PixelBlast"), {
   ssr: false,
 });
 
@@ -32,7 +30,7 @@ export default function LoginPage() {
 function LoginContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirectTo = searchParams.get("from") || "/home";
+  const redirectTo = searchParams.get("from") || "/";
   const [step, setStep] = useState<Step>("email");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState(["", "", "", "", "", ""]);
@@ -158,22 +156,22 @@ function LoginContent() {
 
   return (
     <div className="min-h-screen flex flex-col relative" style={{ background: "var(--tf-bg-base)" }}>
-      {/* Dither background */}
-      <div className="absolute inset-0 pointer-events-none" style={{ opacity: 0.2 }}>
-        <Dither
-          waveColor={[1.0, 0.42, 0.17]}
-          disableAnimation={false}
-          enableMouseInteraction={false}
-          colorNum={4}
-          waveAmplitude={0.25}
-          waveFrequency={2}
-          waveSpeed={0.02}
-          pixelSize={3}
+      <div className="absolute inset-0 pointer-events-none" style={{ opacity: 0.4 }}>
+        <PixelBlast
+          variant="square"
+          pixelSize={4}
+          color="#B19EEF"
+          patternScale={2}
+          patternDensity={1}
+          pixelSizeJitter={0}
+          enableRipples
+          rippleSpeed={0.4}
+          rippleThickness={0.12}
+          rippleIntensityScale={1.5}
+          speed={0.5}
+          edgeFade={0.25}
+          transparent
         />
-      </div>
-      {/* Floating ember particles */}
-      <div className="absolute inset-0 pointer-events-none">
-        <ParticleField count={25} className="opacity-50" />
       </div>
 
       <div className="relative z-10 flex-1 flex items-center justify-center px-6 py-12">

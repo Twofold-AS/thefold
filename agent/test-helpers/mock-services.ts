@@ -91,7 +91,7 @@ export function mockBuilderStart() {
 
 export function mockGitHubCreatePR() {
   return {
-    prUrl: "https://github.com/Twofold-AS/thefold/pull/999",
+    prUrl: "https://github.com/thefold-dev/thefold/pull/999",
     prNumber: 999,
   };
 }

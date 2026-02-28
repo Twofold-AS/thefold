@@ -60,7 +60,7 @@ export default function ChatInput({
     <div
       style={{
         width: "100%",
-        maxWidth: undefined,
+        maxWidth: compact ? undefined : 800,
         background: T.surface,
         borderRadius: T.r * 1.5,
         position: "relative",

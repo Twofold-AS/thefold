@@ -12,6 +12,11 @@ export const db = new SQLDatabase("users", {
   migrations: "./migrations",
 });
 
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[users] db warmed"); }
+  catch (e) { console.warn("[users] warmup failed:", e); }
+})();
+
 // --- Secrets ---
 
 const resendApiKey = secret("ResendAPIKey");

@@ -12,6 +12,11 @@ const monitorEnabled = secret("MonitorEnabled");
 
 const db = new SQLDatabase("monitor", { migrations: "./migrations" });
 
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[monitor] db warmed"); }
+  catch (e) { console.warn("[monitor] warmup failed:", e); }
+})();
+
 // --- Types ---
 
 interface HealthCheckResult {
@@ -246,7 +251,7 @@ export const runCheck = api(
     const results: HealthCheckResult[] = [];
 
     // Create a sandbox for running checks
-    const [owner, name] = req.repo.includes("/") ? req.repo.split("/") : ["Twofold-AS", req.repo];
+    const [owner, name] = req.repo.includes("/") ? req.repo.split("/") : ["thefold-dev", req.repo];
 
     let sandboxId: string | null = null;
     try {

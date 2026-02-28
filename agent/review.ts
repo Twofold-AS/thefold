@@ -332,7 +332,7 @@ export const approveReview = api(
     let pr: { url: string; number: number };
     try {
       pr = await github.createPR({
-        owner: "Twofold-AS",
+        owner: "thefold-dev",
         repo: targetRepo,
         branch: branchName,
         title: `[TheFold] ${review.taskId}`,
@@ -460,7 +460,7 @@ export const approveReview = api(
           category: "decision",
           linearTaskId: review.taskId,
           memoryType: "decision",
-          sourceRepo: `Twofold-AS/${targetRepo}`,
+          sourceRepo: `thefold-dev/${targetRepo}`,
         }).catch((e) => log.warn("memory.store failed (background)", { error: String(e) }))
       ),
       // Destroy sandbox in background
@@ -514,7 +514,7 @@ export const requestChanges = api(
       taskId: review.taskId,
       taskDescription: "",
       userMessage: req.feedback,
-      repoOwner: "Twofold-AS",
+      repoOwner: "thefold-dev",
       repoName: targetRepo,
       branch: "main",
       modelMode: "auto",

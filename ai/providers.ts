@@ -77,37 +77,49 @@ function parseModel(row: ModelRow): AIModelRow {
 export const listProviders = api(
   { method: "GET", path: "/ai/providers", expose: true, auth: true },
   async (): Promise<{ providers: AIProvider[] }> => {
-    const providers: AIProvider[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const providers: AIProvider[] = [];
 
-    const providerRows = db.query<ProviderRow>`
-      SELECT id, name, slug, base_url, api_key_set, enabled
-      FROM ai_providers ORDER BY name ASC
-    `;
+        const providerRows = db.query<ProviderRow>`
+          SELECT id, name, slug, base_url, api_key_set, enabled
+          FROM ai_providers ORDER BY name ASC
+        `;
 
-    for await (const p of providerRows) {
-      const models: AIModelRow[] = [];
-      const modelRows = db.query<ModelRow>`
-        SELECT id, provider_id, model_id, display_name, input_price, output_price,
-          context_window, max_output_tokens, tags, tier, enabled, supports_tools, supports_vision
-        FROM ai_models WHERE provider_id = ${p.id}::uuid
-        ORDER BY tier ASC, input_price ASC
-      `;
-      for await (const m of modelRows) {
-        models.push(parseModel(m));
+        for await (const p of providerRows) {
+          const models: AIModelRow[] = [];
+          const modelRows = db.query<ModelRow>`
+            SELECT id, provider_id, model_id, display_name, input_price, output_price,
+              context_window, max_output_tokens, tags, tier, enabled, supports_tools, supports_vision
+            FROM ai_models WHERE provider_id = ${p.id}::uuid
+            ORDER BY tier ASC, input_price ASC
+          `;
+          for await (const m of modelRows) {
+            models.push(parseModel(m));
+          }
+
+          providers.push({
+            id: p.id,
+            name: p.name,
+            slug: p.slug,
+            baseUrl: p.base_url,
+            apiKeySet: p.api_key_set,
+            enabled: p.enabled,
+            models,
+          });
+        }
+
+        return { providers };
+      } catch (e) {
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        } else {
+          throw e;
+        }
       }
-
-      providers.push({
-        id: p.id,
-        name: p.name,
-        slug: p.slug,
-        baseUrl: p.base_url,
-        apiKeySet: p.api_key_set,
-        enabled: p.enabled,
-        models,
-      });
     }
-
-    return { providers };
+    // TypeScript needs this — unreachable but satisfies return type
+    return { providers: [] };
   }
 );
 

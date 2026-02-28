@@ -30,6 +30,7 @@
     "lucide-react": "^0.564.0",
     "motion-icons-react": "^1.0.9",
     "next": "^15.1.0",
+    "ogl": "^1.0.11",
     "postprocessing": "^6.38.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

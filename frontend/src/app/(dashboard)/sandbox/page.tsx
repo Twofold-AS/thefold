@@ -37,6 +37,15 @@ function formatDuration(startedAt: string | null, completedAt: string | null): s
   return `${hours}t ${mins % 60}m`;
 }
 
+function formatTime(ts: string | null): string {
+  if (!ts) return "—";
+  try {
+    return new Date(ts).toLocaleString("nb-NO", {
+      day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"
+    });
+  } catch { return "—"; }
+}
+
 export default function SandboxPage() {
   const { data, loading } = useApiData(() => listBuilderJobs(), []);
   const [sel, setSel] = useState<string | null>(null);
@@ -134,6 +143,7 @@ export default function SandboxPage() {
                     </div>
                     <div style={{ display: "flex", gap: 12 }}>
                       <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>task: {r.taskId.slice(0, 8)}</span>
+                      <span style={{ fontSize: 10, color: T.textFaint }}>{formatTime(r.startedAt)}</span>
                       <span style={{ fontSize: 10, color: T.textFaint, marginLeft: "auto" }}>{formatDuration(r.startedAt, r.completedAt)}</span>
                     </div>
                   </div>
@@ -151,6 +161,11 @@ export default function SandboxPage() {
                 <Tag variant={jobStatus(sb.status) === "pass" ? "success" : jobStatus(sb.status) === "warn" ? "accent" : "error"}>{sb.status}</Tag>
                 <Tag>{sb.buildStrategy || "sandbox"}</Tag>
                 {Number(sb.totalCostUsd) > 0 && <Tag>${(Number(sb.totalCostUsd) || 0).toFixed(4)}</Tag>}
+              </div>
+              <div style={{ display: "flex", gap: 16, marginBottom: 16, fontSize: 11, fontFamily: T.mono, color: T.textFaint }}>
+                <span>Startet: {formatTime(sb.startedAt)}</span>
+                {sb.completedAt && <span>Ferdig: {formatTime(sb.completedAt)}</span>}
+                <span>Varighet: {formatDuration(sb.startedAt, sb.completedAt)}</span>
               </div>
               <SectionLabel>VALIDATION PIPELINE</SectionLabel>
               {stepsLoading ? (

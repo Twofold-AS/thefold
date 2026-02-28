@@ -144,7 +144,7 @@ function createTestContext(overrides?: Partial<AgentExecutionContext>): AgentExe
     taskId: `mock-task-${Date.now()}`,
     taskDescription: "Add a comment to the top of agent/types.ts explaining the module purpose",
     userMessage: "Add a comment to agent/types.ts",
-    repoOwner: "Twofold-AS",
+    repoOwner: "thefold-dev",
     repoName: "thefold",
     branch: "main",
     modelMode: "auto",
@@ -242,7 +242,7 @@ describe("Mock E2E Test 3: Prosjektdekomponering", () => {
   it("should decompose a project with mock AI", () => {
     const result = mockDecomposeProject({
       userMessage: "Bygg en oppgaveapp",
-      repoOwner: "Twofold-AS",
+      repoOwner: "thefold-dev",
       repoName: "thefold",
     });
 
@@ -366,7 +366,7 @@ describe("Mock E2E Test 3 (additional): Project decomposition validation", () =>
   it("should have conventions under 2000 tokens", () => {
     const result = mockDecomposeProject({
       userMessage: "Build a complete app",
-      repoOwner: "Twofold-AS",
+      repoOwner: "thefold-dev",
       repoName: "thefold",
     });
 
@@ -377,7 +377,7 @@ describe("Mock E2E Test 3 (additional): Project decomposition validation", () =>
   it("should have valid dependsOnIndices", () => {
     const result = mockDecomposeProject({
       userMessage: "Build multi-phase project",
-      repoOwner: "Twofold-AS",
+      repoOwner: "thefold-dev",
       repoName: "thefold",
     });
 

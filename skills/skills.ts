@@ -6,6 +6,11 @@ import { cache } from "~encore/clients";
 
 export const db = new SQLDatabase("skills", { migrations: "./migrations" });
 
+(async () => {
+  try { await db.queryRow`SELECT 1`; console.log("[skills] db warmed"); }
+  catch (e) { console.warn("[skills] warmup failed:", e); }
+})();
+
 // --- Types ---
 
 export interface Skill {
