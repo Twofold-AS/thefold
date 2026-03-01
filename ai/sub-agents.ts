@@ -26,11 +26,12 @@ export interface SubAgentResult {
   error?: string;
 }
 
+// BudgetMode kept as type alias for backward compatibility but ignored in routing
 export type BudgetMode = "balanced" | "quality_first" | "aggressive_save";
 
-// --- Role-to-Model Mapping ---
+// --- Role-to-Model Mapping (tag-based, not cost-based) ---
 
-const BALANCED_MAP: Record<SubAgentRole, string> = {
+const ROLE_MODEL_MAP: Record<SubAgentRole, string> = {
   planner: "claude-sonnet-4-5-20250929",
   implementer: "claude-sonnet-4-5-20250929",
   tester: "claude-haiku-4-5-20251001",
@@ -39,34 +40,10 @@ const BALANCED_MAP: Record<SubAgentRole, string> = {
   researcher: "claude-haiku-4-5-20251001",
 };
 
-const QUALITY_FIRST_MAP: Record<SubAgentRole, string> = {
-  planner: "claude-sonnet-4-5-20250929",
-  implementer: "claude-opus-4-5-20251101",
-  tester: "claude-sonnet-4-5-20250929",
-  reviewer: "claude-opus-4-5-20251101",
-  documenter: "claude-sonnet-4-5-20250929",
-  researcher: "claude-sonnet-4-5-20250929",
-};
-
-const AGGRESSIVE_SAVE_MAP: Record<SubAgentRole, string> = {
-  planner: "claude-haiku-4-5-20251001",
-  implementer: "claude-haiku-4-5-20251001",
-  tester: "claude-haiku-4-5-20251001",
-  reviewer: "claude-haiku-4-5-20251001",
-  documenter: "claude-haiku-4-5-20251001",
-  researcher: "claude-haiku-4-5-20251001",
-};
-
-export const ROLE_MODEL_MAP: Record<BudgetMode, Record<SubAgentRole, string>> = {
-  balanced: BALANCED_MAP,
-  quality_first: QUALITY_FIRST_MAP,
-  aggressive_save: AGGRESSIVE_SAVE_MAP,
-};
-
 // --- Functions ---
 
-export function getModelForRole(role: SubAgentRole, budgetMode: BudgetMode = "balanced"): string {
-  return ROLE_MODEL_MAP[budgetMode][role];
+export function getModelForRole(role: SubAgentRole, _budgetMode?: BudgetMode): string {
+  return ROLE_MODEL_MAP[role];
 }
 
 // --- System Prompts per Role ---

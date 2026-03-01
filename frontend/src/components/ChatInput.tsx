@@ -21,9 +21,11 @@ interface ChatInputProps {
   subAgentsEnabled?: boolean;
   onSubAgentsToggle?: () => void;
   repos?: string[];
+  isLoading?: boolean;
+  onCancel?: () => void;
 }
 
-const defaultRepos = ["thefold-api", "thefold-frontend"];
+const defaultRepos: string[] = [];
 
 export default function ChatInput({
   compact,
@@ -39,6 +41,8 @@ export default function ChatInput({
   subAgentsEnabled,
   onSubAgentsToggle,
   repos: reposProp,
+  isLoading,
+  onCancel,
 }: ChatInputProps) {
   const repos = reposProp ?? defaultRepos;
   const [v, setV] = useState("");
@@ -334,8 +338,18 @@ export default function ChatInput({
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <ModelPill />
-          <PillIcon active={ty || st} onClick={doSend} tooltip={st ? "Stopp" : "Send"}>
-            {st ? (
+          <PillIcon
+            active={ty || st || isLoading}
+            onClick={isLoading ? onCancel : doSend}
+            tooltip={isLoading ? "Stopp" : st ? "Stopp" : "Send"}
+          >
+            {isLoading ? (
+              <div style={{
+                width: 12, height: 12,
+                background: T.text,
+                borderRadius: 2,
+              }} />
+            ) : st ? (
               <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
                 <rect x="2" y="2" width="8" height="8" rx="0" fill="currentColor" />
               </svg>

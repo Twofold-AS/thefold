@@ -3,7 +3,6 @@
 import { T } from "@/lib/tokens";
 import Tag from "@/components/Tag";
 import SectionLabel from "@/components/SectionLabel";
-import PixelCorners from "@/components/PixelCorners";
 import { GR } from "@/components/GridRow";
 import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
@@ -53,7 +52,6 @@ export default function MemoryPage() {
 
       <GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
           {[
             { l: "MINNER", v: statsLoading ? "–" : String(totalMemories) },
             { l: "KODE-MØNSTRE", v: statsLoading ? "–" : String(codePatternCount) },
@@ -71,7 +69,6 @@ export default function MemoryPage() {
 
       <GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>SISTE MINNER</SectionLabel>
             {memsLoading ? (

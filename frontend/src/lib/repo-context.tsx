@@ -16,6 +16,7 @@ interface RepoContextValue {
   selectedRepo: Repo | null;
   selectRepo: (fullName: string) => void;
   loading: boolean;
+  error: string | null;
 }
 
 const RepoContext = createContext<RepoContextValue | null>(null);
@@ -26,9 +27,7 @@ export function useRepoContext() {
   return ctx;
 }
 
-const FALLBACK_REPOS: Repo[] = [
-  { owner: "thefold-dev", name: "thefold", fullName: "thefold-dev/thefold", status: "healthy", errorCount: 0 },
-];
+const FALLBACK_REPOS: Repo[] = [];
 
 function repoInfoToRepo(info: RepoInfo): Repo {
   const parts = info.fullName.split("/");
@@ -55,42 +54,31 @@ function saveRepoFullName(fullName: string) {
 }
 
 export function RepoProvider({ children }: { children: ReactNode }) {
-  const [repos, setRepos] = useState<Repo[]>(FALLBACK_REPOS);
-  const [selectedRepo, setSelectedRepo] = useState<Repo | null>(() => {
-    const saved = getSavedRepoFullName();
-    if (saved) {
-      const fallback = FALLBACK_REPOS.find((r) => r.fullName === saved);
-      if (fallback) return fallback;
-    }
-    return FALLBACK_REPOS[0] ?? null;
-  });
+  const [repos, setRepos] = useState<Repo[]>([]);
+  const [selectedRepo, setSelectedRepo] = useState<Repo | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    listRepos("thefold-dev")
+    listRepos() // No hardcoded org — backend uses PAT to list accessible repos
       .then((res) => {
-        if (res.repos.length > 0) {
-          const mapped = res.repos
-            .filter((r) => !r.archived)
-            .map(repoInfoToRepo);
-          if (mapped.length > 0) {
-            setRepos(mapped);
-            setSelectedRepo((prev) => {
-              // Keep the user's saved selection if it exists in the fetched repos
-              const saved = getSavedRepoFullName();
-              if (saved) {
-                const savedRepo = mapped.find((r) => r.fullName === saved);
-                if (savedRepo) return savedRepo;
-              }
-              // Keep current selection if it's still valid
-              if (prev && mapped.some((r) => r.fullName === prev.fullName)) return prev;
-              return mapped[0];
-            });
+        const mapped = res.repos
+          .filter((r) => !r.archived)
+          .map(repoInfoToRepo);
+        setRepos(mapped);
+        setSelectedRepo((prev) => {
+          const saved = getSavedRepoFullName();
+          if (saved) {
+            const savedRepo = mapped.find((r) => r.fullName === saved);
+            if (savedRepo) return savedRepo;
           }
-        }
+          if (prev && mapped.some((r) => r.fullName === prev.fullName)) return prev;
+          return mapped[0] ?? null;
+        });
       })
       .catch(() => {
-        // API failed — keep fallback repos (graceful degradation)
+        setError("Kunne ikke laste repos. Sjekk GitHub-tilkoblingen.");
+        setRepos([]);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -104,7 +92,7 @@ export function RepoProvider({ children }: { children: ReactNode }) {
   }, [repos]);
 
   return (
-    <RepoContext.Provider value={{ repos, selectedRepo, selectRepo, loading }}>
+    <RepoContext.Provider value={{ repos, selectedRepo, selectRepo, loading, error }}>
       {children}
     </RepoContext.Provider>
   );

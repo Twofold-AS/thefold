@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { audit, auditedStep, checkCancelled, shouldStopTask, report, think, REPO_OWNER, REPO_NAME, MAX_RETRIES, MAX_PLAN_REVISIONS } from "./helpers";
+import { audit, auditedStep, checkCancelled, shouldStopTask, report, think, MAX_RETRIES, MAX_PLAN_REVISIONS } from "./helpers";
 import type { AgentExecutionContext } from "./types";
 
 // Mock ~encore/clients
@@ -49,8 +49,8 @@ function createMockCtx(overrides?: Partial<AgentExecutionContext>): AgentExecuti
     taskId: "task-1",
     taskDescription: "Test task",
     userMessage: "Do something",
-    repoOwner: "thefold-dev",
-    repoName: "thefold",
+    repoOwner: "test-org",
+    repoName: "test-repo",
     branch: "main",
     modelMode: "auto",
     selectedModel: "claude-sonnet-4-5-20250929",
@@ -178,8 +178,6 @@ describe("helpers", () => {
   });
 
   it("should export correct constants", () => {
-    expect(REPO_OWNER).toBe("thefold-dev");
-    expect(REPO_NAME).toBe("thefold");
     expect(MAX_RETRIES).toBe(5);
     expect(MAX_PLAN_REVISIONS).toBe(2);
   });

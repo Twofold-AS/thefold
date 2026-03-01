@@ -20,7 +20,7 @@ import {
   report, think, reportSteps, auditedStep, audit,
   shouldStopTask, checkCancelled, updateLinearIfExists, autoInitRepo,
   aiBreaker, githubBreaker, sandboxBreaker,
-  REPO_OWNER, REPO_NAME, MAX_RETRIES, MAX_PLAN_REVISIONS,
+  MAX_RETRIES, MAX_PLAN_REVISIONS,
   type AuditOptions,
 } from "./helpers";
 import { checkRateLimit, recordTaskStart } from "./rate-limiter";
@@ -45,7 +45,7 @@ export interface StartTaskRequest {
 }
 
 export interface StartTaskResponse {
-  status: "started" | "repo_locked";
+  status: "started" | "repo_locked" | "missing_repo";
   taskId: string;
 }
 
@@ -438,13 +438,51 @@ export const startTask = api(
       }
     }
 
+    // Resolve repoOwner from GitHub App if not provided
+    let resolvedOwner = req.repoOwner || "";
+    if (!resolvedOwner.trim()) {
+      try {
+        const { owner } = await github.getGitHubOwner();
+        resolvedOwner = owner;
+      } catch (err) {
+        log.warn("Could not resolve repo owner from GitHub App", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    // Sanitize repo name — spaces and special chars break git URLs
+    let resolvedRepoName = (req.repoName || "")
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-zA-Z0-9._-]/g, "");
+    if (!resolvedRepoName.trim()) {
+      try {
+        const taskResult = await tasks.getTaskInternal({ id: req.taskId });
+        if (taskResult.task.repo && taskResult.task.repo.trim() !== "") {
+          resolvedRepoName = taskResult.task.repo;
+        }
+      } catch {
+        // Non-critical — agent will use empty repo and may fail later with a clear error
+      }
+    }
+
+    if (!resolvedRepoName.trim()) {
+      log.error("No repoName available — cannot proceed", { taskId: req.taskId });
+      await agentReports.publish({
+        conversationId: req.conversationId,
+        taskId: req.taskId,
+        content: JSON.stringify({ type: "status", phase: "failed", steps: [{ label: "Mangler reponavn", status: "error" }], meta: { error: "Oppgi repo i oppgaven eller velg et repo i chatten." } }),
+        status: "failed",
+      });
+      return { status: "missing_repo", taskId: req.taskId };
+    }
+
     const ctx: TaskContext = {
       conversationId: req.conversationId,
       taskId: req.taskId,
       taskDescription: "",
       userMessage: req.userMessage,
-      repoOwner: req.repoOwner || REPO_OWNER,
-      repoName: req.repoName || REPO_NAME,
+      repoOwner: resolvedOwner,
+      repoName: resolvedRepoName,
       branch: "main",
       thefoldTaskId: req.thefoldTaskId || req.taskId,
       modelMode,
@@ -537,13 +575,22 @@ export const respondToClarification = api(
     const taskResult = await tasks.getTaskInternal({ id: req.taskId });
     const task = taskResult.task;
 
+    // Resolve repoOwner from task or GitHub App
+    let clarifyOwner = task.repoOwner || "";
+    if (!clarifyOwner.trim()) {
+      try {
+        const { owner } = await github.getGitHubOwner();
+        clarifyOwner = owner;
+      } catch { /* fallback to empty */ }
+    }
+
     const ctx: TaskContext = {
       conversationId: req.conversationId,
       taskId: req.taskId,
       taskDescription: `${task.title}\n\n${task.description || ""}\n\n**Brukerens avklaring:** ${req.response}`,
       userMessage: req.response,
-      repoOwner: REPO_OWNER,
-      repoName: task.repo || REPO_NAME,
+      repoOwner: clarifyOwner,
+      repoName: task.repo || "",
       branch: "main",
       thefoldTaskId: req.taskId,
       modelMode: "auto",
@@ -592,13 +639,22 @@ export const forceContinue = api(
     const taskResult = await tasks.getTaskInternal({ id: req.taskId });
     const task = taskResult.task;
 
+    // Resolve repoOwner from task or GitHub App
+    let forceOwner = task.repoOwner || "";
+    if (!forceOwner.trim()) {
+      try {
+        const { owner } = await github.getGitHubOwner();
+        forceOwner = owner;
+      } catch { /* fallback to empty */ }
+    }
+
     const ctx: TaskContext = {
       conversationId: req.conversationId,
       taskId: req.taskId,
       taskDescription: task.title + (task.description ? "\n\n" + task.description : ""),
       userMessage: "Force continue — brukeren har valgt å fortsette uten avklaring",
-      repoOwner: REPO_OWNER,
-      repoName: task.repo || REPO_NAME,
+      repoOwner: forceOwner,
+      repoName: task.repo || "",
       branch: "main",
       thefoldTaskId: req.taskId,
       modelMode: "auto",

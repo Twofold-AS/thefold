@@ -22,7 +22,7 @@ function sampleComponent(overrides?: Record<string, unknown>) {
         language: "typescript",
       },
     ],
-    sourceRepo: "thefold",
+    sourceRepo: "test-repo",
     tags: ["test", "pattern"],
     ...overrides,
   };

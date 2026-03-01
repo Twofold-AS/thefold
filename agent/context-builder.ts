@@ -1,9 +1,12 @@
 import log from "encore.dev/log";
-import { github, memory, docs, mcp } from "~encore/clients";
+import { github, memory, docs, mcp, web } from "~encore/clients";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 import { updateJobCheckpoint } from "./db";
 import { buildImportGraph, getRelatedFiles, logGraphStats } from "./code-graph";
+
+// --- URL detection ---
+const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
 
 // --- File reading thresholds (re-exported so agent.ts can still reference them) ---
 
@@ -83,10 +86,40 @@ export async function buildContext(
   log.info("STEP 2: Reading project tree", { owner: ctx.repoOwner, repo: ctx.repoName });
   await report(ctx, "Leser prosjektstruktur fra GitHub...", "working");
 
-  let projectTree = await auditedStep(ctx, "project_tree_read", {
-    owner: ctx.repoOwner,
-    repo: ctx.repoName,
-  }, () => githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName })));
+  let projectTree;
+  try {
+    projectTree = await auditedStep(ctx, "project_tree_read", {
+      owner: ctx.repoOwner,
+      repo: ctx.repoName,
+    }, () => githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName })));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("404") || msg.includes("not found") || msg.includes("Not Found")) {
+      // Repo does not exist — create it, then retry
+      log.info("Repo not found, creating on GitHub", { owner: ctx.repoOwner, repo: ctx.repoName });
+      await report(ctx, "Repo eksisterer ikke — oppretter...", "working");
+      try {
+        await github.ensureRepoExists({
+          owner: ctx.repoOwner,
+          name: ctx.repoName,
+          description: `Created by TheFold`,
+        });
+        // Wait for GitHub propagation
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      } catch (createErr) {
+        const createMsg = createErr instanceof Error ? createErr.message : String(createErr);
+        if (!createMsg.includes("422")) {
+          throw new Error(`Kunne ikke opprette repo ${ctx.repoOwner}/${ctx.repoName}: ${createMsg}`);
+        }
+        // 422 = repo already exists (race condition) — continue
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      // Retry getTree after creation
+      projectTree = await githubBreaker.call(() => github.getTree({ owner: ctx.repoOwner, repo: ctx.repoName }));
+    } else {
+      throw e;
+    }
+  }
 
   // Auto-init empty repos before continuing
   if (projectTree.empty) {
@@ -314,6 +347,28 @@ export async function buildContext(
 
   if (memories.results.length > 0) {
     await think(ctx, `Fant ${memories.results.length} relevante minner.`);
+  }
+
+  // === STEP 3.3: Scrape URLs from task description via Firecrawl ===
+  const urls = ctx.taskDescription.match(URL_REGEX) || [];
+  const uniqueUrls = [...new Set(urls)].slice(0, 3); // Max 3 URLs
+
+  if (uniqueUrls.length > 0) {
+    log.info("STEP 3.3: Scraping URLs from task description", { urls: uniqueUrls });
+    await think(ctx, `Henter innhold fra ${uniqueUrls.length} URL(er)...`);
+
+    for (const url of uniqueUrls) {
+      try {
+        const scraped = await web.scrape({ url, maxLength: 20000 });
+        if (scraped.content) {
+          docsStrings.push(`[Web: ${scraped.title || url}]\n${scraped.content.substring(0, 15000)}`);
+          log.info("URL scraped successfully", { url, wordCount: scraped.metadata.wordCount });
+        }
+      } catch (err) {
+        log.warn("URL scraping failed", { url, error: err instanceof Error ? err.message : String(err) });
+        // Non-critical — continue without scraped content
+      }
+    }
   }
 
   // === STEP 3.5: Start MCP servers + get tools ===

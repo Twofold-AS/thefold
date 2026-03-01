@@ -16,6 +16,31 @@ interface ScrapeResponse {
   metadata: { wordCount: number; language?: string };
 }
 
+function isUrlAllowed(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  // Only allow http/https
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+
+  // Block internal/metadata hostnames
+  const blocked = ["localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "metadata.google"];
+  if (blocked.some(b => parsed.hostname.includes(b))) return false;
+  if (parsed.hostname.endsWith(".internal")) return false;
+
+  // Block private IP ranges
+  const parts = parsed.hostname.split(".");
+  if (parts[0] === "10") return false;
+  if (parts[0] === "172" && parseInt(parts[1]) >= 16 && parseInt(parts[1]) <= 31) return false;
+  if (parts[0] === "192" && parts[1] === "168") return false;
+
+  return true;
+}
+
 export const scrape = api(
   { method: "POST", path: "/web/scrape", expose: false },
   async (req: ScrapeRequest): Promise<ScrapeResponse> => {
@@ -28,11 +53,16 @@ export const scrape = api(
       );
     }
 
-    // Validate URL
+    // Validate URL format
     try {
       new URL(req.url);
     } catch {
       throw APIError.invalidArgument("Invalid URL");
+    }
+
+    // SSRF protection — block internal/private URLs
+    if (!isUrlAllowed(req.url)) {
+      throw APIError.invalidArgument("URL not allowed: internal or private addresses are blocked");
     }
 
     const res = await fetch("https://api.firecrawl.dev/v1/scrape", {

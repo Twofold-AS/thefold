@@ -46,21 +46,21 @@ describe("Tasks Service", () => {
         source: string; assigned_to: string; created_by: string;
       }>`
         INSERT INTO tasks (title, description, repo, status, priority, labels, source, assigned_to, created_by)
-        VALUES ('Full task', 'Detailed description', 'thefold', 'planned', 2, ARRAY['bug','urgent']::text[], 'linear', 'thefold', 'user-1')
+        VALUES ('Full task', 'Detailed description', 'test-repo', 'planned', 2, ARRAY['bug','urgent']::text[], 'linear', 'agent', 'user-1')
         RETURNING id, title, description, repo, status, priority, labels, source, assigned_to, created_by
       `;
 
       expect(row).toBeDefined();
       expect(row!.title).toBe("Full task");
       expect(row!.description).toBe("Detailed description");
-      expect(row!.repo).toBe("thefold");
+      expect(row!.repo).toBe("test-repo");
       expect(row!.status).toBe("planned");
       expect(row!.priority).toBe(2);
       const labels = parseLabels(row!.labels);
       expect(labels).toContain("bug");
       expect(labels).toContain("urgent");
       expect(row!.source).toBe("linear");
-      expect(row!.assigned_to).toBe("thefold");
+      expect(row!.assigned_to).toBe("agent");
       expect(row!.created_by).toBe("user-1");
     });
 
@@ -470,7 +470,7 @@ describe("Tasks Service", () => {
         id: "test-id",
         title: "Test task",
         description: null,
-        repo: "thefold",
+        repo: "test-repo",
         status: "backlog",
         priority: 3,
         labels: ["feature"],
@@ -483,7 +483,7 @@ describe("Tasks Service", () => {
         estimatedComplexity: null,
         estimatedTokens: null,
         plannedOrder: null,
-        assignedTo: "thefold",
+        assignedTo: "agent",
         buildJobId: null,
         prUrl: null,
         reviewId: null,

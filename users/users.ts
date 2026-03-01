@@ -1,4 +1,4 @@
-import { api, APIError } from "encore.dev/api";
+import { api, APIError, Header } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { secret } from "encore.dev/config";
 import { getAuthData } from "~encore/auth";
@@ -363,11 +363,23 @@ export const verifyOtp = api(
   }
 );
 
-// POST /auth/logout — client-side token removal
+// POST /auth/logout — revoke token + audit
 export const logout = api(
   { method: "POST", path: "/auth/logout", expose: true, auth: true },
-  async (): Promise<LogoutResponse> => {
+  async (params: { authorization: Header<"Authorization"> }): Promise<LogoutResponse> => {
     const authData = getAuthData()!;
+    const token = params.authorization?.replace("Bearer ", "");
+
+    if (token) {
+      try {
+        await gateway.revokeToken({ token });
+      } catch (err) {
+        log.warn("Token revocation failed during logout", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     await logAudit(authData.email, true, authData.userID);
     return { success: true };
   }

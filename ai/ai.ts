@@ -32,6 +32,7 @@ export interface ChatRequest {
   systemContext: "direct_chat" | "agent_planning" | "agent_coding" | "agent_review";
   model?: string; // Optional - uses DefaultAIModel if not set
   repoName?: string; // Which repo the user is chatting about (from repo-chat)
+  repoOwner?: string; // GitHub owner/org for the repo
   repoContext?: string; // Actual file content from the repo (tree + relevant files)
   conversationId?: string; // For tool-use (e.g. start_task needs conversation reference)
   aiName?: string; // User-configurable AI assistant name (default: "Jorgen Andre")
@@ -591,18 +592,34 @@ Du har tilgang til verktøy for å gjøre handlinger:
 Du har tilgang til GitHub via en installert GitHub App i thefold-dev organisasjonen. Du KAN opprette nye repositories, lese og skrive til repos, commite kode, og opprette branches. Ikke si at du ikke kan gjøre dette.
 
 NÅR BRUKEREN BER DEG GJØRE NOE: Bruk verktøyene. Ikke bare forklar — GJØR det.
-- "Lag en plan for X" → bruk create_task for hvert steg
 - "Fiks denne buggen" → bruk create_task + start_task i SAMME tur
 - "Hva er status?" → bruk list_tasks
 - "Se på filen X" → bruk read_file
 - "Start oppgaven om index" → bruk start_task med query: "index"
 - "Kjør siste oppgave" → bruk start_task uten taskId (starter siste automatisk)
 
-VIKTIG — Oppgaveflyt:
+VIKTIGE REGLER FOR OPPGAVER:
+
+1. Lag ALLTID kun ÉN oppgave per brukerforespørsel
+2. Beskriv ALT brukeren ber om i oppgavens title og description
+3. ALDRI lag flere tasks for å dekke én forespørsel
+4. Agenten håndterer dekomponering internt (repo-opprettelse, filskriving, osv)
+
+EKSEMPLER:
+- "Lag repo X med index.html" → ÉN task: "Lag repo X med index.html fil"
+- "Fiks bug Y og skriv tester" → ÉN task: "Fiks bug Y og skriv tester"
+- "Bygg en komplett TODO-app" → ÉN task: "Bygg TODO-app med CRUD endpoints"
+- "Opprett et repo og legg til en landing page" → ÉN task: "Opprett repo og lag landing page"
+
+ALDRI GJØR DETTE:
+- Lag separate tasks for "Opprett repo" og "Lag fil" — dette er ÉN oppgave
+- Lag flere create_task kall for samme forespørsel
+- Bruk dependsOn — dette er kun for orchestrator-modus
+
 - Vis ALDRI Task ID / UUID til brukeren — de trenger ikke se det
-- Etter create_task: oppsummer i 1-2 setninger, spør "Vil du at jeg starter oppgaven nå?"
-- Når brukeren bekrefter (ja/start/kjør): bruk start_task. Du trenger IKKE taskId — start_task finner riktig oppgave automatisk
-- ALLTID bruk start_task når brukeren bekrefter — ALDRI bruk create_task på nytt for samme oppgave`;
+- Etter create_task: oppsummer i 1-2 setninger, spor "Vil du at jeg starter oppgaven na?"
+- Nar brukeren bekrefter (ja/start/kjor): bruk start_task. Du trenger IKKE taskId — start_task finner riktig oppgave automatisk
+- ALLTID bruk start_task nar brukeren bekrefter — ALDRI bruk create_task pa nytt for samme oppgave`;
 }
 
 // --- Skills Pipeline Integration ---
@@ -736,8 +753,8 @@ const CHAT_TOOLS: Array<{
     input_schema: {
       type: "object",
       properties: {
-        title: { type: "string", description: "Kort tittel for oppgaven" },
-        description: { type: "string", description: "Detaljert beskrivelse av hva som skal gjøres" },
+        title: { type: "string", description: "Kort tittel for oppgaven — beskriv ALT brukeren ber om i én oppgave" },
+        description: { type: "string", description: "Detaljert beskrivelse av hva som skal gjøres. Inkluder alle steg." },
         priority: { type: "number", enum: [1, 2, 3, 4], description: "1=Urgent, 2=High, 3=Normal, 4=Low" },
         repoName: { type: "string", description: "Hvilket repo oppgaven gjelder" },
       },
@@ -793,13 +810,26 @@ const CHAT_TOOLS: Array<{
   },
 ];
 
+// Sanitize repo name — GitHub only allows alphanumeric, hyphens, underscores, dots
+function sanitizeRepoName(name: string): string {
+  if (!name) return "";
+  return name
+    .trim()
+    .replace(/\s+/g, "-")           // spaces → hyphens
+    .replace(/[^a-zA-Z0-9._-]/g, "") // remove invalid chars
+    .replace(/^[-_.]+/, "")          // don't start with special chars
+    .replace(/[-_.]+$/, "")          // don't end with special chars
+    .substring(0, 100);              // GitHub max 100 chars
+}
+
 async function executeToolCall(
   name: string,
   input: Record<string, unknown>,
   repoName?: string,
   conversationId?: string,
+  repoOwner?: string,
 ): Promise<Record<string, unknown>> {
-  const owner = "thefold-dev";
+  const owner = repoOwner || "";
 
   switch (name) {
     case "create_task": {
@@ -807,7 +837,7 @@ async function executeToolCall(
       console.log("[DEBUG-AF] Input:", JSON.stringify(input).substring(0, 300));
 
       const { tasks: tasksClient } = await import("~encore/clients");
-      const taskRepo = (input.repoName as string) || repoName || undefined;
+      const taskRepo = sanitizeRepoName((input.repoName as string) || repoName || "") || undefined;
 
       // Duplicate check — prevent creating same task twice
       try {
@@ -944,8 +974,8 @@ async function executeToolCall(
           taskId,
           userMessage: "Start oppgave: " + taskData.title,
           thefoldTaskId: taskId,
-          repoName: taskData.repo || repoName,
-          repoOwner: "thefold-dev",
+          repoName: sanitizeRepoName(taskData.repo || repoName || ""),
+          repoOwner: repoOwner || "",
         };
 
         console.log("[DEBUG-AF] Calling agent.startTask with:", JSON.stringify(startPayload).substring(0, 500));
@@ -961,7 +991,7 @@ async function executeToolCall(
         });
 
         console.log("[DEBUG-AF] agent.startTask fired (async)");
-        return { success: true, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber nå.` };
+        return { success: true, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber na.` };
       } catch (e) {
         console.error("[DEBUG-AF] START_TASK CRASHED:", e instanceof Error ? e.message : String(e));
         return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -1037,6 +1067,7 @@ async function enrichTaskWithAI(taskId: string, title: string, description: stri
 async function callAnthropicWithTools(options: AICallOptions & {
   tools: typeof CHAT_TOOLS;
   repoName?: string;
+  repoOwner?: string;
   conversationId?: string;
 }): Promise<AICallResponse & { toolsUsed: string[]; lastCreatedTaskId?: string }> {
   const client = new Anthropic({ apiKey: anthropicKey() });
@@ -1178,8 +1209,21 @@ async function callAnthropicWithTools(options: AICallOptions & {
             });
           }
         } else {
+          // Block multiple create_task calls in the same conversation turn
+          if (toolName === "create_task" && lastCreatedTaskId) {
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: (toolBlock as any).id,
+              content: JSON.stringify({
+                success: false,
+                message: "Du har allerede opprettet en oppgave i denne samtalen. Beskriv alt i én oppgave i stedet for flere.",
+              }),
+            });
+            continue;
+          }
+
           // Regular tool call
-          const result = await executeToolCall(toolName, toolInput, options.repoName, options.conversationId);
+          const result = await executeToolCall(toolName, toolInput, options.repoName, options.conversationId, options.repoOwner);
 
           // Track lastCreatedTaskId
           if (toolName === "create_task" && result?.taskId) {
@@ -1296,6 +1340,7 @@ export const chat = api(
       maxTokens: 8192,
       tools: CHAT_TOOLS,
       repoName: req.repoName,
+      repoOwner: req.repoOwner,
       conversationId: req.conversationId,
     });
 
@@ -1432,20 +1477,56 @@ export const reviewCode = api(
     await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
 
     try {
-      const jsonText = stripMarkdownJson(response.content);
-      const parsed = JSON.parse(jsonText);
+      // Try multiple JSON extraction strategies
+      let jsonText = stripMarkdownJson(response.content);
+      let parsed: Record<string, unknown>;
+
+      try {
+        parsed = JSON.parse(jsonText);
+      } catch {
+        // Strategy 2: Strip prefix text before first `{`
+        const firstBrace = response.content.indexOf("{");
+        const lastBrace = response.content.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          jsonText = response.content.substring(firstBrace, lastBrace + 1);
+          parsed = JSON.parse(jsonText);
+        } else {
+          // Strategy 3: Regex extract JSON object
+          const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            parsed = JSON.parse(jsonMatch[0]);
+          } else {
+            throw new Error("No JSON object found in response");
+          }
+        }
+      }
+
       return {
-        documentation: parsed.documentation,
-        memoriesExtracted: parsed.memoriesExtracted || [],
-        qualityScore: parsed.qualityScore || 5,
-        concerns: parsed.concerns || [],
+        documentation: parsed.documentation as string,
+        memoriesExtracted: (parsed.memoriesExtracted as string[]) || [],
+        qualityScore: (parsed.qualityScore as number) ?? 0,
+        concerns: (parsed.concerns as string[]) || [],
         tokensUsed: response.tokensUsed,
         modelUsed: response.modelUsed,
         costUsd: response.costEstimate.totalCost,
       };
-    } catch {
+    } catch (parseErr) {
+      log.warn("reviewCode: all JSON parsing strategies failed", {
+        error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+        responseLength: response.content.length,
+        responsePreview: response.content.substring(0, 1000),
+      });
       await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
-      throw APIError.internal("failed to parse review response");
+      // Honest fallback: qualityScore 0 + needsHumanReview flag
+      return {
+        documentation: response.content.substring(0, 2000),
+        memoriesExtracted: [],
+        qualityScore: 0,
+        concerns: ["AI review response could not be parsed — needs human review"],
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+        costUsd: response.costEstimate.totalCost,
+      };
     }
   }
 );
@@ -1559,7 +1640,7 @@ export const reviewProject = api(
       const parsed = JSON.parse(jsonText);
       return {
         documentation: parsed.documentation || "",
-        qualityScore: parsed.qualityScore || 5,
+        qualityScore: parsed.qualityScore ?? 0,
         concerns: parsed.concerns || [],
         architecturalDecisions: parsed.architecturalDecisions || [],
         memoriesExtracted: parsed.memoriesExtracted || [],
@@ -1567,11 +1648,12 @@ export const reviewProject = api(
         modelUsed: response.modelUsed,
         costUsd: response.costEstimate.totalCost,
       };
-    } catch {
+    } catch (err) {
+      log.warn("reviewProject: JSON parse failed", { error: err instanceof Error ? err.message : String(err), responsePreview: response.content.substring(0, 500) });
       return {
         documentation: response.content,
-        qualityScore: 5,
-        concerns: ["Kunne ikke parse AI-respons som JSON"],
+        qualityScore: 0,
+        concerns: ["Kunne ikke parse AI-respons som JSON — needs human review"],
         architecturalDecisions: [],
         memoriesExtracted: [],
         tokensUsed: response.tokensUsed,

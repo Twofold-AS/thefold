@@ -5,7 +5,6 @@ import { T } from "@/lib/tokens";
 import Tag from "@/components/Tag";
 import Btn from "@/components/Btn";
 import SectionLabel from "@/components/SectionLabel";
-import PixelCorners from "@/components/PixelCorners";
 import { GR } from "@/components/GridRow";
 import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
@@ -24,7 +23,7 @@ function extractDetail(details: Record<string, unknown>): string {
 export default function MonitorPage() {
   const { data: healthData, loading: healthLoading } = useApiData(() => getMonitorHealth(), []);
   const { data: healingData, loading: healingLoading } = useApiData(() => getHealingStatus({ limit: 10 }), []);
-  const { data: reposData, loading: reposLoading } = useApiData(() => listRepos("thefold-dev"), []);
+  const { data: reposData, loading: reposLoading } = useApiData(() => listRepos(), []);
 
   const [selectedRepo, setSelectedRepo] = useState<string>("");
   const [running, setRunning] = useState(false);
@@ -105,7 +104,6 @@ export default function MonitorPage() {
       {/* Automated checks info */}
       <GR>
         <div style={{ border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
           <div style={{ padding: 20 }}>
             <SectionLabel>AUTOMATISKE SJEKKER</SectionLabel>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 8 }}>
@@ -129,7 +127,6 @@ export default function MonitorPage() {
       {/* Stats bar */}
       <GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: 0, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
           {[
             { l: "HELSE-SJEKKER", v: loading ? "\u2013" : checks.length },
             { l: "BEST\u00C5TT", v: loading ? "\u2013" : passCount, c: T.success },
@@ -146,7 +143,6 @@ export default function MonitorPage() {
 
       <GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: 0, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>HELSE-SJEKKER</SectionLabel>
             {healthLoading ? (
@@ -217,7 +213,6 @@ export default function MonitorPage() {
       {/* Run check section with repo selector */}
       <GR>
         <div style={{ border: `1px solid ${T.border}`, borderTop: "none", borderRadius: 0, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
           <div style={{ padding: 20 }}>
             <SectionLabel>KJ&Oslash;R SJEKK</SectionLabel>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
@@ -292,8 +287,7 @@ export default function MonitorPage() {
       {history && (
         <GR>
           <div style={{ border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, position: "relative", overflow: "hidden" }}>
-            <PixelCorners />
-            <div style={{ padding: 20 }}>
+              <div style={{ padding: 20 }}>
               <SectionLabel>HISTORIKK &mdash; {selectedRepo}</SectionLabel>
               {historyLoading ? (
                 <div style={{ padding: "20px 0" }}>

@@ -468,6 +468,8 @@ interface SendRequest {
   skillIds?: string[];
   // Hvilket repo brukeren chatter om (fra repo-chat)
   repoName?: string;
+  // GitHub repo owner/org — resolved from frontend context
+  repoOwner?: string;
   // Where the message originated
   source?: "web" | "slack" | "discord" | "api";
 }
@@ -643,11 +645,22 @@ export const send = api(
       const { github: ghClient } = await import("~encore/clients");
       const { agent: agentClient } = await import("~encore/clients");
 
-      try {
+      let projectOwner = req.repoOwner;
+      const projectRepo = req.repoName;
+      // Resolve owner from GitHub App if not provided
+      if (!projectOwner && projectRepo) {
+        try {
+          const { owner } = await ghClient.getGitHubOwner();
+          projectOwner = owner;
+        } catch { /* fallback to empty */ }
+      }
+      if (!projectOwner || !projectRepo) {
+        // Can't decompose without owner/repo — fall through to direct chat
+      } else try {
         // Get project structure (try/catch — empty repos return fallback)
         let treeString = "(Tomt repo — ingen eksisterende filer)";
         try {
-          const tree = await ghClient.getTree({ owner: "thefold-dev", repo: "thefold" });
+          const tree = await ghClient.getTree({ owner: projectOwner, repo: projectRepo });
           treeString = tree.treeString || treeString;
         } catch (e) {
           console.warn("getTree failed for project decomposition (likely empty repo):", e);
@@ -656,8 +669,8 @@ export const send = api(
         // Decompose project
         const decomposition = await aiClient.decomposeProject({
           userMessage: req.message,
-          repoOwner: "thefold-dev",
-          repoName: "thefold",
+          repoOwner: projectOwner,
+          repoName: projectRepo,
           projectStructure: treeString,
         });
 
@@ -716,7 +729,7 @@ export const send = api(
         userMessage: req.message,
         modelOverride: req.modelOverride ?? undefined,
         repoName: req.repoName,
-        repoOwner: "thefold-dev",
+        repoOwner: req.repoOwner,
       });
 
       // Store a "task started" message
@@ -775,6 +788,7 @@ export const send = api(
         req.repoName,
         userAiName,
         req.modelOverride ?? undefined,
+        req.repoOwner,
       ).catch((err) => {
         console.error("AI processing failed:", err);
         updateMessageContent(placeholderMsg.id, "Beklager, noe gikk galt. Prøv igjen.").catch(() => {});
@@ -812,6 +826,7 @@ async function processAIResponse(
   repoName?: string,
   aiName?: string,
   modelOverride?: string,
+  repoOwner?: string,
 ) {
   // Start heartbeat — updates updated_at every 10s so frontend knows we're alive
   const heartbeat = setInterval(async () => {
@@ -875,7 +890,7 @@ async function processAIResponse(
     // Step 4.5: Fetch GitHub context if in repo-chat
     let repoContext = "";
 
-    if (repoName) {
+    if (repoName && repoOwner) {
       if (isCancelled(conversationId)) return;
 
       try {
@@ -884,9 +899,9 @@ async function processAIResponse(
         // Fetch file tree (try/catch — empty repos return fallback)
         let tree: { tree: string[]; treeString: string; empty?: boolean } = { tree: [], treeString: "" };
         try {
-          tree = await github.getTree({ owner: "thefold-dev", repo: repoName });
+          tree = await github.getTree({ owner: repoOwner, repo: repoName });
         } catch (e) {
-          console.warn(`getTree failed for ${repoName} (likely empty repo):`, e);
+          console.warn(`getTree failed for ${repoOwner}/${repoName} (likely empty repo):`, e);
         }
         if (tree?.tree?.length > 0) {
           repoContext += `\nFilstruktur for ${repoName} (${tree.tree.length} filer):\n${tree.treeString || tree.tree.join("\n")}`;
@@ -895,7 +910,7 @@ async function processAIResponse(
         // Find relevant files based on the user's message
         try {
           const relevant = await github.findRelevantFiles({
-            owner: "thefold-dev",
+            owner: repoOwner,
             repo: repoName,
             taskDescription: userContent,
             tree: tree.tree,
@@ -905,7 +920,7 @@ async function processAIResponse(
           const filesToFetch = (relevant.paths || []).slice(0, 5);
           for (const filePath of filesToFetch) {
             try {
-              const file = await github.getFile({ owner: "thefold-dev", repo: repoName, path: filePath });
+              const file = await github.getFile({ owner: repoOwner, repo: repoName, path: filePath });
               if (file?.content) {
                 const trimmed = file.content.split("\n").slice(0, 200).join("\n");
                 repoContext += `\n\n--- ${filePath} ---\n${trimmed}`;
@@ -918,7 +933,7 @@ async function processAIResponse(
           // Fallback: fetch key files
           for (const keyFile of ["package.json", "README.md", "encore.app"]) {
             try {
-              const file = await github.getFile({ owner: "thefold-dev", repo: repoName, path: keyFile });
+              const file = await github.getFile({ owner: repoOwner, repo: repoName, path: keyFile });
               if (file?.content) {
                 repoContext += `\n\n--- ${keyFile} ---\n${file.content.slice(0, 3000)}`;
               }
@@ -963,6 +978,7 @@ async function processAIResponse(
         systemContext: "direct_chat",
         model: selectedModel,
         repoName,
+        repoOwner,
         repoContext: repoContext || undefined,
         conversationId,
         aiName,

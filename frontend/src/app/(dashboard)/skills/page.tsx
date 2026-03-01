@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { T } from "@/lib/tokens";
 import { GR } from "@/components/GridRow";
-import PixelCorners from "@/components/PixelCorners";
 import SectionLabel from "@/components/SectionLabel";
 import Toggle from "@/components/Toggle";
 import Btn from "@/components/Btn";
@@ -119,7 +118,6 @@ export default function SkillsPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
           {[
             { l: "AKTIVE", v: skills.filter((s) => s.enabled).length },
             { l: "PIPELINE-FASER", v: "pre → inject → post" },
@@ -164,7 +162,6 @@ export default function SkillsPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
           <div style={{ borderRight: sk ? `1px solid ${T.border}` : "none" }}>
             {skills.map((s) => (
               <div

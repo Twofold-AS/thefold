@@ -18,7 +18,7 @@ function sampleComponent(overrides?: Record<string, unknown>) {
     files: [
       { path: "auth/middleware.ts", content: "export function authMiddleware() {}", language: "typescript" },
     ],
-    sourceRepo: "thefold",
+    sourceRepo: "test-repo",
     tags: ["auth", "middleware", "jwt"],
     ...overrides,
   };
@@ -39,8 +39,8 @@ describe("Registry Service", () => {
       expect(comp.version).toBe("1.0.0");
       expect(comp.files).toHaveLength(1);
       expect(comp.files[0].path).toBe("auth/middleware.ts");
-      expect(comp.sourceRepo).toBe("thefold");
-      expect(comp.extractedBy).toBe("thefold");
+      expect(comp.sourceRepo).toBe("test-repo");
+      expect(comp.extractedBy).toBe("unknown");
       expect(comp.usedByRepos).toEqual([]);
       expect(comp.timesUsed).toBe(0);
       expect(comp.validationStatus).toBe("pending");

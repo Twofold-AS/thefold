@@ -144,8 +144,8 @@ function createTestContext(overrides?: Partial<AgentExecutionContext>): AgentExe
     taskId: `mock-task-${Date.now()}`,
     taskDescription: "Add a comment to the top of agent/types.ts explaining the module purpose",
     userMessage: "Add a comment to agent/types.ts",
-    repoOwner: "thefold-dev",
-    repoName: "thefold",
+    repoOwner: "test-org",
+    repoName: "test-repo",
     branch: "main",
     modelMode: "auto",
     selectedModel: "claude-sonnet-4-5-20250929",
@@ -242,8 +242,8 @@ describe("Mock E2E Test 3: Prosjektdekomponering", () => {
   it("should decompose a project with mock AI", () => {
     const result = mockDecomposeProject({
       userMessage: "Bygg en oppgaveapp",
-      repoOwner: "thefold-dev",
-      repoName: "thefold",
+      repoOwner: "test-org",
+      repoName: "test-repo",
     });
 
     expect(result.phases.length).toBeGreaterThanOrEqual(2);
@@ -366,8 +366,8 @@ describe("Mock E2E Test 3 (additional): Project decomposition validation", () =>
   it("should have conventions under 2000 tokens", () => {
     const result = mockDecomposeProject({
       userMessage: "Build a complete app",
-      repoOwner: "thefold-dev",
-      repoName: "thefold",
+      repoOwner: "test-org",
+      repoName: "test-repo",
     });
 
     const conventionTokens = Math.ceil(result.conventions.length / 4);
@@ -377,8 +377,8 @@ describe("Mock E2E Test 3 (additional): Project decomposition validation", () =>
   it("should have valid dependsOnIndices", () => {
     const result = mockDecomposeProject({
       userMessage: "Build multi-phase project",
-      repoOwner: "thefold-dev",
-      repoName: "thefold",
+      repoOwner: "test-org",
+      repoName: "test-repo",
     });
 
     let taskIndex = 0;

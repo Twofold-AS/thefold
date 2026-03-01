@@ -2,8 +2,8 @@ import { describe, it, expect, afterAll } from "vitest";
 import { create, writeFile, validate, validateIncremental, destroy } from "./sandbox";
 
 describe("Sandbox service", () => {
-  const testOwner = "thefold-dev";
-  const testRepo = "thefold";
+  const testOwner = "test-org";
+  const testRepo = "test-repo";
   const createdSandboxes: string[] = [];
 
   // Clean up all created sandboxes after tests

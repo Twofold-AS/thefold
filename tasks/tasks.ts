@@ -165,7 +165,7 @@ export const createTask = api(
         ${req.dependsOn ?? []}::uuid[],
         ${req.source ?? "manual"},
         ${req.linearTaskId ?? null},
-        ${req.assignedTo ?? "thefold"},
+        ${req.assignedTo ?? "agent"},
         ${req.createdBy ?? null},
         ${req.externalId ?? null},
         ${req.externalSource ?? null}

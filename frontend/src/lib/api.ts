@@ -3,7 +3,7 @@ import { debugToast } from "./debug";
 
 // --- Base fetch wrapper ---
 
-const API_BASE = "http://localhost:4000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
 interface FetchOptions {
   method?: string;
@@ -328,10 +328,10 @@ export interface RepoInfo {
   openIssuesCount: number;
 }
 
-export async function listRepos(owner: string) {
+export async function listRepos(owner?: string) {
   return apiFetch<{ repos: RepoInfo[] }>("/github/repos", {
     method: "POST",
-    body: { owner },
+    body: owner ? { owner } : {},
   });
 }
 

@@ -3,7 +3,6 @@
 import { useState, useMemo } from "react";
 import { T } from "@/lib/tokens";
 import { GR } from "@/components/GridRow";
-import PixelCorners from "@/components/PixelCorners";
 import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import Skeleton from "@/components/Skeleton";
@@ -78,7 +77,6 @@ export default function KomponenterPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
           <svg
             width="16"
             height="16"
@@ -140,7 +138,6 @@ export default function KomponenterPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
           {fl.length === 0 && (
             <div
               style={{

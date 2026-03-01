@@ -2,18 +2,14 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import dynamic from "next/dynamic";
 import { T, Layout } from "@/lib/tokens";
 import { useApiData } from "@/lib/hooks";
 import { getTaskStats, getCostSummary, listTheFoldTasks, getAuditStats, listSkills, getMemoryStats } from "@/lib/api";
 import ChatComposer from "@/components/ChatComposer";
 import { GR } from "@/components/GridRow";
-import PixelCorners from "@/components/PixelCorners";
 import SectionLabel from "@/components/SectionLabel";
 import Toggle from "@/components/Toggle";
 import Skeleton from "@/components/Skeleton";
-
-const PixelBlast = dynamic(() => import("@/components/effects/PixelBlast"), { ssr: false });
 
 function formatTokens(n: number): string {
   if (n >= 1000) return (n / 1000).toFixed(1) + "k";
@@ -113,32 +109,12 @@ export default function OverviewPage() {
 
   return (
     <>
-      {/* PixelBlast background */}
-      <div style={{
-        position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
-        pointerEvents: "none", zIndex: 0, opacity: 0.1,
-      }}>
-        <PixelBlast
-          variant="square"
-          pixelSize={4}
-          color="#B19EEF"
-          patternScale={2}
-          patternDensity={1}
-          pixelSizeJitter={0}
-          enableRipples
-          rippleSpeed={0.4}
-          rippleThickness={0.12}
-          rippleIntensityScale={1.5}
-          speed={0.3}
-          edgeFade={0.25}
-          transparent
-        />
-      </div>
-
       <div style={{ margin: `0 -${SP}px`, position: "relative", zIndex: 1 }}>
         <ChatComposer
           heading="Når AI sier umulig, sier Mikael Kråkenes neste"
           onSubmit={(msg, repo, ghost) => onStartChat(msg, repo, ghost)}
+          defaultGhost={privat}
+          onGhostChange={(g) => setPrivat(g)}
           skills={allSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
           selectedSkillIds={selectedSkillIds}
           onSkillsChange={setSelectedSkillIds}
@@ -159,7 +135,7 @@ export default function OverviewPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
+
           {[
             {
               l: "TOKENS I DAG",
@@ -246,7 +222,7 @@ export default function OverviewPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
+
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>SISTE AKTIVITET</SectionLabel>
             {tasksLoading ? (
@@ -307,7 +283,7 @@ export default function OverviewPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
+
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>SKILLS</SectionLabel>
             {skillsLoading ? (

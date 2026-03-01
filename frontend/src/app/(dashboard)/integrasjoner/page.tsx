@@ -6,7 +6,6 @@ import Tag from "@/components/Tag";
 import Btn from "@/components/Btn";
 import Skeleton from "@/components/Skeleton";
 
-import PixelCorners from "@/components/PixelCorners";
 import { GR } from "@/components/GridRow";
 import { useApiData } from "@/lib/hooks";
 import { listIntegrations, saveIntegration, deleteIntegration, type IntegrationConfig } from "@/lib/api";
@@ -127,7 +126,6 @@ export default function IntegrasjonerPage() {
 
       <GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
           {[
             { l: "TILKOBLET", v: loading ? "–" : connectedCount },
             { l: "FRAKOBLET", v: loading ? "–" : disconnectedCount },
@@ -144,7 +142,6 @@ export default function IntegrasjonerPage() {
 
       <GR mb={40}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
           {loading ? (
             <div style={{ padding: 40, gridColumn: "1 / -1" }}>
               <Skeleton rows={4} />

@@ -12,7 +12,7 @@ export function mockGitHubTree() {
       "tsconfig.json",
     ],
     treeString: "agent/\n  types.ts\n  agent.ts\npackage.json\ntsconfig.json",
-    packageJson: { name: "thefold", version: "1.0.0", dependencies: { "encore.dev": "^1.0.0" } },
+    packageJson: { name: "test-repo", version: "1.0.0", dependencies: { "encore.dev": "^1.0.0" } },
     empty: false,
   };
 }
@@ -20,7 +20,7 @@ export function mockGitHubTree() {
 export function mockGitHubFile(filePath: string) {
   const mockFiles: Record<string, string> = {
     "agent/types.ts": "export interface AgentExecutionContext { /* ... */ }",
-    "package.json": JSON.stringify({ name: "thefold", dependencies: { "encore.dev": "^1.0.0" } }),
+    "package.json": JSON.stringify({ name: "test-repo", dependencies: { "encore.dev": "^1.0.0" } }),
     "tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
   };
 

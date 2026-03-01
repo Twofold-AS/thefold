@@ -111,20 +111,19 @@ const DEFAULT_COMPLEX = "claude-opus-4-5-20251101";
 // --- Core Functions ---
 
 /**
- * Select optimal model based on complexity and mode.
+ * Select optimal model based on context tags and mode.
  *
- * mode = "auto": picks from DB-backed cache based on complexity thresholds
+ * mode = "auto": picks from DB-backed cache based on tag matching
  * mode = "manual": uses manualModelId directly
  *
- * Complexity scale: 1-10
- *   1-3: Simple → tier 1 (cheap/fast)
- *   4-7: Medium → tier 3 (balanced)
- *   8-10: Complex → tier 5 (best quality)
+ * context: "chat" | "coding" | "planning" | "review" | "analysis" | "fast"
+ * Models are matched by their `bestFor` tags, not by tier/cost.
  */
 export function selectOptimalModel(
   complexity: number,
   mode: ModelMode = "auto",
-  manualModelId?: string
+  manualModelId?: string,
+  context?: string
 ): string {
   if (mode === "manual" && manualModelId) {
     return manualModelId;
@@ -132,7 +131,15 @@ export function selectOptimalModel(
 
   ensureCacheFresh();
 
-  // Pick default model for complexity
+  // Tag-based selection: find models that match the requested context
+  if (context) {
+    const matching = cachedModels.filter(m => m.bestFor.includes(context));
+    if (matching.length > 0) {
+      return matching[0].id;
+    }
+  }
+
+  // No context match — use defaults based on complexity range
   let targetId: string;
   if (complexity <= 3) targetId = DEFAULT_SIMPLE;
   else if (complexity <= 7) targetId = DEFAULT_MEDIUM;
@@ -143,39 +150,32 @@ export function selectOptimalModel(
     return targetId;
   }
 
-  // Fallback: find closest tier from enabled models
-  const targetTier = complexity <= 3 ? 1 : complexity <= 7 ? 3 : 5;
-  const sorted = [...cachedModels].sort((a, b) => {
-    const d = Math.abs(a.tier - targetTier) - Math.abs(b.tier - targetTier);
-    if (d !== 0) return d;
-    if (a.supportsTools !== b.supportsTools) return a.supportsTools ? -1 : 1;
-    return a.inputCostPer1M - b.inputCostPer1M;
-  });
-
-  return sorted[0]?.id || targetId;
+  // Fallback: first available model with tool support
+  const withTools = cachedModels.filter(m => m.supportsTools);
+  return withTools[0]?.id || cachedModels[0]?.id || targetId;
 }
 
 /**
- * Get the next tier model when current model fails.
- * Uses tier-based upgrade with provider affinity.
- * Returns null if already at highest tier.
+ * Get a more capable model when current model fails.
+ * Prefers same provider, picks models with more tags (broader capability).
+ * Returns null if no upgrade available.
  */
 export function getUpgradeModel(currentModel: string): string | null {
   ensureCacheFresh();
 
   const current = cachedModels.find((m) => m.id === currentModel);
-  const currentTier = current?.tier ?? 0;
-  const currentProvider = current?.provider;
+  if (!current) return null;
+  const currentProvider = current.provider;
 
   const upgrades = cachedModels
-    .filter((m) => m.tier > currentTier)
+    .filter((m) => m.id !== currentModel && m.bestFor.length >= current.bestFor.length)
     .sort((a, b) => {
-      if (a.tier !== b.tier) return a.tier - b.tier;
-      // Same tier: prefer same provider
+      // Prefer same provider
       const aSame = a.provider === currentProvider ? 0 : 1;
       const bSame = b.provider === currentProvider ? 0 : 1;
       if (aSame !== bSame) return aSame - bSame;
-      return a.inputCostPer1M - b.inputCostPer1M;
+      // More capabilities = better upgrade
+      return b.bestFor.length - a.bestFor.length;
     });
 
   return upgrades[0]?.id || null;

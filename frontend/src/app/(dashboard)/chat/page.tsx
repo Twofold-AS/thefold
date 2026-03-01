@@ -2,15 +2,12 @@
 
 import { useState, useEffect, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import dynamic from "next/dynamic";
 import { T } from "@/lib/tokens";
-import PixelCorners from "@/components/PixelCorners";
 import ChatComposer from "@/components/ChatComposer";
 import ChatInput from "@/components/ChatInput";
 import RobotIcon from "@/components/icons/RobotIcon";
 import Btn from "@/components/Btn";
-
-const PixelBlast = dynamic(() => import("@/components/effects/PixelBlast"), { ssr: false });
+import AgentStream from "@/components/AgentStream";
 
 import { useApiData } from "@/lib/hooks";
 import {
@@ -24,6 +21,8 @@ import {
   listSkills,
   listRepos,
   listProviders,
+  approveReview,
+  rejectReview,
   type ConversationSummary,
   type Message,
 } from "@/lib/api";
@@ -81,6 +80,7 @@ function ChatPageInner() {
   const [thinkSeconds, setThinkSeconds] = useState(0);
   const autoMsgSent = useRef(false);
   const msgEndRef = useRef<HTMLDivElement>(null);
+  const slowIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
     () => getConversations(),
@@ -98,9 +98,9 @@ function ChatPageInner() {
   const { data: skillsData } = useApiData(() => listSkills(), []);
   const availableSkills = skillsData?.skills ?? [];
 
-  // Dynamic repos
-  const { data: repoData } = useApiData(() => listRepos("thefold-dev"), []);
-  const dynamicRepos = repoData?.repos?.map(r => r.name) ?? ["thefold-api", "thefold-frontend"];
+  // Dynamic repos — no hardcoded org, backend resolves from PAT
+  const { data: repoData } = useApiData(() => listRepos(), []);
+  const dynamicRepos = repoData?.repos?.map(r => r.name) ?? [];
 
   // Models
   const { data: providerData } = useApiData(() => listProviders(), []);
@@ -109,9 +109,9 @@ function ChatPageInner() {
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
-  // Filter conversations by tab
+  // Filter conversations by tab — Repo tab shows repo-* and chat-* conversations
   const filtered = conversations.filter((c) =>
-    tab === "Privat" ? c.id.startsWith("inkognito-") : c.id.startsWith("repo-"),
+    tab === "Privat" ? c.id.startsWith("inkognito-") : !c.id.startsWith("inkognito-"),
   );
 
   // Think seconds timer
@@ -129,23 +129,88 @@ function ChatPageInner() {
     const poll = async () => {
       try {
         const data = await getChatHistory(ac, 50);
-        if (data?.messages?.length) {
-          setMsgData(data);
-          const hasReply = data.messages.some(
-            (m: any) => m.role === "assistant" &&
-              m.messageType !== "agent_status" &&
-              m.messageType !== "agent_progress"
-          );
-          if (hasReply) setSending(false);
+        if (!data?.messages?.length) return;
+
+        // Alltid oppdater meldinger — bruk content-hash for å unngå unødvendige re-renders
+        const newHash = data.messages
+          .map((m: any) => `${m.id}:${(m.content || "").length}:${m.messageType}`)
+          .join("|");
+        const oldHash = (msgs || [])
+          .map((m: any) => `${m.id}:${(m.content || "").length}:${m.messageType}`)
+          .join("|");
+
+        if (newHash !== oldHash) {
+          setMsgData({ ...data }); // Ny referanse → re-render
         }
-      } catch {}
+
+        // Stopp polling KUN når vi har et EKTE svar (ikke tom placeholder)
+        const hasRealReply = data.messages.some(
+          (m: any) =>
+            m.role === "assistant" &&
+            m.content &&
+            m.content.trim().length > 0 &&
+            !m.content.startsWith("{") && // Ikke JSON (agent-melding)
+            m.messageType === "chat"
+        );
+
+        // Eller agent er ferdig/feilet
+        const agentDone = data.messages.some((m: any) => {
+          if (m.role !== "assistant") return false;
+          if (m.messageType !== "agent_status" && m.messageType !== "agent_progress") return false;
+          try {
+            const p = JSON.parse(m.content);
+            return p.status === "done" || p.status === "failed" ||
+                   p.status === "completed" || p.phase === "Ferdig" || p.phase === "Feilet";
+          } catch { return false; }
+        });
+
+        // Sjekk om agent fortsatt jobber (da stopper vi IKKE)
+        const agentWorking = data.messages.some((m: any) => {
+          if (m.role !== "assistant") return false;
+          if (m.messageType !== "agent_status" && m.messageType !== "agent_progress") return false;
+          try {
+            const p = JSON.parse(m.content);
+            return p.status === "working" || p.phase === "Bygger" ||
+                   p.phase === "Planlegger" || p.phase === "Forbereder";
+          } catch { return false; }
+        });
+
+        if (agentDone || (hasRealReply && !agentWorking)) {
+          setSending(false);
+        }
+      } catch {
+        // Nettverksfeil — ikke stopp polling, prøv igjen
+      }
     };
 
-    const first = setTimeout(poll, 1500);
-    const interval = setInterval(poll, 2000);
-    const max = setTimeout(() => setSending(false), 60000);
+    // Rask polling først, deretter langsommere
+    const first = setTimeout(poll, 800);
+    const fast = setInterval(poll, 1200);
 
-    return () => { clearTimeout(first); clearInterval(interval); clearTimeout(max); };
+    // Etter 8 sekunder, bytt til langsommere polling
+    const slowdownTimer = setTimeout(() => {
+      clearInterval(fast);
+    }, 8000);
+
+    // Fortsett med tregere polling etter 8s
+    const slow = setTimeout(() => {
+      slowIntervalRef.current = setInterval(poll, 3000);
+    }, 8000);
+
+    // Absolutt maks: 2 minutter (agent kan ta lang tid)
+    const max = setTimeout(() => setSending(false), 120000);
+
+    return () => {
+      clearTimeout(first);
+      clearInterval(fast);
+      clearTimeout(slowdownTimer);
+      clearTimeout(slow);
+      clearTimeout(max);
+      if (slowIntervalRef.current) {
+        clearInterval(slowIntervalRef.current);
+        slowIntervalRef.current = null;
+      }
+    };
   }, [sending, ac]);
 
   // Auto-send msg from search params (overview redirect)
@@ -171,7 +236,9 @@ function ChatPageInner() {
         ? inkognitoConversationId()
         : repoParam
           ? repoConversationId(repoParam)
-          : inkognitoConversationId();
+          : dynamicRepos[0]
+            ? repoConversationId(dynamicRepos[0])
+            : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
       setAc(convId);
 
@@ -208,22 +275,26 @@ function ChatPageInner() {
     }
   }, [autoMsg]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Scroll to bottom on new messages
+  // Scroll to bottom on new messages or content changes
+  const msgsHash = msgs.map(m => `${m.id}:${(m.content || "").length}`).join(",");
   useEffect(() => {
     msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [msgs.length]);
+  }, [msgsHash]);
 
   const cur = ac ? conversations.find((c) => c.id === ac) : null;
   const isGhost = ac ? ac.startsWith("inkognito-") : false;
   const curRepo = ac ? extractRepoFromId(ac) : null;
 
   const startNewChat = (msg: string, repo: string | null, ghost: boolean) => {
-    const isPrivateTab = tab === "Privat";
-    const convId = ghost || isPrivateTab
+    // Tab state is the primary authority for conversation routing
+    // Ghost toggle syncs with tab (see onGhostChange below)
+    const usePrivate = tab === "Privat";
+    const effectiveRepo = repo || dynamicRepos[0] || null;
+    const convId = usePrivate
       ? inkognitoConversationId()
-      : repo
-        ? repoConversationId(repo)
-        : inkognitoConversationId();
+      : effectiveRepo
+        ? repoConversationId(effectiveRepo)
+        : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setAc(convId);
     setNewChat(false);
 
@@ -318,30 +389,6 @@ function ChatPageInner() {
         overflow: "hidden",
       }}
     >
-      <PixelCorners />
-
-      {/* PixelBlast background */}
-      <div style={{
-        position: "absolute", inset: 0,
-        pointerEvents: "none", zIndex: 0, opacity: 0.08,
-      }}>
-        <PixelBlast
-          variant="square"
-          pixelSize={4}
-          color="#B19EEF"
-          patternScale={2}
-          patternDensity={1}
-          pixelSizeJitter={0}
-          enableRipples
-          rippleSpeed={0.4}
-          rippleThickness={0.12}
-          rippleIntensityScale={1.5}
-          speed={0.3}
-          edgeFade={0.25}
-          transparent
-        />
-      </div>
-
       {/* Sidebar */}
       <div
         style={{
@@ -383,7 +430,17 @@ function ChatPageInner() {
               key={f}
               onClick={() => {
                 setTab(f);
-                setAc(null);
+                // Find first conversation in new tab, or show new-chat view
+                const tabConvs = conversations.filter((c) =>
+                  f === "Privat" ? c.id.startsWith("inkognito-") : c.id.startsWith("repo-"),
+                );
+                if (tabConvs.length > 0) {
+                  setAc(tabConvs[0].id);
+                  setNewChat(false);
+                } else {
+                  setAc(null);
+                  setNewChat(true);
+                }
               }}
               style={{
                 fontSize: 11,
@@ -453,14 +510,21 @@ function ChatPageInner() {
                     </span>
                     <span
                       className="conv-delete"
-                      onClick={(e) => {
+                      onClick={async (e) => {
                         e.stopPropagation();
-                        if (window.confirm("Slett denne samtalen?")) {
-                          deleteConversation(c.id).then(() => {
-                            if (ac === c.id) { setAc(null); setNewChat(true); }
-                            refreshConvs();
-                          }).catch(() => {});
-                        }
+                        try {
+                          await deleteConversation(c.id);
+                          if (ac === c.id) {
+                            const remaining = filtered.filter(x => x.id !== c.id);
+                            if (remaining.length > 0) {
+                              setAc(remaining[0].id);
+                            } else {
+                              setAc(null);
+                              setNewChat(true);
+                            }
+                          }
+                          refreshConvs();
+                        } catch {}
                       }}
                       style={{
                         opacity: 0,
@@ -500,11 +564,13 @@ function ChatPageInner() {
           <ChatComposer
             onSubmit={startNewChat}
             defaultGhost={tab === "Privat"}
+            onGhostChange={(g) => setTab(g ? "Privat" : "Repo")}
             skills={availableSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
             selectedSkillIds={selectedSkillIds}
             onSkillsChange={setSelectedSkillIds}
             subAgentsEnabled={subAgentsEnabled}
             onSubAgentsToggle={() => setSubAgentsEnabled(p => !p)}
+            repos={dynamicRepos}
           />
         </div>
       ) : (
@@ -576,92 +642,162 @@ function ChatPageInner() {
                 </span>
               </div>
             ) : (
-              msgs.map((m) => {
-                // Filter: skip agent_status during sending, agent_progress always
-                if (sending && m.messageType === "agent_status") return null;
-                if (m.messageType === "agent_progress") return null;
+              (() => {
+                // Deduplicate: keep only the last agent message
+                let lastAgentIdx = -1;
+                for (let i = msgs.length - 1; i >= 0; i--) {
+                  if (isAgentMessage(msgs[i])) { lastAgentIdx = i; break; }
+                }
+                const dedupedMsgs = msgs.filter((m, i) => {
+                  if (!isAgentMessage(m)) return true;
+                  return i === lastAgentIdx;
+                });
 
-                const time = new Date(m.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
-                const meta = m.metadata ? (typeof m.metadata === "string" ? (() => { try { return JSON.parse(m.metadata as string); } catch { return null; } })() : m.metadata) : null;
+                // Find last agent message and the chat message to merge it under
+                const lastAgentMsg = dedupedMsgs.find(m => isAgentMessage(m));
+                const mergedChatId = lastAgentMsg
+                  ? (() => {
+                      // Find the last assistant chat message that comes before the agent message
+                      let found: string | null = null;
+                      for (const m of dedupedMsgs) {
+                        if (m.role === "assistant" && !isAgentMessage(m) && m.content?.trim()) {
+                          found = m.id;
+                        }
+                        if (m === lastAgentMsg) break;
+                      }
+                      return found;
+                    })()
+                  : null;
 
-                return (
-                  <div key={m.id}>
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: 10,
-                        alignItems: "flex-start",
-                        justifyContent: m.role === "user" ? "flex-end" : "flex-start",
-                      }}
-                    >
-                      {m.role === "assistant" && m.messageType !== "agent_status" && (
-                        <div
-                          style={{
-                            width: 28,
-                            height: 28,
-                            borderRadius: T.r,
-                            flexShrink: 0,
-                            background: T.surface,
-                            border: `1px solid ${T.border}`,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <RobotIcon size={16} />
-                        </div>
-                      )}
-                      <div style={{ maxWidth: 540 }}>
-                        {m.role === "user" && (
-                          <div
-                            style={{
+                return dedupedMsgs.map((m) => {
+                  const time = new Date(m.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
+                  const isAgent = isAgentMessage(m);
+
+                  // Hide empty placeholder messages while waiting
+                  if (sending && m.role === "assistant" && (!m.content || m.content.trim() === "")) {
+                    return null;
+                  }
+
+                  return (
+                    <div key={m.id}>
+                      {/* USER */}
+                      {m.role === "user" && (
+                        <div style={{ display: "flex", justifyContent: "flex-end", padding: "4px 0" }}>
+                          <div>
+                            <div style={{
                               background: T.subtle,
                               border: `1px solid ${T.border}`,
                               borderRadius: T.r,
                               padding: "10px 16px",
-                              fontSize: 13,
-                              lineHeight: 1.6,
-                              color: T.text,
-                              fontFamily: T.sans,
-                            }}
-                          >
-                            {m.content}
+                              fontSize: 13, lineHeight: 1.6, color: T.text,
+                            }}>
+                              {m.content}
+                            </div>
+                            <div style={{ fontSize: 10, color: T.textFaint, textAlign: "right", marginTop: 2 }}>{time}</div>
                           </div>
-                        )}
-                        {m.role === "assistant" && m.messageType !== "agent_status" && m.content && (
-                          <div
-                            style={{
-                              fontSize: 13,
-                              lineHeight: 1.65,
-                              color: T.text,
-                              fontFamily: T.sans,
-                              paddingTop: 4,
-                            }}
-                          >
-                            {m.content}
+                        </div>
+                      )}
+
+                      {/* ASSISTANT — agent message: skip if merged under chat message */}
+                      {m.role === "assistant" && isAgent && !(m.id === lastAgentMsg?.id && mergedChatId) && (
+                        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
+                          <div style={{
+                            width: 28, height: 28, borderRadius: T.r, flexShrink: 0,
+                            background: T.surface, border: `1px solid ${T.border}`,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                          }}>
+                            <RobotIcon size={16} />
                           </div>
-                        )}
-                      </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <AgentStream
+                              content={m.content}
+                              onCancel={() => { if (ac) cancelChatGeneration(ac).catch(() => {}); setSending(false); }}
+                              onApprove={async (reviewId) => {
+                                try {
+                                  await approveReview(reviewId);
+                                  refreshMsgs();
+                                } catch (e) {
+                                  setChatError(e instanceof Error ? e.message : "Godkjenning feilet");
+                                }
+                              }}
+                              onReject={async (reviewId) => {
+                                try {
+                                  await rejectReview(reviewId);
+                                  refreshMsgs();
+                                } catch (e) {
+                                  setChatError(e instanceof Error ? e.message : "Avvisning feilet");
+                                }
+                              }}
+                            />
+                            <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ASSISTANT — chat message, with optional merged agent-status below */}
+                      {m.role === "assistant" && !isAgent && (
+                        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
+                          <div style={{
+                            width: 28, height: 28, borderRadius: T.r, flexShrink: 0,
+                            background: T.surface, border: `1px solid ${T.border}`,
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                          }}>
+                            <RobotIcon size={16} />
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {m.content && m.content.trim() !== "" ? (
+                              <div style={{ fontSize: 13, lineHeight: 1.65, color: T.text, fontFamily: T.sans, paddingTop: 4 }}>
+                                {m.content}
+                              </div>
+                            ) : null}
+
+                            {/* Merged agent-status under this chat message */}
+                            {m.id === mergedChatId && lastAgentMsg && (
+                              <div style={{ marginTop: 8 }}>
+                                <AgentStream
+                                  content={lastAgentMsg.content}
+                                  onCancel={() => { if (ac) cancelChatGeneration(ac).catch(() => {}); setSending(false); }}
+                                  onApprove={async (reviewId) => {
+                                    try {
+                                      await approveReview(reviewId);
+                                      refreshMsgs();
+                                    } catch (e) {
+                                      setChatError(e instanceof Error ? e.message : "Godkjenning feilet");
+                                    }
+                                  }}
+                                  onReject={async (reviewId) => {
+                                    try {
+                                      await rejectReview(reviewId);
+                                      refreshMsgs();
+                                    } catch (e) {
+                                      setChatError(e instanceof Error ? e.message : "Avvisning feilet");
+                                    }
+                                  }}
+                                />
+                              </div>
+                            )}
+
+                            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
+                              <span style={{ fontSize: 10, color: T.textFaint }}>{time}</span>
+                              {m.metadata && (() => {
+                                try {
+                                  const meta = typeof m.metadata === "string" ? JSON.parse(m.metadata) : m.metadata;
+                                  return meta?.model ? (
+                                    <span style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>{meta.model}</span>
+                                  ) : null;
+                                } catch { return null; }
+                              })()}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    {/* Message metadata */}
-                    {m.role === "assistant" && !isAgentMessage(m) ? (
-                      <div style={{ display: "flex", gap: 12, marginTop: 6, marginLeft: 38, fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                        <span>{time}</span>
-                        {meta?.tokensUsed && <span>{meta.tokensUsed.toLocaleString()} tokens</span>}
-                        {meta?.costUsd != null && <span>${meta.costUsd.toFixed(4)}</span>}
-                        {meta?.model && <span>{meta.model.split("/").pop()}</span>}
-                      </div>
-                    ) : m.role === "user" ? (
-                      <div style={{ marginTop: 4, fontSize: 10, fontFamily: T.mono, color: T.textFaint, textAlign: "right" }}>
-                        {time}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })
+                  );
+                });
+              })()
             )}
-            {sending && (
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {sending && !msgs.some(m => isAgentMessage(m)) && (
+              <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "4px 0" }}>
                 <div style={{
                   width: 28, height: 28, borderRadius: T.r, flexShrink: 0,
                   background: T.surface, border: `1px solid ${T.border}`,
@@ -672,19 +808,21 @@ function ChatPageInner() {
                 <span style={{
                   fontSize: 13, fontWeight: 500, fontFamily: T.mono,
                   position: "relative", overflow: "hidden",
-                  color: T.text, padding: "2px 0",
+                  color: T.textMuted, padding: "2px 4px",
                 }}>
                   TheFold tenker
                   <span style={{
                     position: "absolute",
                     top: 0, left: 0, right: 0, bottom: 0,
-                    background: "linear-gradient(90deg, transparent 0%, rgba(99,102,241,0.18) 50%, transparent 100%)",
+                    background: "linear-gradient(90deg, transparent 0%, rgba(99,102,241,0.15) 50%, transparent 100%)",
                     backgroundSize: "200% 100%",
                     animation: "shimmerMove 2s linear infinite",
                     pointerEvents: "none",
                   }} />
                 </span>
-                <span style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono }}>&middot; {thinkSeconds}s</span>
+                <span style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono }}>
+                  {thinkSeconds}s
+                </span>
               </div>
             )}
             {chatError && (
@@ -709,6 +847,12 @@ function ChatPageInner() {
               repo={curRepo || undefined}
               ghost={isGhost}
               onSubmit={handleSend}
+              onRepoChange={(r) => {
+                if (r) {
+                  const newConvId = repoConversationId(r);
+                  setAc(newConvId);
+                }
+              }}
               isPrivate={tab === "Privat"}
               skills={availableSkills}
               selectedSkillIds={selectedSkillIds}
@@ -716,6 +860,11 @@ function ChatPageInner() {
               subAgentsEnabled={subAgentsEnabled}
               onSubAgentsToggle={() => setSubAgentsEnabled((p) => !p)}
               repos={dynamicRepos}
+              isLoading={sending}
+              onCancel={() => {
+                if (ac) cancelChatGeneration(ac).catch(() => {});
+                setSending(false);
+              }}
             />
           </div>
         </div>

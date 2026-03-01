@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from "react";
 import { T } from "@/lib/tokens";
 import { GR } from "@/components/GridRow";
-import PixelCorners from "@/components/PixelCorners";
 import SectionLabel from "@/components/SectionLabel";
 import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
@@ -314,7 +313,6 @@ export default function AIPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
           {PROVIDER_KEYS.map((key, i) => {
             const config = PROVIDER_CONFIG[key];
             const backendProvider = providerMap[key];
@@ -393,7 +391,6 @@ export default function AIPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>KOSTNAD 7 DAGER</SectionLabel>
             <div
@@ -531,7 +528,6 @@ export default function AIPage() {
             overflow: "visible",
           }}
         >
-          <PixelCorners />
           <div
             style={{
               padding: "14px 20px",
@@ -676,7 +672,6 @@ export default function AIPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
           <div
             style={{
               padding: "14px 20px",
@@ -744,7 +739,6 @@ export default function AIPage() {
                 >
                   {m.displayName}
                 </span>
-                {m.tier >= 3 && <Tag variant="accent">primær</Tag>}
               </div>
               <span style={{ fontSize: 12, color: T.textSec }}>{m.providerName}</span>
               <span style={{ fontSize: 12, fontFamily: T.mono, color: T.textMuted }}>
@@ -819,34 +813,6 @@ export default function AIPage() {
                 placeholder="f.eks. Moonshot v1 128k"
                 style={inputStyle}
               />
-            </div>
-
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Tier</div>
-              <div style={{ display: "flex", gap: 6 }}>
-                {[
-                  { v: 1, l: "1 — Rask/billig" },
-                  { v: 3, l: "3 — Balansert" },
-                  { v: 5, l: "5 — Best kvalitet" },
-                ].map((t) => (
-                  <div
-                    key={t.v}
-                    onClick={() => setNewModel((prev) => ({ ...prev, tier: t.v }))}
-                    style={{
-                      padding: "6px 12px",
-                      fontSize: 12,
-                      fontFamily: T.mono,
-                      background: newModel.tier === t.v ? T.subtle : "transparent",
-                      color: newModel.tier === t.v ? T.text : T.textMuted,
-                      border: `1px solid ${newModel.tier === t.v ? T.border : "transparent"}`,
-                      borderRadius: 6,
-                      cursor: "pointer",
-                    }}
-                  >
-                    {t.l}
-                  </div>
-                ))}
-              </div>
             </div>
 
             <div style={{ marginBottom: 14 }}>

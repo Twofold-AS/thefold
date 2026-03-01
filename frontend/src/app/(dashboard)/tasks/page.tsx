@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { T } from "@/lib/tokens";
 import { GR } from "@/components/GridRow";
-import PixelCorners from "@/components/PixelCorners";
 import SectionLabel from "@/components/SectionLabel";
 import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
@@ -93,7 +92,7 @@ export default function TasksPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
-  const [newRepo, setNewRepo] = useState("thefold-api");
+  const [newRepo, setNewRepo] = useState("");
   const [creating, setCreating] = useState(false);
 
   const { data: taskData, loading: tasksLoading, refresh: refreshTasks } = useApiData(
@@ -101,9 +100,9 @@ export default function TasksPage() {
     [],
   );
   const { data: reviewData } = useApiData(() => listReviews({}), []);
-  const { data: repoData } = useApiData(() => listRepos("thefold-dev"), []);
+  const { data: repoData } = useApiData(() => listRepos(), []);
   const { data: skillsData } = useApiData(() => listSkills(), []);
-  const dynamicRepos = repoData?.repos?.map(r => r.name) ?? ["thefold-api", "thefold-frontend"];
+  const dynamicRepos = repoData?.repos?.map(r => r.name) ?? [];
   const availableSkills = (skillsData?.skills ?? []).filter(s => s.enabled);
   const [newSkillIds, setNewSkillIds] = useState<string[]>([]);
 
@@ -188,11 +187,20 @@ export default function TasksPage() {
     if (!newTitle.trim()) return;
     setCreating(true);
     try {
-      await createTask({ title: newTitle, description: newDesc, repo: newRepo });
+      await createTask({
+        title: newTitle,
+        description: newDesc,
+        repo: newRepo || dynamicRepos[0] || undefined,
+        labels: newSkillIds.length > 0 ? newSkillIds.map(id => {
+          const sk = availableSkills.find(s => s.id === id);
+          return sk ? `skill:${sk.name}` : "";
+        }).filter(Boolean) : undefined,
+      });
       setShowCreate(false);
       setNewTitle("");
       setNewDesc("");
-      setNewRepo("thefold-api");
+      setNewRepo(dynamicRepos[0] || "");
+      setNewSkillIds([]);
       refreshTasks();
     } catch (e) {
       alert(`Feil ved opprettelse: ${e instanceof Error ? e.message : String(e)}`);
@@ -258,7 +266,6 @@ export default function TasksPage() {
             overflow: "hidden",
           }}
         >
-          <PixelCorners />
           {/* Task list */}
           <div style={{ borderRight: t ? `1px solid ${T.border}` : "none" }}>
             {tasksLoading ? (
@@ -621,7 +628,7 @@ export default function TasksPage() {
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Repo</div>
               <select
-                value={newRepo}
+                value={newRepo || dynamicRepos[0] || ""}
                 onChange={(e) => setNewRepo(e.target.value)}
                 style={{
                   ...inputStyle,

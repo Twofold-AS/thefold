@@ -3,7 +3,6 @@ import {
   getModelForRole,
   getSystemPromptForRole,
   getMaxTokensForRole,
-  ROLE_MODEL_MAP,
   type SubAgentRole,
   type BudgetMode,
 } from "./sub-agents";
@@ -29,17 +28,11 @@ describe("getModelForRole", () => {
     expect(getModelForRole("researcher", "balanced")).toBe("claude-haiku-4-5-20251001");
   });
 
-  it("respects quality_first mode", () => {
-    expect(getModelForRole("implementer", "quality_first")).toBe("claude-opus-4-5-20251101");
-    expect(getModelForRole("reviewer", "quality_first")).toBe("claude-opus-4-5-20251101");
-    expect(getModelForRole("tester", "quality_first")).toBe("claude-sonnet-4-5-20250929");
-  });
-
-  it("respects aggressive_save mode", () => {
-    const roles: SubAgentRole[] = ["planner", "implementer", "tester", "reviewer", "documenter", "researcher"];
-    for (const role of roles) {
-      expect(getModelForRole(role, "aggressive_save")).toBe("claude-haiku-4-5-20251001");
-    }
+  it("ignores budget mode (tag-based routing, not cost-based)", () => {
+    // BudgetMode is preserved for API compatibility but ignored in routing
+    expect(getModelForRole("implementer", "quality_first")).toBe("claude-sonnet-4-5-20250929");
+    expect(getModelForRole("implementer", "aggressive_save")).toBe("claude-sonnet-4-5-20250929");
+    expect(getModelForRole("tester", "quality_first")).toBe("claude-haiku-4-5-20251001");
   });
 
   it("defaults to balanced when no mode specified", () => {
@@ -122,16 +115,15 @@ describe("planSubAgents", () => {
     expect(implementer!.dependsOn).toContain(planner!.id);
   });
 
-  it("budget mode affects model selection", () => {
+  it("budget mode parameter is accepted but ignored", () => {
     const balanced = planSubAgents("task", "plan", 6, "balanced");
     const aggressive = planSubAgents("task", "plan", 6, "aggressive_save");
 
     const balancedModels = balanced.agents.map((a) => a.model);
     const aggressiveModels = aggressive.agents.map((a) => a.model);
 
-    // Balanced uses sonnet for implementer, aggressive uses haiku
-    expect(balancedModels).toContain("claude-sonnet-4-5-20250929");
-    expect(aggressiveModels.every((m) => m === "claude-haiku-4-5-20251001")).toBe(true);
+    // All modes now use the same tag-based model mapping
+    expect(balancedModels).toEqual(aggressiveModels);
   });
 });
 
@@ -221,11 +213,11 @@ describe("estimateSubAgentCostPreview", () => {
     expect(high.agents.length).toBeGreaterThan(medium.agents.length);
   });
 
-  it("budget mode affects cost estimates", () => {
+  it("budget mode parameter accepted but produces same costs", () => {
     const balanced = estimateSubAgentCostPreview(7, "balanced");
     const aggressive = estimateSubAgentCostPreview(7, "aggressive_save");
-    // Aggressive save should be cheaper
-    expect(aggressive.withSubAgents).toBeLessThanOrEqual(balanced.withSubAgents);
+    // All modes now use the same models — costs are equal
+    expect(aggressive.withSubAgents).toBe(balanced.withSubAgents);
   });
 });
 

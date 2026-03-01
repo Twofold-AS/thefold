@@ -1,8 +1,68 @@
 import { api, APIError } from "encore.dev/api";
 import { getAuthData } from "~encore/auth";
+import { secret } from "encore.dev/config";
 import log from "encore.dev/log";
+import * as crypto from "crypto";
 import { integrationsDB as db } from "./db";
 import type { IntegrationConfig, SlackEvent, DiscordInteraction } from "./types";
+
+// Webhook signing secrets — if not set, webhooks are rejected
+const slackSigningSecret = secret("SlackSigningSecret");
+const discordPublicKey = secret("DiscordPublicKey");
+
+function isSecretSet(getter: () => string): boolean {
+  try {
+    const val = getter();
+    return !!val && val.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function verifySlackSignature(
+  signingSecret: string,
+  signature: string,
+  timestamp: string,
+  body: string
+): boolean {
+  // Replay protection: reject if timestamp is > 5 min old
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - parseInt(timestamp)) > 300) return false;
+
+  const sigBaseString = `v0:${timestamp}:${body}`;
+  const mySignature = "v0=" + crypto
+    .createHmac("sha256", signingSecret)
+    .update(sigBaseString)
+    .digest("hex");
+
+  return crypto.timingSafeEqual(
+    Buffer.from(mySignature),
+    Buffer.from(signature)
+  );
+}
+
+function verifyDiscordSignature(
+  publicKey: string,
+  signature: string,
+  timestamp: string,
+  body: string
+): boolean {
+  try {
+    const ed25519 = crypto.verify(
+      null,
+      Buffer.from(timestamp + body),
+      {
+        key: Buffer.from(publicKey, "hex"),
+        format: "der",
+        type: "spki",
+      },
+      Buffer.from(signature, "hex")
+    );
+    return ed25519;
+  } catch {
+    return false;
+  }
+}
 
 // --- CRUD Endpoints ---
 
@@ -93,87 +153,136 @@ export const deleteConfig = api(
   }
 );
 
-// --- Slack Webhook ---
+// --- Slack Webhook (raw for signature verification) ---
 
-interface SlackWebhookResponse {
-  ok?: boolean;
-  challenge?: string;
-}
+export const slackWebhook = api.raw(
+  { method: "POST", path: "/integrations/slack/webhook", expose: true },
+  async (req, res) => {
+    // Require signing secret
+    if (!isSecretSet(slackSigningSecret)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Slack webhook signature verification not configured" }));
+      return;
+    }
 
-export const slackWebhook = api(
-  { method: "POST", path: "/integrations/slack/webhook", expose: true, auth: false },
-  async (req: SlackEvent): Promise<SlackWebhookResponse> => {
+    // Read raw body
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const rawBody = Buffer.concat(chunks).toString("utf-8");
+
+    // Verify signature
+    const signature = (req.headers["x-slack-signature"] as string) || "";
+    const timestamp = (req.headers["x-slack-request-timestamp"] as string) || "";
+
+    if (!verifySlackSignature(slackSigningSecret(), signature, timestamp, rawBody)) {
+      log.warn("Slack webhook: invalid signature");
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid signature" }));
+      return;
+    }
+
+    const event: SlackEvent = JSON.parse(rawBody);
+
     // URL verification challenge
-    if (req.type === "url_verification" && req.challenge) {
-      return { challenge: req.challenge };
+    if (event.type === "url_verification" && event.challenge) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ challenge: event.challenge }));
+      return;
     }
 
     // Handle message events
-    if (req.event?.type === "message" && !req.event.bot_id && req.team_id) {
+    if (event.event?.type === "message" && !event.event.bot_id && event.team_id) {
       const config = await db.queryRow<IntegrationConfig>`
         SELECT id, user_id as "userId", platform, webhook_url as "webhookUrl",
                default_repo as "defaultRepo", enabled
         FROM integration_configs
-        WHERE team_id = ${req.team_id} AND platform = 'slack' AND enabled = true
+        WHERE team_id = ${event.team_id} AND platform = 'slack' AND enabled = true
       `;
 
-      if (!config) return { ok: true };
-
-      try {
-        const { chat } = await import("~encore/clients");
-
-        await chat.send({
-          conversationId: `slack-${req.event.channel}-${config.userId}`,
-          message: req.event.text,
-          repoName: config.defaultRepo || undefined,
-          source: "slack",
-        });
-      } catch (e) {
-        log.warn("Slack message processing failed", { error: e instanceof Error ? e.message : String(e) });
+      if (config) {
+        try {
+          const { chat } = await import("~encore/clients");
+          await chat.send({
+            conversationId: `slack-${event.event.channel}-${config.userId}`,
+            message: event.event.text,
+            repoName: config.defaultRepo || undefined,
+            source: "slack",
+          });
+        } catch (e) {
+          log.warn("Slack message processing failed", { error: e instanceof Error ? e.message : String(e) });
+        }
       }
     }
 
-    return { ok: true };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
   }
 );
 
-// --- Discord Webhook ---
+// --- Discord Webhook (raw for signature verification) ---
 
-interface DiscordWebhookResponse {
-  type: number;
-  data?: { content: string };
-}
+export const discordWebhook = api.raw(
+  { method: "POST", path: "/integrations/discord/webhook", expose: true },
+  async (req, res) => {
+    // Require public key
+    if (!isSecretSet(discordPublicKey)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Discord webhook signature verification not configured" }));
+      return;
+    }
 
-export const discordWebhook = api(
-  { method: "POST", path: "/integrations/discord/webhook", expose: true, auth: false },
-  async (req: DiscordInteraction): Promise<DiscordWebhookResponse> => {
+    // Read raw body
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const rawBody = Buffer.concat(chunks).toString("utf-8");
+
+    // Verify signature
+    const signature = (req.headers["x-signature-ed25519"] as string) || "";
+    const timestamp = (req.headers["x-signature-timestamp"] as string) || "";
+
+    if (!verifyDiscordSignature(discordPublicKey(), signature, timestamp, rawBody)) {
+      log.warn("Discord webhook: invalid signature");
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid signature" }));
+      return;
+    }
+
+    const interaction: DiscordInteraction = JSON.parse(rawBody);
+
     // PING
-    if (req.type === 1) {
-      return { type: 1 };
+    if (interaction.type === 1) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ type: 1 }));
+      return;
     }
 
     // APPLICATION_COMMAND
-    if (req.type === 2 && req.guild_id) {
+    if (interaction.type === 2 && interaction.guild_id) {
       const config = await db.queryRow<IntegrationConfig>`
         SELECT id, user_id as "userId", platform, webhook_url as "webhookUrl",
                default_repo as "defaultRepo", enabled
         FROM integration_configs
-        WHERE team_id = ${req.guild_id} AND platform = 'discord' AND enabled = true
+        WHERE team_id = ${interaction.guild_id} AND platform = 'discord' AND enabled = true
       `;
 
       if (!config) {
-        return { type: 4, data: { content: "TheFold er ikke konfigurert for denne serveren." } };
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ type: 4, data: { content: "TheFold er ikke konfigurert for denne serveren." } }));
+        return;
       }
 
-      const userMessage = req.data?.options?.[0]?.value || "";
+      const userMessage = interaction.data?.options?.[0]?.value || "";
+      processDiscordMessage(userMessage, interaction.channel_id || "", config).catch(e =>
+        log.warn("Discord async processing failed", { error: e instanceof Error ? e.message : String(e) })
+      );
 
-      // Process async — return deferred response immediately
-      processDiscordMessage(userMessage, req.channel_id || "", config).catch(console.error);
-
-      return { type: 5 }; // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ type: 5 }));
+      return;
     }
 
-    return { type: 1 };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ type: 1 }));
   }
 );
 
@@ -192,39 +301,3 @@ async function processDiscordMessage(message: string, channelId: string, config:
   }
 }
 
-// --- Outgoing Messages (Two-Way Communication) ---
-
-export async function sendToSlack(webhookUrl: string, message: string): Promise<void> {
-  try {
-    const res = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text: message,
-        unfurl_links: false,
-      }),
-    });
-    if (!res.ok) {
-      log.warn("Slack webhook failed", { status: res.status });
-    }
-  } catch (err) {
-    log.warn("Failed to send to Slack", { error: err instanceof Error ? err.message : String(err) });
-  }
-}
-
-export async function sendToDiscord(webhookUrl: string, message: string): Promise<void> {
-  try {
-    // Discord has a 2000 char limit
-    const truncated = message.length > 1900 ? message.substring(0, 1900) + "..." : message;
-    const res = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content: truncated }),
-    });
-    if (!res.ok) {
-      log.warn("Discord webhook failed", { status: res.status });
-    }
-  } catch (err) {
-    log.warn("Failed to send to Discord", { error: err instanceof Error ? err.message : String(err) });
-  }
-}

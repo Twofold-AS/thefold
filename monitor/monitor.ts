@@ -57,7 +57,7 @@ async function runDependencyAudit(repo: string, sandboxId: string): Promise<Heal
   try {
     const result = await sandbox.runCommand({
       sandboxId,
-      command: "npm audit --json 2>&1",
+      command: "pnpm audit --json 2>&1",
       timeout: 60,
     });
 
@@ -84,14 +84,14 @@ async function runDependencyAudit(repo: string, sandboxId: string): Promise<Heal
         critical: criticalVulns,
         total: (auditData as any)?.metadata?.vulnerabilities?.total ?? 0,
       },
-      suggestedAction: status === "fail" ? "Run npm audit fix --force" : undefined,
+      suggestedAction: status === "fail" ? "Run pnpm audit --fix" : undefined,
     };
   } catch {
     return {
       repo,
       checkType: "dependency_audit",
       status: "warn",
-      details: { error: "Could not run npm audit" },
+      details: { error: "Could not run pnpm audit" },
     };
   }
 }
@@ -100,7 +100,7 @@ async function runTestCoverage(repo: string, sandboxId: string): Promise<HealthC
   try {
     const result = await sandbox.runCommand({
       sandboxId,
-      command: "npm test -- --coverage --passWithNoTests 2>&1",
+      command: "pnpm test -- --coverage --passWithNoTests 2>&1",
       timeout: 120,
     });
 
@@ -132,7 +132,7 @@ async function runCodeQuality(repo: string, sandboxId: string): Promise<HealthCh
   try {
     const result = await sandbox.runCommand({
       sandboxId,
-      command: "npx eslint . --no-error-on-unmatched-pattern --format json 2>&1",
+      command: "pnpm eslint . --no-error-on-unmatched-pattern --format json 2>&1",
       timeout: 60,
     });
 
@@ -161,7 +161,7 @@ async function runCodeQuality(repo: string, sandboxId: string): Promise<HealthCh
       checkType: "code_quality",
       status,
       details: { errors: totalErrors, warnings: totalWarnings, filesChecked: eslintData.length },
-      suggestedAction: status === "fail" ? "Run npx eslint . --fix" : undefined,
+      suggestedAction: status === "fail" ? "Run pnpm eslint . --fix" : undefined,
     };
   } catch {
     return {
@@ -251,7 +251,10 @@ export const runCheck = api(
     const results: HealthCheckResult[] = [];
 
     // Create a sandbox for running checks
-    const [owner, name] = req.repo.includes("/") ? req.repo.split("/") : ["thefold-dev", req.repo];
+    if (!req.repo.includes("/")) {
+      throw APIError.invalidArgument("repo must be in 'owner/name' format");
+    }
+    const [owner, name] = req.repo.split("/");
 
     let sandboxId: string | null = null;
     try {

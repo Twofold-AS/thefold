@@ -108,6 +108,48 @@ export async function getInstallationToken(owner: string): Promise<string> {
   return tokenData.token;
 }
 
+// Cache for installed org (5 min TTL)
+let cachedInstalledOrg: { owner: string; expiresAt: number } | null = null;
+
+/**
+ * Get the org/user where the GitHub App is installed.
+ * Returns the first installation's account login, cached for 5 minutes.
+ */
+export async function getInstalledOrg(): Promise<string | null> {
+  if (cachedInstalledOrg && cachedInstalledOrg.expiresAt > Date.now()) {
+    return cachedInstalledOrg.owner;
+  }
+
+  if (!isGitHubAppEnabled()) {
+    return null;
+  }
+
+  try {
+    const jwt = await generateAppJWT();
+    const res = await fetch("https://api.github.com/app/installations", {
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: "application/vnd.github.v3+json",
+      },
+    });
+
+    if (!res.ok) return null;
+
+    const installations = await res.json();
+    if (!Array.isArray(installations) || installations.length === 0) return null;
+
+    const owner = installations[0].account?.login;
+    if (owner) {
+      cachedInstalledOrg = { owner, expiresAt: Date.now() + 5 * 60 * 1000 };
+      log.info("Resolved installed org from GitHub App", { owner });
+    }
+    return owner || null;
+  } catch (err) {
+    log.warn("getInstalledOrg failed", { error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+}
+
 /**
  * Clear cached token for an owner (useful for testing or forced refresh).
  */

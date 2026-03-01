@@ -1,5 +1,11 @@
 import { api, APIError } from "encore.dev/api";
+import log from "encore.dev/log";
 import { db } from "./db";
+
+// --- In-memory provider cache ---
+let cachedProviders: AIProvider[] | null = null;
+let cacheTimestamp = 0;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // --- Types ---
 
@@ -77,49 +83,82 @@ function parseModel(row: ModelRow): AIModelRow {
 export const listProviders = api(
   { method: "GET", path: "/ai/providers", expose: true, auth: true },
   async (): Promise<{ providers: AIProvider[] }> => {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const providers: AIProvider[] = [];
+    // Return cached data if fresh
+    if (cachedProviders && Date.now() - cacheTimestamp < CACHE_TTL_MS) {
+      return { providers: cachedProviders };
+    }
 
-        const providerRows = db.query<ProviderRow>`
-          SELECT id, name, slug, base_url, api_key_set, enabled
-          FROM ai_providers ORDER BY name ASC
-        `;
+    try {
+      // Single JOIN query — no N+1
+      const rows = db.query<{
+        p_id: string; p_name: string; slug: string; base_url: string | null;
+        api_key_set: boolean; p_enabled: boolean;
+        m_id: string | null; provider_id: string; model_id: string; display_name: string;
+        input_price: string | number; output_price: string | number;
+        context_window: number; max_output_tokens: number;
+        tags: string | string[]; tier: number; m_enabled: boolean;
+        supports_tools: boolean; supports_vision: boolean;
+      }>`
+        SELECT
+          p.id AS p_id, p.name AS p_name, p.slug, p.base_url, p.api_key_set, p.enabled AS p_enabled,
+          m.id AS m_id, m.provider_id, m.model_id, m.display_name,
+          m.input_price, m.output_price, m.context_window, m.max_output_tokens,
+          m.tags, m.tier, m.enabled AS m_enabled, m.supports_tools, m.supports_vision
+        FROM ai_providers p
+        LEFT JOIN ai_models m ON m.provider_id = p.id
+        ORDER BY p.name ASC, m.tier ASC, m.input_price ASC
+      `;
 
-        for await (const p of providerRows) {
-          const models: AIModelRow[] = [];
-          const modelRows = db.query<ModelRow>`
-            SELECT id, provider_id, model_id, display_name, input_price, output_price,
-              context_window, max_output_tokens, tags, tier, enabled, supports_tools, supports_vision
-            FROM ai_models WHERE provider_id = ${p.id}::uuid
-            ORDER BY tier ASC, input_price ASC
-          `;
-          for await (const m of modelRows) {
-            models.push(parseModel(m));
-          }
+      const providerMap = new Map<string, AIProvider>();
 
-          providers.push({
-            id: p.id,
-            name: p.name,
-            slug: p.slug,
-            baseUrl: p.base_url,
-            apiKeySet: p.api_key_set,
-            enabled: p.enabled,
-            models,
+      for await (const row of rows) {
+        if (!providerMap.has(row.p_id)) {
+          providerMap.set(row.p_id, {
+            id: row.p_id,
+            name: row.p_name,
+            slug: row.slug,
+            baseUrl: row.base_url,
+            apiKeySet: row.api_key_set,
+            enabled: row.p_enabled,
+            models: [],
           });
         }
 
-        return { providers };
-      } catch (e) {
-        if (attempt < 2) {
-          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-        } else {
-          throw e;
+        if (row.m_id) {
+          providerMap.get(row.p_id)!.models.push(parseModel({
+            id: row.m_id,
+            provider_id: row.provider_id,
+            model_id: row.model_id,
+            display_name: row.display_name,
+            input_price: row.input_price,
+            output_price: row.output_price,
+            context_window: row.context_window,
+            max_output_tokens: row.max_output_tokens,
+            tags: row.tags,
+            tier: row.tier,
+            enabled: row.m_enabled,
+            supports_tools: row.supports_tools,
+            supports_vision: row.supports_vision,
+          }));
         }
       }
+
+      const providers = Array.from(providerMap.values());
+
+      // Update cache
+      cachedProviders = providers;
+      cacheTimestamp = Date.now();
+
+      return { providers };
+    } catch (e) {
+      log.warn("listProviders failed", { error: e instanceof Error ? e.message : String(e) });
+      // Return stale cache if available
+      if (cachedProviders) {
+        log.warn("listProviders: returning stale cache");
+        return { providers: cachedProviders };
+      }
+      throw e;
     }
-    // TypeScript needs this — unreachable but satisfies return type
-    return { providers: [] };
   }
 );
 

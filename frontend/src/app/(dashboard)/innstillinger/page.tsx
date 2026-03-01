@@ -10,7 +10,6 @@ import Tag from "@/components/Tag";
 import Btn from "@/components/Btn";
 import Toggle from "@/components/Toggle";
 import SectionLabel from "@/components/SectionLabel";
-import PixelCorners from "@/components/PixelCorners";
 import Skeleton from "@/components/Skeleton";
 import { GR } from "@/components/GridRow";
 
@@ -121,7 +120,6 @@ export default function InnstillingerPage() {
 
       <GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
-          <PixelCorners />
 
           {/* Left column: PROFIL + AUTENTISERING + Revoke */}
           <div style={{ padding: 24, borderRight: `1px solid ${T.border}` }}>

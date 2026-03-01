@@ -1,6 +1,6 @@
 import log from "encore.dev/log";
 import { secret } from "encore.dev/config";
-import { github, linear, memory, sandbox, tasks, ai, registry } from "~encore/clients";
+import { agent, github, linear, memory, sandbox, tasks, ai, registry } from "~encore/clients";
 import { savePhaseMetrics } from "./metrics";
 import { completeJob } from "./db";
 import { validateAgentScope } from "./helpers";
@@ -55,6 +55,57 @@ export interface CompletionHelpers {
     prUrl?: string;
   }) => Promise<void>;
   updateLinearIfExists: (ctx: AgentExecutionContext, msg: string, status: string) => Promise<void>;
+}
+
+/**
+ * Auto-start tasks that depend on the completed task.
+ * Checks that ALL dependencies (not just this one) are done before starting.
+ */
+export async function startDependentTasks(completedTaskId: string, conversationId: string, repoName?: string, repoOwner?: string): Promise<void> {
+  try {
+    const dependents = await tasks.listTasks({ limit: 50 });
+    const waiting = dependents.tasks.filter((t: any) =>
+      t.dependsOn?.includes(completedTaskId) &&
+      ["backlog", "planned"].includes(t.status)
+    );
+
+    for (const dep of waiting) {
+      // Check that ALL dependencies are done, not just this one
+      let allDepsDone = true;
+      if (dep.dependsOn && dep.dependsOn.length > 0) {
+        for (const depId of dep.dependsOn) {
+          if (depId === completedTaskId) continue;
+          try {
+            const depTask = await tasks.getTaskInternal({ id: depId });
+            if (depTask.task.status !== "done") {
+              allDepsDone = false;
+              break;
+            }
+          } catch {
+            allDepsDone = false;
+            break;
+          }
+        }
+      }
+
+      if (allDepsDone) {
+        log.info("Auto-starting dependent task", { taskId: dep.id, title: dep.title, triggeredBy: completedTaskId });
+        try {
+          await agent.startTask({
+            taskId: dep.id,
+            conversationId,
+            repoName: dep.repo || repoName || "",
+            repoOwner: repoOwner || undefined,
+            userMessage: `Auto-startet: avhengighet "${completedTaskId}" er ferdig`,
+          });
+        } catch (e) {
+          log.warn("Failed to auto-start dependent task", { taskId: dep.id, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+    }
+  } catch (e) {
+    log.warn("startDependentTasks failed", { error: e instanceof Error ? e.message : String(e) });
+  }
 }
 
 /**
@@ -162,6 +213,9 @@ export async function completeTask(
     } catch (err) {
       log.warn("updateTaskStatus to done failed", { error: err instanceof Error ? err.message : String(err) });
     }
+
+    // Auto-start tasks that depend on this completed task
+    await startDependentTasks(ctx.thefoldTaskId, ctx.conversationId, ctx.repoName, ctx.repoOwner);
   }
 
   await audit({

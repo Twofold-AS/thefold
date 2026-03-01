@@ -158,7 +158,9 @@ export const create = api(
 
     try {
       // Clone the repo into the sandbox
-      const cloneUrl = `https://x-access-token:${githubToken()}@github.com/${req.repoOwner}/${req.repoName}.git`;
+      // Sanitize repo name before building git URL — spaces break git commands
+      const safeRepo = (req.repoName || "").trim().replace(/\s+/g, "-").replace(/[^a-zA-Z0-9._-]/g, "");
+      const cloneUrl = `https://x-access-token:${githubToken()}@github.com/${req.repoOwner}/${safeRepo}.git`;
 
       // Try clone with branch, fallback for empty repos
       const repoPath = `${dir}/repo`;

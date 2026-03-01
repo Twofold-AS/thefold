@@ -44,7 +44,7 @@ function parseComponent(row: Record<string, unknown>): Component {
     dependencies: (row.dependencies as string[]) ?? [],
     sourceRepo: row.source_repo as string,
     sourceTaskId: (row.source_task_id as string) ?? null,
-    extractedBy: (row.extracted_by as string) ?? "thefold",
+    extractedBy: (row.extracted_by as string) ?? "unknown",
     usedByRepos: (row.used_by_repos as string[]) ?? [],
     timesUsed: (row.times_used as number) ?? 0,
     testCoverage: (row.test_coverage as number) ?? null,
@@ -108,7 +108,7 @@ export const register = api(
         ${req.version ?? "1.0.0"}, ${req.previousVersionId ?? null},
         ${filesJson}::jsonb, ${req.entryPoint ?? null}, ${deps}::text[],
         ${req.sourceRepo.trim()}, ${req.sourceTaskId ?? null},
-        ${req.extractedBy ?? "thefold"}, ${tags}::text[]
+        ${req.extractedBy ?? "unknown"}, ${tags}::text[]
       )
       RETURNING *
     `;

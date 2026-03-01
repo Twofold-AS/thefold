@@ -2,7 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
 import log from "encore.dev/log";
 import { cache } from "~encore/clients";
-import { isGitHubAppEnabled, getInstallationToken } from "./github-app";
+import { isGitHubAppEnabled, getInstallationToken, getInstalledOrg } from "./github-app";
 
 const githubToken = secret("GitHubToken");
 
@@ -583,7 +583,7 @@ export const createPR = api(
 // --- List repos for an org/user ---
 
 interface ListReposRequest {
-  owner: string;
+  owner?: string; // Optional — if omitted, lists repos accessible to the authenticated user
 }
 
 interface RepoInfo {
@@ -607,8 +607,23 @@ interface ListReposResponse {
 export const listRepos = api(
   { method: "POST", path: "/github/repos", expose: true, auth: true },
   async (req: ListReposRequest): Promise<ListReposResponse> => {
-    const token = await resolveToken(req.owner);
-    const data = await ghApi(`/orgs/${req.owner}/repos?sort=pushed&per_page=30&type=all`, { token });
+    let targetOwner = req.owner;
+
+    // If no owner specified: resolve from GitHub App installation
+    if (!targetOwner) {
+      targetOwner = await getInstalledOrg() ?? undefined;
+    }
+
+    if (!targetOwner) {
+      log.warn("listRepos: no owner and no GitHub App installation found");
+      return { repos: [] };
+    }
+
+    const token = await resolveToken(targetOwner);
+    const data = await ghApi(
+      `/orgs/${targetOwner}/repos?sort=pushed&per_page=30&type=all`,
+      { token }
+    );
 
     const repos: RepoInfo[] = (data as Array<Record<string, unknown>>)
       .filter((r) => !r.archived)
@@ -627,6 +642,107 @@ export const listRepos = api(
       }));
 
     return { repos };
+  }
+);
+
+// --- Ensure a repository exists (creates if not found, works with PAT or App) ---
+
+interface EnsureRepoRequest {
+  owner: string;
+  name: string;
+  description?: string;
+  isPrivate?: boolean;
+}
+
+interface EnsureRepoResponse {
+  exists: boolean;
+  created: boolean;
+  url: string;
+}
+
+export const ensureRepoExists = api(
+  { method: "POST", path: "/github/repo/ensure", expose: false },
+  async (req: EnsureRepoRequest): Promise<EnsureRepoResponse> => {
+    // Sanitize repo name — spaces and special chars break git URLs
+    const safeName = req.name
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-zA-Z0-9._-]/g, "")
+      .substring(0, 100);
+
+    if (!safeName) {
+      throw APIError.invalidArgument("Ugyldig reponavn etter sanitering");
+    }
+
+    const token = await resolveToken(req.owner);
+
+    // 1. Check if repo already exists
+    const checkRes = await fetch(`https://api.github.com/repos/${req.owner}/${safeName}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github.v3+json",
+      },
+    });
+
+    if (checkRes.ok) {
+      const repo = await checkRes.json();
+      return { exists: true, created: false, url: repo.html_url };
+    }
+
+    if (checkRes.status !== 404) {
+      const error = await checkRes.text();
+      throw APIError.internal(`GitHub check repo failed: ${checkRes.status} ${error}`);
+    }
+
+    // 2. Repo not found — create it
+    log.info("ensureRepoExists: creating repo", { owner: req.owner, name: safeName });
+
+    // Try org endpoint first, fall back to user endpoint
+    let createRes = await fetch(`https://api.github.com/orgs/${req.owner}/repos`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: safeName,
+        description: req.description || "Created by TheFold",
+        private: req.isPrivate ?? true,
+        auto_init: true,
+      }),
+    });
+
+    // If org endpoint fails (not an org), try user endpoint
+    if (createRes.status === 404) {
+      createRes = await fetch("https://api.github.com/user/repos", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github.v3+json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          name: safeName,
+          description: req.description || "Created by TheFold",
+          private: req.isPrivate ?? true,
+          auto_init: true,
+        }),
+      });
+    }
+
+    if (!createRes.ok) {
+      const error = await createRes.text();
+      throw APIError.internal(`Failed to create repo ${req.owner}/${safeName}: ${createRes.status} ${error}`);
+    }
+
+    const repo = await createRes.json();
+    log.info("ensureRepoExists: repo created", { url: repo.html_url });
+
+    // 3. Wait briefly for GitHub to finish initializing the repo
+    await new Promise(r => setTimeout(r, 2000));
+
+    return { exists: true, created: true, url: repo.html_url };
   }
 );
 
@@ -651,6 +767,17 @@ export const createRepo = api(
       throw APIError.failedPrecondition("GitHub App not enabled. Set GitHubAppEnabled=true");
     }
 
+    // Sanitize repo name — spaces and special chars break git URLs
+    const safeName = req.name
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-zA-Z0-9._-]/g, "")
+      .substring(0, 100);
+
+    if (!safeName) {
+      throw APIError.invalidArgument("Ugyldig reponavn etter sanitering");
+    }
+
     const token = await getInstallationToken(req.org);
 
     const res = await fetch(`https://api.github.com/orgs/${req.org}/repos`, {
@@ -661,7 +788,7 @@ export const createRepo = api(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        name: req.name,
+        name: safeName,
         description: req.description || "Created by TheFold",
         private: req.isPrivate ?? true,
         auto_init: true,
@@ -675,5 +802,22 @@ export const createRepo = api(
 
     const repo = await res.json();
     return { url: repo.html_url, cloneUrl: repo.clone_url };
+  }
+);
+
+// --- Get installed GitHub App org/owner ---
+
+interface GetInstalledOrgResponse {
+  owner: string;
+}
+
+export const getGitHubOwner = api(
+  { method: "GET", path: "/github/owner", expose: false },
+  async (): Promise<GetInstalledOrgResponse> => {
+    const owner = await getInstalledOrg();
+    if (!owner) {
+      throw APIError.failedPrecondition("No GitHub App installation found. Is the GitHub App installed?");
+    }
+    return { owner };
   }
 );

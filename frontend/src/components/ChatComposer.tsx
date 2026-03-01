@@ -3,26 +3,30 @@
 import { useState, useEffect } from "react";
 import { T } from "@/lib/tokens";
 import ChatInput from "@/components/ChatInput";
-import dynamic from "next/dynamic";
-
-const Particles = dynamic(() => import("@/components/effects/Particles"), { ssr: false });
 
 interface ChatComposerProps {
   onSubmit?: (msg: string, repo: string | null, ghost: boolean) => void;
   heading?: string;
   defaultGhost?: boolean;
+  onGhostChange?: (ghost: boolean) => void;
   skills?: Array<{ id: string; name: string; enabled: boolean }>;
   selectedSkillIds?: string[];
   onSkillsChange?: (ids: string[]) => void;
   subAgentsEnabled?: boolean;
   onSubAgentsToggle?: () => void;
+  repos?: string[];
 }
 
-export default function ChatComposer({ onSubmit, heading, defaultGhost, skills, selectedSkillIds, onSkillsChange, subAgentsEnabled, onSubAgentsToggle }: ChatComposerProps) {
+export default function ChatComposer({ onSubmit, heading, defaultGhost, onGhostChange, skills, selectedSkillIds, onSkillsChange, subAgentsEnabled, onSubAgentsToggle, repos }: ChatComposerProps) {
   const [repo, setRepo] = useState<string | null>(null);
   const [ghost, setGhost] = useState(defaultGhost ?? false);
 
   useEffect(() => { setGhost(defaultGhost ?? false); }, [defaultGhost]);
+
+  const handleGhostChange = (newGhost: boolean) => {
+    setGhost(newGhost);
+    onGhostChange?.(newGhost);
+  };
 
   return (
     <div
@@ -36,26 +40,6 @@ export default function ChatComposer({ onSubmit, heading, defaultGhost, skills, 
         position: "relative",
       }}
     >
-      {/* Particles background */}
-      <div style={{
-        position: "absolute",
-        inset: 0,
-        pointerEvents: "none",
-        zIndex: 0,
-      }}>
-        <Particles
-          particleColors={["#ffffff"]}
-          particleCount={800}
-          particleSpread={30}
-          speed={0.1}
-          particleBaseSize={200}
-          moveParticlesOnHover={false}
-          alphaParticles={false}
-          disableRotation={false}
-          pixelRatio={2}
-        />
-      </div>
-
       {/* Heading */}
       <div style={{ paddingBottom: 32, textAlign: "center", position: "relative", zIndex: 1 }}>
         <h2 style={{
@@ -78,14 +62,15 @@ export default function ChatComposer({ onSubmit, heading, defaultGhost, skills, 
           <ChatInput
             repo={ghost ? null : repo}
             onSubmit={(msg, r) => onSubmit && onSubmit(msg, r ?? null, ghost)}
-            onRepoChange={setRepo}
+            onRepoChange={(r) => setRepo(r)}
             ghost={ghost}
-            onGhostChange={setGhost}
+            onGhostChange={handleGhostChange}
             skills={skills}
             selectedSkillIds={selectedSkillIds}
             onSkillsChange={onSkillsChange}
             subAgentsEnabled={subAgentsEnabled}
             onSubAgentsToggle={onSubAgentsToggle}
+            repos={repos}
           />
         </div>
       </div>

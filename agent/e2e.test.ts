@@ -49,8 +49,8 @@ describe.skip("Test 1: Enkel task-flyt (uten review)", () => {
       taskId: `e2e-simple-${Date.now()}`,
       taskDescription: "Add a comment to the top of agent/types.ts explaining the module purpose",
       userMessage: "Add a comment to the top of agent/types.ts",
-      repoOwner: "thefold-dev",
-      repoName: "thefold",
+      repoOwner: "test-org",
+      repoName: "test-repo",
       branch: "main",
       modelMode: "auto",
       selectedModel: "claude-sonnet-4-5-20250929",
@@ -158,8 +158,8 @@ describe.skip("Test 2: Task med review-flyt", () => {
       taskId: `e2e-review-${Date.now()}`,
       taskDescription: "Add a comment to agent/db.ts explaining the database purpose",
       userMessage: "Add a comment",
-      repoOwner: "thefold-dev",
-      repoName: "thefold",
+      repoOwner: "test-org",
+      repoName: "test-repo",
       branch: "main",
       modelMode: "auto",
       selectedModel: "claude-sonnet-4-5-20250929",
@@ -234,8 +234,8 @@ describe.skip("Test 3: Prosjektdekomponering", () => {
     // 1. Kall ai.decomposeProject
     const decomposition = await ai.decomposeProject({
       userMessage: "Bygg en enkel oppgaveapp med brukerregistrering og en dashboard-side",
-      repoOwner: "thefold-dev",
-      repoName: "thefold",
+      repoOwner: "test-org",
+      repoName: "test-repo",
       projectStructure: "src/\n  index.ts\n  api.ts\npackage.json",
     });
 
@@ -381,8 +381,8 @@ describe.skip("Test 4: Context Curator", () => {
       allTasks[2],
       { conventions: "# Project Conventions\nUse TypeScript strict mode.\nFollow Encore.ts patterns." },
       allTasks,
-      "thefold-dev",
-      "thefold"
+      "test-org",
+      "test-repo"
     );
 
     // 4. Verifiser:

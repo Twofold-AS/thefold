@@ -2,13 +2,9 @@
 
 import { useState, useRef, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import dynamic from "next/dynamic";
 import { setToken } from "@/lib/auth";
 import { requestOtp, verifyOtp } from "@/lib/api";
 import { ArrowRight, Mail, KeyRound, RotateCw } from "lucide-react";
-const PixelBlast = dynamic(() => import("@/components/effects/PixelBlast"), {
-  ssr: false,
-});
 
 type Step = "email" | "code";
 
@@ -156,24 +152,6 @@ function LoginContent() {
 
   return (
     <div className="min-h-screen flex flex-col relative" style={{ background: "var(--tf-bg-base)" }}>
-      <div className="absolute inset-0 pointer-events-none" style={{ opacity: 0.4 }}>
-        <PixelBlast
-          variant="square"
-          pixelSize={4}
-          color="#B19EEF"
-          patternScale={2}
-          patternDensity={1}
-          pixelSizeJitter={0}
-          enableRipples
-          rippleSpeed={0.4}
-          rippleThickness={0.12}
-          rippleIntensityScale={1.5}
-          speed={0.5}
-          edgeFade={0.25}
-          transparent
-        />
-      </div>
-
       <div className="relative z-10 flex-1 flex items-center justify-center px-6 py-12">
         <div
           className="w-full max-w-[420px] rounded-xl p-8 backdrop-blur-sm"

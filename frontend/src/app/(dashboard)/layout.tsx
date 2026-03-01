@@ -7,7 +7,6 @@ import { T, Layout } from "@/lib/tokens";
 import Btn from "@/components/Btn";
 import NotifBell from "@/components/NotifBell";
 import SectionLabel from "@/components/SectionLabel";
-import PixelCorners from "@/components/PixelCorners";
 import {
   LayoutDashboard, MessageSquare, CheckSquare, Box,
   Wand2, Brain, Plug, Server, Database, Activity, Terminal,
@@ -305,12 +304,26 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               borderTop: `1px solid ${T.border}`,
               padding: collapsed ? "12px 8px" : "12px 16px",
               position: "relative",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
             }}>
-              <PixelCorners />
+              {/* Avatar initial */}
+              <div style={{
+                width: 28, height: 28, borderRadius: T.r, flexShrink: 0,
+                background: T.subtle, border: `1px solid ${T.border}`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 11, fontWeight: 600, color: T.text, fontFamily: T.mono,
+              }}>
+                {(user?.name || user?.email || "?").charAt(0).toUpperCase()}
+              </div>
               {!collapsed && (
-                <div style={{ padding: "0 4px" }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: T.text }}>
-                    {user?.name || "\u2014"}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {user?.name || user?.email || "\u2014"}
+                  </div>
+                  <div style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                    {user?.role || "viewer"}
                   </div>
                 </div>
               )}
@@ -324,7 +337,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 position: "relative",
               }}
             >
-              <PixelCorners />
               <div
                 onClick={() => setCollapsed((c) => !c)}
                 style={{

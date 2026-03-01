@@ -5,6 +5,7 @@ import { github, linear, memory, sandbox, tasks } from "~encore/clients";
 import { agentReports } from "../chat/chat";
 import { db } from "./db";
 import { executeTask } from "./agent";
+import { startDependentTasks } from "./completion";
 import type { CodeReview, ReviewFile, AIReviewData, AgentExecutionContext } from "./types";
 import {
   serializeMessage,
@@ -15,12 +16,24 @@ import {
 } from "./messages";
 
 // Extract repo name from conversation_id format: "repo-{REPONAME}-{UUID}"
-function extractRepoFromConversationId(convId: string): string {
-  if (!convId.startsWith("repo-")) return "thefold";
+function extractRepoFromConversationId(convId: string): string | null {
+  if (!convId.startsWith("repo-")) return null;
   const withoutPrefix = convId.replace(/^repo-/, "");
   const uuidPattern = /-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const repoName = withoutPrefix.replace(uuidPattern, "");
-  return repoName || "thefold";
+  return repoName || null;
+}
+
+// Extract owner from conversation_id format: "repo-{OWNER}/{REPONAME}-{UUID}" or fall back to context
+function extractOwnerFromConversationId(convId: string): string | null {
+  if (!convId.startsWith("repo-")) return null;
+  const withoutPrefix = convId.replace(/^repo-/, "");
+  const uuidPattern = /-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const nameOrPath = withoutPrefix.replace(uuidPattern, "");
+  if (nameOrPath.includes("/")) {
+    return nameOrPath.split("/")[0] || null;
+  }
+  return null;
 }
 
 // --- Internal function (same service, no API boundary) ---
@@ -31,24 +44,26 @@ export interface SubmitReviewParams {
   projectTaskId?: string;
   sandboxId: string;
   repoName?: string;
+  repoOwner?: string;
   filesChanged: ReviewFile[];
   aiReview: AIReviewData;
 }
 
 export async function submitReviewInternal(params: SubmitReviewParams): Promise<{ reviewId: string }> {
-  // Extract repo name: explicit param > conversation_id pattern > fallback
+  // Extract repo name: explicit param > conversation_id pattern
   const repoName = params.repoName || extractRepoFromConversationId(params.conversationId);
 
   const row = await db.queryRow<{ id: string }>`
     INSERT INTO code_reviews (
       conversation_id, task_id, project_task_id, sandbox_id,
-      repo_name, files_changed, ai_review, status
+      repo_name, repo_owner, files_changed, ai_review, status
     ) VALUES (
       ${params.conversationId},
       ${params.taskId},
       ${params.projectTaskId ?? null},
       ${params.sandboxId},
       ${repoName},
+      ${params.repoOwner ?? null},
       ${JSON.stringify(params.filesChanged)}::jsonb,
       ${JSON.stringify(params.aiReview)}::jsonb,
       'pending'
@@ -106,6 +121,7 @@ interface CodeReviewRow {
   project_task_id: string | null;
   sandbox_id: string;
   repo_name: string | null;
+  repo_owner: string | null;
   files_changed: string | ReviewFile[];
   ai_review: string | AIReviewData | null;
   status: string;
@@ -124,6 +140,7 @@ function rowToCodeReview(row: CodeReviewRow): CodeReview {
     projectTaskId: row.project_task_id ?? undefined,
     sandboxId: row.sandbox_id,
     repoName: row.repo_name ?? undefined,
+    repoOwner: row.repo_owner ?? undefined,
     filesChanged: typeof row.files_changed === "string"
       ? JSON.parse(row.files_changed)
       : row.files_changed,
@@ -325,14 +342,39 @@ export const approveReview = api(
 
     const review = rowToCodeReview(row);
 
-    // STEP 9: Create PR — use repo from review (extracted from conversation_id at submit time)
-    const targetRepo = review.repoName || extractRepoFromConversationId(review.conversationId);
+    // STEP 9: Create PR — use repo/owner from review, with fallbacks
+    let targetRepo = review.repoName || extractRepoFromConversationId(review.conversationId);
+    let targetOwner = review.repoOwner || extractOwnerFromConversationId(review.conversationId);
+
+    // Fallback: resolve owner from GitHub App installation
+    if (!targetOwner || targetOwner.trim() === "") {
+      try {
+        const ghOwner = await github.getGitHubOwner();
+        targetOwner = ghOwner.owner;
+      } catch (e) {
+        log.warn("Failed to resolve GitHub owner from App installation", { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    // Fallback: resolve repo from task
+    if (!targetRepo || targetRepo.trim() === "") {
+      try {
+        const taskResult = await tasks.getTaskInternal({ id: review.taskId });
+        targetRepo = taskResult.task.repo || "";
+      } catch (e) {
+        log.warn("Failed to resolve repo from task", { error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+
+    if (!targetRepo || !targetOwner) {
+      throw APIError.failedPrecondition("Kan ikke opprette PR: repo eller owner mangler i review-data");
+    }
     const branchName = `thefold/${review.taskId.toLowerCase().replace(/\s+/g, "-")}`;
 
     let pr: { url: string; number: number };
     try {
       pr = await github.createPR({
-        owner: "thefold-dev",
+        owner: targetOwner,
         repo: targetRepo,
         branch: branchName,
         title: `[TheFold] ${review.taskId}`,
@@ -416,6 +458,14 @@ export const approveReview = api(
     } catch {
       // Task update is optional (task may be from Linear, not local)
     }
+
+    // Auto-start tasks that depend on this completed task
+    await startDependentTasks(
+      review.taskId,
+      review.conversationId,
+      targetRepo || undefined,
+      targetOwner || undefined,
+    );
 
     // Notify chat — structured "Ferdig" status + persistent completion message
     const prLabel = "PR opprettet";
@@ -507,6 +557,7 @@ export const requestChanges = api(
 
     const review = rowToCodeReview(row);
     const targetRepo = review.repoName || extractRepoFromConversationId(review.conversationId);
+    const targetOwner = review.repoOwner || extractOwnerFromConversationId(review.conversationId);
 
     // Fire-and-forget: re-execute task with feedback
     const ctx: AgentExecutionContext = {
@@ -514,8 +565,8 @@ export const requestChanges = api(
       taskId: review.taskId,
       taskDescription: "",
       userMessage: req.feedback,
-      repoOwner: "thefold-dev",
-      repoName: targetRepo,
+      repoOwner: targetOwner || "",
+      repoName: targetRepo || "",
       branch: "main",
       modelMode: "auto",
       selectedModel: "claude-sonnet-4-5-20250929",

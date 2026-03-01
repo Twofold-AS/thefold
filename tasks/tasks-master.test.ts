@@ -102,7 +102,7 @@ function mockTaskRow(overrides: Partial<Record<string, any>> = {}): Record<strin
     estimated_complexity: overrides.estimated_complexity ?? null,
     estimated_tokens: overrides.estimated_tokens ?? null,
     planned_order: overrides.planned_order ?? null,
-    assigned_to: overrides.assigned_to ?? "thefold",
+    assigned_to: overrides.assigned_to ?? "agent",
     build_job_id: overrides.build_job_id ?? null,
     pr_url: overrides.pr_url ?? null,
     review_id: overrides.review_id ?? null,

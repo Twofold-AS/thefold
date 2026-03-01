@@ -17,8 +17,7 @@ import type { ExecuteTaskOptions, ExecuteTaskResult } from "./agent";
 
 // --- Constants ---
 
-const REPO_OWNER = "thefold-dev";
-const REPO_NAME = "thefold";
+// REPO_OWNER and REPO_NAME removed — passed as parameters from callers
 const MAX_CONTEXT_TOKENS = 30000;
 
 // --- Helper: Report to chat via pub/sub ---
@@ -406,7 +405,7 @@ export async function executeProject(
 
             const skipTaskId = thefoldTaskMap.get(task.title);
             if (skipTaskId) {
-              try { await tasks.updateTaskStatus({ id: skipTaskId, status: "blocked", errorMessage: "Avhengighet feilet" }); } catch { /* */ }
+              try { await tasks.updateTaskStatus({ id: skipTaskId, status: "blocked", errorMessage: "Avhengighet feilet" }); } catch (err) { log.warn("Failed to mark skipped task as blocked", { taskId: skipTaskId, error: err instanceof Error ? err.message : String(err) }); }
             }
             await reportProject(conversationId, `Hopper over "${task.title}" — avhengighet feilet`);
             continue;
@@ -426,7 +425,7 @@ export async function executeProject(
 
         const thefoldTaskId = thefoldTaskMap.get(task.title);
         if (thefoldTaskId) {
-          try { await tasks.updateTaskStatus({ id: thefoldTaskId, status: mapProjectStatus("running") as any }); } catch { /* */ }
+          try { await tasks.updateTaskStatus({ id: thefoldTaskId, status: mapProjectStatus("running") as any }); } catch (err) { log.warn("Failed to update task status to running", { taskId: thefoldTaskId, error: err instanceof Error ? err.message : String(err) }); }
         }
 
         // Curate context
@@ -515,7 +514,7 @@ export async function executeProject(
           `;
 
           if (thefoldTaskId) {
-            try { await tasks.updateTaskStatus({ id: thefoldTaskId, status: "done" }); } catch { /* */ }
+            try { await tasks.updateTaskStatus({ id: thefoldTaskId, status: "done" }); } catch (err) { log.warn("Failed to mark task as done", { taskId: thefoldTaskId, error: err instanceof Error ? err.message : String(err) }); }
           }
 
           await reportProject(conversationId, `Task ${completedTasks}/${planRow.total_tasks} fullfort: ${task.title}`);
@@ -544,7 +543,7 @@ export async function executeProject(
               `;
               otherTask.status = "skipped";
               const downId = thefoldTaskMap.get(otherTask.title);
-              if (downId) { try { await tasks.updateTaskStatus({ id: downId, status: "blocked", errorMessage: "Blokkert av feilet avhengighet" }); } catch { /* */ } }
+              if (downId) { try { await tasks.updateTaskStatus({ id: downId, status: "blocked", errorMessage: "Blokkert av feilet avhengighet" }); } catch (err) { log.warn("Failed to block downstream task", { taskId: downId, error: err instanceof Error ? err.message : String(err) }); } }
             }
           }
 
@@ -736,10 +735,10 @@ export async function executeProject(
     });
 
     // Destroy sandbox on completion (no pending review)
-    try { await sandbox.destroy({ sandboxId: projectSandboxId }); } catch { /* */ }
+    try { await sandbox.destroy({ sandboxId: projectSandboxId }); } catch (e) { log.warn("Sandbox destroy failed (completion)", { sandboxId: projectSandboxId, error: e instanceof Error ? e.message : String(e) }); }
   } catch (err) {
     // Unexpected error — destroy sandbox and mark project as failed
-    try { await sandbox.destroy({ sandboxId: projectSandboxId }); } catch { /* */ }
+    try { await sandbox.destroy({ sandboxId: projectSandboxId }); } catch (e) { log.warn("Sandbox destroy failed (error path)", { sandboxId: projectSandboxId, error: e instanceof Error ? e.message : String(e) }); }
     const msg = err instanceof Error ? err.message : String(err);
     await db.exec`UPDATE project_plans SET status = 'failed', updated_at = NOW() WHERE id = ${projectId}`;
     await reportProject(conversationId, `Prosjekt feilet: ${msg}`);
@@ -753,6 +752,8 @@ export async function executeProject(
 interface StartProjectRequest {
   conversationId: string;
   projectId: string;
+  repoOwner: string;
+  repoName: string;
 }
 
 interface StartProjectResponse {
@@ -763,6 +764,10 @@ interface StartProjectResponse {
 export const startProject = api(
   { method: "POST", path: "/agent/project/start", expose: true, auth: true },
   async (req: StartProjectRequest): Promise<StartProjectResponse> => {
+    if (!req.repoOwner || !req.repoName) {
+      throw APIError.invalidArgument("repoOwner and repoName are required");
+    }
+
     // Verify project exists
     const plan = await db.queryRow<{ id: string; status: string }>`
       SELECT id, status FROM project_plans WHERE id = ${req.projectId}
@@ -773,17 +778,17 @@ export const startProject = api(
     }
 
     // Acquire advisory lock — prevent concurrent execution on same repo
-    const locked = await acquireRepoLock(REPO_OWNER, REPO_NAME);
+    const locked = await acquireRepoLock(req.repoOwner, req.repoName);
     if (!locked) {
-      throw APIError.failedPrecondition(`Repo ${REPO_OWNER}/${REPO_NAME} er allerede låst av en annen oppgave`);
+      throw APIError.failedPrecondition(`Repo ${req.repoOwner}/${req.repoName} er allerede låst av en annen oppgave`);
     }
 
     // Fire and forget
-    executeProject(req.projectId, req.conversationId, REPO_OWNER, REPO_NAME)
+    executeProject(req.projectId, req.conversationId, req.repoOwner, req.repoName)
       .catch((err) => {
         console.error(`Project ${req.projectId} failed:`, err);
       })
-      .finally(() => releaseRepoLock(REPO_OWNER, REPO_NAME));
+      .finally(() => releaseRepoLock(req.repoOwner, req.repoName));
 
     return { status: "started", projectId: req.projectId };
   }
@@ -907,6 +912,8 @@ export const pauseProject = api(
 interface ResumeProjectRequest {
   conversationId: string;
   projectId: string;
+  repoOwner: string;
+  repoName: string;
 }
 
 interface ResumeProjectResponse {
@@ -917,6 +924,10 @@ interface ResumeProjectResponse {
 export const resumeProject = api(
   { method: "POST", path: "/agent/project/resume", expose: true, auth: true },
   async (req: ResumeProjectRequest): Promise<ResumeProjectResponse> => {
+    if (!req.repoOwner || !req.repoName) {
+      throw APIError.invalidArgument("repoOwner and repoName are required");
+    }
+
     const plan = await db.queryRow<{ id: string; status: string }>`
       SELECT id, status FROM project_plans WHERE id = ${req.projectId}
     `;
@@ -931,7 +942,7 @@ export const resumeProject = api(
     `;
 
     // Resume execution
-    executeProject(req.projectId, req.conversationId, REPO_OWNER, REPO_NAME).catch((err) => {
+    executeProject(req.projectId, req.conversationId, req.repoOwner, req.repoName).catch((err) => {
       console.error(`Project ${req.projectId} resume failed:`, err);
     });
 
@@ -943,6 +954,8 @@ export const resumeProject = api(
 interface StoreProjectPlanRequest {
   conversationId: string;
   userRequest: string;
+  repoOwner?: string;
+  repoName?: string;
   decomposition: {
     phases: Array<{
       name: string;
@@ -1014,7 +1027,7 @@ export const storeProjectPlan = api(
           await tasks.createTask({
             title: task.title,
             description: task.description,
-            repo: REPO_NAME,
+            repo: req.repoName || undefined,
             source: "orchestrator",
             priority: 3,
             phase: `phase-${phaseIdx}`,

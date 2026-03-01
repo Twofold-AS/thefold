@@ -15,6 +15,8 @@ interface AgentReport {
   costUsd: number;
   duration: string;
   qualityScore?: number;
+  reviewId?: string;
+  concerns?: string[];
 }
 
 interface AgentProgress {
@@ -29,6 +31,8 @@ interface AgentProgress {
 interface AgentStreamProps {
   content?: string;
   onCancel?: () => void;
+  onApprove?: (reviewId: string) => void;
+  onReject?: (reviewId: string) => void;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -47,22 +51,91 @@ const PHASE_LABELS: Record<string, string> = {
   completed: "Ferdig",
 };
 
+function convertLegacy(parsed: any): AgentProgress | null {
+  if (!parsed?.type) return null;
+  switch (parsed.type) {
+    case "status":
+      return {
+        status: parsed.meta?.error ? "failed" : "working",
+        phase: parsed.phase || "building",
+        summary: parsed.meta?.title || parsed.phase || "Jobber...",
+        steps: (parsed.steps || []).map((s: any) => ({
+          id: s.label,
+          label: s.label,
+          detail: s.detail,
+          done: s.status === "done" ? true : s.status === "active" ? false : s.status === "error" ? true : null,
+        })),
+      };
+    case "report":
+      return {
+        status: parsed.status === "completed" ? "done" : parsed.status === "failed" ? "failed" : "working",
+        phase: parsed.status === "completed" ? "completing" : "building",
+        summary: parsed.text?.substring(0, 200) || "",
+        steps: [],
+      };
+    case "review":
+      return {
+        status: "waiting",
+        phase: "reviewing",
+        summary: "Venter pa godkjenning",
+        steps: (parsed.steps || []).map((s: any) => ({
+          id: s.label,
+          label: s.label,
+          done: s.status === "done" ? true : s.status === "active" ? false : null,
+        })),
+        report: {
+          filesChanged: [],
+          costUsd: 0,
+          duration: "",
+          qualityScore: parsed.reviewData?.quality,
+          concerns: parsed.reviewData?.concerns,
+          reviewId: parsed.reviewData?.reviewId || "",
+        },
+      };
+    case "clarification":
+      return {
+        status: "waiting",
+        phase: "clarification",
+        summary: "Trenger avklaring",
+        steps: (parsed.steps || []).map((s: any) => ({
+          id: s.label,
+          label: s.label,
+          done: null,
+        })),
+        question: parsed.questions?.[0] || "",
+      };
+    case "completion":
+      return {
+        status: "done",
+        phase: "completing",
+        summary: parsed.text || "Ferdig",
+        steps: [],
+      };
+    default:
+      return null;
+  }
+}
+
 function parseProgress(content?: string): AgentProgress | null {
   if (!content) return null;
   try {
     const parsed = JSON.parse(content);
-    // Backend may wrap in { type: "progress", ...data }
-    const data = parsed?.type === "progress" ? parsed : parsed;
-    if (data && typeof data.status === "string" && typeof data.phase === "string") {
-      return data as AgentProgress;
+    // New contract: { type: "progress", status, phase, ... }
+    if (parsed?.type === "progress" && typeof parsed.status === "string") {
+      return parsed as AgentProgress;
     }
-    return null;
+    // Direct AgentProgress shape (no type wrapper)
+    if (parsed && typeof parsed.status === "string" && typeof parsed.phase === "string") {
+      return parsed as AgentProgress;
+    }
+    // Legacy formats: { type: "status"|"review"|"report"|... }
+    return convertLegacy(parsed);
   } catch {
     return null;
   }
 }
 
-export default function AgentStream({ content, onCancel }: AgentStreamProps) {
+export default function AgentStream({ content, onCancel, onApprove, onReject }: AgentStreamProps) {
   const progress = parseProgress(content);
 
   // If we can't parse, show raw content
@@ -118,11 +191,7 @@ export default function AgentStream({ content, onCancel }: AgentStreamProps) {
             />
           )}
         </span>
-        {isWorking && onCancel && (
-          <Btn sm onClick={onCancel} style={{ marginLeft: "auto" }}>
-            Stopp
-          </Btn>
-        )}
+        {/* Stop button moved to send button in ChatInput */}
       </div>
 
       {/* Summary */}
@@ -278,6 +347,34 @@ export default function AgentStream({ content, onCancel }: AgentStreamProps) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Review actions */}
+      {progress.status === "waiting" && progress.report?.reviewId && (
+        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+          {onApprove && (
+            <Btn primary sm onClick={() => onApprove(progress.report!.reviewId!)}>
+              Godkjenn
+            </Btn>
+          )}
+          {onReject && (
+            <Btn sm onClick={() => onReject(progress.report!.reviewId!)} style={{ color: T.error }}>
+              Avvis
+            </Btn>
+          )}
+        </div>
+      )}
+
+      {/* Concerns */}
+      {progress.report?.concerns && progress.report.concerns.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", marginBottom: 4 }}>Bekymringer</div>
+          {progress.report.concerns.map((c, i) => (
+            <div key={i} style={{ fontSize: 12, color: T.textSec, lineHeight: 1.5, paddingLeft: 8, borderLeft: `2px solid ${T.border}`, marginBottom: 4 }}>
+              {c}
+            </div>
+          ))}
         </div>
       )}
     </div>

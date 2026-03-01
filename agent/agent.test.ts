@@ -3,8 +3,8 @@ import { getTree } from "../github/github";
 import { planTask } from "../ai/ai";
 import { create, writeFile, validate, destroy } from "../sandbox/sandbox";
 
-const REPO_OWNER = "thefold-dev";
-const REPO_NAME = "thefold";
+const REPO_OWNER = "test-org";
+const REPO_NAME = "test-repo";
 
 describe("Agent integration loop", () => {
   const createdSandboxes: string[] = [];

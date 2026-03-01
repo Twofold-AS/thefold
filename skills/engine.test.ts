@@ -14,7 +14,7 @@ describe("Skills Pipeline Engine", () => {
 
   const validContext = {
     task: "Fix authentication bug",
-    repo: "thefold",
+    repo: "test-repo",
     labels: ["bug"],
     files: ["auth.ts"],
     userId: "user-123",

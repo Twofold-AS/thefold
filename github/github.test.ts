@@ -2,8 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { getTree, getFile, findRelevantFiles, getFileMetadata, getFileChunk, createPR } from "./github";
 
 describe("GitHub service", () => {
-  const testOwner = "thefold-dev";
-  const testRepo = "thefold";
+  const testOwner = "test-org";
+  const testRepo = "test-repo";
 
   describe("getTree", () => {
     it(
