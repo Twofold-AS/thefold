@@ -119,7 +119,7 @@ export default function InnstillingerPage() {
       </div>
 
       <GR>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
 
           {/* Left column: PROFIL + AUTENTISERING + Revoke */}
           <div style={{ padding: 24, borderRight: `1px solid ${T.border}` }}>

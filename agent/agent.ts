@@ -225,6 +225,9 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       treeString = ctxResult.treeString; treeArray = ctxResult.treeArray; packageJson = ctxResult.packageJson;
       relevantFiles = ctxResult.relevantFiles; memoryStrings = ctxResult.memoryStrings; docsStrings = ctxResult.docsStrings;
       mcpTools = ctxResult.mcpTools;
+      // Set tool usage counters for completion report
+      ctx.memoriesUsed = memoryStrings.length;
+      ctx.docsUsed = docsStrings.length;
       sm.transitionTo("context"); ctx.phase = sm.current;
     }
 

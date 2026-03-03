@@ -103,7 +103,7 @@ export default function MonitorPage() {
 
       {/* Automated checks info */}
       <GR>
-        <div style={{ border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
+        <div style={{ borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
           <div style={{ padding: 20 }}>
             <SectionLabel>AUTOMATISKE SJEKKER</SectionLabel>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 8 }}>
@@ -126,7 +126,7 @@ export default function MonitorPage() {
 
       {/* Stats bar */}
       <GR>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: 0, position: "relative", overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, marginTop: 20, position: "relative", overflow: "hidden" }}>
           {[
             { l: "HELSE-SJEKKER", v: loading ? "\u2013" : checks.length },
             { l: "BEST\u00C5TT", v: loading ? "\u2013" : passCount, c: T.success },
@@ -142,7 +142,7 @@ export default function MonitorPage() {
       </GR>
 
       <GR>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: 0, position: "relative", overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, marginTop: 20, position: "relative", overflow: "hidden" }}>
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>HELSE-SJEKKER</SectionLabel>
             {healthLoading ? (
@@ -212,7 +212,7 @@ export default function MonitorPage() {
 
       {/* Run check section with repo selector */}
       <GR>
-        <div style={{ border: `1px solid ${T.border}`, borderTop: "none", borderRadius: 0, position: "relative", overflow: "hidden" }}>
+        <div style={{ borderRadius: 12, border: `1px solid ${T.border}`, marginTop: 20, position: "relative", overflow: "hidden" }}>
           <div style={{ padding: 20 }}>
             <SectionLabel>KJ&Oslash;R SJEKK</SectionLabel>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
@@ -286,7 +286,7 @@ export default function MonitorPage() {
       {/* History section */}
       {history && (
         <GR>
-          <div style={{ border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, position: "relative", overflow: "hidden" }}>
+          <div style={{ borderRadius: 12, border: `1px solid ${T.border}`, marginTop: 20, position: "relative", overflow: "hidden" }}>
               <div style={{ padding: 20 }}>
               <SectionLabel>HISTORIKK &mdash; {selectedRepo}</SectionLabel>
               {historyLoading ? (

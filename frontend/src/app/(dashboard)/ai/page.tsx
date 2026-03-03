@@ -307,8 +307,8 @@ export default function AIPage() {
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
+            borderRadius: 12,
             border: `1px solid ${T.border}`,
-            borderRadius: T.r,
             position: "relative",
             overflow: "hidden",
           }}
@@ -385,8 +385,7 @@ export default function AIPage() {
           style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr",
-            border: `1px solid ${T.border}`,
-            borderTop: "none",
+            marginTop: 20,
             position: "relative",
             overflow: "hidden",
           }}
@@ -522,8 +521,7 @@ export default function AIPage() {
       <GR>
         <div
           style={{
-            border: `1px solid ${T.border}`,
-            borderTop: "none",
+            marginTop: 20,
             position: "relative",
             overflow: "visible",
           }}
@@ -665,9 +663,9 @@ export default function AIPage() {
       <GR mb={40}>
         <div
           style={{
+            marginTop: 20,
+            borderRadius: 12,
             border: `1px solid ${T.border}`,
-            borderTop: "none",
-            borderRadius: `0 0 ${T.r}px ${T.r}px`,
             position: "relative",
             overflow: "hidden",
           }}
@@ -781,7 +779,7 @@ export default function AIPage() {
             style={{
               background: T.surface,
               border: `1px solid ${T.border}`,
-              borderRadius: T.r,
+              borderRadius: 12,
               padding: 24,
               width: 420,
               maxHeight: "80vh",

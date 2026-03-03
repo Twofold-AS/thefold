@@ -69,7 +69,7 @@ export default function MCPPage() {
       </GR>
 
       <GR mb={40}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, position: "relative", overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", marginTop: 20, borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
           {loading ? (
             <div style={{ padding: 40, gridColumn: "1 / -1" }}>
               <Skeleton rows={4} />

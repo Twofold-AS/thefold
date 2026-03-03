@@ -1,33 +1,22 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { T } from "@/lib/tokens";
 import ChatInput from "@/components/ChatInput";
 
 interface ChatComposerProps {
-  onSubmit?: (msg: string, repo: string | null, ghost: boolean) => void;
+  onSubmit?: (msg: string) => void;
   heading?: string;
-  defaultGhost?: boolean;
-  onGhostChange?: (ghost: boolean) => void;
   skills?: Array<{ id: string; name: string; enabled: boolean }>;
   selectedSkillIds?: string[];
   onSkillsChange?: (ids: string[]) => void;
   subAgentsEnabled?: boolean;
   onSubAgentsToggle?: () => void;
-  repos?: string[];
+  models?: Array<{ id: string; displayName: string; provider: string }>;
+  selectedModel?: string | null;
+  onModelChange?: (modelId: string | null) => void;
 }
 
-export default function ChatComposer({ onSubmit, heading, defaultGhost, onGhostChange, skills, selectedSkillIds, onSkillsChange, subAgentsEnabled, onSubAgentsToggle, repos }: ChatComposerProps) {
-  const [repo, setRepo] = useState<string | null>(null);
-  const [ghost, setGhost] = useState(defaultGhost ?? false);
-
-  useEffect(() => { setGhost(defaultGhost ?? false); }, [defaultGhost]);
-
-  const handleGhostChange = (newGhost: boolean) => {
-    setGhost(newGhost);
-    onGhostChange?.(newGhost);
-  };
-
+export default function ChatComposer({ onSubmit, heading, skills, selectedSkillIds, onSkillsChange, subAgentsEnabled, onSubAgentsToggle, models, selectedModel, onModelChange }: ChatComposerProps) {
   return (
     <div
       style={{
@@ -43,7 +32,7 @@ export default function ChatComposer({ onSubmit, heading, defaultGhost, onGhostC
       {/* Heading */}
       <div style={{ paddingBottom: 32, textAlign: "center", position: "relative", zIndex: 1 }}>
         <h2 style={{
-          fontSize: 32, fontWeight: 600, color: T.text,
+          fontSize: 32, fontWeight: 400, color: T.text, fontFamily: T.brandFont,
           letterSpacing: "-0.03em",
         }}>
           {heading || "Når AI sier umulig, sier Mikael Kråkenes neste"}
@@ -60,17 +49,15 @@ export default function ChatComposer({ onSubmit, heading, defaultGhost, onGhostC
         }} />
         <div style={{ position: "relative", zIndex: 1 }}>
           <ChatInput
-            repo={ghost ? null : repo}
-            onSubmit={(msg, r) => onSubmit && onSubmit(msg, r ?? null, ghost)}
-            onRepoChange={(r) => setRepo(r)}
-            ghost={ghost}
-            onGhostChange={handleGhostChange}
+            onSubmit={(msg) => onSubmit && onSubmit(msg)}
             skills={skills}
             selectedSkillIds={selectedSkillIds}
             onSkillsChange={onSkillsChange}
             subAgentsEnabled={subAgentsEnabled}
             onSubAgentsToggle={onSubAgentsToggle}
-            repos={repos}
+            models={models}
+            selectedModel={selectedModel}
+            onModelChange={onModelChange}
           />
         </div>
       </div>

@@ -6,16 +6,15 @@ import Link from "next/link";
 import { T, Layout } from "@/lib/tokens";
 import Btn from "@/components/Btn";
 import NotifBell from "@/components/NotifBell";
-import SectionLabel from "@/components/SectionLabel";
 import {
-  LayoutDashboard, MessageSquare, CheckSquare, Box,
+  Eye, BotMessageSquare, CheckSquare, Box,
   Wand2, Brain, Plug, Server, Database, Activity, Terminal,
-  Settings,
+  Cog, ChevronDown,
   type LucideIcon,
 } from "lucide-react";
-import { useUser } from "@/contexts/UserPreferencesContext";
+import { RepoProvider, useRepoContext } from "@/lib/repo-context";
 
-const { sidebarWidth: SW, sidebarCollapsed: SWC, contentWidth: CW, innerWidth: IW, headerHeight: HH, sidePadding: SP } = Layout;
+const { sidebarWidth: SW, sidebarCollapsed: SWC, contentWidth: CW, innerWidth: IW, headerHeight: HH } = Layout;
 
 interface NavItem {
   icon: LucideIcon;
@@ -32,13 +31,13 @@ interface NavGroup {
 const navGroups: NavGroup[] = [
   {
     items: [
-      { icon: LayoutDashboard, label: "Overview", href: "/" },
+      { icon: Eye, label: "Overview", href: "/" },
     ],
   },
   {
     cat: "WORKSPACE",
     items: [
-      { icon: MessageSquare, label: "Chat", href: "/chat", badge: "3" },
+      { icon: BotMessageSquare, label: "Chat", href: "/chat" },
       { icon: CheckSquare, label: "Tasks", href: "/tasks" },
       { icon: Box, label: "Komponenter", href: "/komponenter" },
       { icon: Wand2, label: "Skills", href: "/skills" },
@@ -62,11 +61,12 @@ function isActiveRoute(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(href + "/");
 }
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user } = useUser();
+  const { repos, selectedRepo, selectRepo, clearRepo } = useRepoContext();
   const [collapsed, setCollapsed] = useState(false);
+  const [repoDropdownOpen, setRepoDropdownOpen] = useState(false);
   const sw = collapsed ? SWC : SW;
   const useFullWidth = pathname === "/chat" || pathname.startsWith("/chat/");
   const isSettings = pathname === "/innstillinger" || pathname.startsWith("/innstillinger/");
@@ -97,11 +97,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             style={{
               width: sw,
               height: HH,
-              borderBottom: `1px solid ${T.border}`,
-              borderRight: `1px solid ${T.border}`,
               display: "flex",
               alignItems: "center",
-              gap: collapsed ? 0 : 10,
+              gap: collapsed ? 0 : 4,
               padding: collapsed ? "0" : "0 20px",
               justifyContent: collapsed ? "center" : "flex-start",
               background: T.bg,
@@ -111,39 +109,26 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               flexShrink: 0,
             }}
           >
-            {/* TF Logo */}
-            <div
+            {/* Logo */}
+            <img
+              src="/logo/logo.svg"
+              alt="TheFold"
               style={{
-                width: 28,
-                height: 28,
-                borderRadius: T.r,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
+                width: 36,
+                height: 36,
                 flexShrink: 0,
-                background: `linear-gradient(135deg, ${T.accent}, ${T.brand})`,
               }}
-            >
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: 800,
-                  color: T.bg,
-                  fontFamily: T.brandFont,
-                }}
-              >
-                TF
-              </span>
-            </div>
+            />
             {!collapsed && (
               <span
                 style={{
-                  fontSize: 15,
-                  fontWeight: 600,
+                  fontSize: 22,
+                  fontWeight: 400,
                   color: T.text,
-                  letterSpacing: "-0.02em",
+                  letterSpacing: "0",
                   fontFamily: T.brandFont,
                   whiteSpace: "nowrap",
+                  visibility: "hidden"
                 }}
               >
                 TheFold
@@ -156,7 +141,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             style={{
               flex: 1,
               height: HH,
-              borderBottom: `1px solid ${T.border}`,
               display: "flex",
               alignItems: "center",
               justifyContent: "flex-end",
@@ -166,7 +150,125 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               zIndex: 2,
             }}
           >
-            <Btn sm>Docs</Btn>
+            {/* Repo Selector */}
+            <div style={{ position: "relative" }}>
+              <div
+                onClick={() => setRepoDropdownOpen((p) => !p)}
+                style={{
+                  padding: "6px 14px",
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 999,
+                  fontSize: 12,
+                  fontFamily: T.mono,
+                  color: T.textMuted,
+                  cursor: "pointer",
+                  background: "transparent",
+                  maxWidth: 140,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {selectedRepo ? selectedRepo.name : "Global"}
+                  <ChevronDown size={12} strokeWidth={2} />
+                </span>
+              </div>
+
+              {repoDropdownOpen && (
+                <>
+                  <div
+                    style={{ position: "fixed", inset: 0, zIndex: 98 }}
+                    onClick={() => setRepoDropdownOpen(false)}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      top: "calc(100% + 6px)",
+                      right: 0,
+                      background: T.surface,
+                      border: `1px solid ${T.border}`,
+                      borderRadius: 12,
+                      minWidth: 200,
+                      maxHeight: 300,
+                      overflowY: "auto",
+                      zIndex: 99,
+                      overflow: "hidden",
+                      boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                    }}
+                  >
+                    {/* Global option */}
+                    <div
+                      onClick={() => {
+                        clearRepo();
+                        setRepoDropdownOpen(false);
+                      }}
+                      onMouseEnter={(e) => { if (selectedRepo) e.currentTarget.style.background = T.subtle; }}
+                      onMouseLeave={(e) => { if (selectedRepo) e.currentTarget.style.background = "transparent"; }}
+                      style={{
+                        padding: "10px 16px",
+                        fontSize: 12,
+                        fontFamily: T.mono,
+                        color: !selectedRepo ? T.text : T.textMuted,
+                        background: !selectedRepo ? T.subtle : "transparent",
+                        cursor: "pointer",
+                        borderBottom: `1px solid ${T.border}`,
+                        transition: "background 0.1s",
+                      }}
+                    >
+                      Global
+                    </div>
+
+                    {/* Repo list */}
+                    {repos.map((repo) => (
+                      <div
+                        key={repo.fullName}
+                        onClick={() => {
+                          selectRepo(repo.fullName);
+                          setRepoDropdownOpen(false);
+                        }}
+                        onMouseEnter={(e) => { if (selectedRepo?.fullName !== repo.fullName) e.currentTarget.style.background = T.subtle; }}
+                        onMouseLeave={(e) => { if (selectedRepo?.fullName !== repo.fullName) e.currentTarget.style.background = "transparent"; }}
+                        style={{
+                          padding: "10px 16px",
+                          fontSize: 12,
+                          fontFamily: T.mono,
+                          color: selectedRepo?.fullName === repo.fullName ? T.text : T.textMuted,
+                          background: selectedRepo?.fullName === repo.fullName ? T.subtle : "transparent",
+                          cursor: "pointer",
+                          transition: "background 0.1s",
+                        }}
+                      >
+                        {repo.name}
+                      </div>
+                    ))}
+
+                    {repos.length === 0 && (
+                      <div style={{ padding: "12px", fontSize: 11, color: T.textFaint, textAlign: "center" }}>
+                        Ingen repos funnet
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <Link
+              href="/docs"
+              style={{
+                padding: "6px 14px",
+                border: `1px solid ${T.border}`,
+                borderRadius: 999,
+                fontSize: 12,
+                fontFamily: T.mono,
+                color: T.textMuted,
+                cursor: "pointer",
+                background: "transparent",
+                textDecoration: "none",
+              }}
+            >
+              Docs
+            </Link>
             <NotifBell onGoTask={() => router.push("/tasks")} />
             <Link
               href="/innstillinger"
@@ -180,7 +282,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 textDecoration: "none",
               }}
             >
-              <Settings size={16} strokeWidth={1.3} />
+              <Cog size={16} strokeWidth={1.3} />
             </Link>
           </div>
         </div>
@@ -198,7 +300,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               overflowX: "hidden",
               flexShrink: 0,
               transition: "width 0.25s ease",
-              borderRight: `1px solid ${T.border}`,
               display: "flex",
               flexDirection: "column",
               background: T.bg,
@@ -252,7 +353,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                           gap: 10,
                           padding: collapsed ? "9px 0" : "9px 14px",
                           justifyContent: collapsed ? "center" : "flex-start",
-                          background: active ? T.subtle : "transparent",
+                          background: "transparent",
                           cursor: "pointer",
                           transition: "background 0.12s",
                           position: "relative",
@@ -262,14 +363,20 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                       >
                         {/* Active indicator removed (G2) */}
                         {/* Icon */}
-                        <it.icon size={16} strokeWidth={1.5} style={{ color: active ? T.text : T.textMuted, flexShrink: 0 }} />
+                        <it.icon
+                          size={16}
+                          strokeWidth={1.5}
+                          className={active ? "brand-shimmer-icon" : ""}
+                          style={{ color: active ? T.text : T.textMuted, flexShrink: 0 }}
+                        />
                         {/* Label */}
                         {!collapsed && (
                           <span
+                            className={active ? "brand-shimmer" : ""}
                             style={{
                               fontSize: 13,
                               fontWeight: active ? 500 : 400,
-                              color: active ? T.text : T.textSec,
+                              color: active ? undefined : T.textSec,
                               whiteSpace: "nowrap",
                             }}
                           >
@@ -299,40 +406,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               ))}
             </div>
 
-            {/* User section */}
-            <div style={{
-              borderTop: `1px solid ${T.border}`,
-              padding: collapsed ? "12px 8px" : "12px 16px",
-              position: "relative",
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-            }}>
-              {/* Avatar initial */}
-              <div style={{
-                width: 28, height: 28, borderRadius: T.r, flexShrink: 0,
-                background: T.subtle, border: `1px solid ${T.border}`,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 11, fontWeight: 600, color: T.text, fontFamily: T.mono,
-              }}>
-                {(user?.name || user?.email || "?").charAt(0).toUpperCase()}
-              </div>
-              {!collapsed && (
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 500, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {user?.name || user?.email || "\u2014"}
-                  </div>
-                  <div style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                    {user?.role || "viewer"}
-                  </div>
-                </div>
-              )}
-            </div>
-
             {/* Collapse button */}
             <div
               style={{
-                borderTop: `1px solid ${T.border}`,
                 padding: collapsed ? "12px 8px" : "12px 16px",
                 position: "relative",
               }}
@@ -371,20 +447,46 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
           </div>
 
-          {/* CONTENT */}
-          <div style={{ flex: 1, minWidth: 0, position: "relative", zIndex: 1 }}>
-            {useFullWidth ? (
-              <div style={{ height: `calc(100vh - ${HH}px)`, overflow: "hidden" }}>
+          {/* CONTENT — visnings-boks */}
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div
+              style={{
+                flex: 1,
+                background: T.surface,
+                borderRadius: "30px 0 0 0",
+                overflow: useFullWidth ? "hidden" : "auto",
+                height: useFullWidth ? `calc(100vh - ${HH}px)` : undefined,
+              }}
+            >
+              <div
+                style={{
+                  maxWidth: useFullWidth ? "100%" : IW,
+                  margin: useFullWidth ? 0 : "0 auto",
+                  padding: useFullWidth ? 0 : "0 48px",
+                  width: "100%",
+                }}
+              >
                 {children}
               </div>
-            ) : (
-              <div style={{ padding: `0 ${SP}px` }}>
-                <div style={{ maxWidth: IW, margin: "0 auto" }}>{children}</div>
-              </div>
-            )}
+            </div>
           </div>
         </div>
       </div>
     </div>
+  );
+}
+
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <RepoProvider>
+      <DashboardLayoutInner>{children}</DashboardLayoutInner>
+    </RepoProvider>
   );
 }

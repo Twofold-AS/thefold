@@ -1,62 +1,67 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { T } from "@/lib/tokens";
-import { Ghost } from "lucide-react";
 import PillIcon from "@/components/PillIcon";
-import ModelPill from "@/components/ModelPill";
 import TypewriterPlaceholder from "@/components/TypewriterPlaceholder";
+import { ChevronDown } from "lucide-react";
 
 interface ChatInputProps {
   compact?: boolean;
-  repo?: string | null;
-  onSubmit?: (value: string, repo?: string | null) => void;
-  onRepoChange?: (repo: string | null) => void;
-  ghost?: boolean;
-  onGhostChange?: (ghost: boolean) => void;
-  isPrivate?: boolean;
+  onSubmit?: (value: string) => void;
+  placeholder?: string;
   skills?: Array<{ id: string; name: string; enabled: boolean }>;
   selectedSkillIds?: string[];
   onSkillsChange?: (ids: string[]) => void;
   subAgentsEnabled?: boolean;
   onSubAgentsToggle?: () => void;
-  repos?: string[];
   isLoading?: boolean;
   onCancel?: () => void;
+  models?: Array<{ id: string; displayName: string; provider: string }>;
+  selectedModel?: string | null;
+  onModelChange?: (modelId: string | null) => void;
 }
-
-const defaultRepos: string[] = [];
 
 export default function ChatInput({
   compact,
-  repo,
   onSubmit,
-  onRepoChange,
-  ghost,
-  onGhostChange,
-  isPrivate,
+  placeholder,
   skills,
   selectedSkillIds,
   onSkillsChange,
   subAgentsEnabled,
   onSubAgentsToggle,
-  repos: reposProp,
   isLoading,
   onCancel,
+  models,
+  selectedModel,
+  onModelChange,
 }: ChatInputProps) {
-  const repos = reposProp ?? defaultRepos;
   const [v, setV] = useState("");
-  const [st, setSt] = useState(false);
   const ty = v.length > 0;
-  const [rd, setRd] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const MAX_INPUT_HEIGHT = 200;
+
+  const autoResize = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const newHeight = Math.min(el.scrollHeight, MAX_INPUT_HEIGHT);
+    el.style.height = newHeight + "px";
+    el.style.overflowY = el.scrollHeight > MAX_INPUT_HEIGHT ? "auto" : "hidden";
+  }, []);
+
+  useEffect(() => {
+    autoResize();
+  }, [v, autoResize]);
 
   const doSend = () => {
     if (v && onSubmit) {
-      onSubmit(v, repo);
+      onSubmit(v);
       setV("");
-    } else if (v) {
-      setSt(true);
     }
   };
 
@@ -65,14 +70,15 @@ export default function ChatInput({
       style={{
         width: "100%",
         maxWidth: compact ? undefined : 800,
-        background: T.surface,
+        background: T.bg,
+        border: "none",
         borderRadius: T.r * 1.5,
         position: "relative",
       }}
     >
       <div
         style={{
-          height: compact ? 48 : 56,
+          minHeight: compact ? 48 : 56,
           padding: "0 20px",
           display: "flex",
           alignItems: "center",
@@ -84,24 +90,32 @@ export default function ChatInput({
             style={{
               position: "absolute",
               left: 20,
-              top: "50%",
-              transform: "translateY(-50%)",
+              top: compact ? 14 : 18,
               fontSize: 13,
               fontFamily: T.sans,
+              pointerEvents: "none",
             }}
           >
             <TypewriterPlaceholder active={ty} />
           </div>
         )}
-        <input
+        <textarea
+          ref={textareaRef}
+          data-chat-input
+          rows={1}
           value={v}
           onChange={(e) => setV(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && v) doSend();
+            if (e.key === "Enter" && !e.shiftKey && v) {
+              e.preventDefault();
+              doSend();
+            }
           }}
+          placeholder={placeholder}
           style={{
             width: "100%",
-            height: "100%",
+            minHeight: compact ? 24 : 28,
+            maxHeight: MAX_INPUT_HEIGHT,
             background: "transparent",
             border: "none",
             outline: "none",
@@ -110,6 +124,10 @@ export default function ChatInput({
             fontFamily: T.sans,
             position: "relative",
             zIndex: 1,
+            resize: "none",
+            overflowY: "hidden",
+            lineHeight: 1.5,
+            padding: "12px 0",
           }}
         />
       </div>
@@ -135,213 +153,177 @@ export default function ChatInput({
               />
             </svg>
           </PillIcon>
-          {/* Ghost toggle */}
+          {/* Sub-agents */}
           <PillIcon
-            tooltip="Privat — kun synlig for deg"
-            active={ghost}
-            onClick={() => onGhostChange && onGhostChange(!ghost)}
+            tooltip="Sub-agenter"
+            active={subAgentsEnabled}
+            onClick={() => onSubAgentsToggle && onSubAgentsToggle()}
           >
-            <Ghost size={14} />
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <circle cx="7" cy="4" r="2.5" stroke="currentColor" strokeWidth="1.1" />
+              <circle cx="3.5" cy="6" r="1.5" stroke="currentColor" strokeWidth="1" />
+              <circle cx="10.5" cy="6" r="1.5" stroke="currentColor" strokeWidth="1" />
+              <path
+                d="M1 12c0-2 1.5-3 2.5-3M13 12c0-2-1.5-3-2.5-3M3.5 12c0-2.5 1.5-4 3.5-4s3.5 1.5 3.5 4"
+                stroke="currentColor"
+                strokeWidth="1.1"
+                strokeLinecap="round"
+              />
+            </svg>
           </PillIcon>
-          {/* Conditional icons: sub-agents, skills, repo dropdown — hidden when isPrivate */}
-          {!ghost && !isPrivate && (
-            <>
-              {/* Sub-agents */}
-              <PillIcon
-                tooltip="Sub-agenter"
-                active={subAgentsEnabled}
-                onClick={() => onSubAgentsToggle && onSubAgentsToggle()}
+          {/* Skills dropdown */}
+          <div style={{ position: "relative" }}>
+            <PillIcon
+              tooltip="Skills"
+              active={(selectedSkillIds?.length ?? 0) > 0}
+              onClick={() => setSkillsOpen((p) => !p)}
+            >
+              {/* Wand2 icon */}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z" />
+                <path d="m14 7 3 3" />
+                <path d="M5 6v4" /><path d="M19 14v4" />
+                <path d="M10 2v2" /><path d="M7 8H3" /><path d="M21 16h-4" /><path d="M11 3H9" />
+              </svg>
+            </PillIcon>
+            {skillsOpen && skills && skills.length > 0 && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: "100%",
+                  left: 0,
+                  marginBottom: 6,
+                  background: T.surface,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: T.r,
+                  padding: "4px 0",
+                  minWidth: 200,
+                  maxHeight: 240,
+                  overflow: "auto",
+                  zIndex: 100,
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                }}
               >
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                  <circle cx="7" cy="4" r="2.5" stroke="currentColor" strokeWidth="1.1" />
-                  <circle cx="3.5" cy="6" r="1.5" stroke="currentColor" strokeWidth="1" />
-                  <circle cx="10.5" cy="6" r="1.5" stroke="currentColor" strokeWidth="1" />
-                  <path
-                    d="M1 12c0-2 1.5-3 2.5-3M13 12c0-2-1.5-3-2.5-3M3.5 12c0-2.5 1.5-4 3.5-4s3.5 1.5 3.5 4"
-                    stroke="currentColor"
-                    strokeWidth="1.1"
-                    strokeLinecap="round"
-                  />
-                </svg>
-              </PillIcon>
-              {/* Skills dropdown */}
-              <div style={{ position: "relative" }}>
-                <PillIcon
-                  tooltip="Skills"
-                  active={(selectedSkillIds?.length ?? 0) > 0}
-                  onClick={() => setSkillsOpen((p) => !p)}
-                >
-                  {/* Wand2 icon */}
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z" />
-                    <path d="m14 7 3 3" />
-                    <path d="M5 6v4" /><path d="M19 14v4" />
-                    <path d="M10 2v2" /><path d="M7 8H3" /><path d="M21 16h-4" /><path d="M11 3H9" />
-                  </svg>
-                </PillIcon>
-                {skillsOpen && skills && skills.length > 0 && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      bottom: "100%",
-                      left: 0,
-                      marginBottom: 6,
-                      background: T.surface,
-                      border: `1px solid ${T.border}`,
-                      borderRadius: T.r,
-                      padding: "4px 0",
-                      minWidth: 200,
-                      maxHeight: 240,
-                      overflow: "auto",
-                      zIndex: 100,
-                      boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-                    }}
-                  >
-                    {skills
-                      .filter((s) => s.enabled)
-                      .map((skill) => {
-                        const selected = selectedSkillIds?.includes(skill.id) ?? false;
-                        return (
-                          <div
-                            key={skill.id}
-                            onClick={() => {
-                              if (!onSkillsChange || !selectedSkillIds) return;
-                              onSkillsChange(
-                                selected
-                                  ? selectedSkillIds.filter((id) => id !== skill.id)
-                                  : [...selectedSkillIds, skill.id]
-                              );
-                            }}
-                            style={{
-                              padding: "6px 12px",
-                              fontSize: 12,
-                              fontFamily: T.sans,
-                              color: selected ? T.text : T.textSec,
-                              background: "transparent",
-                              cursor: "pointer",
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 8,
-                            }}
-                          >
-                            <div
-                              style={{
-                                width: 10,
-                                height: 10,
-                                borderRadius: 2,
-                                border: `1px solid ${selected ? T.accent : T.border}`,
-                                background: selected ? T.accent : "transparent",
-                              }}
-                            />
-                            {skill.name}
-                          </div>
-                        );
-                      })}
-                  </div>
-                )}
-              </div>
-              {/* Repo dropdown */}
-              <div style={{ marginLeft: 4, position: "relative", zIndex: 50 }}>
-                <div
-                  onClick={() => setRd((p) => !p)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 5,
-                    padding: "3px 10px",
-                    background: T.subtle,
-                    border: `1px solid ${T.border}`,
-                    borderRadius: 6,
-                    fontSize: 11,
-                    fontFamily: T.mono,
-                    color: repo ? T.textSec : T.textFaint,
-                    cursor: "pointer",
-                  }}
-                >
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.2"
-                  >
-                    <path d="M2 3.5C2 2.67 2.67 2 3.5 2h2l1 1.5h2c.83 0 1.5.67 1.5 1.5v4c0 .83-.67 1.5-1.5 1.5h-5A1.5 1.5 0 012 9V3.5z" />
-                  </svg>
-                  {repo || "Velg repo"}
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                    <path
-                      d="M2.5 4L5 6.5 7.5 4"
-                      stroke="currentColor"
-                      strokeWidth="1"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </div>
-                {rd && (
-                  <div
-                    style={{
-                      position: "absolute",
-                      bottom: "100%",
-                      left: 0,
-                      marginBottom: 4,
-                      background: T.surface,
-                      border: `1px solid ${T.border}`,
-                      borderRadius: T.r,
-                      overflow: "hidden",
-                      zIndex: 100,
-                      minWidth: 180,
-                      boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
-                    }}
-                  >
-                    {repos.map((r) => (
+                {skills
+                  .filter((s) => s.enabled)
+                  .map((skill) => {
+                    const selected = selectedSkillIds?.includes(skill.id) ?? false;
+                    return (
                       <div
-                        key={r}
+                        key={skill.id}
                         onClick={() => {
-                          onRepoChange && onRepoChange(r);
-                          setRd(false);
+                          if (!onSkillsChange || !selectedSkillIds) return;
+                          onSkillsChange(
+                            selected
+                              ? selectedSkillIds.filter((id) => id !== skill.id)
+                              : [...selectedSkillIds, skill.id]
+                          );
                         }}
                         style={{
-                          padding: "8px 12px",
-                          fontSize: 11,
-                          fontFamily: T.mono,
-                          color: r === repo ? T.text : T.textSec,
-                          background: r === repo ? T.subtle : "transparent",
+                          padding: "6px 12px",
+                          fontSize: 12,
+                          fontFamily: T.sans,
+                          color: selected ? T.text : T.textSec,
+                          background: "transparent",
                           cursor: "pointer",
-                          borderBottom: `1px solid ${T.border}`,
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
                         }}
                       >
-                        {r}
+                        <div
+                          style={{
+                            width: 10,
+                            height: 10,
+                            borderRadius: 2,
+                            border: `1px solid ${selected ? T.accent : T.border}`,
+                            background: selected ? T.accent : "transparent",
+                          }}
+                        />
+                        {skill.name}
                       </div>
-                    ))}
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* Model selector dropdown */}
+          <div style={{ position: "relative" }}>
+            <div
+              onClick={() => setModelOpen((p) => !p)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "4px 10px",
+                border: `1px solid ${T.border}`,
+                borderRadius: 999,
+                fontSize: 11,
+                fontFamily: T.mono,
+                color: T.textMuted,
+                cursor: "pointer",
+                background: "transparent",
+              }}
+            >
+              {selectedModel
+                ? models?.find(m => m.id === selectedModel)?.displayName || selectedModel
+                : "Auto (anbefalt)"}
+              <ChevronDown size={10} strokeWidth={2} />
+            </div>
+            {modelOpen && (
+              <>
+                <div style={{ position: "fixed", inset: 0, zIndex: 98 }} onClick={() => setModelOpen(false)} />
+                <div style={{
+                  position: "absolute",
+                  bottom: "calc(100% + 6px)",
+                  right: 0,
+                  background: T.surface,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 12,
+                  minWidth: 220,
+                  zIndex: 99,
+                  overflow: "hidden",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                }}>
+                  <div
+                    onClick={() => { onModelChange?.(null); setModelOpen(false); }}
+                    style={{
+                      padding: "10px 16px",
+                      fontSize: 12,
+                      fontFamily: T.mono,
+                      color: !selectedModel ? T.text : T.textMuted,
+                      background: !selectedModel ? T.subtle : "transparent",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Auto (anbefalt)
+                  </div>
+                  {(models || []).map((m) => (
                     <div
-                      onClick={() => {
-                        onRepoChange && onRepoChange(null);
-                        setRd(false);
-                      }}
+                      key={m.id}
+                      onClick={() => { onModelChange?.(m.id); setModelOpen(false); }}
                       style={{
-                        padding: "8px 12px",
-                        fontSize: 11,
+                        padding: "10px 16px",
+                        fontSize: 12,
                         fontFamily: T.mono,
-                        color: T.textFaint,
+                        color: selectedModel === m.id ? T.text : T.textMuted,
+                        background: selectedModel === m.id ? T.subtle : "transparent",
                         cursor: "pointer",
                       }}
                     >
-                      Ingen repo
+                      {m.displayName}
                     </div>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <ModelPill />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <PillIcon
-            active={ty || st || isLoading}
+            active={ty || isLoading}
             onClick={isLoading ? onCancel : doSend}
-            tooltip={isLoading ? "Stopp" : st ? "Stopp" : "Send"}
+            tooltip={isLoading ? "Stopp" : "Send"}
           >
             {isLoading ? (
               <div style={{
@@ -349,10 +331,6 @@ export default function ChatInput({
                 background: T.text,
                 borderRadius: 2,
               }} />
-            ) : st ? (
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                <rect x="2" y="2" width="8" height="8" rx="0" fill="currentColor" />
-              </svg>
             ) : (
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                 <path

@@ -75,6 +75,10 @@ export interface AgentExecutionContext {
   // Sub-agents
   subAgentsEnabled: boolean;
   subAgentResults?: import("../ai/sub-agents").SubAgentResult[];
+  // Tool usage counters (for completion report)
+  memoriesUsed?: number;
+  skillsUsed?: number;
+  docsUsed?: number;
   // State machine
   phase?: AgentPhase;
   // Progress tracking (Z-project: new message contract)

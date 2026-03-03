@@ -161,7 +161,7 @@ export const getReview = api(
   async (req: GetReviewRequest): Promise<{ review: CodeReview }> => {
     const row = await db.queryRow<CodeReviewRow>`
       SELECT id, conversation_id, task_id, project_task_id, sandbox_id,
-             repo_name, files_changed, ai_review, status, reviewer_id, feedback,
+             repo_name, repo_owner, files_changed, ai_review, status, reviewer_id, feedback,
              created_at, reviewed_at, pr_url
       FROM code_reviews WHERE id = ${req.reviewId}
     `;
@@ -318,7 +318,7 @@ export const approveReview = api(
 
     const row = await db.queryRow<CodeReviewRow>`
       SELECT id, conversation_id, task_id, project_task_id, sandbox_id,
-             repo_name, files_changed, ai_review, status, reviewer_id, feedback,
+             repo_name, repo_owner, files_changed, ai_review, status, reviewer_id, feedback,
              created_at, reviewed_at, pr_url
       FROM code_reviews WHERE id = ${req.reviewId}
     `;
@@ -535,7 +535,7 @@ export const requestChanges = api(
 
     const row = await db.queryRow<CodeReviewRow>`
       SELECT id, conversation_id, task_id, project_task_id, sandbox_id,
-             repo_name, files_changed, ai_review, status, reviewer_id, feedback,
+             repo_name, repo_owner, files_changed, ai_review, status, reviewer_id, feedback,
              created_at, reviewed_at, pr_url
       FROM code_reviews WHERE id = ${req.reviewId}
     `;
@@ -557,7 +557,24 @@ export const requestChanges = api(
 
     const review = rowToCodeReview(row);
     const targetRepo = review.repoName || extractRepoFromConversationId(review.conversationId);
-    const targetOwner = review.repoOwner || extractOwnerFromConversationId(review.conversationId);
+    let targetOwner = review.repoOwner || extractOwnerFromConversationId(review.conversationId);
+
+    // Resolve owner from GitHub App if not available from review/conversation
+    if (!targetOwner || targetOwner.trim() === "") {
+      try {
+        const ghOwner = await github.getGitHubOwner();
+        targetOwner = ghOwner.owner;
+      } catch (e) {
+        log.warn("requestChanges: failed to resolve owner from GitHub App", {
+          error: e instanceof Error ? e.message : String(e)
+        });
+      }
+    }
+
+    if (!targetOwner || !targetRepo) {
+      log.error("requestChanges: missing repo or owner", { targetOwner, targetRepo, reviewId: req.reviewId });
+      throw APIError.failedPrecondition("Kan ikke re-kjøre: mangler repo/owner informasjon");
+    }
 
     // Fire-and-forget: re-execute task with feedback
     const ctx: AgentExecutionContext = {
@@ -565,8 +582,8 @@ export const requestChanges = api(
       taskId: review.taskId,
       taskDescription: "",
       userMessage: req.feedback,
-      repoOwner: targetOwner || "",
-      repoName: targetRepo || "",
+      repoOwner: targetOwner,
+      repoName: targetRepo,
       branch: "main",
       modelMode: "auto",
       selectedModel: "claude-sonnet-4-5-20250929",

@@ -573,6 +573,18 @@ export async function executePlan(
         allFiles.push(file);
       }
 
+      // Store built files as sub-tasks in task labels
+      if (ctx.thefoldTaskId && buildResult.result.filesChanged.length > 0) {
+        try {
+          const subTasks = buildResult.result.filesChanged
+            .map((f: { path: string }) => f.path)
+            .slice(0, 10);
+          await tasks.updateTask({ id: ctx.thefoldTaskId, labels: subTasks });
+        } catch (e) {
+          log.warn("Failed to store sub-tasks in labels", { error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+
       completedPlanSteps = planStepCount;
       for (const f of buildResult.result.filesChanged) {
         await think(ctx, `Skriver ${f.path}... OK`);

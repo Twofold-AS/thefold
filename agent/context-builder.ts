@@ -164,70 +164,75 @@ export async function buildContext(
     let totalTokensSaved = 0;
 
     for (const path of relevantPaths.paths) {
-      const meta = await github.getFileMetadata({
-        owner: ctx.repoOwner,
-        repo: ctx.repoName,
-        path,
-      });
+      try {
+        const meta = await github.getFileMetadata({
+          owner: ctx.repoOwner,
+          repo: ctx.repoName,
+          path,
+        });
 
-      if (meta.totalLines <= SMALL_FILE_THRESHOLD) {
-        // Small file: read in full
-        const file = await github.getFile({ owner: ctx.repoOwner, repo: ctx.repoName, path });
-        files.push({ path, content: file.content });
-      } else if (meta.totalLines <= MEDIUM_FILE_THRESHOLD) {
-        // Medium file: read in chunks
-        let content = "";
-        let startLine = 1;
-        let chunksRead = 0;
+        if (meta.totalLines <= SMALL_FILE_THRESHOLD) {
+          // Small file: read in full
+          const file = await github.getFile({ owner: ctx.repoOwner, repo: ctx.repoName, path });
+          files.push({ path, content: file.content });
+        } else if (meta.totalLines <= MEDIUM_FILE_THRESHOLD) {
+          // Medium file: read in chunks
+          let content = "";
+          let startLine = 1;
+          let chunksRead = 0;
 
-        while (chunksRead < MAX_CHUNKS_PER_FILE) {
-          const chunk = await github.getFileChunk({
+          while (chunksRead < MAX_CHUNKS_PER_FILE) {
+            const chunk = await github.getFileChunk({
+              owner: ctx.repoOwner,
+              repo: ctx.repoName,
+              path,
+              startLine,
+              maxLines: CHUNK_SIZE,
+            });
+            content += (content ? "\n" : "") + chunk.content;
+            chunksRead++;
+
+            if (!chunk.hasMore) break;
+            startLine = chunk.nextStartLine!;
+          }
+
+          const fullTokenEstimate = Math.ceil(meta.totalLines * 30 / 4);
+          const readTokenEstimate = Math.ceil(content.length / 4);
+          totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
+
+          files.push({ path, content });
+        } else {
+          // Large file: read first + last chunk only
+          const firstChunk = await github.getFileChunk({
             owner: ctx.repoOwner,
             repo: ctx.repoName,
             path,
-            startLine,
+            startLine: 1,
             maxLines: CHUNK_SIZE,
           });
-          content += (content ? "\n" : "") + chunk.content;
-          chunksRead++;
 
-          if (!chunk.hasMore) break;
-          startLine = chunk.nextStartLine!;
+          const lastStart = Math.max(1, meta.totalLines - CHUNK_SIZE);
+          const lastChunk = await github.getFileChunk({
+            owner: ctx.repoOwner,
+            repo: ctx.repoName,
+            path,
+            startLine: lastStart,
+            maxLines: CHUNK_SIZE,
+          });
+
+          const content = firstChunk.content
+            + `\n\n// ... [${meta.totalLines - (CHUNK_SIZE * 2)} lines omitted — file has ${meta.totalLines} lines total] ...\n\n`
+            + lastChunk.content;
+
+          const fullTokenEstimate = Math.ceil(meta.totalLines * 30 / 4);
+          const readTokenEstimate = Math.ceil(content.length / 4);
+          totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
+
+          files.push({ path, content });
         }
-
-        const fullTokenEstimate = Math.ceil(meta.totalLines * 30 / 4);
-        const readTokenEstimate = Math.ceil(content.length / 4);
-        totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
-
-        files.push({ path, content });
-      } else {
-        // Large file: read first + last chunk only
-        const firstChunk = await github.getFileChunk({
-          owner: ctx.repoOwner,
-          repo: ctx.repoName,
-          path,
-          startLine: 1,
-          maxLines: CHUNK_SIZE,
-        });
-
-        const lastStart = Math.max(1, meta.totalLines - CHUNK_SIZE);
-        const lastChunk = await github.getFileChunk({
-          owner: ctx.repoOwner,
-          repo: ctx.repoName,
-          path,
-          startLine: lastStart,
-          maxLines: CHUNK_SIZE,
-        });
-
-        const content = firstChunk.content
-          + `\n\n// ... [${meta.totalLines - (CHUNK_SIZE * 2)} lines omitted — file has ${meta.totalLines} lines total] ...\n\n`
-          + lastChunk.content;
-
-        const fullTokenEstimate = Math.ceil(meta.totalLines * 30 / 4);
-        const readTokenEstimate = Math.ceil(content.length / 4);
-        totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
-
-        files.push({ path, content });
+      } catch (err) {
+        // File doesn't exist yet (404) or other read error — skip it
+        log.warn("getFileMetadata/getFile skipped", { path, error: err instanceof Error ? err.message : String(err) });
       }
     }
 

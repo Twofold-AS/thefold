@@ -27,6 +27,7 @@ export const Layout = {
   sidebarCollapsed: 56,
   contentWidth: 1636,
   innerWidth: 1232,
-  headerHeight: 64,
+  headerHeight: 65,
   sidePadding: (1636 - 1232) / 2,
+  viewBoxRadius: 30,
 } as const;

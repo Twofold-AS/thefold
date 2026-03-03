@@ -1,6 +1,7 @@
 import log from "encore.dev/log";
 import { secret } from "encore.dev/config";
 import { agent, github, linear, memory, sandbox, tasks, ai, registry } from "~encore/clients";
+import { agentReports } from "../chat/chat";
 import { savePhaseMetrics } from "./metrics";
 import { completeJob } from "./db";
 import { validateAgentScope } from "./helpers";
@@ -298,16 +299,57 @@ export async function completeTask(
   // === STEP 12: Final report + sandbox cleanup ===
   log.info("STEP 12: Cleanup and final report");
 
+  // Build rich completion message with file list, PR link, and tool stats
+  const fileList = allFiles.map(f => {
+    const icon = f.action === "create" ? "+" : f.action === "delete" ? "\u2212" : "~";
+    return `  ${icon} ${f.path}`;
+  }).join("\n");
+
+  // Collect tool usage stats from context
+  const toolStats = {
+    memories: ctx.memoriesUsed ?? 0,
+    skills: ctx.skillsUsed ?? 0,
+    docs: ctx.docsUsed ?? 0,
+    subAgents: ctx.subAgentResults?.length ?? 0,
+    attempts: ctx.totalAttempts,
+    planRevisions: ctx.planRevisions,
+  };
+
+  const toolLines = [
+    `Minner: ${toolStats.memories}`,
+    `Skills: ${toolStats.skills}`,
+    `Docs: ${toolStats.docs}`,
+    toolStats.subAgents > 0 ? `Sub-agenter: ${toolStats.subAgents}` : null,
+    toolStats.attempts > 1 ? `Forsok: ${toolStats.attempts}` : null,
+    toolStats.planRevisions > 0 ? `Plan-revisjoner: ${toolStats.planRevisions}` : null,
+  ].filter(Boolean).join(" \u00b7 ");
+
   const completionMsg = [
     "Oppgave fullfort",
-    prUrl ? `PR: ${prUrl}` : "",
-    `Filer endret: ${allFiles.length}`,
-    `Kostnad: $${ctx.totalCostUsd.toFixed(4)}`,
-  ].filter(Boolean).join("\n");
+    "",
+    prUrl ? `PR: ${prUrl}` : "PR ble ikke opprettet",
+    "",
+    `Filer (${allFiles.length}):`,
+    fileList,
+    "",
+    `Verktoy: ${toolLines}`,
+    `Kostnad: $${ctx.totalCostUsd.toFixed(4)} \u00b7 Tokens: ${ctx.totalTokensUsed.toLocaleString()}`,
+  ].join("\n");
 
   await report(ctx, completionMsg, "completed", {
     prUrl: prUrl || undefined,
     filesChanged: allFiles.map((f) => f.path),
+  });
+
+  // Publish persistent completion message (stored as messageType "chat" in DB)
+  await agentReports.publish({
+    conversationId: ctx.conversationId,
+    taskId: ctx.taskId,
+    content: completionMsg,
+    status: "completed",
+    prUrl: prUrl || undefined,
+    filesChanged: allFiles.map((f) => f.path),
+    completionMessage: completionMsg,
   });
 
   await reportSteps(ctx, "Ferdig", [

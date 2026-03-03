@@ -143,6 +143,61 @@ function getProvider(modelName: string): AIProvider {
 
 // --- Helper Functions ---
 
+/**
+ * Wrap a provider SDK error into a readable APIError.
+ * Parses common error patterns across Anthropic, OpenAI, Fireworks, OpenRouter.
+ */
+function wrapProviderError(provider: string, model: string, error: unknown): APIError {
+  const msg = error instanceof Error ? error.message : String(error);
+  const lower = msg.toLowerCase();
+
+  // Credit / billing
+  if (lower.includes("credit balance") || lower.includes("billing") || lower.includes("insufficient_quota") || lower.includes("payment required") || lower.includes("402")) {
+    return APIError.resourceExhausted(
+      `${provider} credits er brukt opp (modell: ${model}). Fyll pa via leverandorens dashboard.`
+    );
+  }
+
+  // Rate limit
+  if (lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("429") || lower.includes("too many requests")) {
+    return APIError.resourceExhausted(
+      `${provider} rate limit nadd (modell: ${model}). Vent litt og prov igjen.`
+    );
+  }
+
+  // Auth
+  if (lower.includes("401") || lower.includes("authentication") || lower.includes("invalid api key") || lower.includes("invalid_api_key") || lower.includes("unauthorized")) {
+    return APIError.unauthenticated(
+      `${provider} API-nokkel er ugyldig eller utlopt (modell: ${model}). Sjekk AI-innstillinger.`
+    );
+  }
+
+  // Overloaded / server error
+  if (lower.includes("overloaded") || lower.includes("503") || lower.includes("529") || lower.includes("server error") || lower.includes("500")) {
+    return APIError.unavailable(
+      `${provider} er midlertidig utilgjengelig (modell: ${model}). Prov igjen om litt.`
+    );
+  }
+
+  // Model not found
+  if (lower.includes("model not found") || lower.includes("not_found_error") || lower.includes("does not exist")) {
+    return APIError.notFound(
+      `Modellen "${model}" finnes ikke hos ${provider}. Sjekk modell-ID i AI-innstillinger.`
+    );
+  }
+
+  // Context length
+  if (lower.includes("context length") || lower.includes("maximum context") || lower.includes("token limit") || lower.includes("too long")) {
+    return APIError.invalidArgument(
+      `Meldingen er for lang for ${model}. Prov en kortere melding eller en modell med storre kontekstvindu.`
+    );
+  }
+
+  // Fallback
+  console.error(`[AI] ${provider} error (${model}):`, msg);
+  return APIError.internal(`${provider}-feil (${model}): ${msg}`);
+}
+
 function stripMarkdownJson(text: string): string {
   let jsonText = text.trim();
   const codeBlockMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
@@ -224,12 +279,18 @@ async function callAnthropic(options: AICallOptions): Promise<AICallResponse> {
     },
   ];
 
-  const response = await client.messages.create({
-    model: options.model,
-    max_tokens: options.maxTokens,
-    system: systemBlocks,
-    messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
-  });
+  let response;
+  try {
+    const stream = client.messages.stream({
+      model: options.model,
+      max_tokens: options.maxTokens,
+      system: systemBlocks,
+      messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
+    });
+    response = await stream.finalMessage();
+  } catch (e) {
+    throw wrapProviderError("Anthropic", options.model, e);
+  }
 
   const text = response.content.find((c) => c.type === "text");
   if (!text || text.type !== "text") {
@@ -281,11 +342,16 @@ async function callOpenAI(options: AICallOptions): Promise<AICallResponse> {
     ...options.messages,
   ];
 
-  const response = await client.chat.completions.create({
-    model: options.model,
-    max_tokens: options.maxTokens,
-    messages,
-  });
+  let response;
+  try {
+    response = await client.chat.completions.create({
+      model: options.model,
+      max_tokens: options.maxTokens,
+      messages,
+    });
+  } catch (e) {
+    throw wrapProviderError("OpenAI", options.model, e);
+  }
 
   const choice = response.choices[0];
   if (!choice?.message?.content) {
@@ -331,11 +397,16 @@ async function callMoonshot(options: AICallOptions): Promise<AICallResponse> {
     ...options.messages,
   ];
 
-  const response = await client.chat.completions.create({
-    model: options.model,
-    max_tokens: options.maxTokens,
-    messages,
-  });
+  let response;
+  try {
+    response = await client.chat.completions.create({
+      model: options.model,
+      max_tokens: options.maxTokens,
+      messages,
+    });
+  } catch (e) {
+    throw wrapProviderError("Moonshot", options.model, e);
+  }
 
   const choice = response.choices[0];
   if (!choice?.message?.content) {
@@ -837,15 +908,26 @@ async function executeToolCall(
       console.log("[DEBUG-AF] Input:", JSON.stringify(input).substring(0, 300));
 
       const { tasks: tasksClient } = await import("~encore/clients");
-      const taskRepo = sanitizeRepoName((input.repoName as string) || repoName || "") || undefined;
+      let taskRepo = sanitizeRepoName((input.repoName as string) || repoName || "") || undefined;
+      if (!taskRepo) {
+        // Prøv å ekstrahere repo-navn fra task title
+        const repoMatch = (input.title as string).match(/repo\s+[""]?([A-Za-z0-9_-]+)[""]?/i);
+        if (repoMatch) taskRepo = repoMatch[1];
+      }
 
-      // Duplicate check — prevent creating same task twice
+      // Duplicate check — prevent creating same task twice (fuzzy matching)
       try {
         const existing = await tasksClient.listTasks({ repo: taskRepo, limit: 20 });
-        const duplicate = existing.tasks.find((t: { title: string; status: string }) =>
-          t.title.toLowerCase() === (input.title as string).toLowerCase() &&
-          !["deleted", "done", "blocked", "failed"].includes(t.status)
-        );
+        const title = (input.title as string).toLowerCase();
+        const duplicate = existing.tasks.find((t: { title: string; status: string; repo?: string }) => {
+          if (["deleted", "done", "blocked", "failed"].includes(t.status)) return false;
+          const existingTitle = t.title.toLowerCase();
+          const titleMatch = existingTitle === title ||
+            existingTitle.includes(title.substring(0, 30)) ||
+            title.includes(existingTitle.substring(0, 30));
+          const repoMatch = !taskRepo || !t.repo || t.repo === taskRepo;
+          return titleMatch && repoMatch;
+        });
         if (duplicate) {
           console.log("[DEBUG-AF] Duplicate found:", duplicate.id);
           return { success: false, taskId: duplicate.id, message: `Oppgave "${input.title}" finnes allerede (ID: ${duplicate.id})` };
@@ -1092,13 +1174,14 @@ async function callAnthropicWithTools(options: AICallOptions & {
   for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
     console.log(`[DEBUG-AH] Tool loop iteration ${loop + 1}`);
 
-    const response = await client.messages.create({
+    const responseStream = client.messages.stream({
       model: options.model,
       max_tokens: options.maxTokens,
       system: systemBlocks,
       messages,
       tools: options.tools as any,
     });
+    const response = await responseStream.finalMessage();
 
     totalInputTokens += response.usage.input_tokens;
     totalOutputTokens += response.usage.output_tokens;
@@ -1316,7 +1399,12 @@ export const chat = api(
 
     // Inject repo context if chatting from a specific repo
     if (req.repoName) {
-      system += `\n\nDu ser på repoet: ${req.repoName}. Når brukeren refererer til "repoet", "prosjektet", eller "koden", mener de dette spesifikke repoet.`;
+      system += `\n\nDu jobber i repoet: ${req.repoName}. Når brukeren refererer til "repoet", "prosjektet", eller "koden", mener de dette spesifikke repoet.`;
+      system += `\nVIKTIG: Hvis brukeren nevner et ANNET repo-navn enn "${req.repoName}", IKKE opprett task for det andre repoet. Si i stedet: "Du jobber i ${req.repoName}, men refererer til et annet repo. Bytt til riktig repo i navigasjonslinjen øverst først."`;
+    } else {
+      system += `\n\nBrukeren er i Global-modus (intet spesifikt repo valgt).`;
+      system += `\nHvis brukeren ber om å opprette et NYTT repo (f.eks. "Lag repo X"), gå videre og opprett task med det nye repo-navnet.`;
+      system += `\nHvis brukeren refererer til et EKSISTERENDE repo (f.eks. "Oppdater X-repoet"), si: "Du er i Global-modus. Bytt til det repoet i navigasjonslinjen øverst først."`;
     }
 
     // Inject actual repo file content
@@ -1414,14 +1502,34 @@ export const planTask = api(
       model,
       system: pipeline.systemPrompt,
       messages,
-      maxTokens: 16384,
+      maxTokens: 32768,
     });
 
     // Log skill usage
     await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
 
     try {
-      const jsonText = stripMarkdownJson(response.content);
+      let jsonText = stripMarkdownJson(response.content);
+
+      // JSON repair for truncated responses (max_tokens hit)
+      if (response.stopReason === "max_tokens" || response.content.length > 15000) {
+        // Try to fix common truncation issues
+        const openBraces = (jsonText.match(/{/g) || []).length;
+        const closeBraces = (jsonText.match(/}/g) || []).length;
+        const openBrackets = (jsonText.match(/\[/g) || []).length;
+        const closeBrackets = (jsonText.match(/]/g) || []).length;
+
+        if (openBraces > closeBraces || openBrackets > closeBrackets) {
+          // Remove trailing incomplete property (e.g. "content": "half...)
+          jsonText = jsonText.replace(/,\s*"[^"]*":\s*"[^"]*$/, "");
+          jsonText = jsonText.replace(/,\s*"[^"]*":\s*$/, "");
+          jsonText = jsonText.replace(/,\s*{[^}]*$/, "");
+          // Close remaining brackets/braces
+          for (let i = 0; i < openBrackets - closeBrackets; i++) jsonText += "]";
+          for (let i = 0; i < openBraces - closeBraces; i++) jsonText += "}";
+        }
+      }
+
       const parsed = JSON.parse(jsonText);
 
       // Validate and normalize plan steps

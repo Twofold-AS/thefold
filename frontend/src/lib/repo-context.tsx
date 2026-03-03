@@ -15,6 +15,7 @@ interface RepoContextValue {
   repos: Repo[];
   selectedRepo: Repo | null;
   selectRepo: (fullName: string) => void;
+  clearRepo: () => void;
   loading: boolean;
   error: string | null;
 }
@@ -73,7 +74,8 @@ export function RepoProvider({ children }: { children: ReactNode }) {
             if (savedRepo) return savedRepo;
           }
           if (prev && mapped.some((r) => r.fullName === prev.fullName)) return prev;
-          return mapped[0] ?? null;
+          // Ikke auto-velg første repo — null = Global modus
+          return null;
         });
       })
       .catch(() => {
@@ -91,8 +93,15 @@ export function RepoProvider({ children }: { children: ReactNode }) {
     }
   }, [repos]);
 
+  const clearRepo = useCallback(() => {
+    setSelectedRepo(null);
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+  }, []);
+
   return (
-    <RepoContext.Provider value={{ repos, selectedRepo, selectRepo, loading, error }}>
+    <RepoContext.Provider value={{ repos, selectedRepo, selectRepo, clearRepo, loading, error }}>
       {children}
     </RepoContext.Provider>
   );

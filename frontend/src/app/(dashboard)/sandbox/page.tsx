@@ -91,7 +91,7 @@ export default function SandboxPage() {
       </div>
 
       <GR>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
           {[
             { l: "KJØRINGER", v: loading ? "–" : jobs.length },
             { l: "BESTÅTT", v: loading ? "–" : passCount, c: T.success },
@@ -107,7 +107,7 @@ export default function SandboxPage() {
       </GR>
 
       <GR mb={40}>
-        <div style={{ display: "grid", gridTemplateColumns: sb ? "1fr 1fr" : "1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, minHeight: 300, position: "relative", overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: sb ? "1fr 1fr" : "1fr", marginTop: 20, borderRadius: 12, border: `1px solid ${T.border}`, minHeight: 300, position: "relative", overflow: "hidden" }}>
           <div style={{ borderRight: sb ? `1px solid ${T.border}` : "none" }}>
             {loading ? (
               <div style={{ padding: 40 }}>

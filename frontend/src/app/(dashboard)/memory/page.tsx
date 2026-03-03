@@ -51,7 +51,7 @@ export default function MemoryPage() {
       </div>
 
       <GR>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
           {[
             { l: "MINNER", v: statsLoading ? "–" : String(totalMemories) },
             { l: "KODE-MØNSTRE", v: statsLoading ? "–" : String(codePatternCount) },
@@ -68,7 +68,7 @@ export default function MemoryPage() {
       </GR>
 
       <GR>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, position: "relative", overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, marginTop: 20, position: "relative", overflow: "hidden" }}>
           <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
             <SectionLabel>SISTE MINNER</SectionLabel>
             {memsLoading ? (

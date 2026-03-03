@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { T } from "@/lib/tokens";
 import CheckIcon from "@/components/icons/CheckIcon";
 import Btn from "@/components/Btn";
@@ -33,6 +34,7 @@ interface AgentStreamProps {
   onCancel?: () => void;
   onApprove?: (reviewId: string) => void;
   onReject?: (reviewId: string) => void;
+  onRequestChanges?: (reviewId: string, feedback: string) => void;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -77,12 +79,13 @@ function convertLegacy(parsed: any): AgentProgress | null {
       return {
         status: "waiting",
         phase: "reviewing",
-        summary: "Venter pa godkjenning",
-        steps: (parsed.steps || []).map((s: any) => ({
-          id: s.label,
-          label: s.label,
-          done: s.status === "done" ? true : s.status === "active" ? false : null,
-        })),
+        summary: `Venter pa godkjenning — ${parsed.reviewData?.filesChanged || 0} filer`,
+        steps: [
+          { id: "code", label: "Kode skrevet", done: true },
+          { id: "validated", label: "Validert", done: true },
+          { id: "review", label: `Kvalitet: ${parsed.reviewData?.quality || "?"}/10`, done: true },
+          { id: "waiting", label: "Venter pa godkjenning", done: false },
+        ],
         report: {
           filesChanged: [],
           costUsd: 0,
@@ -111,6 +114,33 @@ function convertLegacy(parsed: any): AgentProgress | null {
         summary: parsed.text || "Ferdig",
         steps: [],
       };
+    case "progress":
+      // progress med status=waiting er review-venting — bevar review-data
+      if (parsed.status === "waiting") {
+        return {
+          status: "waiting",
+          phase: "reviewing",
+          summary: parsed.summary || "Venter pa godkjenning",
+          steps: (parsed.steps || []).map((s: any) => ({
+            id: s.id || s.label,
+            label: s.label,
+            done: s.done ?? (s.status === "done" ? true : s.status === "active" ? false : null),
+          })),
+          report: parsed.report,
+        };
+      }
+      // Annen progress — standard konvertering
+      return {
+        status: parsed.status || "working",
+        phase: parsed.phase || "building",
+        summary: parsed.summary || "Jobber...",
+        steps: (parsed.steps || []).map((s: any) => ({
+          id: s.id || s.label,
+          label: s.label,
+          done: s.done ?? (s.status === "done" ? true : s.status === "active" ? false : null),
+        })),
+        report: parsed.report,
+      };
     default:
       return null;
   }
@@ -135,8 +165,8 @@ function parseProgress(content?: string): AgentProgress | null {
   }
 }
 
-export default function AgentStream({ content, onCancel, onApprove, onReject }: AgentStreamProps) {
-  const progress = parseProgress(content);
+export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges }: AgentStreamProps) {
+  const progress = useMemo(() => parseProgress(content), [content]);
 
   // If we can't parse, show raw content
   if (!progress) {
@@ -289,8 +319,8 @@ export default function AgentStream({ content, onCancel, onApprove, onReject }: 
         </div>
       )}
 
-      {/* Report (when done) */}
-      {isDone && progress.report && (
+      {/* Report (when done or waiting for review) */}
+      {(isDone || progress.status === "waiting") && progress.report && (
         <div
           style={{
             display: "flex",
@@ -352,10 +382,15 @@ export default function AgentStream({ content, onCancel, onApprove, onReject }: 
 
       {/* Review actions */}
       {progress.status === "waiting" && progress.report?.reviewId && (
-        <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           {onApprove && (
             <Btn primary sm onClick={() => onApprove(progress.report!.reviewId!)}>
               Godkjenn
+            </Btn>
+          )}
+          {onRequestChanges && (
+            <Btn sm onClick={() => onRequestChanges(progress.report!.reviewId!, "")}>
+              Be om endringer
             </Btn>
           )}
           {onReject && (

@@ -186,6 +186,7 @@ export async function handleReview(
     taskId: ctx.taskId,
     sandboxId,
     repoName: ctx.repoName,
+    repoOwner: ctx.repoOwner,
     filesChanged: allFiles.map((f) => ({
       path: f.path,
       content: f.content,
@@ -238,7 +239,7 @@ export async function handleReview(
   addStep(ctx, { id: "waiting", label: "Venter pa godkjenning", done: false });
 
   await reportProgress(ctx, {
-    status: "done",
+    status: "waiting",
     phase: "reviewing",
     summary: `Ferdig — ${allFiles.length} filer endret`,
     steps: buildSteps(ctx),

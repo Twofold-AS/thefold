@@ -60,7 +60,7 @@ export default function DocsPage() {
 
       {/* Healing-rapporter */}
       <GR>
-        <div style={{ border: `1px solid ${T.border}`, borderRadius: T.r, position: "relative", overflow: "hidden" }}>
+        <div style={{ borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
           <div style={{ padding: 20 }}>
             <SectionLabel>HEALING-RAPPORTER</SectionLabel>
             {healingLoading ? (
@@ -102,7 +102,7 @@ export default function DocsPage() {
 
       {/* Helse-sjekker */}
       <GR mb={40}>
-        <div style={{ border: `1px solid ${T.border}`, borderTop: "none", borderRadius: `0 0 ${T.r}px ${T.r}px`, position: "relative", overflow: "hidden" }}>
+        <div style={{ borderRadius: 12, border: `1px solid ${T.border}`, marginTop: 20, position: "relative", overflow: "hidden" }}>
           <div style={{ padding: 20 }}>
             <SectionLabel>HELSE-SJEKKER</SectionLabel>
             {healthLoading ? (

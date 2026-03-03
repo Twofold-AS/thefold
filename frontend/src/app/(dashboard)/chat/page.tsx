@@ -16,17 +16,17 @@ import {
   sendMessage,
   cancelChatGeneration,
   deleteConversation,
-  inkognitoConversationId,
   repoConversationId,
   listSkills,
-  listRepos,
   listProviders,
   approveReview,
   rejectReview,
+  requestReviewChanges,
   type ConversationSummary,
   type Message,
 } from "@/lib/api";
 import { Trash2 } from "lucide-react";
+import { useRepoContext } from "@/lib/repo-context";
 
 function timeAgo(date: string): string {
   const now = Date.now();
@@ -43,19 +43,6 @@ function timeAgo(date: string): string {
   return `${months}mnd`;
 }
 
-function GhostIcon({ color }: { color?: string }) {
-  return (
-    <svg width="12" height="12" viewBox="0 0 14 14" fill="none">
-      <path
-        d="M7 1C5 1 3.5 2.5 3 4c-.7 0-1.5.3-1.5 1.5C1.5 7 3 8 3 8s-.5 2 1 3.5c1 1 2 1.5 3 1.5s2-.5 3-1.5c1.5-1.5 1-3.5 1-3.5s1.5-1 1.5-2.5C12.5 4.3 11.7 4 11 4c-.5-1.5-2-3-4-3z"
-        stroke={color || T.textFaint}
-        strokeWidth="1.1"
-        fill="none"
-      />
-    </svg>
-  );
-}
-
 function extractRepoFromId(id: string): string | null {
   if (!id.startsWith("repo-")) return null;
   const rest = id.substring(5);
@@ -70,17 +57,19 @@ function ChatPageInner() {
   const searchParams = useSearchParams();
   const autoMsg = searchParams.get("msg");
 
+  const { selectedRepo } = useRepoContext();
   const [ac, setAc] = useState<string | null>(null);
   const [newChat, setNewChat] = useState(true);
-  const [tab, setTab] = useState<"Repo" | "Privat">("Repo");
   const [sending, setSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
   const [thinkSeconds, setThinkSeconds] = useState(0);
+  const [pendingReviewId, setPendingReviewId] = useState<string | null>(null);
   const autoMsgSent = useRef(false);
   const msgEndRef = useRef<HTMLDivElement>(null);
   const slowIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollStoppedRef = useRef(false);
 
   const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
     () => getConversations(),
@@ -98,10 +87,6 @@ function ChatPageInner() {
   const { data: skillsData } = useApiData(() => listSkills(), []);
   const availableSkills = skillsData?.skills ?? [];
 
-  // Dynamic repos — no hardcoded org, backend resolves from PAT
-  const { data: repoData } = useApiData(() => listRepos(), []);
-  const dynamicRepos = repoData?.repos?.map(r => r.name) ?? [];
-
   // Models
   const { data: providerData } = useApiData(() => listProviders(), []);
   const allModels = (providerData?.providers ?? []).flatMap(p =>
@@ -109,10 +94,17 @@ function ChatPageInner() {
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
-  // Filter conversations by tab — Repo tab shows repo-* and chat-* conversations
-  const filtered = conversations.filter((c) =>
-    tab === "Privat" ? c.id.startsWith("inkognito-") : !c.id.startsWith("inkognito-"),
-  );
+  // Filter conversations by selected repo
+  const filtered = conversations.filter((c) => {
+    // Aldri vis inkognito-samtaler (fjernet som konsept)
+    if (c.id.startsWith("inkognito-")) return false;
+    if (selectedRepo) {
+      // Vis samtaler for valgt repo
+      return c.id.startsWith(`repo-${selectedRepo.name}-`);
+    }
+    // Global: vis chat-* samtaler (ikke repo-bundne)
+    return c.id.startsWith("chat-");
+  });
 
   // Think seconds timer
   useEffect(() => {
@@ -125,57 +117,67 @@ function ChatPageInner() {
   // Poll for replies while sending
   useEffect(() => {
     if (!sending || !ac) return;
+    pollStoppedRef.current = false;
 
     const poll = async () => {
+      if (pollStoppedRef.current) return;
       try {
         const data = await getChatHistory(ac, 50);
         if (!data?.messages?.length) return;
 
         // Alltid oppdater meldinger — bruk content-hash for å unngå unødvendige re-renders
         const newHash = data.messages
-          .map((m: any) => `${m.id}:${(m.content || "").length}:${m.messageType}`)
+          .map((m: any) => `${m.id}:${(m.content || "").substring(0, 80)}:${m.messageType}`)
           .join("|");
         const oldHash = (msgs || [])
-          .map((m: any) => `${m.id}:${(m.content || "").length}:${m.messageType}`)
+          .map((m: any) => `${m.id}:${(m.content || "").substring(0, 80)}:${m.messageType}`)
           .join("|");
 
         if (newHash !== oldHash) {
           setMsgData({ ...data }); // Ny referanse → re-render
         }
 
-        // Stopp polling KUN når vi har et EKTE svar (ikke tom placeholder)
+        // Finn tidspunkt for siste brukermelding
+        const lastUserTime = (() => {
+          for (let i = data.messages.length - 1; i >= 0; i--) {
+            if (data.messages[i].role === "user") return new Date(data.messages[i].createdAt).getTime();
+          }
+          return 0;
+        })();
+
+        // Sjekk om det finnes et EKTE chat-svar ETTER siste brukermelding
         const hasRealReply = data.messages.some(
           (m: any) =>
             m.role === "assistant" &&
             m.content &&
             m.content.trim().length > 0 &&
-            !m.content.startsWith("{") && // Ikke JSON (agent-melding)
-            m.messageType === "chat"
+            !m.content.startsWith("{") &&
+            m.messageType === "chat" &&
+            new Date(m.createdAt).getTime() > lastUserTime
         );
 
-        // Eller agent er ferdig/feilet
-        const agentDone = data.messages.some((m: any) => {
-          if (m.role !== "assistant") return false;
-          if (m.messageType !== "agent_status" && m.messageType !== "agent_progress") return false;
-          try {
-            const p = JSON.parse(m.content);
-            return p.status === "done" || p.status === "failed" ||
-                   p.status === "completed" || p.phase === "Ferdig" || p.phase === "Feilet";
-          } catch { return false; }
-        });
+        // Finn SISTE agent-melding (ikke .some() over alle — gamle "working" meldinger forsvinner aldri)
+        const agentMessages = data.messages.filter((m: any) =>
+          m.role === "assistant" &&
+          (m.messageType === "agent_status" || m.messageType === "agent_progress")
+        );
+        const lastAgent = agentMessages.length > 0 ? agentMessages[agentMessages.length - 1] : null;
 
-        // Sjekk om agent fortsatt jobber (da stopper vi IKKE)
-        const agentWorking = data.messages.some((m: any) => {
-          if (m.role !== "assistant") return false;
-          if (m.messageType !== "agent_status" && m.messageType !== "agent_progress") return false;
+        let agentDone = false;
+        let agentWaiting = false;
+        if (lastAgent) {
           try {
-            const p = JSON.parse(m.content);
-            return p.status === "working" || p.phase === "Bygger" ||
-                   p.phase === "Planlegger" || p.phase === "Forbereder";
-          } catch { return false; }
-        });
+            const p = JSON.parse(lastAgent.content);
+            // Ferdig: status=done/completed/failed ELLER phase=completed/Ferdig/Feilet
+            agentDone = p.status === "done" || p.status === "completed" || p.status === "failed"
+              || p.phase === "completed" || p.phase === "Ferdig" || p.phase === "Feilet";
+            // Venter på review: status=waiting/needs_input
+            agentWaiting = p.status === "waiting" || p.status === "needs_input";
+          } catch { /* ignore */ }
+        }
 
-        if (agentDone || (hasRealReply && !agentWorking)) {
+        if (agentDone || agentWaiting || (hasRealReply && !lastAgent)) {
+          pollStoppedRef.current = true;
           setSending(false);
         }
       } catch {
@@ -220,25 +222,16 @@ function ChatPageInner() {
       setNewChat(false);
 
       const repoParam = searchParams.get("repo");
-      const ghostParam = searchParams.get("ghost") === "1";
       const skillsParam = searchParams.get("skills");
       const subagentsParam = searchParams.get("subagents") === "1";
 
       if (skillsParam) setSelectedSkillIds(skillsParam.split(",").filter(Boolean));
       if (subagentsParam) setSubAgentsEnabled(true);
 
-      // Sett riktig tab basert på ghost
-      if (ghostParam) {
-        setTab("Privat");
-      }
-
-      const convId = ghostParam
-        ? inkognitoConversationId()
-        : repoParam
-          ? repoConversationId(repoParam)
-          : dynamicRepos[0]
-            ? repoConversationId(dynamicRepos[0])
-            : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const repoName = repoParam || selectedRepo?.name || null;
+      const convId = repoName
+        ? repoConversationId(repoName)
+        : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
       setAc(convId);
 
@@ -259,7 +252,8 @@ function ChatPageInner() {
 
       setSending(true);
       sendMessage(convId, autoMsg, {
-        repoName: repoParam || undefined,
+        repoName: repoName || undefined,
+        repoOwner: selectedRepo?.owner || undefined,
         skillIds: skillsParam ? skillsParam.split(",").filter(Boolean) : undefined,
       })
         .then((result) => {
@@ -268,33 +262,31 @@ function ChatPageInner() {
         .catch((e: unknown) => {
           setSending(false);
           const msg = e instanceof Error ? e.message : "Noe gikk galt";
-          if (msg.includes("rate limit") || msg.includes("quota")) setChatError("Du har brukt opp token-kvoten. Vent litt eller oppgrader.");
-          else if (msg.includes("insufficient")) setChatError("Ikke nok credits. Sjekk API-nøklene.");
+          const lower = msg.toLowerCase();
+          if (lower.includes("credit") || lower.includes("billing") || lower.includes("quota") || lower.includes("brukt opp")) setChatError("AI-credits er brukt opp. Sjekk billing hos leverandøren.");
+          else if (lower.includes("rate limit") || lower.includes("429") || lower.includes("too many")) setChatError("For mange forespørsler — vent litt og prøv igjen.");
+          else if (lower.includes("api key") || lower.includes("api-nøkkel") || lower.includes("401") || lower.includes("ugyldig")) setChatError("API-nøkkelen er ugyldig. Sjekk AI-innstillingene.");
+          else if (lower.includes("unavailable") || lower.includes("503") || lower.includes("utilgjengelig") || lower.includes("overloaded")) setChatError("AI-tjenesten er midlertidig nede. Prøv igjen om litt.");
+          else if (lower.includes("context length") || lower.includes("too long")) setChatError("Meldingen er for lang. Prøv en kortere melding.");
           else setChatError(msg);
         });
     }
   }, [autoMsg]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Scroll to bottom on new messages or content changes
-  const msgsHash = msgs.map(m => `${m.id}:${(m.content || "").length}`).join(",");
+  const msgsHash = msgs.map(m => `${m.id}:${(m.content || "").substring(0, 40)}`).join(",");
   useEffect(() => {
     msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgsHash]);
 
   const cur = ac ? conversations.find((c) => c.id === ac) : null;
-  const isGhost = ac ? ac.startsWith("inkognito-") : false;
   const curRepo = ac ? extractRepoFromId(ac) : null;
 
-  const startNewChat = (msg: string, repo: string | null, ghost: boolean) => {
-    // Tab state is the primary authority for conversation routing
-    // Ghost toggle syncs with tab (see onGhostChange below)
-    const usePrivate = tab === "Privat";
-    const effectiveRepo = repo || dynamicRepos[0] || null;
-    const convId = usePrivate
-      ? inkognitoConversationId()
-      : effectiveRepo
-        ? repoConversationId(effectiveRepo)
-        : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const startNewChat = (msg: string) => {
+    const repoName = selectedRepo?.name || null;
+    const convId = repoName
+      ? repoConversationId(repoName)
+      : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setAc(convId);
     setNewChat(false);
 
@@ -315,26 +307,43 @@ function ChatPageInner() {
 
     setSending(true);
     sendMessage(convId, msg, {
-      ...(repo ? { repoName: repo } : {}),
+      ...(repoName ? { repoName, repoOwner: selectedRepo?.owner } : {}),
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
     })
       .then((result) => {
         refreshConvs();
-        refreshMsgs();
+        // IKKE refreshMsgs() — polling håndterer dette
       })
       .catch((e: unknown) => {
         setSending(false);
         const msg = e instanceof Error ? e.message : "Noe gikk galt";
-        if (msg.includes("rate limit") || msg.includes("quota")) setChatError("Du har brukt opp token-kvoten. Vent litt eller oppgrader.");
-        else if (msg.includes("insufficient")) setChatError("Ikke nok credits. Sjekk API-nøklene.");
+        const lower = msg.toLowerCase();
+        if (lower.includes("credit") || lower.includes("billing") || lower.includes("quota") || lower.includes("brukt opp")) setChatError("AI-credits er brukt opp. Sjekk billing hos leverandøren.");
+        else if (lower.includes("rate limit") || lower.includes("429") || lower.includes("too many")) setChatError("For mange forespørsler — vent litt og prøv igjen.");
+        else if (lower.includes("api key") || lower.includes("api-nøkkel") || lower.includes("401") || lower.includes("ugyldig")) setChatError("API-nøkkelen er ugyldig. Sjekk AI-innstillingene.");
+        else if (lower.includes("unavailable") || lower.includes("503") || lower.includes("utilgjengelig") || lower.includes("overloaded")) setChatError("AI-tjenesten er midlertidig nede. Prøv igjen om litt.");
+        else if (lower.includes("context length") || lower.includes("too long")) setChatError("Meldingen er for lang. Prøv en kortere melding.");
         else setChatError(msg);
       });
   };
 
-  const handleSend = (value: string, repo?: string | null) => {
+  const handleSend = async (value: string) => {
     if (!ac || !value) return;
     setChatError(null);
+
+    // Intercept: if pending review, send as feedback instead of chat message
+    if (pendingReviewId) {
+      try {
+        await requestReviewChanges(pendingReviewId, value);
+        setPendingReviewId(null);
+        refreshMsgs();
+      } catch (e) {
+        setChatError(e instanceof Error ? e.message : "Endring feilet");
+        setPendingReviewId(null);
+      }
+      return;
+    }
 
     // Optimistic user message
     const optimisticMsg: Message = {
@@ -353,19 +362,24 @@ function ChatPageInner() {
 
     setSending(true);
     sendMessage(ac, value, {
-      repoName: repo || curRepo || undefined,
+      repoName: selectedRepo?.name || curRepo || undefined,
+      repoOwner: selectedRepo?.owner || undefined,
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
     })
       .then((result) => {
-        refreshMsgs();
         refreshConvs();
+        // IKKE refreshMsgs() — polling håndterer dette
       })
       .catch((e: unknown) => {
         setSending(false);
         const msg = e instanceof Error ? e.message : "Noe gikk galt";
-        if (msg.includes("rate limit") || msg.includes("quota")) setChatError("Du har brukt opp token-kvoten. Vent litt eller oppgrader.");
-        else if (msg.includes("insufficient")) setChatError("Ikke nok credits. Sjekk API-nøklene.");
+        const lower = msg.toLowerCase();
+        if (lower.includes("credit") || lower.includes("billing") || lower.includes("quota") || lower.includes("brukt opp")) setChatError("AI-credits er brukt opp. Sjekk billing hos leverandøren.");
+        else if (lower.includes("rate limit") || lower.includes("429") || lower.includes("too many")) setChatError("For mange forespørsler — vent litt og prøv igjen.");
+        else if (lower.includes("api key") || lower.includes("api-nøkkel") || lower.includes("401") || lower.includes("ugyldig")) setChatError("API-nøkkelen er ugyldig. Sjekk AI-innstillingene.");
+        else if (lower.includes("unavailable") || lower.includes("503") || lower.includes("utilgjengelig") || lower.includes("overloaded")) setChatError("AI-tjenesten er midlertidig nede. Prøv igjen om litt.");
+        else if (lower.includes("context length") || lower.includes("too long")) setChatError("Meldingen er for lang. Prøv en kortere melding.");
         else setChatError(msg);
       });
   };
@@ -380,8 +394,6 @@ function ChatPageInner() {
   return (
     <div
       style={{
-        border: `1px solid ${T.border}`,
-        borderRadius: T.r,
         display: "grid",
         gridTemplateColumns: "280px 1fr",
         height: "100%",
@@ -395,67 +407,42 @@ function ChatPageInner() {
           borderRight: `1px solid ${T.border}`,
           display: "flex",
           flexDirection: "column",
-          height: "100%",
           minHeight: 0,
+          alignSelf: "stretch",
         }}
       >
         <div
           style={{
             padding: "16px 16px 12px",
-            borderBottom: `1px solid ${T.border}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
           }}
         >
-          <Btn
-            primary
-            sm
-            style={{ width: "100%" }}
+          <span style={{ fontSize: 12, fontWeight: 500, color: T.textMuted, fontFamily: T.mono }}>Samtaler</span>
+          <div
             onClick={() => {
               setNewChat(true);
               setAc(null);
             }}
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 999,
+              border: `1px solid ${T.border}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              background: "transparent",
+              flexShrink: 0,
+            }}
+            title="Ny samtale"
           >
-            + Ny samtale
-          </Btn>
-        </div>
-        <div
-          style={{
-            padding: "8px",
-            display: "flex",
-            gap: 4,
-            borderBottom: `1px solid ${T.border}`,
-          }}
-        >
-          {(["Repo", "Privat"] as const).map((f) => (
-            <div
-              key={f}
-              onClick={() => {
-                setTab(f);
-                // Find first conversation in new tab, or show new-chat view
-                const tabConvs = conversations.filter((c) =>
-                  f === "Privat" ? c.id.startsWith("inkognito-") : c.id.startsWith("repo-"),
-                );
-                if (tabConvs.length > 0) {
-                  setAc(tabConvs[0].id);
-                  setNewChat(false);
-                } else {
-                  setAc(null);
-                  setNewChat(true);
-                }
-              }}
-              style={{
-                fontSize: 11,
-                fontFamily: T.mono,
-                padding: "4px 8px",
-                background: tab === f ? T.subtle : "transparent",
-                color: tab === f ? T.text : T.textMuted,
-                cursor: "pointer",
-                border: `1px solid ${tab === f ? T.border : "transparent"}`,
-                borderRadius: 6,
-              }}
-            >
-              {f}
-            </div>
-          ))}
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M7 2v10M2 7h10" stroke={T.textMuted} strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </div>
         </div>
         <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
           {convsLoading ? (
@@ -468,7 +455,6 @@ function ChatPageInner() {
             </div>
           ) : (
             filtered.map((c) => {
-              const isPrivate = c.id.startsWith("inkognito-");
               const repo = extractRepoFromId(c.id);
               return (
                 <div
@@ -490,11 +476,10 @@ function ChatPageInner() {
                     style={{
                       display: "flex",
                       alignItems: "center",
+                      justifyContent: "space-between",
                       gap: 8,
-                      marginBottom: 4,
                     }}
                   >
-                    {isPrivate && <GhostIcon />}
                     <span
                       style={{
                         fontSize: 13,
@@ -539,17 +524,22 @@ function ChatPageInner() {
                     >
                       <Trash2 size={14} />
                     </span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {repo && (
-                      <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                        {repo}
-                      </span>
-                    )}
-                    <span style={{ fontSize: 10, color: T.textFaint, marginLeft: "auto" }}>
+                    <span style={{
+                      fontSize: 10,
+                      color: T.textFaint,
+                      fontFamily: T.mono,
+                      flexShrink: 0,
+                    }}>
                       {timeAgo(c.lastActivity)}
                     </span>
                   </div>
+                  {repo && (
+                    <div style={{ marginTop: 4 }}>
+                      <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                        {repo}
+                      </span>
+                    </div>
+                  )}
                   <style>{`.conv-row:hover .conv-delete { opacity: 1 !important; }`}</style>
                 </div>
               );
@@ -562,15 +552,15 @@ function ChatPageInner() {
       {newChat ? (
         <div style={{ display: "flex", flexDirection: "column" }}>
           <ChatComposer
-            onSubmit={startNewChat}
-            defaultGhost={tab === "Privat"}
-            onGhostChange={(g) => setTab(g ? "Privat" : "Repo")}
+            onSubmit={(msg) => startNewChat(msg)}
             skills={availableSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
             selectedSkillIds={selectedSkillIds}
             onSkillsChange={setSelectedSkillIds}
             subAgentsEnabled={subAgentsEnabled}
             onSubAgentsToggle={() => setSubAgentsEnabled(p => !p)}
-            repos={dynamicRepos}
+            models={allModels}
+            selectedModel={selectedModel}
+            onModelChange={setSelectedModel}
           />
         </div>
       ) : (
@@ -603,19 +593,6 @@ function ChatPageInner() {
               )}
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <select
-                value={selectedModel || "auto"}
-                onChange={e => setSelectedModel(e.target.value === "auto" ? null : e.target.value)}
-                style={{
-                  background: T.surface, border: `1px solid ${T.border}`,
-                  borderRadius: T.r, padding: "4px 8px", fontSize: 11,
-                  color: T.text, fontFamily: T.mono, outline: "none",
-                  cursor: "pointer",
-                }}
-              >
-                <option value="auto">Auto (anbefalt)</option>
-                {allModels.map(m => <option key={m.id} value={m.id}>{m.displayName || m.id}</option>)}
-              </select>
             </div>
           </div>
 
@@ -728,6 +705,20 @@ function ChatPageInner() {
                                   setChatError(e instanceof Error ? e.message : "Avvisning feilet");
                                 }
                               }}
+                              onRequestChanges={async (reviewId, feedback) => {
+                                if (!feedback || feedback.trim() === "") {
+                                  setPendingReviewId(reviewId);
+                                  const input = document.querySelector<HTMLInputElement>('[data-chat-input]');
+                                  if (input) input.focus();
+                                  return;
+                                }
+                                try {
+                                  await requestReviewChanges(reviewId, feedback);
+                                  refreshMsgs();
+                                } catch (e) {
+                                  setChatError(e instanceof Error ? e.message : "Endring feilet");
+                                }
+                              }}
                             />
                             <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
                           </div>
@@ -773,6 +764,20 @@ function ChatPageInner() {
                                       setChatError(e instanceof Error ? e.message : "Avvisning feilet");
                                     }
                                   }}
+                                  onRequestChanges={async (reviewId, feedback) => {
+                                    if (!feedback || feedback.trim() === "") {
+                                      setPendingReviewId(reviewId);
+                                      const input = document.querySelector<HTMLInputElement>('[data-chat-input]');
+                                      if (input) input.focus();
+                                      return;
+                                    }
+                                    try {
+                                      await requestReviewChanges(reviewId, feedback);
+                                      refreshMsgs();
+                                    } catch (e) {
+                                      setChatError(e instanceof Error ? e.message : "Endring feilet");
+                                    }
+                                  }}
                                 />
                               </div>
                             )}
@@ -782,8 +787,15 @@ function ChatPageInner() {
                               {m.metadata && (() => {
                                 try {
                                   const meta = typeof m.metadata === "string" ? JSON.parse(m.metadata) : m.metadata;
-                                  return meta?.model ? (
-                                    <span style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>{meta.model}</span>
+                                  if (!meta) return null;
+                                  const parts: string[] = [];
+                                  if (meta.model) parts.push(meta.model);
+                                  if (meta.cost != null) parts.push(`$${Number(meta.cost).toFixed(4)}`);
+                                  if (meta.tokens?.totalTokens != null) parts.push(`${Number(meta.tokens.totalTokens).toLocaleString()} tokens`);
+                                  return parts.length > 0 ? (
+                                    <span style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>
+                                      {parts.join(" \u00b7 ")}
+                                    </span>
                                   ) : null;
                                 } catch { return null; }
                               })()}
@@ -825,6 +837,17 @@ function ChatPageInner() {
                 </span>
               </div>
             )}
+            {sending && msgs.some(m => isAgentMessage(m)) && !msgs.some(m => {
+              try {
+                const p = JSON.parse(m.content);
+                return p.status === "done" || p.status === "failed" || p.status === "waiting" ||
+                       p.phase === "Ferdig" || p.phase === "Feilet";
+              } catch { return false; }
+            }) && (
+              <div style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono, padding: "4px 0 4px 38px" }}>
+                Oppdaterer... {thinkSeconds}s
+              </div>
+            )}
             {chatError && (
               <div style={{
                 padding: "10px 16px",
@@ -841,31 +864,32 @@ function ChatPageInner() {
           </div>
 
           {/* Input */}
-          <div style={{ padding: "12px 20px", borderTop: `1px solid ${T.border}`, flexShrink: 0 }}>
-            <ChatInput
-              compact
-              repo={curRepo || undefined}
-              ghost={isGhost}
-              onSubmit={handleSend}
-              onRepoChange={(r) => {
-                if (r) {
-                  const newConvId = repoConversationId(r);
-                  setAc(newConvId);
-                }
-              }}
-              isPrivate={tab === "Privat"}
-              skills={availableSkills}
-              selectedSkillIds={selectedSkillIds}
-              onSkillsChange={setSelectedSkillIds}
-              subAgentsEnabled={subAgentsEnabled}
-              onSubAgentsToggle={() => setSubAgentsEnabled((p) => !p)}
-              repos={dynamicRepos}
-              isLoading={sending}
-              onCancel={() => {
-                if (ac) cancelChatGeneration(ac).catch(() => {});
-                setSending(false);
-              }}
-            />
+          <div style={{
+            padding: "8px 24px 0",
+            display: "flex",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}>
+            <div style={{ width: "100%", maxWidth: 768 }}>
+              <ChatInput
+                compact
+                onSubmit={handleSend}
+                skills={availableSkills}
+                selectedSkillIds={selectedSkillIds}
+                onSkillsChange={setSelectedSkillIds}
+                subAgentsEnabled={subAgentsEnabled}
+                onSubAgentsToggle={() => setSubAgentsEnabled((p) => !p)}
+                isLoading={sending}
+                onCancel={() => {
+                  if (ac) cancelChatGeneration(ac).catch(() => {});
+                  setSending(false);
+                }}
+                placeholder={pendingReviewId ? "Skriv feedback til agenten..." : undefined}
+                models={allModels}
+                selectedModel={selectedModel}
+                onModelChange={setSelectedModel}
+              />
+            </div>
           </div>
         </div>
       )}

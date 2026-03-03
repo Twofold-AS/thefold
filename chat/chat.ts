@@ -985,8 +985,24 @@ async function processAIResponse(
       });
     } catch (e) {
       console.error("AI call failed:", e);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      const lower = errMsg.toLowerCase();
+      let userMessage: string;
+      if (lower.includes("credit") || lower.includes("billing") || lower.includes("quota") || lower.includes("402") || lower.includes("brukt opp")) {
+        userMessage = "AI-leverandørens credits er brukt opp. Sjekk billing-innstillingene hos leverandøren.";
+      } else if (lower.includes("rate limit") || lower.includes("429") || lower.includes("too many")) {
+        userMessage = "For mange forespørsler — vent litt og prøv igjen.";
+      } else if (lower.includes("401") || lower.includes("api key") || lower.includes("api-nøkkel") || lower.includes("unauthenticated") || lower.includes("unauthorized")) {
+        userMessage = "API-nøkkelen er ugyldig eller utløpt. Sjekk AI-innstillingene.";
+      } else if (lower.includes("overloaded") || lower.includes("503") || lower.includes("unavailable") || lower.includes("utilgjengelig")) {
+        userMessage = "AI-tjenesten er midlertidig utilgjengelig. Prøv igjen om litt.";
+      } else if (lower.includes("context length") || lower.includes("too long") || lower.includes("token limit")) {
+        userMessage = "Meldingen er for lang. Prøv en kortere melding.";
+      } else {
+        userMessage = `Beklager, noe gikk galt: ${errMsg}`;
+      }
       aiResponse = {
-        content: "Beklager, jeg klarte ikke å generere et svar. Feilmelding: " + (e instanceof Error ? e.message : "Ukjent feil"),
+        content: userMessage,
         tokensUsed: 0,
         stopReason: "error",
         modelUsed: "none",

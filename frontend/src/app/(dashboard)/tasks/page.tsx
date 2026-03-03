@@ -8,7 +8,7 @@ import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import { useApiData } from "@/lib/hooks";
 import Skeleton from "@/components/Skeleton";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, Trash2, ChevronDown } from "lucide-react";
 import {
   listTheFoldTasks,
   listReviews,
@@ -17,6 +17,7 @@ import {
   requestReviewChanges,
   rejectReview,
   createTask,
+  softDeleteTask,
   listRepos,
   listSkills,
   type TheFoldTask,
@@ -94,6 +95,7 @@ export default function TasksPage() {
   const [newDesc, setNewDesc] = useState("");
   const [newRepo, setNewRepo] = useState("");
   const [creating, setCreating] = useState(false);
+  const [repoDropOpen, setRepoDropOpen] = useState(false);
 
   const { data: taskData, loading: tasksLoading, refresh: refreshTasks } = useApiData(
     () => listTheFoldTasks(),
@@ -260,6 +262,7 @@ export default function TasksPage() {
           style={{
             display: "grid",
             gridTemplateColumns: t ? "1fr 1fr" : "1fr",
+            borderRadius: 12,
             border: `1px solid ${T.border}`,
             minHeight: 400,
             position: "relative",
@@ -307,6 +310,26 @@ export default function TasksPage() {
                       <span style={{ fontSize: 13, fontWeight: 500, color: T.text, flex: 1 }}>
                         {tk.title}
                       </span>
+                      <div
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          try {
+                            await softDeleteTask(tk.id);
+                            refreshTasks();
+                          } catch {
+                            // Stille feil — brukeren ser at task ikke forsvant
+                          }
+                        }}
+                        title="Slett oppgave"
+                        style={{
+                          padding: 4,
+                          cursor: "pointer",
+                          color: T.textFaint,
+                          flexShrink: 0,
+                        }}
+                      >
+                        <Trash2 size={14} strokeWidth={1.5} />
+                      </div>
                       <Tag
                         variant={
                           st === "done"
@@ -505,18 +528,44 @@ export default function TasksPage() {
                 </>
               )}
 
-              <SectionLabel>LABELS</SectionLabel>
-              <div style={{ marginBottom: 20 }}>
-                {t.labels && t.labels.length > 0 ? (
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {t.labels.map((label, i) => (
-                      <Tag key={i}>{label}</Tag>
-                    ))}
+              {t.labels && t.labels.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    color: T.textMuted,
+                    textTransform: "uppercase" as const,
+                    letterSpacing: "0.06em",
+                    marginBottom: 8,
+                    fontFamily: T.mono,
+                  }}>
+                    SUB-TASKS
                   </div>
-                ) : (
-                  <div style={{ fontSize: 12, color: T.textFaint }}>Ingen labels</div>
-                )}
-              </div>
+                  {t.labels.map((label, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "6px 0",
+                        borderBottom: i < t.labels.length - 1 ? `1px solid ${T.border}` : "none",
+                      }}
+                    >
+                      <div style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        background: t.status === "done" ? T.success : T.textFaint,
+                        flexShrink: 0,
+                      }} />
+                      <span style={{ fontSize: 12, color: T.textSec, fontFamily: T.mono }}>
+                        {label}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
 
               {t.errorMessage && (
                 <>
@@ -627,19 +676,56 @@ export default function TasksPage() {
 
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Repo</div>
-              <select
-                value={newRepo || dynamicRepos[0] || ""}
-                onChange={(e) => setNewRepo(e.target.value)}
-                style={{
-                  ...inputStyle,
-                  cursor: "pointer",
-                  appearance: "auto",
-                }}
-              >
-                {dynamicRepos.map((r) => (
-                  <option key={r} value={r}>{r}</option>
-                ))}
-              </select>
+              <div style={{ position: "relative" }}>
+                <div
+                  onClick={() => setRepoDropOpen((p) => !p)}
+                  style={{
+                    ...inputStyle,
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    borderRadius: 12,
+                  }}
+                >
+                  <span>{newRepo || dynamicRepos[0] || "Velg repo"}</span>
+                  <ChevronDown size={14} strokeWidth={1.5} style={{ color: T.textMuted }} />
+                </div>
+                {repoDropOpen && (
+                  <>
+                    <div style={{ position: "fixed", inset: 0, zIndex: 98 }} onClick={() => setRepoDropOpen(false)} />
+                    <div style={{
+                      position: "absolute",
+                      top: "calc(100% + 4px)",
+                      left: 0,
+                      right: 0,
+                      background: T.surface,
+                      border: `1px solid ${T.border}`,
+                      borderRadius: 12,
+                      zIndex: 99,
+                      overflow: "hidden",
+                      boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                    }}>
+                      {dynamicRepos.map((r) => (
+                        <div
+                          key={r}
+                          onClick={() => { setNewRepo(r); setRepoDropOpen(false); }}
+                          style={{
+                            padding: "10px 16px",
+                            fontSize: 12,
+                            fontFamily: T.mono,
+                            color: (newRepo || dynamicRepos[0]) === r ? T.text : T.textMuted,
+                            background: (newRepo || dynamicRepos[0]) === r ? T.subtle : "transparent",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {r}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
 
             <div style={{ marginBottom: 20 }}>

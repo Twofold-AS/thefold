@@ -2,10 +2,11 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { T, Layout } from "@/lib/tokens";
+import { T } from "@/lib/tokens";
 import { useApiData } from "@/lib/hooks";
-import { getTaskStats, getCostSummary, listTheFoldTasks, getAuditStats, listSkills, getMemoryStats } from "@/lib/api";
+import { getTaskStats, getCostSummary, listTheFoldTasks, getAuditStats, listSkills, getMemoryStats, listProviders } from "@/lib/api";
 import ChatComposer from "@/components/ChatComposer";
+import { useRepoContext } from "@/lib/repo-context";
 import { GR } from "@/components/GridRow";
 import SectionLabel from "@/components/SectionLabel";
 import Toggle from "@/components/Toggle";
@@ -49,6 +50,7 @@ function statusColor(status: string): string {
 
 export default function OverviewPage() {
   const router = useRouter();
+  const { selectedRepo } = useRepoContext();
 
   const { data: taskStats, loading: taskLoading } = useApiData(() => getTaskStats(), []);
   const { data: costData, loading: costLoading } = useApiData(() => getCostSummary(), []);
@@ -56,22 +58,24 @@ export default function OverviewPage() {
   const { data: auditStats, loading: auditLoading } = useApiData(() => getAuditStats(), []);
   const { data: skillsData, loading: skillsLoading } = useApiData(() => listSkills(), []);
   const { data: memoryStats, loading: memoryLoading } = useApiData(() => getMemoryStats(), []);
+  const { data: providerData } = useApiData(() => listProviders(), []);
+  const allModels = (providerData?.providers ?? []).flatMap(p =>
+    p.models.filter(m => m.enabled).map(m => ({ id: m.id, displayName: m.displayName, provider: p.name }))
+  );
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
   const [agentOn, setAgentOn] = useState(true);
   const [subAgOn, setSubAgOn] = useState(false);
-  const [privat, setPrivat] = useState(false);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
 
   // Les fra localStorage etter hydration
   useEffect(() => {
     setAgentOn(localStorage.getItem("tf_agentMode") !== "false");
     setSubAgOn(localStorage.getItem("tf_subAgents") === "true");
-    setPrivat(localStorage.getItem("tf_private") === "true");
   }, []);
 
   useEffect(() => { localStorage.setItem("tf_agentMode", String(agentOn)); }, [agentOn]);
   useEffect(() => { localStorage.setItem("tf_subAgents", String(subAgOn)); }, [subAgOn]);
-  useEffect(() => { localStorage.setItem("tf_private", String(privat)); }, [privat]);
 
   const tokensToday = Number(costData?.today?.tokens ?? 0) || 0;
   const costToday = Number(costData?.today?.total ?? 0) || 0;
@@ -82,11 +86,11 @@ export default function OverviewPage() {
 
   const statsLoading = taskLoading || costLoading || auditLoading;
 
-  const onStartChat = (msg: string, repo: string | null, ghost: boolean) => {
+  const onStartChat = (msg: string) => {
     const params = new URLSearchParams();
     if (msg) params.set("msg", msg);
-    if (repo) params.set("repo", repo);
-    if (ghost) params.set("ghost", "1");
+    // Repo comes from global context now, not from ChatComposer
+    if (selectedRepo) params.set("repo", selectedRepo.name);
     if (selectedSkillIds.length > 0) params.set("skills", selectedSkillIds.join(","));
     if (subAgOn) params.set("subagents", "1");
     router.push(`/chat?${params.toString()}`);
@@ -105,21 +109,20 @@ export default function OverviewPage() {
     .sort(([, a], [, b]) => b - a)
     .slice(0, 3);
 
-  const SP = Layout.sidePadding;
-
   return (
     <>
-      <div style={{ margin: `0 -${SP}px`, position: "relative", zIndex: 1 }}>
+      <div style={{ position: "relative", zIndex: 1 }}>
         <ChatComposer
           heading="Når AI sier umulig, sier Mikael Kråkenes neste"
-          onSubmit={(msg, repo, ghost) => onStartChat(msg, repo, ghost)}
-          defaultGhost={privat}
-          onGhostChange={(g) => setPrivat(g)}
+          onSubmit={(msg) => onStartChat(msg)}
           skills={allSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
           selectedSkillIds={selectedSkillIds}
           onSkillsChange={setSelectedSkillIds}
           subAgentsEnabled={subAgOn}
           onSubAgentsToggle={() => setSubAgOn(p => !p)}
+          models={allModels}
+          selectedModel={selectedModel}
+          onModelChange={setSelectedModel}
         />
       </div>
 
@@ -129,8 +132,8 @@ export default function OverviewPage() {
           style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr 1fr 1fr",
+            borderRadius: 12,
             border: `1px solid ${T.border}`,
-            borderRadius: T.r,
             position: "relative",
             overflow: "hidden",
           }}
@@ -215,9 +218,9 @@ export default function OverviewPage() {
           style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr",
+            borderRadius: 12,
             border: `1px solid ${T.border}`,
-            borderTop: "none",
-            borderRadius: `0 0 ${T.r}px ${T.r}px`,
+            marginTop: 20,
             position: "relative",
             overflow: "hidden",
           }}
@@ -264,7 +267,6 @@ export default function OverviewPage() {
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <Toggle checked={agentOn} onChange={setAgentOn} label="Agent-modus" />
               <Toggle checked={subAgOn} onChange={setSubAgOn} label="Sub-agenter" />
-              <Toggle checked={privat} onChange={setPrivat} label="Privat" />
             </div>
           </div>
         </div>
@@ -276,9 +278,9 @@ export default function OverviewPage() {
           style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr",
+            borderRadius: 12,
             border: `1px solid ${T.border}`,
-            borderTop: "none",
-            borderRadius: `0 0 ${T.r}px ${T.r}px`,
+            marginTop: 20,
             position: "relative",
             overflow: "hidden",
           }}

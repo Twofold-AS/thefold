@@ -580,6 +580,65 @@ export const createPR = api(
   }
 );
 
+// --- Create or update a single file directly on a branch (no PR) ---
+
+interface CreateOrUpdateFileRequest {
+  owner: string;
+  repo: string;
+  path: string;
+  content: string;
+  message: string;
+  branch?: string; // default "main"
+}
+
+interface CreateOrUpdateFileResponse {
+  sha: string;
+  path: string;
+}
+
+export const createOrUpdateFile = api(
+  { method: "PUT", path: "/github/contents", expose: false },
+  async (req: CreateOrUpdateFileRequest): Promise<CreateOrUpdateFileResponse> => {
+    const token = await resolveToken(req.owner);
+    const branch = req.branch || "main";
+
+    // Check if file already exists (to get its SHA for update)
+    let existingSha: string | undefined;
+    try {
+      const existing = await ghApi(
+        `/repos/${req.owner}/${req.repo}/contents/${req.path}?ref=${branch}`,
+        { token },
+      );
+      existingSha = existing.sha;
+    } catch {
+      // File doesn't exist — this is a create, not update
+    }
+
+    const body: Record<string, unknown> = {
+      message: req.message,
+      content: Buffer.from(req.content).toString("base64"),
+      branch,
+    };
+    if (existingSha) {
+      body.sha = existingSha;
+    }
+
+    const result = await ghApi(
+      `/repos/${req.owner}/${req.repo}/contents/${req.path}`,
+      {
+        method: "PUT",
+        body,
+        token,
+      },
+    );
+
+    return {
+      sha: result.content?.sha || result.commit?.sha || "",
+      path: req.path,
+    };
+  },
+);
+
 // --- List repos for an org/user ---
 
 interface ListReposRequest {
