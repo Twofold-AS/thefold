@@ -52,7 +52,6 @@ Key concepts:
 - **Agent integration:** STEP 3.5 starts installed servers via `startInstalledServers()`, includes tools in AI context with `mcp_` prefix
 - **Call routing:** AI tool-use loop detects `mcp_` prefix, parses server/tool name, routes to `mcp.callTool()`
 - **Cleanup:** STEP 12.5 calls `stopAllServers()` after task completion
-- **Feature flag:** MCPRoutingEnabled secret controls routing (true) vs info-mode (false)
 - **Protocol:** JSON-RPC 2.0 over stdio with subprocess spawning (15s start timeout, 30s tool call timeout)
 
 Endpoints: `/mcp/list` (auth), `/mcp/get` (auth), `/mcp/install` (auth), `/mcp/uninstall` (auth), `/mcp/configure` (auth), `/mcp/installed` (internal), `/mcp/routing-status` (auth), `/mcp/call-tool` (internal)
@@ -115,7 +114,7 @@ Chat is connected to the agent system via Claude tool-use. When users ask for ac
 - **Dynamic AgentStatus:** `processAIResponse` builds steps dynamically based on intent detection with phase names (Forbereder/Analyserer/Planlegger/Bygger/Reviewer/Utforer)
 - **Animated PhaseIcons:** Per-phase SVG icons with CSS animations (grid-blink, magnifying glass pulse, clipboard, lightning swing, eye, gear spin)
 
-Key files: `ai/ai.ts` (tool definitions, callAnthropicWithTools, executeToolCall), `frontend/src/components/AgentStatus.tsx` (animated phase icons)
+Key files: `ai/tools.ts` (CHAT_TOOLS, callWithTools, executeToolCall), `ai/ai.ts` (endpoint orchestration), `frontend/src/components/AgentStatus.tsx` (animated phase icons)
 
 ## Integrations Service
 External service webhook integrations (Slack, Discord) with configuration management.
@@ -450,7 +449,6 @@ encore run              # all services + local infra
 
 ### Feature flags (alle default false)
 - ProgressMessageEnabled — Ny meldingskontrakt
-- MultiProviderEnabled — Multi-provider AI
 - GitHubAppEnabled — GitHub App auth
 - DynamicSubAgentsEnabled — Dynamisk sub-agent oppsett
 - HealingPipelineEnabled — Healing pipeline
@@ -478,7 +476,11 @@ encore run              # all services + local infra
 - `builder/builder.ts` — Builder service core: 5 endpoints, build orchestration
 - `builder/phases.ts` — 6 build phases: init, scaffold, dependencies, implement, integrate, finalize
 - `builder/graph.ts` — Dependency analysis, topological sort, import extraction
-- `ai/ai.ts` — System prompts, multi-model routing, diagnosis, prompt caching, reviseProjectPhase, planTaskOrder, generateFile, fixFile, callForExtraction (for registry auto-extraction)
+- `ai/ai.ts` — AI endpoint orchestration: chat, planTask, reviewCode, reviewProject, assessComplexity, diagnoseFailure, revisePlan, assessConfidence, decomposeProject, reviseProjectPhase, planTaskOrder, generateFile, fixFile, callForExtraction. Re-exports types from ./types
+- `ai/types.ts` — All shared AI interfaces: ChatMessage, ChatRequest, ChatResponse, AICallOptions, AICallResponse, TaskStep, CodeGenRequest/Response, ReviewRequest/Response, etc.
+- `ai/prompts.ts` — System prompts (BASE_RULES, CONTEXT_PROMPTS, getDirectChatPrompt), skills pipeline (buildSystemPromptWithPipeline, logSkillResults)
+- `ai/call.ts` — Provider-registry AI calls: callAIWithFallback, callAnthropicStreaming (SDK streaming), wrapProviderError, stripMarkdownJson, DEFAULT_MODEL
+- `ai/tools.ts` — Chat tool-use loop: CHAT_TOOLS (5 tools), callWithTools, executeToolCall, enrichTaskWithAI, sanitizeRepoName
 - `ai/db.ts` — SQLDatabase("ai") for providers + models tables
 - `ai/providers.ts` — 5 CRUD endpoints for dynamic provider/model system
 - `ai/router.ts` — DB-backed model cache, selectOptimalModel, getUpgradeModel, tag-based selection, tier-based upgrade
