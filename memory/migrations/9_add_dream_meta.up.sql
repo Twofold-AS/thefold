@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS memory_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
