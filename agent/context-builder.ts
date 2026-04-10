@@ -151,13 +151,51 @@ export async function buildContext(
     }).catch(() => { /* non-critical */ });
   }
 
+  // === STEP 2.1: Diff-based context (D27) ===
+  // Compare current tree against stored file hashes to skip fetching unchanged files.
+  // If <20% of files are new (absent from previous hash), only scan changed files.
+  let diffBasedTreeArray: string[] | null = null;
+  try {
+    const prevManifest = await memory.getManifest({ repoOwner: ctx.repoOwner, repoName: ctx.repoName });
+    // fileHashes is a new field — access via type cast until Encore regenerates client types
+    const prevHashes = (prevManifest.manifest as unknown as { fileHashes?: Record<string, string> })?.fileHashes;
+    if (prevHashes && Object.keys(prevHashes).length > 0 && treeArray.length > 0) {
+      const prevHashSet = new Set(Object.keys(prevHashes));
+      const changedFiles = treeArray.filter(f => !prevHashSet.has(f));
+      const changedRatio = changedFiles.length / treeArray.length;
+      if (changedRatio < 0.20) {
+        log.info("D27: diff-based context active", { total: treeArray.length, changed: changedFiles.length });
+        await think(ctx, `Diff-basert kontekst: ${changedFiles.length} av ${treeArray.length} filer er nye/endret.`);
+        diffBasedTreeArray = changedFiles;
+      } else {
+        log.info("D27: too many changes, using full fetch", { total: treeArray.length, changed: changedFiles.length });
+      }
+    }
+  } catch (d27Err) {
+    log.warn("D27: diff context check failed, using full fetch", { error: d27Err instanceof Error ? d27Err.message : String(d27Err) });
+  }
+
+  // When diff-based: scan only changed + task-mentioned files; otherwise full tree
+  const treeForRelevance: string[] = diffBasedTreeArray !== null
+    ? (() => {
+        const taskWords = new Set(ctx.taskDescription.toLowerCase().split(/\W+/).filter(w => w.length > 3));
+        const taskMentioned = treeArray.filter(f => {
+          const base = f.split("/").pop()?.toLowerCase() || "";
+          return taskWords.has(base) || taskWords.has(base.replace(/\.[^.]+$/, ""));
+        });
+        const combined = new Set([...diffBasedTreeArray, ...taskMentioned]);
+        return [...combined];
+      })()
+    : projectTree.tree;
+
   const relevantPaths = await auditedStep(ctx, "relevant_files_identified", {
     taskDescription: ctx.taskDescription.substring(0, 200),
+    diffBased: diffBasedTreeArray !== null,
   }, () => github.findRelevantFiles({
     owner: ctx.repoOwner,
     repo: ctx.repoName,
     taskDescription: ctx.taskDescription,
-    tree: projectTree.tree,
+    tree: treeForRelevance,
   }));
 
   relevantFiles = await auditedStep(ctx, "files_read", {
@@ -319,6 +357,24 @@ export async function buildContext(
   // Check cancellation after heavy GitHub I/O
   if (await checkCancelled(ctx)) {
     return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools: [], manifest };
+  }
+
+  // === STEP 2.9: Update file hashes (D27 — fire-and-forget) ===
+  // Lightweight presence map: file path → "1" (just tracks what files exist in the tree).
+  if (treeArray.length > 0) {
+    const newFileHashes: Record<string, string> = {};
+    for (const f of treeArray) newFileHashes[f] = "1";
+    // fileHashes is new — cast via any until Encore client types are regenerated
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (memory.updateManifest as any)({
+      repoOwner: ctx.repoOwner,
+      repoName: ctx.repoName,
+      fileHashes: newFileHashes,
+    }).catch((err: unknown) => {
+      log.warn("D27: file hash update failed (non-critical)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   // === STEP 3: Gather context (memory + docs) ===
