@@ -487,6 +487,8 @@ describe("Tasks Service", () => {
         buildJobId: null,
         prUrl: null,
         reviewId: null,
+        externalId: null,
+        externalSource: null,
         createdBy: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),

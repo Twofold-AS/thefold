@@ -6,6 +6,7 @@ interface JsonRpcRequest {
   id: number;
   method: string;
   params?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
 interface JsonRpcResponse {

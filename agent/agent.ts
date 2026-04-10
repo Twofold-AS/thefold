@@ -635,14 +635,12 @@ export const respondToClarification = api(
     const taskResult = await tasks.getTaskInternal({ id: req.taskId });
     const task = taskResult.task;
 
-    // Resolve repoOwner from task or GitHub App
-    let clarifyOwner = task.repoOwner || "";
-    if (!clarifyOwner.trim()) {
-      try {
-        const { owner } = await github.getGitHubOwner();
-        clarifyOwner = owner;
-      } catch { /* fallback to empty */ }
-    }
+    // Resolve repoOwner from GitHub App (task type doesn't carry owner)
+    let clarifyOwner = "";
+    try {
+      const { owner } = await github.getGitHubOwner();
+      clarifyOwner = owner;
+    } catch { /* fallback to empty */ }
 
     const ctx: TaskContext = {
       conversationId: req.conversationId,
@@ -699,14 +697,12 @@ export const forceContinue = api(
     const taskResult = await tasks.getTaskInternal({ id: req.taskId });
     const task = taskResult.task;
 
-    // Resolve repoOwner from task or GitHub App
-    let forceOwner = task.repoOwner || "";
-    if (!forceOwner.trim()) {
-      try {
-        const { owner } = await github.getGitHubOwner();
-        forceOwner = owner;
-      } catch { /* fallback to empty */ }
-    }
+    // Resolve repoOwner from GitHub App (task type doesn't carry owner)
+    let forceOwner = "";
+    try {
+      const { owner } = await github.getGitHubOwner();
+      forceOwner = owner;
+    } catch { /* fallback to empty */ }
 
     const ctx: TaskContext = {
       conversationId: req.conversationId,

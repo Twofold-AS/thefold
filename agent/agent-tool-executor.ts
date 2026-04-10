@@ -89,10 +89,9 @@ async function dispatch(
       // github.getFile does not accept a ref parameter — always reads head of default branch
       const result = await github.getFile({ owner, repo, path });
       return {
-        path: result.path,
+        path,
         content: result.content,
-        size: result.size,
-        encoding: result.encoding,
+        sha: result.sha,
       };
     }
 
@@ -129,7 +128,7 @@ async function dispatch(
       const branch   = str(input.branch) || `thefold/${Date.now()}`;
 
       // Load review to get files
-      const review = await agent.getReview({ reviewId });
+      const { review } = await agent.getReview({ reviewId });
 
       // Map ReviewFile[] → github.createPR files format
       const files = review.filesChanged.map((f: { path: string; content: string; action: string }) => ({
@@ -359,30 +358,46 @@ async function dispatch(
     // ─── SKILLS ───────────────────────────────────────────────────────────────
 
     case "search_skills": {
-      const context     = requireStr(input.context, "context");
-      const category    = str(input.category) || undefined;
-      const tags        = Array.isArray(input.tags) ? (input.tags as string[]) : undefined;
-      const enabledOnly = input.enabledOnly !== false; // default: true
+      const contextStr = requireStr(input.context, "context");
+      const taskType   = str(input.context) || "all";
 
-      const result = await skills.listSkills({
-        context,
-        category,
-        tags,
-        enabledOnly,
+      // Use skills.resolve() for routing-rule-based filtering
+      const result = await skills.resolve({
+        context: {
+          task:             contextStr,
+          taskType,
+          repo:             ctx.repoName || undefined,
+          userId:           ctx.thefoldTaskId || "agent",
+          totalTokenBudget: 20_000,
+        },
       });
 
-      return {
-        skills: result.skills.map((s: { id: string; name: string; description: string; promptFragment: string; category: string; tags: string[]; enabled: boolean; taskPhase: string }) => ({
+      // Extract matched skills from the injected prompt and postRun skills
+      // Return skills with truncated promptFragment (max 2000 tokens ≈ 8000 chars)
+      const MAX_FRAGMENT_CHARS = 8_000;
+      const injectedIds = new Set(result.result.injectedSkillIds);
+
+      // Fetch full skill list to get metadata for injected skills
+      const listResult = await skills.listSkills({ enabledOnly: true });
+      const matchedSkills = listResult.skills
+        .filter((s: { id: string }) => injectedIds.has(s.id))
+        .map((s: { id: string; name: string; description: string; promptFragment: string; category: string; tags: string[]; enabled: boolean; taskPhase: string }) => ({
           id:             s.id,
           name:           s.name,
           description:    s.description,
-          promptFragment: s.promptFragment,
+          promptFragment: s.promptFragment.length > MAX_FRAGMENT_CHARS
+            ? s.promptFragment.substring(0, MAX_FRAGMENT_CHARS) + "... [truncated]"
+            : s.promptFragment,
           category:       s.category,
           tags:           s.tags,
-          enabled:        s.enabled,
           taskPhase:      s.taskPhase,
-        })),
-        count: result.skills.length,
+        }));
+
+      return {
+        skills:        matchedSkills,
+        count:         matchedSkills.length,
+        tokensUsed:    result.result.tokensUsed,
+        injectedPrompt: result.result.injectedPrompt.substring(0, 500) + (result.result.injectedPrompt.length > 500 ? "..." : ""),
       };
     }
 
@@ -390,12 +405,22 @@ async function dispatch(
       const id      = requireStr(input.id,      "id");
       const enabled = typeof input.enabled === "boolean" ? input.enabled : true;
 
-      const result = await skills.toggleSkill({ id, enabled });
+      const toggleResult = await skills.toggleSkill({ id, enabled });
+
+      // After toggle, fetch full promptFragment so AI can use it immediately
+      const MAX_FRAGMENT_CHARS = 8_000;
+      const listResult = await skills.listSkills({ enabledOnly: false });
+      const skill = listResult.skills.find((s: { id: string }) => s.id === id);
 
       return {
-        id:      result.skill.id,
-        name:    result.skill.name,
-        enabled: result.skill.enabled,
+        id:             toggleResult.skill.id,
+        name:           toggleResult.skill.name,
+        enabled:        toggleResult.skill.enabled,
+        promptFragment: skill
+          ? (skill.promptFragment.length > MAX_FRAGMENT_CHARS
+            ? skill.promptFragment.substring(0, MAX_FRAGMENT_CHARS) + "... [truncated]"
+            : skill.promptFragment)
+          : "",
       };
     }
 

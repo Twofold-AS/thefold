@@ -295,7 +295,7 @@ describe("AgentMessage — legacy contract", () => {
     const result = deserializeMessage(legacy);
     expect(result).not.toBeNull();
     expect(result!.type).toBe("status");
-    if (result!.type === "status") {
+    if (result !== null && result.type === "status") {
       expect(result.phase).toBe("Bygger");
       expect(result.steps).toHaveLength(1);
       expect(result.meta?.title).toBe("Bygger kode");

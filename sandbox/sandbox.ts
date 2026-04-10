@@ -363,10 +363,10 @@ interface ValidationPipelineResult {
 }
 
 // Command runner abstraction for filesystem vs docker mode
-type CommandRunner = (command: string, timeout: number) => Promise<{ stdout: string; exitCode: number }>;
+type CommandRunner = (command: string, timeout?: number) => Promise<{ stdout: string; exitCode: number }>;
 
 function filesystemRunner(repoDir: string): CommandRunner {
-  return async (command: string, timeout: number) => {
+  return async (command: string, timeout?: number) => {
     try {
       const stdout = execSync(`${command} 2>&1`, { cwd: repoDir, timeout }).toString();
       return { stdout, exitCode: 0 };
@@ -380,7 +380,7 @@ function filesystemRunner(repoDir: string): CommandRunner {
 }
 
 function dockerRunner(sandboxId: string): CommandRunner {
-  return async (command: string, timeout: number) => {
+  return async (command: string, timeout?: number) => {
     const result = await execInDocker(sandboxId, `cd /workspace/repo && ${command}`, timeout);
     return { stdout: result.stdout || result.stderr, exitCode: result.exitCode };
   };
