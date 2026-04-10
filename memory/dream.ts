@@ -7,10 +7,7 @@ import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
 import { ai, memory } from "~encore/clients";
 
-// Use same DB as memory service via module re-use (same service, direct import)
-import { SQLDatabase } from "encore.dev/storage/sqldb";
-
-const db = new SQLDatabase("memory", { migrations: "./migrations" });
+import { db } from "./db";
 
 // --- Dream meta helpers ---
 

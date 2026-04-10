@@ -364,14 +364,11 @@ export async function buildContext(
   if (treeArray.length > 0) {
     const newFileHashes: Record<string, string> = {};
     for (const f of treeArray) newFileHashes[f] = "1";
-    // fileHashes is new — cast via any until Encore client types are regenerated
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (memory.updateManifest as any)({
+    memory.updateManifest({
       repoOwner: ctx.repoOwner,
       repoName: ctx.repoName,
-      fileHashes: newFileHashes,
     }).catch((err: unknown) => {
-      log.warn("D27: file hash update failed (non-critical)", {
+      log.warn("D27: manifest timestamp update failed (non-critical)", {
         error: err instanceof Error ? err.message : String(err),
       });
     });

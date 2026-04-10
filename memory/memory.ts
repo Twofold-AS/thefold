@@ -1,5 +1,4 @@
 import { api, APIError } from "encore.dev/api";
-import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
@@ -8,6 +7,7 @@ import { calculateImportanceScore, calculateDecayedRelevance } from "./decay";
 import type { MemoryType } from "./decay";
 import { sanitizeForMemory } from "../ai/sanitize";
 import { createHash } from "node:crypto";
+import { db } from "./db";
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -18,8 +18,6 @@ function hashContent(content: string): string {
 // const voyageKey = secret("VoyageAPIKey");
 // NOTE: OpenAIAPIKey secret must be configured in Encore secrets for this to work.
 const OpenAIApiKey = secret("OpenAIAPIKey");
-
-const db = new SQLDatabase("memory", { migrations: "./migrations" });
 
 (async () => {
   try { await db.queryRow`SELECT 1`; console.log("[memory] db warmed"); }
