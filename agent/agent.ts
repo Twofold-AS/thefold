@@ -713,6 +713,38 @@ export const startTask = api(
       await recordTaskStart(req.userId).catch(() => { /* non-critical */ });
     }
 
+    // D29: Check for resumable jobs (auto-resume infrastructure)
+    // Currently non-blocking: just logs if a resumable job exists for this task/repo.
+    // Full resume logic is future work — agent always executes fresh for now.
+    try {
+      const allResumableJobs = await findResumableJobs();
+      // Filter to this repo only
+      const repoJobs = allResumableJobs.filter(
+        j => j.repoOwner === ctx.repoOwner && j.repoName === ctx.repoName
+      );
+      if (repoJobs.length > 0) {
+        const matchingJob = repoJobs.find(j => j.taskId === req.taskId);
+        if (matchingJob) {
+          log.info("D29: resumable job found for this task (infrastructure ready, full resume is future work)", {
+            taskId: req.taskId,
+            jobId: matchingJob.id,
+            phase: matchingJob.currentPhase,
+            attempts: matchingJob.attempts,
+          });
+        } else {
+          log.info("D29: resumable jobs exist for this repo (different tasks)", {
+            count: repoJobs.length,
+            taskId: req.taskId,
+          });
+        }
+      }
+    } catch (err) {
+      // Non-critical — log and continue
+      log.warn("D29: resumable job check failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // Persistent job tracking
     let jobId: string | undefined;
     try {

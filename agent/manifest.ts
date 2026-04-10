@@ -16,6 +16,8 @@ export interface ProjectManifest {
   fileCount: number | null;
   lastAnalyzedAt: string | null;
   version: number;
+  /** D27: Map of file path → hash string for diff-based context detection */
+  fileHashes?: Record<string, string>;
 }
 
 /**

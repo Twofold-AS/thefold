@@ -1228,6 +1228,8 @@ export interface ProjectManifest {
   fileCount: number | null;
   lastAnalyzedAt: string | null;
   version: number;
+  /** D27: Map of file path → simple hash (mtime-based or content-based) for diff detection */
+  fileHashes?: Record<string, string>;
 }
 
 interface GetManifestRequest {
@@ -1247,6 +1249,8 @@ interface UpdateManifestRequest {
   services?: unknown[];
   dataModels?: unknown[];
   contracts?: unknown[];
+  /** D27: Map of file path → hash string, for diff-based context detection */
+  fileHashes?: Record<string, string>;
   conventions?: string | null;
   knownPitfalls?: string | null;
   fileCount?: number | null;
@@ -1275,9 +1279,11 @@ export const getManifest = api(
       file_count: number | null;
       last_analyzed_at: string | null;
       version: number;
+      file_hashes: unknown;
     }>`
       SELECT id, repo_owner, repo_name, summary, tech_stack, services, data_models,
-             contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version
+             contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version,
+             file_hashes
       FROM project_manifests
       WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
     `;
@@ -1288,6 +1294,9 @@ export const getManifest = api(
     const services = typeof row.services === "string" ? JSON.parse(row.services) : (row.services || []);
     const dataModels = typeof row.data_models === "string" ? JSON.parse(row.data_models) : (row.data_models || []);
     const contracts = typeof row.contracts === "string" ? JSON.parse(row.contracts) : (row.contracts || []);
+    const fileHashes = typeof row.file_hashes === "string"
+      ? JSON.parse(row.file_hashes)
+      : (row.file_hashes as Record<string, string> || {});
 
     return {
       manifest: {
@@ -1304,6 +1313,7 @@ export const getManifest = api(
         fileCount: row.file_count,
         lastAnalyzedAt: row.last_analyzed_at ? String(row.last_analyzed_at) : null,
         version: row.version,
+        fileHashes,
       },
     };
   }
@@ -1353,8 +1363,9 @@ export const updateManifest = api(
       file_count: number | null;
       last_analyzed_at: string | null;
       version: number;
+      file_hashes: unknown;
     }>`
-      INSERT INTO project_manifests (repo_owner, repo_name, summary, tech_stack, services, data_models, contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version)
+      INSERT INTO project_manifests (repo_owner, repo_name, summary, tech_stack, services, data_models, contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version, file_hashes)
       VALUES (
         ${req.repoOwner},
         ${req.repoName},
@@ -1367,7 +1378,8 @@ export const updateManifest = api(
         ${req.knownPitfalls ?? null},
         ${req.fileCount ?? null},
         NOW(),
-        1
+        1,
+        ${JSON.stringify(req.fileHashes ?? {})}::jsonb
       )
       ON CONFLICT (repo_owner, repo_name) DO UPDATE SET
         summary = COALESCE(EXCLUDED.summary, project_manifests.summary),
@@ -1380,9 +1392,15 @@ export const updateManifest = api(
         file_count = COALESCE(EXCLUDED.file_count, project_manifests.file_count),
         last_analyzed_at = NOW(),
         version = project_manifests.version + 1,
-        updated_at = NOW()
+        updated_at = NOW(),
+        file_hashes = CASE
+          WHEN EXCLUDED.file_hashes::text != '{}'::jsonb::text
+          THEN EXCLUDED.file_hashes
+          ELSE project_manifests.file_hashes
+        END
       RETURNING id, repo_owner, repo_name, summary, tech_stack, services, data_models,
-                contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version
+                contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version,
+                file_hashes
     `;
 
     if (!row) throw APIError.internal("failed to upsert manifest");
@@ -1391,6 +1409,9 @@ export const updateManifest = api(
     const retServices = typeof row.services === "string" ? JSON.parse(row.services) : (row.services || []);
     const retDataModels = typeof row.data_models === "string" ? JSON.parse(row.data_models) : (row.data_models || []);
     const retContracts = typeof row.contracts === "string" ? JSON.parse(row.contracts) : (row.contracts || []);
+    const retFileHashes = typeof row.file_hashes === "string"
+      ? JSON.parse(row.file_hashes)
+      : (row.file_hashes as Record<string, string> || {});
 
     return {
       manifest: {
@@ -1407,6 +1428,7 @@ export const updateManifest = api(
         fileCount: row.file_count,
         lastAnalyzedAt: row.last_analyzed_at ? String(row.last_analyzed_at) : null,
         version: row.version,
+        fileHashes: retFileHashes,
       },
     };
   }
@@ -1490,6 +1512,137 @@ export const mergeKnowledgeDuplicates = api(
       }
     }
     return { merged };
+  }
+);
+
+// --- Dependency Graph (D27) ---
+
+interface GetGraphRequest {
+  repoOwner: string;
+  repoName: string;
+}
+
+interface GetGraphResponse {
+  graph: Record<string, string[]> | null;
+  fileCount: number;
+  edgeCount: number;
+  analyzedAt: string | null;
+}
+
+interface UpdateGraphRequest {
+  repoOwner: string;
+  repoName: string;
+  graph: Record<string, string[]>;
+  fileCount: number;
+  edgeCount: number;
+}
+
+interface UpdateGraphResponse {
+  ok: boolean;
+}
+
+// POST /memory/graph/get (expose: false) — get dependency graph for a repo
+export const getGraph = api(
+  { method: "POST", path: "/memory/graph/get", expose: false },
+  async (req: GetGraphRequest): Promise<GetGraphResponse> => {
+    const row = await db.queryRow<{
+      graph: unknown;
+      file_count: number;
+      edge_count: number;
+      analyzed_at: string | null;
+    }>`
+      SELECT graph, file_count, edge_count, analyzed_at
+      FROM project_dependency_graph
+      WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
+    `;
+
+    if (!row) {
+      return { graph: null, fileCount: 0, edgeCount: 0, analyzedAt: null };
+    }
+
+    const graph = typeof row.graph === "string"
+      ? JSON.parse(row.graph)
+      : (row.graph as Record<string, string[]> || {});
+
+    return {
+      graph,
+      fileCount: row.file_count,
+      edgeCount: row.edge_count,
+      analyzedAt: row.analyzed_at ? String(row.analyzed_at) : null,
+    };
+  }
+);
+
+// POST /memory/graph/update (expose: false) — upsert dependency graph for a repo
+export const updateGraph = api(
+  { method: "POST", path: "/memory/graph/update", expose: false },
+  async (req: UpdateGraphRequest): Promise<UpdateGraphResponse> => {
+    await db.exec`
+      INSERT INTO project_dependency_graph (repo_owner, repo_name, graph, file_count, edge_count, analyzed_at)
+      VALUES (
+        ${req.repoOwner},
+        ${req.repoName},
+        ${JSON.stringify(req.graph)}::jsonb,
+        ${req.fileCount},
+        ${req.edgeCount},
+        NOW()
+      )
+      ON CONFLICT (repo_owner, repo_name) DO UPDATE SET
+        graph       = EXCLUDED.graph,
+        file_count  = EXCLUDED.file_count,
+        edge_count  = EXCLUDED.edge_count,
+        analyzed_at = NOW()
+    `;
+    return { ok: true };
+  }
+);
+
+// --- Episodic Memory (D26) ---
+
+interface StoreEpisodeRequest {
+  title: string;
+  content: string;
+  sourceRepo?: string;
+  relatedTaskIds?: string[];
+  tags?: string[];
+}
+
+interface StoreEpisodeResponse {
+  id: string;
+}
+
+/**
+ * D26: Store an episode-type memory capturing a completed task's narrative.
+ * Episodes are structured summaries (title + content) with 180-day TTL.
+ * Stored with memoryType="episode", trustLevel="agent".
+ */
+export const storeEpisode = api(
+  { method: "POST", path: "/memory/episode/store", expose: false },
+  async (req: StoreEpisodeRequest): Promise<StoreEpisodeResponse> => {
+    const episodeContent = sanitizeForMemory(`# ${req.title}\n\n${req.content}`);
+    const contentHash = hashContent(episodeContent);
+    const embedding = await embed(episodeContent);
+    const vec = `[${embedding.join(",")}]`;
+    const tags = [...(req.tags ?? []), "episode"];
+    const ttlDays = 180; // Episodes last longer than regular memories
+
+    const row = await db.queryRow`
+      INSERT INTO memories (
+        content, category, embedding,
+        memory_type, source_repo,
+        tags, ttl_days, pinned, relevance_score, content_hash, trust_level
+      )
+      VALUES (
+        ${episodeContent}, ${"agent"},
+        ${vec}::vector,
+        ${"episode"}, ${req.sourceRepo ?? null},
+        ${tags}::text[], ${ttlDays}, false, ${0.75}, ${contentHash}, ${"agent"}
+      )
+      RETURNING id
+    `;
+
+    if (!row) throw new Error("failed to store episode memory");
+    return { id: row.id as string };
   }
 );
 

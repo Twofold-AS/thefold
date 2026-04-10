@@ -10,6 +10,7 @@ import { getPatternRegex } from "./pattern-matcher";
 import { runHooks } from "./hooks";
 import { updateManifest as updateProjectManifest } from "./manifest";
 import { recordRoutingPattern } from "./routing-patterns";
+import { checkTokenAnomaly, checkCostAnomaly } from "./anomaly";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 
@@ -451,6 +452,35 @@ export async function completeTask(
       success: true,
       model: ctx.selectedModel,
     }).catch((err) => log.warn("recordRoutingPattern failed", { error: String(err) }));
+  }
+
+  // === D24: Anomaly detection — fire-and-forget, non-critical ===
+  checkTokenAnomaly(ctx.totalTokensUsed, ctx.thefoldTaskId ?? undefined).catch((err) =>
+    log.warn("checkTokenAnomaly failed", { error: String(err) })
+  );
+  checkCostAnomaly(ctx.totalCostUsd, ctx.thefoldTaskId ?? undefined).catch((err) =>
+    log.warn("checkCostAnomaly failed", { error: String(err) })
+  );
+
+  // === D26: Episodic memory — store narrative summary of completed task (fire-and-forget) ===
+  if (ctx.thefoldTaskId) {
+    const episodeTitle = `Task completed: ${ctx.taskDescription.split("\n")[0].substring(0, 100)}`;
+    const episodeContent = [
+      `Repository: ${ctx.repoOwner}/${ctx.repoName}`,
+      `Files changed: ${allFiles.length}`,
+      prUrl ? `PR: ${prUrl}` : "No PR created",
+      `Attempts: ${ctx.totalAttempts}`,
+      `Cost: $${ctx.totalCostUsd.toFixed(4)} · Tokens: ${ctx.totalTokensUsed.toLocaleString()}`,
+      documentation ? `\nSummary:\n${documentation.substring(0, 500)}` : "",
+    ].join("\n");
+
+    memory.storeEpisode({
+      title: episodeTitle,
+      content: episodeContent,
+      sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
+      relatedTaskIds: [ctx.thefoldTaskId],
+      tags: ["task-completion", ctx.repoName],
+    }).catch((err) => log.warn("storeEpisode failed", { error: String(err) }));
   }
 
   return {

@@ -215,7 +215,168 @@ export async function implementPhase(job: BuilderJob): Promise<void> {
   const contextWindow: Record<string, string> = { ...job.contextWindow };
   let stepCount = 0;
 
-  for (const step of orderedSteps) {
+  // D29: Identify leaf nodes — files that no other file in the build set imports.
+  // These can be generated in parallel since they have no inter-dependencies.
+  const buildSetPaths = new Set(orderedSteps.map(s => s.filePath!));
+  const dependedOn = new Set<string>();
+  for (const deps of Object.values(job.dependencyGraph)) {
+    for (const dep of deps) {
+      if (buildSetPaths.has(dep)) dependedOn.add(dep);
+    }
+  }
+  // A leaf node: not imported by any other file in the build set, AND has no deps from the build set itself
+  const leafSteps = orderedSteps.filter(s => {
+    const path = s.filePath!;
+    const hasDepsInBuildSet = (job.dependencyGraph[path] || []).some(d => buildSetPaths.has(d));
+    return !dependedOn.has(path) && !hasDepsInBuildSet;
+  });
+  const nonLeafSteps = orderedSteps.filter(s => !leafSteps.includes(s));
+
+  log.info("D29: parallel build split", {
+    total: orderedSteps.length,
+    leaf: leafSteps.length,
+    nonLeaf: nonLeafSteps.length,
+  });
+
+  // Helper: generate a single file and return result (used for parallel execution)
+  type FileResult = {
+    filePath: string;
+    fileContent: string;
+    tokensUsed: number;
+    costUsd: number;
+    valid: boolean;
+    validationErrors: string[];
+    skipped: boolean;
+    error?: string;
+  };
+
+  async function generateFile(step: BuildPlanStep, relevantCtx: Record<string, string>): Promise<FileResult> {
+    const filePath = step.filePath!;
+    let fileContent = "";
+    let tokensUsed = 0;
+    let costUsd = 0;
+
+    if (step.content && step.content.length > 0) {
+      fileContent = step.content;
+    } else {
+      const generated = await ai.generateFile({
+        task: job.plan.description,
+        fileSpec: {
+          filePath,
+          description: step.description || `Implement ${filePath}`,
+          action: step.action === "create_file" ? "create" : "modify",
+          existingContent: step.action === "modify_file" ? relevantCtx[filePath] : undefined,
+        },
+        existingFiles: getRelevantContext(filePath, relevantCtx, job.dependencyGraph),
+        projectStructure: Object.keys(relevantCtx),
+        skillFragments: [],
+        patterns: [],
+        model: job.plan.model,
+      });
+      fileContent = generated.content;
+      tokensUsed = generated.tokensUsed;
+      costUsd = generated.costUsd;
+    }
+
+    // Write to sandbox
+    await sandbox.writeFile({ sandboxId: job.sandboxId!, path: filePath, content: fileContent });
+
+    // Incremental validation for TypeScript files
+    let valid = true;
+    let validationErrors: string[] = [];
+    if (filePath.endsWith(".ts") || filePath.endsWith(".tsx")) {
+      const incVal = await sandbox.validateIncremental({ sandboxId: job.sandboxId!, filePath });
+      if (!incVal.success) {
+        valid = false;
+        validationErrors = incVal.errors;
+        // Fix loop
+        for (let attempt = 0; attempt < MAX_FILE_FIX_RETRIES; attempt++) {
+          try {
+            const fixed = await ai.fixFile({
+              task: job.plan.description,
+              filePath,
+              currentContent: fileContent,
+              errors: validationErrors.slice(0, 5),
+              existingFiles: getRelevantContext(filePath, relevantCtx, job.dependencyGraph),
+              model: job.plan.model,
+            });
+            fileContent = fixed.content;
+            tokensUsed += fixed.tokensUsed;
+            costUsd += fixed.costUsd;
+            await sandbox.writeFile({ sandboxId: job.sandboxId!, path: filePath, content: fileContent });
+            const reVal = await sandbox.validateIncremental({ sandboxId: job.sandboxId!, filePath });
+            if (reVal.success) { valid = true; validationErrors = []; break; }
+            validationErrors = reVal.errors;
+          } catch (fixErr) {
+            log.warn("fix attempt failed", { filePath, attempt, error: String(fixErr) });
+          }
+        }
+      }
+    }
+
+    return { filePath, fileContent, tokensUsed, costUsd, valid, validationErrors, skipped: false };
+  }
+
+  // D29: Generate leaf files in parallel
+  if (leafSteps.length > 1) {
+    log.info("D29: generating leaf files in parallel", { count: leafSteps.length });
+    const leafResults = await Promise.allSettled(
+      leafSteps.map(step => generateFile(step, { ...contextWindow }))
+    );
+
+    for (let i = 0; i < leafSteps.length; i++) {
+      stepCount++;
+      const step = leafSteps[i];
+      const result = leafResults[i];
+      const filePath = step.filePath!;
+
+      if (result.status === "rejected") {
+        log.error(result.reason, "parallel leaf file generation failed", { filePath });
+        job.filesWritten.push({ path: filePath, status: "failed", attempts: 1, errors: [String(result.reason)] });
+        await recordStep(job.id, stepCount, "implement", "create_file", filePath, {
+          status: "failed",
+          error: String(result.reason),
+        });
+        continue;
+      }
+
+      const { fileContent, tokensUsed, costUsd, valid, validationErrors } = result.value;
+      job.totalTokensUsed += tokensUsed;
+      job.totalCostUsd += costUsd;
+      await updateJobCost(job.id, job.totalTokensUsed, job.totalCostUsd);
+
+      job.filesWritten.push({ path: filePath, status: valid ? "success" : "failed", attempts: valid ? 1 : MAX_FILE_FIX_RETRIES + 1, errors: validationErrors });
+      contextWindow[filePath] = fileContent;
+
+      await recordStep(job.id, stepCount, "implement", step.action, filePath, {
+        status: valid ? "success" : "failed",
+        content: fileContent,
+        tokensUsed,
+        error: validationErrors.length > 0 ? validationErrors.join("\n") : null,
+        validationResult: valid ? null : { errors: validationErrors },
+      });
+
+      job.currentStep = stepCount;
+      await db.exec`
+        UPDATE builder_jobs
+        SET current_step = ${stepCount},
+            files_written = ${JSON.stringify(job.filesWritten)}::jsonb,
+            context_window = ${JSON.stringify(contextWindow)}::jsonb
+        WHERE id = ${job.id}::uuid
+      `;
+
+      await emitProgress(job, "implement", stepCount, job.totalSteps, filePath, valid ? "completed" : "failed",
+        valid ? `${filePath} ✓ (parallel)` : `${filePath} ✗ (${validationErrors.length} feil)`);
+    }
+  } else {
+    // Only 1 or 0 leaf files — add them to nonLeafSteps for sequential processing
+    nonLeafSteps.unshift(...leafSteps);
+  }
+
+  // Sequential processing for non-leaf files (order matters — deps first)
+  const sequentialSteps = leafSteps.length > 1 ? nonLeafSteps : orderedSteps;
+
+  for (const step of sequentialSteps) {
     stepCount++;
     const filePath = step.filePath!;
 

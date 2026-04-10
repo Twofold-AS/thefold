@@ -293,10 +293,61 @@ export async function executePlan(
   });
 
   let planSummary = plan.plan.map((s: { description: string }, i: number) => `${i + 1}. ${s.description}`).join("\n");
-  const planStepCount = plan.plan.length;
+  let planStepCount = plan.plan.length;
 
   log.info("STEP 5: Plan created", { steps: planStepCount });
   await think(ctx, `Plan klar — ${planStepCount} steg.`);
+
+  // === STEP 5.2: Multi-plan generation (D28) — for complexity >= 8 ===
+  // Generate a second plan with a different approach and pick the simpler one.
+  // Only activates when the first plan has many steps (proxy for high complexity).
+  const estimatedComplexityForMultiPlan = Math.min(10, Math.max(1, planStepCount * 2));
+  if (estimatedComplexityForMultiPlan >= 8) {
+    try {
+      log.info("D28: generating alternative plan (complexity >= 8)", { estimatedComplexity: estimatedComplexityForMultiPlan });
+      await think(ctx, "Kompleks oppgave — genererer alternativ plan for å velge den enkleste.");
+
+      const altPlan = await aiBreaker.call(() => ai.planTask({
+        task: `${ctx.taskDescription}\n\nUser context: ${ctx.userMessage}${strategyHint}\n\nAPPROACH: minimal changes first — prefer editing existing files over creating new ones, keep the plan as short as possible`,
+        projectStructure: treeString,
+        relevantFiles,
+        memoryContext: memoryStrings,
+        docsContext: docsStrings,
+        model: ctx.selectedModel,
+      }));
+
+      ctx.totalCostUsd += altPlan.costUsd;
+      ctx.totalTokensUsed += altPlan.tokensUsed;
+      tracker.recordAICall({
+        inputTokens: altPlan.tokensUsed || 0,
+        outputTokens: 0,
+        costEstimate: { totalCost: altPlan.costUsd || 0 },
+        modelUsed: (altPlan as { modelUsed?: string }).modelUsed || ctx.selectedModel,
+      });
+
+      // Pick the shorter plan (simpler heuristic — fewer steps = less risk)
+      if (altPlan.plan.length < plan.plan.length) {
+        log.info("D28: alternative plan is simpler, using it", {
+          originalSteps: plan.plan.length,
+          altSteps: altPlan.plan.length,
+        });
+        plan = altPlan;
+        planSummary = altPlan.plan.map((s: { description: string }, i: number) => `${i + 1}. ${s.description}`).join("\n");
+        planStepCount = altPlan.plan.length;
+        await think(ctx, `Alternativ plan valgt (${planStepCount} steg vs ${plan.plan.length} steg).`);
+      } else {
+        log.info("D28: original plan is simpler or equal, keeping it", {
+          originalSteps: plan.plan.length,
+          altSteps: altPlan.plan.length,
+        });
+      }
+    } catch (err) {
+      // Non-critical — keep first plan
+      log.warn("D28: alternative plan generation failed, keeping original", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   // TODO (Y-prosjekt fremtidig): Etter planning, bruk import-graf til å:
   // 1. Filtrere relevantFiles til KUN filer referert i plan-stegene
