@@ -22,33 +22,33 @@ export const CHAT_TOOLS: Array<{
 }> = [
   {
     name: "create_task",
-    description: "Opprett en ny utviklingsoppgave. Bruk dette når brukeren ber deg lage, bygge, fikse, eller endre noe i kodebasen.",
+    description: "Create a new development task. Use when the user asks you to build, fix, change, or create something in the codebase.",
     input_schema: {
       type: "object",
       properties: {
-        title: { type: "string", description: "Kort tittel for oppgaven — beskriv ALT brukeren ber om i én oppgave" },
-        description: { type: "string", description: "Detaljert beskrivelse av hva som skal gjøres. Inkluder alle steg." },
+        title: { type: "string", description: "Short task title — describe EVERYTHING the user asks for in one task" },
+        description: { type: "string", description: "Detailed description of what needs to be done. Include all steps." },
         priority: { type: "number", enum: [1, 2, 3, 4], description: "1=Urgent, 2=High, 3=Normal, 4=Low" },
-        repoName: { type: "string", description: "Hvilket repo oppgaven gjelder" },
+        repoName: { type: "string", description: "Which repository the task applies to" },
       },
       required: ["title", "description"],
     },
   },
   {
     name: "start_task",
-    description: "Start en oppgave — agenten begynner å jobbe. Bruk dette når brukeren sier 'start', 'kjør', 'begynn', 'ja'. Tre måter å identifisere oppgaven: (1) oppgi taskId (UUID), (2) oppgi query for å matche oppgavetittel, (3) utelat begge for å starte siste ustartet oppgave. Foretrekk å kalle start_task direkte etter create_task i samme tur.",
+    description: "Start a task — the agent begins working. Use when the user says 'start', 'run', 'go', 'yes'. Three ways to identify the task: (1) provide taskId (UUID), (2) provide query to match task title, (3) omit both to start the latest unstarted task. Prefer calling start_task directly after create_task in the same turn.",
     input_schema: {
       type: "object",
       properties: {
-        taskId: { type: "string", description: "Task UUID — eksakt ID" },
-        query: { type: "string", description: "Søketekst for å matche oppgavetittel, f.eks. 'index' eller 'style.css'" },
+        taskId: { type: "string", description: "Task UUID — exact ID" },
+        query: { type: "string", description: "Search text to match task title, e.g. 'index' or 'style.css'" },
       },
       required: [],
     },
   },
   {
     name: "list_tasks",
-    description: "List oppgaver for et repo. Bruk dette når brukeren spør om status, hva som gjenstår, osv.",
+    description: "List tasks for a repository. Use when the user asks about status, what remains, etc.",
     input_schema: {
       type: "object",
       properties: {
@@ -59,19 +59,19 @@ export const CHAT_TOOLS: Array<{
   },
   {
     name: "read_file",
-    description: "Les en spesifikk fil fra repoet. Bruk dette når brukeren ber deg se på en fil, eller du trenger mer kontekst.",
+    description: "Read a specific file from the repository. Use when the user asks to look at a file, or when you need more context.",
     input_schema: {
       type: "object",
       properties: {
         repoName: { type: "string" },
-        path: { type: "string", description: "Filsti i repoet" },
+        path: { type: "string", description: "File path in the repository" },
       },
       required: ["repoName", "path"],
     },
   },
   {
     name: "search_code",
-    description: "Søk etter relevante filer i repoet basert på en beskrivelse.",
+    description: "Search for relevant files in the repository based on a description.",
     input_schema: {
       type: "object",
       properties: {
