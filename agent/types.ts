@@ -89,6 +89,14 @@ export interface AgentExecutionContext {
   fastPathPattern?: string;
 }
 
+export interface RetryProductivity {
+  attemptNumber: number;
+  filesChanged: number;
+  validationErrorsFixed: number;
+  newErrorsIntroduced: number;
+  outputTokens: number;
+}
+
 export interface AttemptRecord {
   stepIndex: number;
   action: string;
@@ -96,6 +104,7 @@ export interface AttemptRecord {
   error?: string;
   duration: number;
   tokensUsed: number;
+  productivity?: RetryProductivity;
 }
 
 export interface ErrorPattern {

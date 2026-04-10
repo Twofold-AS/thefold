@@ -11,9 +11,10 @@ import { updateJobCheckpoint } from "./db";
 import { estimateTokens } from "./context-builder";
 import { addStep, reportProgress, buildSteps } from "./helpers";
 import { useNewContract } from "./messages";
-import type { AgentExecutionContext } from "./types";
+import type { AgentExecutionContext, RetryProductivity } from "./types";
 import type { PhaseTracker } from "./metrics";
 import type { BudgetMode } from "../ai/sub-agents";
+import { enforcePolicy } from "./token-policy";
 
 // --- Types ---
 
@@ -507,6 +508,9 @@ export async function executePlan(
   // YB: Track previous files for delta computation
   let previousFiles: Array<{ path: string; content: string }> = [];
 
+  // D9: Track previous validation error count for productivity measurement
+  let previousValidationErrorCount = 0;
+
   while (ctx.totalAttempts < ctx.maxAttempts) {
     // Cancel/stop check between retry attempts
     if (await shouldStopTask(ctx, "pre_builder", sandboxRef.id)) {
@@ -613,6 +617,33 @@ export async function executePlan(
         tokensUsed: buildResult.result.totalTokensUsed,
       });
 
+      // D9: Check token policy after builder AI call
+      const buildPolicyAction = enforcePolicy("building", ctx.totalTokensUsed);
+      if (buildPolicyAction === "stop") {
+        log.warn("Token policy: building phase exceeded 1.5x budget — escalating to impossible_task", {
+          tokensUsed: ctx.totalTokensUsed,
+          taskId: ctx.taskId,
+        });
+        await report(ctx, `Token-budsjett overskredet (bygging): oppgaven er for stor å gjennomføre.`, "needs_input");
+        await updateLinearIfExists(ctx, `Token-budsjett overskredet under bygging.`, "blocked");
+        if (ctx.thefoldTaskId) {
+          try {
+            await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked", errorMessage: "Token budget exceeded during building" });
+          } catch (err) {
+            log.warn("updateTaskStatus to blocked failed (token budget)", { error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        return {
+          success: false,
+          filesChanged: allFiles,
+          sandboxId: sandboxRef.id,
+          planSummary,
+          costUsd: ctx.totalCostUsd,
+          tokensUsed: ctx.totalTokensUsed,
+          earlyReturn: { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "impossible_task" },
+        };
+      }
+
       // === STEP 7: Validate ===
       await reportSteps(ctx, "Reviewer", [
         { label: "Builder ferdig", status: "done" },
@@ -626,6 +657,71 @@ export async function executePlan(
 
       if (!validation.success) {
         lastError = validation.output;
+
+        // D9: Compute productivity metrics for this attempt
+        const currentValidationErrorCount = (validation.output.match(/error TS\d+|Error:|error:/gi) || []).length;
+        const validationErrorsFixed = Math.max(0, previousValidationErrorCount - currentValidationErrorCount);
+        const newErrorsIntroduced = Math.max(0, currentValidationErrorCount - previousValidationErrorCount);
+
+        // Attach productivity to last attempt record
+        if (ctx.attemptHistory.length > 0) {
+          const lastAttempt = ctx.attemptHistory[ctx.attemptHistory.length - 1];
+          const productivity: RetryProductivity = {
+            attemptNumber: ctx.totalAttempts,
+            filesChanged: buildResult.result.filesChanged.length,
+            validationErrorsFixed,
+            newErrorsIntroduced,
+            outputTokens: buildResult.result.totalTokensUsed,
+          };
+          lastAttempt.productivity = productivity;
+
+          log.info("retry productivity", {
+            attempt: ctx.totalAttempts,
+            filesChanged: productivity.filesChanged,
+            errorsFixed: productivity.validationErrorsFixed,
+            newErrors: productivity.newErrorsIntroduced,
+            taskId: ctx.taskId,
+          });
+
+          // D9: Early termination after 3+ attempts if progress is stalled or regressing
+          if (ctx.totalAttempts >= 3) {
+            const recent = ctx.attemptHistory.slice(-2).map(a => a.productivity);
+            const allStalled = recent.length === 2 && recent.every(
+              p => p && p.filesChanged < 2 && p.validationErrorsFixed === 0
+            );
+            const regressing = productivity.newErrorsIntroduced > productivity.validationErrorsFixed;
+
+            if (allStalled || regressing) {
+              const reason = allStalled
+                ? `Ingen fremgang etter ${ctx.totalAttempts} forsøk (files: ${productivity.filesChanged}, errorsFixed: ${productivity.validationErrorsFixed})`
+                : `Regressjon: ${productivity.newErrorsIntroduced} nye feil introdusert vs ${productivity.validationErrorsFixed} fikset`;
+
+              log.warn("early termination due to productivity", { reason, attempt: ctx.totalAttempts, taskId: ctx.taskId });
+              await report(ctx, `Avslutter tidlig: ${reason}`, "needs_input");
+              await updateLinearIfExists(ctx, `TheFold klarer ikke denne oppgaven: ${reason}`, "blocked");
+
+              if (ctx.thefoldTaskId) {
+                try {
+                  await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked", errorMessage: reason.substring(0, 500) });
+                } catch (err) {
+                  log.warn("updateTaskStatus to blocked failed (productivity)", { error: err instanceof Error ? err.message : String(err) });
+                }
+              }
+
+              return {
+                success: false,
+                filesChanged: allFiles,
+                sandboxId: sandboxRef.id,
+                planSummary,
+                costUsd: ctx.totalCostUsd,
+                tokensUsed: ctx.totalTokensUsed,
+                earlyReturn: { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "impossible_task" },
+              };
+            }
+          }
+        }
+
+        previousValidationErrorCount = currentValidationErrorCount;
         previousErrors.push(validation.output.substring(0, 500));
         await think(ctx, `Fant problemer, fikser... (forsok ${ctx.totalAttempts})`);
 
@@ -668,6 +764,33 @@ export async function executePlan(
             modelUsed: (diagResult as { modelUsed?: string }).modelUsed || ctx.selectedModel,
           });
           const diagnosis = diagResult.diagnosis;
+
+          // D10: Check token policy after diagnosis AI call
+          const diagPolicyAction = enforcePolicy("validating", ctx.totalTokensUsed);
+          if (diagPolicyAction === "stop") {
+            log.warn("Token policy: validating phase exceeded 1.5x budget — escalating to impossible_task", {
+              tokensUsed: ctx.totalTokensUsed,
+              taskId: ctx.taskId,
+            });
+            await report(ctx, `Token-budsjett overskredet (validering): kan ikke fortsette.`, "needs_input");
+            await updateLinearIfExists(ctx, `Token-budsjett overskredet under validering.`, "blocked");
+            if (ctx.thefoldTaskId) {
+              try {
+                await tasks.updateTaskStatus({ id: ctx.thefoldTaskId, status: "blocked", errorMessage: "Token budget exceeded during validation" });
+              } catch (err) {
+                log.warn("updateTaskStatus to blocked failed (token budget diag)", { error: err instanceof Error ? err.message : String(err) });
+              }
+            }
+            return {
+              success: false,
+              filesChanged: allFiles,
+              sandboxId: sandboxRef.id,
+              planSummary,
+              costUsd: ctx.totalCostUsd,
+              tokensUsed: ctx.totalTokensUsed,
+              earlyReturn: { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "impossible_task" },
+            };
+          }
 
           await audit({
             sessionId: ctx.conversationId,
