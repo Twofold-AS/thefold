@@ -1,5 +1,8 @@
 # TheFold — Development Instructions
 
+<!-- Sprint planning: see docs/plans/ for active plans, docs/plans/archive/ for completed sprints -->
+<!-- Architecture reference: docs/ARKITEKTUR.md | Feature status: docs/GRUNNMUR-STATUS.md -->
+
 ## What is TheFold?
 An autonomous fullstack development agent. It reads tasks from Linear, reads/writes code via GitHub, validates in a sandbox, and delivers PRs with documentation.
 
