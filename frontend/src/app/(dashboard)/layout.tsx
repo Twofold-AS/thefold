@@ -9,7 +9,7 @@ import NotifBell from "@/components/NotifBell";
 import {
   Eye, BotMessageSquare, CheckSquare, Box,
   Wand2, Brain, Plug, Server, Database, Activity, Terminal,
-  Cog, ChevronDown,
+  Cog, ChevronDown, FolderOpen, BookOpen, Menu, X,
   type LucideIcon,
 } from "lucide-react";
 import { RepoProvider, useRepoContext } from "@/lib/repo-context";
@@ -39,8 +39,10 @@ const navGroups: NavGroup[] = [
     items: [
       { icon: BotMessageSquare, label: "Chat", href: "/chat" },
       { icon: CheckSquare, label: "Tasks", href: "/tasks" },
+      { icon: FolderOpen, label: "Projects", href: "/projects" },
       { icon: Box, label: "Komponenter", href: "/komponenter" },
       { icon: Wand2, label: "Skills", href: "/skills" },
+      { icon: BookOpen, label: "Knowledge", href: "/knowledge" },
     ],
   },
   {
@@ -56,6 +58,37 @@ const navGroups: NavGroup[] = [
   },
 ];
 
+const ROUTE_LABELS: Record<string, string> = {
+  "/": "Overview",
+  "/chat": "Chat",
+  "/tasks": "Tasks",
+  "/projects": "Projects",
+  "/komponenter": "Komponenter",
+  "/skills": "Skills",
+  "/knowledge": "Knowledge",
+  "/ai": "AI",
+  "/integrasjoner": "Integrasjoner",
+  "/mcp": "MCP",
+  "/memory": "Memory",
+  "/monitor": "Monitor",
+  "/sandbox": "Sandbox",
+  "/innstillinger": "Innstillinger",
+  "/docs": "Docs",
+};
+
+function getBreadcrumbs(pathname: string): { label: string; href: string }[] {
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length === 0) return [{ label: "Overview", href: "/" }];
+  const crumbs: { label: string; href: string }[] = [];
+  let path = "";
+  for (const seg of segments) {
+    path += `/${seg}`;
+    const label = ROUTE_LABELS[path] || seg.charAt(0).toUpperCase() + seg.slice(1);
+    crumbs.push({ label, href: path });
+  }
+  return crumbs;
+}
+
 function isActiveRoute(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(href + "/");
@@ -67,11 +100,15 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const { repos, selectedRepo, selectRepo, clearRepo } = useRepoContext();
   const [collapsed, setCollapsed] = useState(false);
   const [repoDropdownOpen, setRepoDropdownOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const breadcrumbs = getBreadcrumbs(pathname);
   const sw = collapsed ? SWC : SW;
   const useFullWidth = pathname === "/chat" || pathname.startsWith("/chat/");
   const isSettings = pathname === "/innstillinger" || pathname.startsWith("/innstillinger/");
 
   return (
+    <>
+    <style>{`@media (max-width: 640px) { .mobile-nav-toggle { display: flex !important; } }`}</style>
     <div
       style={{
         minHeight: "100vh",
@@ -109,6 +146,14 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
               flexShrink: 0,
             }}
           >
+            {/* Mobile hamburger */}
+            <div
+              className="mobile-nav-toggle"
+              onClick={() => setMobileNavOpen(p => !p)}
+              style={{ display: "none", cursor: "pointer", color: T.textMuted, padding: 4, flexShrink: 0 }}
+            >
+              {mobileNavOpen ? <X size={18} /> : <Menu size={18} />}
+            </div>
             {/* Logo */}
             <img
               src="/logo/logo.svg"
@@ -286,6 +331,47 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
             </Link>
           </div>
         </div>
+
+        {/* Mobile nav overlay */}
+        {mobileNavOpen && (
+          <>
+            <div
+              style={{ position: "fixed", inset: 0, zIndex: 40, background: "rgba(0,0,0,0.5)" }}
+              onClick={() => setMobileNavOpen(false)}
+            />
+            <div style={{
+              position: "fixed", top: HH, left: 0, bottom: 0, width: SW, zIndex: 50,
+              background: T.bg, overflowY: "auto", padding: "16px 8px",
+              display: "flex", flexDirection: "column", gap: 2,
+            }}>
+              {navGroups.map((g, gi) => (
+                <div key={gi}>
+                  {g.cat && (
+                    <div style={{ fontSize: 9, fontWeight: 600, color: T.textFaint, textTransform: "uppercase", letterSpacing: "0.1em", padding: "12px 14px 4px", fontFamily: T.mono }}>
+                      {g.cat}
+                    </div>
+                  )}
+                  {g.items.map((it) => {
+                    const active = isActiveRoute(pathname, it.href);
+                    return (
+                      <Link
+                        key={it.href}
+                        href={it.href}
+                        onClick={() => setMobileNavOpen(false)}
+                        style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", textDecoration: "none", minHeight: 36 }}
+                      >
+                        <it.icon size={16} strokeWidth={1.5} style={{ color: active ? T.text : T.textMuted, flexShrink: 0 }} />
+                        <span style={{ fontSize: 13, fontWeight: active ? 500 : 400, color: active ? T.text : T.textSec }}>
+                          {it.label}
+                        </span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
 
         {/* BODY */}
         <div style={{ display: "flex", position: "relative" }}>
@@ -473,6 +559,27 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
                   width: "100%",
                 }}
               >
+                {!useFullWidth && breadcrumbs.length > 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, paddingTop: 20, paddingBottom: 0 }}>
+                    {breadcrumbs.map((crumb, i) => (
+                      <span key={crumb.href} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {i > 0 && <span style={{ fontSize: 11, color: T.textFaint }}>/</span>}
+                        <Link
+                          href={crumb.href}
+                          style={{
+                            fontSize: 11,
+                            fontFamily: T.mono,
+                            color: i === breadcrumbs.length - 1 ? T.textMuted : T.textFaint,
+                            textDecoration: "none",
+                            fontWeight: i === breadcrumbs.length - 1 ? 500 : 400,
+                          }}
+                        >
+                          {crumb.label}
+                        </Link>
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {children}
               </div>
             </div>
@@ -480,6 +587,7 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
         </div>
       </div>
     </div>
+    </>
   );
 }
 
