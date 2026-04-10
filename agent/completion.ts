@@ -7,6 +7,7 @@ import { completeJob } from "./db";
 import { validateAgentScope } from "./helpers";
 import { updateDecisionCache, createDecisionEntry } from "./decision-cache";
 import { getPatternRegex } from "./pattern-matcher";
+import { runHooks } from "./hooks";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 
@@ -306,6 +307,13 @@ export async function completeTask(
   maybeDistill(ctx, qualityScore).catch((err) =>
     log.warn("maybeDistill failed", { error: String(err) })
   );
+
+  // === STEP 11.7: Phase-end hooks (D18) ===
+  await runHooks("after:completed", {
+    ctx,
+    filesChanged: allFiles.map((f) => f.path),
+    qualityScore,
+  });
 
   // === STEP 12: Final report + sandbox cleanup ===
   log.info("STEP 12: Cleanup and final report");

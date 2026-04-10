@@ -518,15 +518,25 @@ export function filterForPhase(
     mcpTools: profile.needsMcpTools ? context.mcpTools : [],
   };
 
-  // Enforce maxContextTokens — simple estimation: 1 token ≈ 4 chars
+  // Enforce maxContextTokens — use compressContext with a phase-specific strategy
   const estimatedTokens = estimateTokens(filtered);
   if (estimatedTokens > profile.maxContextTokens) {
-    log.info("context exceeds phase budget, trimming", {
+    log.info("context exceeds phase budget, compressing", {
       phase,
       estimated: estimatedTokens,
       budget: profile.maxContextTokens,
     });
-    return trimContext(filtered, profile.maxContextTokens);
+    const phaseStrategy: ContextStrategy = {
+      trigger: { type: "tokens", threshold: profile.maxContextTokens },
+      retain: { type: "priority_weighted", maxTokens: profile.maxContextTokens },
+      compress: DEFAULT_STRATEGY.compress,
+    };
+    const afterCompress = compressContext(filtered, phaseStrategy);
+    // If still over budget, fall back to byte-level trimContext
+    if (estimateTokens(afterCompress) > profile.maxContextTokens) {
+      return trimContext(afterCompress, profile.maxContextTokens);
+    }
+    return afterCompress;
   }
 
   return filtered;
@@ -545,6 +555,96 @@ export function estimateTokens(context: AgentContext): number {
   chars += context.mcpTools.reduce((sum, t) => sum + t.name.length + t.description.length, 0);
   chars += JSON.stringify(context.packageJson).length;
   return Math.ceil(chars / 4);
+}
+
+// --- Unified Context Compression (D17) ---
+
+export interface ContextStrategy {
+  trigger: { type: "tokens"; threshold: number };
+  retain: { type: "priority_weighted"; maxTokens: number };
+  compress: {
+    files: "signatures_only" | "full" | "drop";
+    memory: "recent_5" | "full" | "drop";
+    docs: "relevant" | "full" | "drop";
+    tree: "summarize" | "full" | "drop";
+  };
+}
+
+export const DEFAULT_STRATEGY: ContextStrategy = {
+  trigger: { type: "tokens", threshold: 30_000 },
+  retain: { type: "priority_weighted", maxTokens: 30_000 },
+  compress: {
+    files: "signatures_only",
+    memory: "recent_5",
+    docs: "relevant",
+    tree: "summarize",
+  },
+};
+
+/**
+ * Reduces a file to its exports, interfaces, function signatures, and important comments.
+ * Falls back to first 500 chars if nothing significant found.
+ */
+export function summarizeFile(content: string): string {
+  const lines = content.split("\n");
+  const significant: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Keep: export statements, function/class/interface/type declarations, important comments
+    if (
+      trimmed.startsWith("export ") ||
+      trimmed.startsWith("interface ") ||
+      trimmed.startsWith("type ") ||
+      trimmed.match(/^(async\s+)?function\s+\w+/) ||
+      trimmed.match(/^class\s+\w+/) ||
+      trimmed.startsWith("// ") ||
+      trimmed.startsWith("/**")
+    ) {
+      significant.push(line);
+    }
+  }
+  return significant.join("\n") || content.substring(0, 500);
+}
+
+/**
+ * Compresses an AgentContext using a declarative ContextStrategy.
+ * Only compresses if token count exceeds the strategy trigger threshold.
+ */
+export function compressContext(context: AgentContext, strategy: ContextStrategy): AgentContext {
+  const tokenCount = estimateTokens(context);
+  if (tokenCount <= strategy.trigger.threshold) return context;
+
+  const compressed = { ...context };
+
+  // Apply compression based on strategy
+  if (strategy.compress.files === "signatures_only") {
+    compressed.relevantFiles = context.relevantFiles.map(f => ({
+      ...f,
+      content: summarizeFile(f.content),
+    }));
+  } else if (strategy.compress.files === "drop") {
+    compressed.relevantFiles = [];
+  }
+
+  if (strategy.compress.memory === "recent_5") {
+    compressed.memoryStrings = context.memoryStrings.slice(0, 5);
+  } else if (strategy.compress.memory === "drop") {
+    compressed.memoryStrings = [];
+  }
+
+  if (strategy.compress.docs === "relevant") {
+    compressed.docsStrings = context.docsStrings.slice(0, 3);
+  } else if (strategy.compress.docs === "drop") {
+    compressed.docsStrings = [];
+  }
+
+  if (strategy.compress.tree === "summarize") {
+    compressed.treeString = context.treeString.split("\n").slice(0, 50).join("\n") + "\n[... truncated]";
+  } else if (strategy.compress.tree === "drop") {
+    compressed.treeString = "";
+  }
+
+  return compressed;
 }
 
 /**

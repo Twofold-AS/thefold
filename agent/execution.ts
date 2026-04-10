@@ -11,6 +11,7 @@ import { updateJobCheckpoint } from "./db";
 import { estimateTokens } from "./context-builder";
 import { addStep, reportProgress, buildSteps } from "./helpers";
 import { useNewContract } from "./messages";
+import { runHooks } from "./hooks";
 import type { AgentExecutionContext, RetryProductivity } from "./types";
 import type { PhaseTracker } from "./metrics";
 import type { BudgetMode } from "../ai/sub-agents";
@@ -593,6 +594,12 @@ export async function executePlan(
       for (const f of buildResult.result.filesChanged) {
         await think(ctx, `Skriver ${f.path}... OK`);
       }
+
+      // Phase-end hook: after:building (D18)
+      await runHooks("after:building", {
+        ctx,
+        filesChanged: buildResult.result.filesChanged.map((f: { path: string }) => f.path),
+      });
 
       const completedTasks = planActiveTasks.map((t: { id: string; title: string }) => {
         const filePath = t.title.split(" (")[0];

@@ -6,6 +6,7 @@ import { executeTask } from "./agent";
 import { autoInitRepo } from "./helpers";
 import { submitReviewInternal } from "./review";
 import { db, acquireRepoLock, releaseRepoLock } from "./db";
+import { summarizeFile, DEFAULT_STRATEGY } from "./context-builder";
 import type {
   ProjectTask,
   CuratedContext,
@@ -156,48 +157,37 @@ export async function curateContext(
     // Docs lookup failed — continue
   }
 
-  // 6. Token trimming — prioritize: conventions → dependency outputs → context hints → memory → docs
-  if (tokenEstimate > MAX_CONTEXT_TOKENS) {
-    const budget = MAX_CONTEXT_TOKENS;
-    let used = Math.ceil(conventions.length / 4); // conventions always kept
+  // 6. Context compression — uses declarative strategy from DEFAULT_STRATEGY (D17)
+  const rawTokenEstimate = tokenEstimate;
+  if (rawTokenEstimate > MAX_CONTEXT_TOKENS) {
+    log.info("curateContext: compressing context", { rawTokens: rawTokenEstimate, budget: MAX_CONTEXT_TOKENS });
 
-    // Trim files (keep as many as fit)
-    const trimmedFiles: Array<{ path: string; content: string }> = [];
-    for (const f of relevantFiles) {
-      const fileTokens = Math.ceil(f.content.length / 4);
-      if (used + fileTokens <= budget) {
-        trimmedFiles.push(f);
-        used += fileTokens;
-      }
+    // Apply file compression: signatures_only (mirrors DEFAULT_STRATEGY)
+    if (DEFAULT_STRATEGY.compress.files === "signatures_only") {
+      const compressed = relevantFiles.map(f => ({ ...f, content: summarizeFile(f.content) }));
+      relevantFiles.length = 0;
+      relevantFiles.push(...compressed);
     }
-    relevantFiles.length = 0;
-    relevantFiles.push(...trimmedFiles);
 
-    // Trim memory
-    const trimmedMemory: string[] = [];
-    for (const m of memoryContext) {
-      const memTokens = Math.ceil(m.length / 4);
-      if (used + memTokens <= budget) {
-        trimmedMemory.push(m);
-        used += memTokens;
-      }
+    // Apply memory compression: recent_5
+    if (DEFAULT_STRATEGY.compress.memory === "recent_5") {
+      const recentMemory = memoryContext.slice(0, 5);
+      memoryContext.length = 0;
+      memoryContext.push(...recentMemory);
     }
-    memoryContext.length = 0;
-    memoryContext.push(...trimmedMemory);
 
-    // Trim docs
-    const trimmedDocs: string[] = [];
-    for (const d of docsContext) {
-      const docTokens = Math.ceil(d.length / 4);
-      if (used + docTokens <= budget) {
-        trimmedDocs.push(d);
-        used += docTokens;
-      }
+    // Apply docs compression: relevant (keep first 3)
+    if (DEFAULT_STRATEGY.compress.docs === "relevant") {
+      const relevantDocs = docsContext.slice(0, 3);
+      docsContext.length = 0;
+      docsContext.push(...relevantDocs);
     }
-    docsContext.length = 0;
-    docsContext.push(...trimmedDocs);
 
-    tokenEstimate = used;
+    // Recalculate token estimate after compression
+    tokenEstimate = Math.ceil(conventions.length / 4)
+      + relevantFiles.reduce((s, f) => s + Math.ceil(f.content.length / 4), 0)
+      + memoryContext.reduce((s, m) => s + Math.ceil(m.length / 4), 0)
+      + docsContext.reduce((s, d) => s + Math.ceil(d.length / 4), 0);
   }
 
   return {
