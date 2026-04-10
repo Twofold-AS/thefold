@@ -15,6 +15,7 @@ import {
   cleanupOldContainers,
 } from "./docker";
 import { takeSnapshot, takeDockerSnapshot, compareSnapshots, type FileSnapshot, type SnapshotDiff } from "./snapshot";
+import { scanFile } from "./file-scanner";
 
 const githubToken = secret("GitHubToken");
 const sandboxMode = secret("SandboxMode"); // "docker" | "filesystem"
@@ -242,6 +243,14 @@ export const writeFile = api(
     // Path traversal check (applies to both modes)
     if (req.path.includes("..")) {
       throw APIError.invalidArgument("path escapes sandbox");
+    }
+
+    // File scanner: log warnings (advisory only — does NOT block the write)
+    const scanResult = scanFile(req.path, req.content);
+    if (scanResult.warnings.length > 0) {
+      for (const warning of scanResult.warnings) {
+        log.warn("sandbox.writeFile: security warning", { warning, path: req.path, sandboxId: req.sandboxId });
+      }
     }
 
     if (getSandboxMode() === "docker") {
