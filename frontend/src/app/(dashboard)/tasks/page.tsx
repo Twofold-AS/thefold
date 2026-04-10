@@ -8,7 +8,9 @@ import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import { useApiData } from "@/lib/hooks";
 import Skeleton from "@/components/Skeleton";
-import { RefreshCw, Trash2, ChevronDown } from "lucide-react";
+import { RefreshCw, Trash2, ChevronDown, Pencil } from "lucide-react";
+import TaskEditor from "@/components/tasks/TaskEditor";
+import LinearSync from "@/components/tasks/LinearSync";
 import {
   listTheFoldTasks,
   listReviews,
@@ -86,6 +88,7 @@ const textareaStyle: React.CSSProperties = {
 
 export default function TasksPage() {
   const [sel, setSel] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
 
@@ -380,18 +383,33 @@ export default function TasksPage() {
           {/* Detail panel */}
           {t && (
             <div style={{ padding: 24, overflow: "auto" }}>
-              <div style={{ marginBottom: 20 }}>
-                <div
-                  style={{
-                    fontSize: 18,
-                    fontWeight: 600,
-                    color: T.text,
-                    marginBottom: 4,
+              {editing ? (
+                <TaskEditor
+                  task={t}
+                  onSaved={(updated) => {
+                    refreshTasks();
+                    setEditing(false);
                   }}
-                >
-                  {t.title}
+                  onCancel={() => setEditing(false)}
+                />
+              ) : (
+              <>
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+                  <div
+                    style={{
+                      fontSize: 18,
+                      fontWeight: 600,
+                      color: T.text,
+                    }}
+                  >
+                    {t.title}
+                  </div>
+                  <Btn sm onClick={() => setEditing(true)}>
+                    <Pencil size={12} /> Rediger
+                  </Btn>
                 </div>
-                <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
                   <Tag variant={tStatus === "done" ? "success" : "accent"}>{statusLabel(t.status)}</Tag>
                   <Tag>{t.repo}</Tag>
                   {t.source === "linear" && <Tag variant="info">linear</Tag>}
@@ -616,6 +634,13 @@ export default function TasksPage() {
                     {actionLoading === "reject" ? "..." : "Avvis"}
                   </Btn>
                 </div>
+              )}
+
+              <div style={{ marginTop: 20 }}>
+                <SectionLabel>LINEAR</SectionLabel>
+                <LinearSync taskId={t.id} />
+              </div>
+              </>
               )}
             </div>
           )}

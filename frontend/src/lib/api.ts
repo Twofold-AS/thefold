@@ -925,6 +925,26 @@ export async function listDeletedTasks(repoName: string) {
   return apiFetch<{ tasks: TheFoldTask[] }>(`/tasks/deleted/${repoName}`);
 }
 
+export async function updateTask(taskId: string, data: {
+  title?: string;
+  description?: string;
+  priority?: number;
+  status?: string;
+  labels?: string[];
+}) {
+  return apiFetch<{ task: TheFoldTask }>("/tasks/update", {
+    method: "POST",
+    body: { taskId, ...data },
+  });
+}
+
+export async function syncTaskToLinear(taskId: string) {
+  return apiFetch<{ success: boolean; linearUrl?: string }>("/tasks/sync-to-linear", {
+    method: "POST",
+    body: { taskId },
+  });
+}
+
 export async function softDeleteTask(taskId: string) {
   return apiFetch<void>("/tasks/soft-delete", { method: "POST", body: { taskId } });
 }
