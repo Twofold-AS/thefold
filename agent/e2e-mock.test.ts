@@ -122,7 +122,6 @@ vi.mock("encore.dev/config", () => ({
   secret: (name: string) => {
     const secrets: Record<string, string> = {
       AgentStateMachineStrict: "false",
-      MCPRoutingEnabled: "false",
       RegistryExtractionEnabled: "false",
       SandboxAdvancedPipeline: "false",
       AgentPersistentJobs: "false",

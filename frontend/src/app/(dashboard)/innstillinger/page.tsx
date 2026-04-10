@@ -264,16 +264,14 @@ export default function InnstillingerPage() {
               <SectionLabel>FEATURE FLAGS</SectionLabel>
               {[
                 { f: "ProgressMessageEnabled", v: true },
-                { f: "MultiProviderEnabled", v: true },
                 { f: "GitHubAppEnabled", v: true },
                 { f: "DynamicSubAgentsEnabled", v: false },
                 { f: "HealingPipelineEnabled", v: false },
                 { f: "MonitorEnabled", v: true },
                 { f: "SandboxAdvancedPipeline", v: true },
-                { f: "MCPRoutingEnabled", v: true },
                 { f: "RegistryExtractionEnabled", v: false },
               ].map((ff, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < 8 ? `1px solid ${T.border}` : "none" }}>
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < 6 ? `1px solid ${T.border}` : "none" }}>
                   <span style={{ fontSize: 12, fontFamily: T.mono, color: T.textSec }}>{ff.f}</span>
                   <Tag variant={ff.v ? "success" : "default"}>{ff.v ? "true" : "false"}</Tag>
                 </div>

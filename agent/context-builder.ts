@@ -1,5 +1,5 @@
 import log from "encore.dev/log";
-import { github, memory, docs, mcp, web } from "~encore/clients";
+import { github, memory, docs, web } from "~encore/clients";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 import { updateJobCheckpoint } from "./db";
@@ -381,39 +381,23 @@ export async function buildContext(
 
   try {
     const { startInstalledServers } = await import("../mcp/router");
-    const { secret } = await import("encore.dev/config");
-    const MCPRoutingEnabled = secret("MCPRoutingEnabled");
-    const mcpRoutingEnabled = MCPRoutingEnabled();
+    const mcpResult = await startInstalledServers();
 
-    if (mcpRoutingEnabled === "true") {
-      // Ny sti: Start servere og hent ekte tools
-      const mcpResult = await startInstalledServers();
+    if (mcpResult.tools.length > 0) {
+      mcpTools = mcpResult.tools.map(t => ({
+        name: t.name,
+        description: t.description,
+        serverName: t.serverName,
+      }));
 
-      if (mcpResult.tools.length > 0) {
-        mcpTools = mcpResult.tools.map(t => ({
-          name: t.name,
-          description: t.description,
-          serverName: t.serverName,
-        }));
+      const toolList = mcpResult.tools
+        .map(t => `- **${t.serverName}/${t.name}**: ${t.description}`)
+        .join("\n");
+      docsStrings.push(`[MCP Tools — AKTIVE] Du kan kalle disse verktøyene:\n${toolList}`);
+    }
 
-        const toolList = mcpResult.tools
-          .map(t => `- **${t.serverName}/${t.name}**: ${t.description}`)
-          .join("\n");
-        docsStrings.push(`[MCP Tools — AKTIVE] Du kan kalle disse verktøyene:\n${toolList}`);
-      }
-
-      if (mcpResult.failedServers.length > 0) {
-        await report(ctx, `⚠️ MCP-servere feilet: ${mcpResult.failedServers.join(", ")}`, "working");
-      }
-    } else {
-      // Gammel sti: Bare list opp installerte servere som info
-      const mcpResult = await mcp.installed();
-      if (mcpResult.servers.length > 0) {
-        const toolList = mcpResult.servers
-          .map(s => `- **${s.name}**: ${s.description ?? "No description"} (${s.category})`)
-          .join("\n");
-        docsStrings.push(`[MCP Tools] Du har tilgang til disse verktøyene:\n${toolList}\n\nNOTE: MCP-kall routing er ikke aktivert. Sett MCPRoutingEnabled=true for å aktivere.`);
-      }
+    if (mcpResult.failedServers.length > 0) {
+      await report(ctx, `⚠️ MCP-servere feilet: ${mcpResult.failedServers.join(", ")}`, "working");
     }
   } catch (err) {
     log.warn("MCP setup failed", { error: String(err) });
