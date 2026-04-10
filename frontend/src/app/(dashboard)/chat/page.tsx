@@ -17,12 +17,11 @@ import {
   repoConversationId,
   listSkills,
   listProviders,
-  approveReview,
-  rejectReview,
-  requestReviewChanges,
   type Message,
 } from "@/lib/api";
 import { useRepoContext } from "@/lib/repo-context";
+import { useAgentStream } from "@/hooks/useAgentStream";
+import { useReviewFlow } from "@/hooks/useReviewFlow";
 
 function classifyError(e: unknown): string {
   const msg = e instanceof Error ? e.message : "Noe gikk galt";
@@ -64,10 +63,8 @@ function ChatPageInner() {
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
   const [thinkSeconds, setThinkSeconds] = useState(0);
-  const [pendingReviewId, setPendingReviewId] = useState<string | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const autoMsgSent = useRef(false);
-  const slowIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollStoppedRef = useRef(false);
 
   const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
     () => getConversations(),
@@ -96,6 +93,42 @@ function ChatPageInner() {
     return c.id.startsWith("chat-");
   });
 
+  // SSE streaming for active agent tasks
+  const { messages: sseMessages, status: streamStatus } = useAgentStream(
+    sending && activeTaskId ? activeTaskId : null,
+    {
+      onDone: () => {
+        setSending(false);
+        setActiveTaskId(null);
+        refreshMsgs();
+      },
+      onError: (err) => {
+        setSending(false);
+        setActiveTaskId(null);
+        setChatError(classifyError(new Error(err)));
+        refreshMsgs();
+      },
+    }
+  );
+
+  // Convert SSE messages to Message shape for display while streaming
+  const sseAsMsgs: Message[] = ac
+    ? sseMessages.map((sm) => ({
+        id: sm.id,
+        conversationId: ac,
+        role: sm.role,
+        content: sm.content,
+        messageType: "chat" as const,
+        metadata: null,
+        createdAt: new Date().toISOString(),
+      }))
+    : [];
+
+  // Deduplicate: drop SSE messages whose IDs already exist in the DB snapshot
+  const dbIds = new Set(msgs.map((m) => m.id));
+  const filteredSseMsgs = sseAsMsgs.filter((m) => !dbIds.has(m.id));
+  const displayMsgs = [...msgs, ...filteredSseMsgs];
+
   // Think seconds timer
   useEffect(() => {
     if (!sending) { setThinkSeconds(0); return; }
@@ -104,84 +137,33 @@ function ChatPageInner() {
     return () => clearInterval(iv);
   }, [sending]);
 
-  // Poll for replies while sending
+  // Safety timeout: stop sending after 2 minutes regardless
   useEffect(() => {
-    if (!sending || !ac) return;
-    pollStoppedRef.current = false;
-
-    const poll = async () => {
-      if (pollStoppedRef.current) return;
-      try {
-        const data = await getChatHistory(ac, 50);
-        if (!data?.messages?.length) return;
-
-        const newHash = data.messages
-          .map((m: Message) => `${m.id}:${(m.content || "").substring(0, 80)}:${m.messageType}`)
-          .join("|");
-        const oldHash = msgs
-          .map((m: Message) => `${m.id}:${(m.content || "").substring(0, 80)}:${m.messageType}`)
-          .join("|");
-
-        if (newHash !== oldHash) setMsgData({ ...data });
-
-        const lastUserTime = (() => {
-          for (let i = data.messages.length - 1; i >= 0; i--) {
-            if (data.messages[i].role === "user") return new Date(data.messages[i].createdAt).getTime();
-          }
-          return 0;
-        })();
-
-        const hasRealReply = data.messages.some(
-          (m: Message) =>
-            m.role === "assistant" && m.content && m.content.trim().length > 0 &&
-            !m.content.startsWith("{") && m.messageType === "chat" &&
-            new Date(m.createdAt).getTime() > lastUserTime
-        );
-
-        const agentMessages = data.messages.filter((m: Message) =>
-          m.role === "assistant" &&
-          (m.messageType === "agent_status" || m.messageType === "agent_progress")
-        );
-        const lastAgent = agentMessages.length > 0 ? agentMessages[agentMessages.length - 1] : null;
-
-        let agentDone = false;
-        let agentWaiting = false;
-        if (lastAgent) {
-          try {
-            const p = JSON.parse(lastAgent.content);
-            agentDone = p.status === "done" || p.status === "completed" || p.status === "failed"
-              || p.phase === "completed" || p.phase === "Ferdig" || p.phase === "Feilet";
-            agentWaiting = p.status === "waiting" || p.status === "needs_input";
-          } catch { /* ignore */ }
-        }
-
-        if (agentDone || agentWaiting || hasRealReply) {
-          pollStoppedRef.current = true;
-          setSending(false);
-        }
-      } catch { /* network error — keep polling */ }
-    };
-
-    const first = setTimeout(poll, 800);
-    const fast = setInterval(poll, 1200);
-    const slowdownTimer = setTimeout(() => clearInterval(fast), 8000);
-    const slow = setTimeout(() => {
-      slowIntervalRef.current = setInterval(poll, 3000);
-    }, 8000);
+    if (!sending) return;
     const max = setTimeout(() => setSending(false), 120000);
+    return () => clearTimeout(max);
+  }, [sending]);
 
-    return () => {
-      clearTimeout(first);
-      clearInterval(fast);
-      clearTimeout(slowdownTimer);
-      clearTimeout(slow);
-      clearTimeout(max);
-      if (slowIntervalRef.current) {
-        clearInterval(slowIntervalRef.current);
-        slowIntervalRef.current = null;
-      }
-    };
-  }, [sending, ac]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Handle send result: set SSE taskId or refresh immediately for direct replies
+  const handleSendResult = (result: { agentTriggered: boolean; taskId?: string } | null) => {
+    if (result?.agentTriggered && result.taskId) {
+      setActiveTaskId(result.taskId);
+      // onDone/onError callbacks on the hook handle setSending(false)
+    } else {
+      // Direct chat reply — no agent, response already persisted to DB
+      refreshMsgs().then(() => setSending(false));
+    }
+    refreshConvs();
+  };
+
+  // Review flow
+  const {
+    pendingReviewId,
+    setPendingReviewId,
+    handleApprove,
+    handleReject,
+    handleRequestChanges,
+  } = useReviewFlow(refreshMsgs, setChatError);
 
   // Auto-send msg from search params
   useEffect(() => {
@@ -213,7 +195,7 @@ function ChatPageInner() {
         repoOwner: selectedRepo?.owner || undefined,
         skillIds: skillsParam ? skillsParam.split(",").filter(Boolean) : undefined,
       })
-        .then(() => refreshConvs())
+        .then(handleSendResult)
         .catch((e) => { setSending(false); setChatError(classifyError(e)); });
     }
   }, [autoMsg]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -238,7 +220,7 @@ function ChatPageInner() {
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
     })
-      .then(() => refreshConvs())
+      .then(handleSendResult)
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
   };
 
@@ -247,14 +229,9 @@ function ChatPageInner() {
     setChatError(null);
 
     if (pendingReviewId) {
-      try {
-        await requestReviewChanges(pendingReviewId, value);
-        setPendingReviewId(null);
-        refreshMsgs();
-      } catch (e) {
-        setChatError(e instanceof Error ? e.message : "Endring feilet");
-        setPendingReviewId(null);
-      }
+      // handleRequestChanges handles the API call, error reporting, and refreshMsgs internally
+      handleRequestChanges(pendingReviewId, value);
+      setPendingReviewId(null);
       return;
     }
 
@@ -269,43 +246,14 @@ function ChatPageInner() {
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
     })
-      .then(() => refreshConvs())
+      .then(handleSendResult)
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
-  };
-
-  const handleApprove = async (reviewId: string) => {
-    try {
-      await approveReview(reviewId);
-      refreshMsgs();
-    } catch (e) {
-      setChatError(e instanceof Error ? e.message : "Godkjenning feilet");
-    }
-  };
-
-  const handleReject = async (reviewId: string) => {
-    try {
-      await rejectReview(reviewId);
-      refreshMsgs();
-    } catch (e) {
-      setChatError(e instanceof Error ? e.message : "Avvisning feilet");
-    }
-  };
-
-  const handleRequestChanges = (reviewId: string, feedback?: string) => {
-    if (!feedback || feedback.trim() === "") {
-      setPendingReviewId(reviewId);
-      const input = document.querySelector<HTMLInputElement>("[data-chat-input]");
-      if (input) input.focus();
-      return;
-    }
-    requestReviewChanges(reviewId, feedback)
-      .then(() => refreshMsgs())
-      .catch((e) => setChatError(e instanceof Error ? e.message : "Endring feilet"));
   };
 
   const handleCancel = () => {
     if (ac) cancelChatGeneration(ac).catch(() => {});
     setSending(false);
+    setActiveTaskId(null);
   };
 
   const handleDelete = async (id: string) => {
@@ -321,6 +269,9 @@ function ChatPageInner() {
     }
     refreshConvs();
   };
+
+  // streamStatus drives UI implicitly via onDone/onError; referenced to satisfy lint
+  void streamStatus;
 
   return (
     <div style={{
@@ -357,7 +308,7 @@ function ChatPageInner() {
         <ChatContainer
           title={cur ? cur.title || "Ny samtale" : "\u2014"}
           subtitle={curRepo ?? undefined}
-          msgs={msgs}
+          msgs={displayMsgs}
           msgsLoading={msgsLoading}
           ac={ac}
           sending={sending}
