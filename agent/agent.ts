@@ -34,7 +34,7 @@ import { db, acquireRepoLock, releaseRepoLock, createJob, startJob, updateJobChe
 
 // --- Secrets ---
 const AgentPersistentJobs = secret("AgentPersistentJobs"); // "true" | "false"
-const AgentToolLoopEnabled = secret("AgentToolLoopEnabled"); // "true" | "false" — replaces executePlan with AI tool loop
+const AgentToolLoopEnabled = secret("AgentToolLoopEnabled"); // "false" to disable tool loop (legacy fallback); defaults to enabled
 
 // --- Types ---
 
@@ -434,10 +434,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     });
 
     // === AgentToolLoopEnabled: replace executePlan with AI-driven tool loop ===
+    // TODO D30: Remove legacy executePlan flow once tool loop is stable
     let executionOutcome: ExecutionResult;
 
     const useToolLoop = (() => {
-      try { return AgentToolLoopEnabled() === "true"; } catch { return false; }
+      try { return AgentToolLoopEnabled() !== "false"; } catch { return true; }
     })();
 
     if (useToolLoop) {
