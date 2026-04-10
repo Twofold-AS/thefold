@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { approveReview, rejectReview, requestReviewChanges } from "@/lib/api";
+import { approveReview, rejectReview, requestReviewChanges } from "../lib/api";
 
 export function useReviewFlow(
   refreshMsgs: () => void,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { getToken } from "@/lib/auth";
+import { getToken } from "../lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 const MAX_RETRIES = 3;
@@ -31,6 +31,7 @@ interface AgentStreamState {
   isStreaming: boolean;
   error: string | null;
   thinkingText: string | null;
+  agentStartedTaskId: string | null;
 }
 
 interface UseAgentStreamOptions {
@@ -45,6 +46,7 @@ const INITIAL_STATE: AgentStreamState = {
   isStreaming: false,
   error: null,
   thinkingText: null,
+  agentStartedTaskId: null,
 };
 
 export function useAgentStream(
@@ -155,10 +157,18 @@ export function useAgentStream(
       // Phase / status update
       es.addEventListener("agent.status", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
+          const raw = JSON.parse(e.data);
+          // Support both nested format ({ timestamp, data: { status, phase } })
+          // and flat format ({ status, phase }) for backward compatibility
+          const payload = raw.data ?? raw;
           setState((prev) => ({
             ...prev,
-            status: data.status ?? data.phase ?? prev.status,
+            status: payload.status ?? payload.phase ?? prev.status,
+            // Capture taskId when AI tool-use starts an agent task (Bug 4)
+            agentStartedTaskId:
+              payload.status === "agent_started" && payload.phase
+                ? (payload.phase as string)
+                : prev.agentStartedTaskId,
           }));
         } catch {
           // ignore
@@ -262,5 +272,6 @@ export function useAgentStream(
     isStreaming: state.isStreaming,
     error: state.error,
     thinkingText: state.thinkingText,
+    agentStartedTaskId: state.agentStartedTaskId,
   };
 }

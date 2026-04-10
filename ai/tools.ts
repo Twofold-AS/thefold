@@ -272,7 +272,7 @@ async function executeToolCall(
         });
 
         console.log("[DEBUG-AF] agent.startTask fired (async)");
-        return { success: true, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber na.` };
+        return { success: true, taskId, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber na.` };
       } catch (e) {
         console.error("[DEBUG-AF] START_TASK CRASHED:", e instanceof Error ? e.message : String(e));
         return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -367,6 +367,7 @@ export interface ToolCallOptions extends AICallOptions {
 export interface ToolCallResponse extends AICallResponse {
   toolsUsed: string[];
   lastCreatedTaskId?: string;
+  lastStartedTaskId?: string;
 }
 
 export async function callWithTools(options: ToolCallOptions): Promise<ToolCallResponse> {
@@ -392,6 +393,7 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let lastCreatedTaskId: string | null = null;
+  let lastStartedTaskId: string | null = null;
 
   const messages: Array<{ role: "user" | "assistant"; content: string | any[] }> = [
     ...options.messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
@@ -448,6 +450,7 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
         costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
         toolsUsed: allToolsUsed,
         lastCreatedTaskId: lastCreatedTaskId || undefined,
+        lastStartedTaskId: lastStartedTaskId || undefined,
       };
     }
 
@@ -537,6 +540,24 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
             console.log(`[DEBUG-AH] lastCreatedTaskId: ${lastCreatedTaskId}`);
           }
 
+          if (toolName === "start_task" && result?.success && result?.taskId) {
+            lastStartedTaskId = result.taskId as string;
+            console.log(`[DEBUG-AH] lastStartedTaskId: ${lastStartedTaskId}`);
+            // Notify frontend via SSE so it can connect to the agent's stream
+            if (options.conversationId) {
+              try {
+                const { agent } = await import("~encore/clients");
+                await agent.emitChatEvent({
+                  streamKey: options.conversationId,
+                  eventType: "agent.status",
+                  data: { status: "agent_started", phase: lastStartedTaskId },
+                });
+              } catch (e) {
+                log.warn("emitChatEvent (agent_started) failed", { error: e instanceof Error ? e.message : String(e) });
+              }
+            }
+          }
+
           console.log(`[DEBUG-AH] Tool ${toolName} result: ${JSON.stringify(result).substring(0, 200)}`);
 
           toolResults.push({
@@ -592,5 +613,6 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
     costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
     toolsUsed: allToolsUsed,
     lastCreatedTaskId: lastCreatedTaskId || undefined,
+    lastStartedTaskId: lastStartedTaskId || undefined,
   };
 }

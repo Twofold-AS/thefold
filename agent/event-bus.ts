@@ -1,37 +1,6 @@
 import { EventEmitter } from "events";
 import type { AgentEvent } from "./events";
 import { Topic } from "encore.dev/pubsub";
-import type { AgentEvent } from "./events";
-
-// --- In-memory event bus for SSE streaming ---
-// Used by tool-loop.ts (emit) and stream.ts (subscribe).
-
-class AgentEventBusImpl {
-  private listeners = new Map<string, Set<(event: AgentEvent) => void>>();
-
-  emit(key: string, event: AgentEvent): void {
-    const subs = this.listeners.get(key);
-    if (!subs) return;
-    for (const sub of subs) {
-      try { sub(event); } catch { /* ignore subscriber errors */ }
-    }
-  }
-
-  subscribe(key: string, callback: (event: AgentEvent) => void): () => void {
-    if (!this.listeners.has(key)) {
-      this.listeners.set(key, new Set());
-    }
-    this.listeners.get(key)!.add(callback);
-    return () => {
-      const subs = this.listeners.get(key);
-      if (!subs) return;
-      subs.delete(callback);
-      if (subs.size === 0) this.listeners.delete(key);
-    };
-  }
-}
-
-export const agentEventBus = new AgentEventBusImpl();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-process event bus for SSE streaming

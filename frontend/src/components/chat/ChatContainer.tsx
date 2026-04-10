@@ -26,6 +26,7 @@ interface ChatContainerProps {
   ac: string | null;
   sending: boolean;
   thinkSeconds: number;
+  streamStatusText?: string | null;
   chatError: string | null;
   onClearError: () => void;
   onCancel: () => void;
@@ -52,6 +53,7 @@ export default function ChatContainer({
   ac,
   sending,
   thinkSeconds,
+  streamStatusText,
   chatError,
   onClearError,
   onCancel,
@@ -97,6 +99,7 @@ export default function ChatContainer({
         ac={ac}
         sending={sending}
         thinkSeconds={thinkSeconds}
+        streamStatusText={streamStatusText}
         chatError={chatError}
         onClearError={onClearError}
         onCancel={onCancel}

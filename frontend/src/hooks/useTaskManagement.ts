@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { useApiData } from "@/lib/hooks";
+import { useApiData } from "../lib/hooks";
 import {
   listTheFoldTasks,
   listReviews,
@@ -11,7 +11,7 @@ import {
   rejectReview,
   type TheFoldTask,
   type ReviewSummary,
-} from "@/lib/api";
+} from "../lib/api";
 
 export interface CreateTaskInput {
   title: string;

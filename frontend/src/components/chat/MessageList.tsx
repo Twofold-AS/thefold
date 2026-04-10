@@ -5,6 +5,7 @@ import { T } from "@/lib/tokens";
 import RobotIcon from "@/components/icons/RobotIcon";
 import AgentStream from "@/components/AgentStream";
 import AgentStatusBar from "@/components/chat/AgentStatusBar";
+import TypingIndicator from "@/components/chat/TypingIndicator";
 import type { Message } from "@/lib/api";
 
 export function isAgentMessage(m: Message): boolean {
@@ -59,6 +60,7 @@ interface MessageListProps {
   ac: string | null;
   sending: boolean;
   thinkSeconds: number;
+  streamStatusText?: string | null;
   chatError: string | null;
   onClearError: () => void;
   onCancel: () => void;
@@ -73,6 +75,7 @@ export default function MessageList({
   ac,
   sending,
   thinkSeconds,
+  streamStatusText,
   chatError,
   onClearError,
   onCancel,
@@ -224,12 +227,18 @@ export default function MessageList({
         })
       )}
 
-      <AgentStatusBar
-        sending={sending}
-        thinkSeconds={thinkSeconds}
-        hasAgentMessages={hasAgentMessages}
-        agentIsDone={agentIsDone}
-      />
+      {/* Typing indicator for direct chat; AgentStatusBar handles agent tasks */}
+      {sending && !hasAgentMessages && (
+        <TypingIndicator statusText={streamStatusText ?? "Tenker..."} />
+      )}
+      {sending && hasAgentMessages && (
+        <AgentStatusBar
+          sending={sending}
+          thinkSeconds={thinkSeconds}
+          hasAgentMessages={hasAgentMessages}
+          agentIsDone={agentIsDone}
+        />
+      )}
 
       {chatError && (
         <div style={{

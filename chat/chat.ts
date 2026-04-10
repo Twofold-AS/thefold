@@ -458,8 +458,12 @@ function isCancelled(conversationId: string): boolean {
 interface SendRequest {
   conversationId: string;
   message: string;
-  // If set, TheFold works on this task autonomously
+  // If set, TheFold works on this task autonomously (Linear task ID)
   linearTaskId?: string;
+  // If set, TheFold works on this TheFold task autonomously (primary flow)
+  taskId?: string;
+  // If true, trigger agent regardless of taskId/linearTaskId
+  triggerAgent?: boolean;
   // If true, just chat — don't trigger agent work
   chatOnly?: boolean;
   // Manuelt modellvalg for denne oppgaven (null = auto)
@@ -634,10 +638,11 @@ export const send = api(
     }
 
     // Determine: agent work, project decomposition, or direct chat?
-    const shouldTriggerAgent = req.linearTaskId && !req.chatOnly;
+    // Tasks (TheFold's own task system) is the PRIMARY flow. Linear is just a side integration.
+    const shouldTriggerAgent = !req.chatOnly && (req.linearTaskId || req.taskId || req.triggerAgent);
 
     // Project detection heuristics
-    const isProjectRequest = !req.chatOnly && !req.linearTaskId && detectProjectRequest(req.message);
+    const isProjectRequest = !req.chatOnly && !req.linearTaskId && !req.taskId && !req.triggerAgent && detectProjectRequest(req.message);
 
     if (isProjectRequest) {
       // Large project request — decompose into phases + tasks
@@ -721,11 +726,14 @@ export const send = api(
       // Import agent dynamically to avoid circular deps
       const { agent } = await import("~encore/clients");
 
+      // Resolve effective task ID — TheFold task is primary, Linear is fallback
+      const effectiveTaskId = req.taskId || req.linearTaskId!;
+
       // Fire off agent work asynchronously via pub/sub
       // The agent will report back via agentReports topic
       await agent.startTask({
         conversationId: req.conversationId,
-        taskId: req.linearTaskId!,
+        taskId: effectiveTaskId,
         userMessage: req.message,
         modelOverride: req.modelOverride ?? undefined,
         repoName: req.repoName,
@@ -736,8 +744,8 @@ export const send = api(
       await db.exec`
         INSERT INTO messages (conversation_id, role, content, message_type, metadata)
         VALUES (${req.conversationId}, 'assistant',
-                ${"Jeg har startet arbeidet med " + req.linearTaskId + ". Jeg rapporterer fremgang her."},
-                'task_start', ${JSON.stringify({ taskId: req.linearTaskId })})
+                ${"Jeg har startet arbeidet med " + effectiveTaskId + ". Jeg rapporterer fremgang her."},
+                'task_start', ${JSON.stringify({ taskId: effectiveTaskId })})
       `;
 
       // Create initial agent_status message for immediate frontend rendering (new contract)
@@ -747,13 +755,13 @@ export const send = api(
       await db.exec`
         INSERT INTO messages (conversation_id, role, content, message_type, metadata)
         VALUES (${req.conversationId}, 'assistant', ${initialStatus}, 'agent_status',
-          ${JSON.stringify({ taskId: req.linearTaskId, status: "working" })}::jsonb)
+          ${JSON.stringify({ taskId: effectiveTaskId, status: "working" })}::jsonb)
       `;
 
       return {
         message: msg,
         agentTriggered: true,
-        taskId: req.linearTaskId,
+        taskId: effectiveTaskId,
       };
     } else {
       // Direct chat — return immediately, process AI async
@@ -838,11 +846,17 @@ async function processAIResponse(
   try {
     console.log("[DEBUG-AF] processAIResponse started for conversation:", conversationId);
 
-    const { ai } = await import("~encore/clients");
-    const { memory } = await import("~encore/clients");
+    const { ai, memory, agent: agentEvt } = await import("~encore/clients");
 
     // Detect intent for richer context
     const intent = detectMessageIntent(userContent);
+
+    // Emit "thinking" status to frontend via SSE (Bug 2 fix)
+    agentEvt.emitChatEvent({
+      streamKey: conversationId,
+      eventType: "agent.status",
+      data: { status: "running", phase: "Tenker" },
+    }).catch(() => {});
 
     if (isCancelled(conversationId)) return;
 
@@ -893,52 +907,77 @@ async function processAIResponse(
     if (repoName && repoOwner) {
       if (isCancelled(conversationId)) return;
 
+      agentEvt.emitChatEvent({
+        streamKey: conversationId,
+        eventType: "agent.status",
+        data: { status: "running", phase: "Henter kontekst" },
+      }).catch(() => {});
+
       try {
         const { github } = await import("~encore/clients");
 
-        // Fetch file tree (try/catch — empty repos return fallback)
+        // Fetch file tree + find relevant files in parallel
         let tree: { tree: string[]; treeString: string; empty?: boolean } = { tree: [], treeString: "" };
+        let relevantPaths: string[] = [];
+
         try {
+          // Step 1: get tree first (findRelevantFiles needs it)
           tree = await github.getTree({ owner: repoOwner, repo: repoName });
         } catch (e) {
           console.warn(`getTree failed for ${repoOwner}/${repoName} (likely empty repo):`, e);
         }
+
         if (tree?.tree?.length > 0) {
           repoContext += `\nFilstruktur for ${repoName} (${tree.tree.length} filer):\n${tree.treeString || tree.tree.join("\n")}`;
+
+          // Step 2: find relevant files (needs tree result)
+          try {
+            const relevant = await github.findRelevantFiles({
+              owner: repoOwner,
+              repo: repoName,
+              taskDescription: userContent,
+              tree: tree.tree,
+            });
+            relevantPaths = (relevant.paths || []).slice(0, 5);
+          } catch {
+            // Fallback to key files below
+          }
         }
 
-        // Find relevant files based on the user's message
-        try {
-          const relevant = await github.findRelevantFiles({
-            owner: repoOwner,
-            repo: repoName,
-            taskDescription: userContent,
-            tree: tree.tree,
-          });
-
-          // Fetch content for top 5 relevant files
-          const filesToFetch = (relevant.paths || []).slice(0, 5);
-          for (const filePath of filesToFetch) {
-            try {
-              const file = await github.getFile({ owner: repoOwner, repo: repoName, path: filePath });
-              if (file?.content) {
-                const trimmed = file.content.split("\n").slice(0, 200).join("\n");
-                repoContext += `\n\n--- ${filePath} ---\n${trimmed}`;
+        // Step 3: fetch all relevant files in parallel
+        if (relevantPaths.length > 0) {
+          const fileResults = await Promise.all(
+            relevantPaths.map(async (filePath) => {
+              try {
+                const file = await github.getFile({ owner: repoOwner, repo: repoName, path: filePath });
+                return file?.content ? { path: filePath, content: file.content } : null;
+              } catch {
+                return null;
               }
-            } catch {
-              // Skip files that fail to load
+            })
+          );
+          for (const result of fileResults) {
+            if (result) {
+              const trimmed = result.content.split("\n").slice(0, 200).join("\n");
+              repoContext += `\n\n--- ${result.path} ---\n${trimmed}`;
             }
           }
-        } catch {
-          // Fallback: fetch key files
-          for (const keyFile of ["package.json", "README.md", "encore.app"]) {
-            try {
-              const file = await github.getFile({ owner: repoOwner, repo: repoName, path: keyFile });
-              if (file?.content) {
-                repoContext += `\n\n--- ${keyFile} ---\n${file.content.slice(0, 3000)}`;
+        } else if (tree?.tree?.length === 0 || !tree?.tree) {
+          // Fallback: fetch key files in parallel
+          const keyFiles = ["package.json", "README.md", "encore.app"];
+          const fallbackResults = await Promise.all(
+            keyFiles.map(async (keyFile) => {
+              try {
+                const file = await github.getFile({ owner: repoOwner, repo: repoName, path: keyFile });
+                return file?.content ? { path: keyFile, content: file.content } : null;
+              } catch {
+                return null;
               }
-            } catch {
-              // Skip
+            })
+          );
+          for (const result of fallbackResults) {
+            if (result) {
+              repoContext += `\n\n--- ${result.path} ---\n${result.content.slice(0, 3000)}`;
             }
           }
         }
@@ -967,6 +1006,12 @@ async function processAIResponse(
       else selectedModel = "claude-opus-4-5-20251101";
       console.log("[DEBUG-AF] Auto-routed, complexity:", complexity, "model:", selectedModel || "(default sonnet)");
     }
+
+    agentEvt.emitChatEvent({
+      streamKey: conversationId,
+      eventType: "agent.status",
+      data: { status: "running", phase: "Genererer svar" },
+    }).catch(() => {});
 
     // Call AI with tools (ALWAYS includes CHAT_TOOLS — AI decides whether to use them)
     console.log("[DEBUG-AF] Calling ai.chat with", history.length, "messages, intent:", intent);
@@ -1050,6 +1095,22 @@ async function processAIResponse(
       toolsUsed: aiResponse.toolsUsed || [],
       ...(aiResponse.lastCreatedTaskId ? { lastCreatedTaskId: aiResponse.lastCreatedTaskId } : {}),
     })}::jsonb WHERE id = ${placeholderId}::uuid`;
+
+    // Emit agent.done so frontend knows to refresh messages (Bug 2 fix)
+    agentEvt.emitChatEvent({
+      streamKey: conversationId,
+      eventType: "agent.done",
+      data: {
+        finalText: aiResponse.content,
+        toolsUsed: aiResponse.toolsUsed || [],
+        filesWritten: 0,
+        totalInputTokens: aiResponse.usage?.inputTokens || 0,
+        totalOutputTokens: aiResponse.usage?.outputTokens || 0,
+        costUsd: aiResponse.costUsd || 0,
+        loopsUsed: 0,
+        stoppedAtMaxLoops: false,
+      },
+    }).catch(() => {});
 
     // Log repo activity (fire-and-forget)
     if (repoName) {
