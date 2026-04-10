@@ -8,6 +8,7 @@ import { validateAgentScope } from "./helpers";
 import { updateDecisionCache, createDecisionEntry } from "./decision-cache";
 import { getPatternRegex } from "./pattern-matcher";
 import { runHooks } from "./hooks";
+import { updateManifest as updateProjectManifest } from "./manifest";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 
@@ -382,6 +383,17 @@ export async function completeTask(
 
   // Destroy sandbox (fire-and-forget — non-critical)
   sandbox.destroy({ sandboxId }).catch(() => { /* Sandbox may already be destroyed */ });
+
+  // Update project manifest with changed files (fire-and-forget — non-critical, D20)
+  if (allFiles.length > 0) {
+    updateProjectManifest(
+      ctx.repoOwner,
+      ctx.repoName,
+      allFiles.map((f) => f.path)
+    ).catch((err) =>
+      log.warn("manifest update after task completion failed", { error: String(err) })
+    );
+  }
 
   // STEP 12.5: Stop MCP servers (fire-and-forget — non-critical)
   try {

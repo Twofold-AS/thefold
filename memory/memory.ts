@@ -1212,6 +1212,222 @@ export const knowledgeStats = api(
   }
 );
 
+// --- Manifest Endpoints ---
+
+export interface ProjectManifest {
+  id: string;
+  repoOwner: string;
+  repoName: string;
+  summary: string | null;
+  techStack: string[];
+  services: unknown[];
+  dataModels: unknown[];
+  contracts: unknown[];
+  conventions: string | null;
+  knownPitfalls: string | null;
+  fileCount: number | null;
+  lastAnalyzedAt: string | null;
+  version: number;
+}
+
+interface GetManifestRequest {
+  repoOwner: string;
+  repoName: string;
+}
+
+interface GetManifestResponse {
+  manifest: ProjectManifest | null;
+}
+
+interface UpdateManifestRequest {
+  repoOwner: string;
+  repoName: string;
+  summary?: string | null;
+  techStack?: string[];
+  services?: unknown[];
+  dataModels?: unknown[];
+  contracts?: unknown[];
+  conventions?: string | null;
+  knownPitfalls?: string | null;
+  fileCount?: number | null;
+  changedFiles?: string[]; // used to bump version + updated_at only
+}
+
+interface UpdateManifestResponse {
+  manifest: ProjectManifest;
+}
+
+// POST /memory/manifest/get (expose: false) — get manifest by owner/repo
+export const getManifest = api(
+  { method: "POST", path: "/memory/manifest/get", expose: false },
+  async (req: GetManifestRequest): Promise<GetManifestResponse> => {
+    const row = await db.queryRow<{
+      id: string;
+      repo_owner: string;
+      repo_name: string;
+      summary: string | null;
+      tech_stack: string[] | string;
+      services: unknown;
+      data_models: unknown;
+      contracts: unknown;
+      conventions: string | null;
+      known_pitfalls: string | null;
+      file_count: number | null;
+      last_analyzed_at: string | null;
+      version: number;
+    }>`
+      SELECT id, repo_owner, repo_name, summary, tech_stack, services, data_models,
+             contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version
+      FROM project_manifests
+      WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
+    `;
+
+    if (!row) return { manifest: null };
+
+    const techStack = typeof row.tech_stack === "string" ? JSON.parse(row.tech_stack) : (row.tech_stack || []);
+    const services = typeof row.services === "string" ? JSON.parse(row.services) : (row.services || []);
+    const dataModels = typeof row.data_models === "string" ? JSON.parse(row.data_models) : (row.data_models || []);
+    const contracts = typeof row.contracts === "string" ? JSON.parse(row.contracts) : (row.contracts || []);
+
+    return {
+      manifest: {
+        id: row.id,
+        repoOwner: row.repo_owner,
+        repoName: row.repo_name,
+        summary: row.summary,
+        techStack,
+        services,
+        dataModels,
+        contracts,
+        conventions: row.conventions,
+        knownPitfalls: row.known_pitfalls,
+        fileCount: row.file_count,
+        lastAnalyzedAt: row.last_analyzed_at ? String(row.last_analyzed_at) : null,
+        version: row.version,
+      },
+    };
+  }
+);
+
+// POST /memory/manifest/update (expose: false) — upsert manifest
+export const updateManifest = api(
+  { method: "POST", path: "/memory/manifest/update", expose: false },
+  async (req: UpdateManifestRequest): Promise<UpdateManifestResponse> => {
+    // changedFiles-only path: just bump version + updated_at
+    if (req.changedFiles !== undefined && Object.keys(req).filter(k => !["repoOwner", "repoName", "changedFiles"].includes(k)).length === 0) {
+      await db.exec`
+        UPDATE project_manifests
+        SET version = version + 1, updated_at = NOW()
+        WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
+      `;
+      const existing = await db.queryRow<{ id: string; repo_owner: string; repo_name: string; summary: string | null; tech_stack: string[] | string; services: unknown; data_models: unknown; contracts: unknown; conventions: string | null; known_pitfalls: string | null; file_count: number | null; last_analyzed_at: string | null; version: number }>`
+        SELECT id, repo_owner, repo_name, summary, tech_stack, services, data_models,
+               contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version
+        FROM project_manifests
+        WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
+      `;
+      if (!existing) throw APIError.notFound("manifest not found");
+      const techStack = typeof existing.tech_stack === "string" ? JSON.parse(existing.tech_stack) : (existing.tech_stack || []);
+      const services = typeof existing.services === "string" ? JSON.parse(existing.services) : (existing.services || []);
+      const dataModels = typeof existing.data_models === "string" ? JSON.parse(existing.data_models) : (existing.data_models || []);
+      const contracts = typeof existing.contracts === "string" ? JSON.parse(existing.contracts) : (existing.contracts || []);
+      return { manifest: { id: existing.id, repoOwner: existing.repo_owner, repoName: existing.repo_name, summary: existing.summary, techStack, services, dataModels, contracts, conventions: existing.conventions, knownPitfalls: existing.known_pitfalls, fileCount: existing.file_count, lastAnalyzedAt: existing.last_analyzed_at ? String(existing.last_analyzed_at) : null, version: existing.version } };
+    }
+
+    const techStack = req.techStack ?? [];
+    const services = req.services ?? [];
+    const dataModels = req.dataModels ?? [];
+    const contracts = req.contracts ?? [];
+
+    const row = await db.queryRow<{
+      id: string;
+      repo_owner: string;
+      repo_name: string;
+      summary: string | null;
+      tech_stack: string[] | string;
+      services: unknown;
+      data_models: unknown;
+      contracts: unknown;
+      conventions: string | null;
+      known_pitfalls: string | null;
+      file_count: number | null;
+      last_analyzed_at: string | null;
+      version: number;
+    }>`
+      INSERT INTO project_manifests (repo_owner, repo_name, summary, tech_stack, services, data_models, contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version)
+      VALUES (
+        ${req.repoOwner},
+        ${req.repoName},
+        ${req.summary ?? null},
+        ${techStack}::text[],
+        ${JSON.stringify(services)}::jsonb,
+        ${JSON.stringify(dataModels)}::jsonb,
+        ${JSON.stringify(contracts)}::jsonb,
+        ${req.conventions ?? null},
+        ${req.knownPitfalls ?? null},
+        ${req.fileCount ?? null},
+        NOW(),
+        1
+      )
+      ON CONFLICT (repo_owner, repo_name) DO UPDATE SET
+        summary = COALESCE(EXCLUDED.summary, project_manifests.summary),
+        tech_stack = CASE WHEN array_length(EXCLUDED.tech_stack, 1) > 0 THEN EXCLUDED.tech_stack ELSE project_manifests.tech_stack END,
+        services = EXCLUDED.services,
+        data_models = EXCLUDED.data_models,
+        contracts = EXCLUDED.contracts,
+        conventions = COALESCE(EXCLUDED.conventions, project_manifests.conventions),
+        known_pitfalls = COALESCE(EXCLUDED.known_pitfalls, project_manifests.known_pitfalls),
+        file_count = COALESCE(EXCLUDED.file_count, project_manifests.file_count),
+        last_analyzed_at = NOW(),
+        version = project_manifests.version + 1,
+        updated_at = NOW()
+      RETURNING id, repo_owner, repo_name, summary, tech_stack, services, data_models,
+                contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version
+    `;
+
+    if (!row) throw APIError.internal("failed to upsert manifest");
+
+    const retTechStack = typeof row.tech_stack === "string" ? JSON.parse(row.tech_stack) : (row.tech_stack || []);
+    const retServices = typeof row.services === "string" ? JSON.parse(row.services) : (row.services || []);
+    const retDataModels = typeof row.data_models === "string" ? JSON.parse(row.data_models) : (row.data_models || []);
+    const retContracts = typeof row.contracts === "string" ? JSON.parse(row.contracts) : (row.contracts || []);
+
+    return {
+      manifest: {
+        id: row.id,
+        repoOwner: row.repo_owner,
+        repoName: row.repo_name,
+        summary: row.summary,
+        techStack: retTechStack,
+        services: retServices,
+        dataModels: retDataModels,
+        contracts: retContracts,
+        conventions: row.conventions,
+        knownPitfalls: row.known_pitfalls,
+        fileCount: row.file_count,
+        lastAnalyzedAt: row.last_analyzed_at ? String(row.last_analyzed_at) : null,
+        version: row.version,
+      },
+    };
+  }
+);
+
+// GET /memory/manifest/view (expose: true, auth: true) — view manifest
+export const viewManifest = api(
+  { method: "GET", path: "/memory/manifest/view", expose: true, auth: true },
+  async (req: GetManifestRequest): Promise<GetManifestResponse> => {
+    return getManifest(req);
+  }
+);
+
+// POST /memory/manifest/edit (expose: true, auth: true) — edit manifest
+export const editManifest = api(
+  { method: "POST", path: "/memory/manifest/edit", expose: true, auth: true },
+  async (req: UpdateManifestRequest): Promise<UpdateManifestResponse> => {
+    return updateManifest(req);
+  }
+);
+
 // --- Crons ---
 
 const _cleanup = new CronJob("memory-cleanup", {

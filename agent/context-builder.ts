@@ -4,6 +4,8 @@ import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 import { updateJobCheckpoint } from "./db";
 import { buildImportGraph, getRelatedFiles, logGraphStats } from "./code-graph";
+import { getOrCreateManifest, formatManifestForContext } from "./manifest";
+import type { ProjectManifest } from "./manifest";
 
 // --- URL detection ---
 const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
@@ -25,6 +27,7 @@ export interface AgentContext {
   memoryStrings: string[];
   docsStrings: string[];
   mcpTools: Array<{ name: string; description: string; serverName: string }>;
+  manifest?: ProjectManifest;
 }
 
 /** Helpers injected from agent.ts — keeps context-builder testable without live services */
@@ -81,6 +84,7 @@ export async function buildContext(
   let relevantFiles: Array<{ path: string; content: string }> = [];
   let memoryStrings: string[] = [];
   let docsStrings: string[] = [];
+  let manifest: ProjectManifest | undefined = undefined;
 
   // === STEP 2: Read the project ===
   log.info("STEP 2: Reading project tree", { owner: ctx.repoOwner, repo: ctx.repoName });
@@ -314,7 +318,7 @@ export async function buildContext(
 
   // Check cancellation after heavy GitHub I/O
   if (await checkCancelled(ctx)) {
-    return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools: [] };
+    return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools: [], manifest };
   }
 
   // === STEP 3: Gather context (memory + docs) ===
@@ -349,6 +353,22 @@ export async function buildContext(
   );
   docsStrings = docsResults.docs.map((d) => `[${d.source}] ${d.content}`);
   log.info("STEP 3: Context gathered", { memories: memories.results.length, docs: docsResults.docs.length });
+
+  // === STEP 3.1: Load project manifest (D19) ===
+  try {
+    const manifestResult = await getOrCreateManifest(ctx.repoOwner, ctx.repoName, treeString);
+    if (manifestResult) {
+      manifest = manifestResult;
+      // Inject manifest as a high-priority context section before files, after memory
+      // Token budget: ~500-800 tokens
+      const manifestSection = formatManifestForContext(manifestResult);
+      docsStrings = [manifestSection, ...docsStrings];
+      log.info("STEP 3.1: Manifest injected", { owner: ctx.repoOwner, repo: ctx.repoName, version: manifestResult.version });
+    }
+  } catch (err) {
+    log.warn("manifest load failed (non-critical)", { error: err instanceof Error ? err.message : String(err) });
+    // Continue without manifest
+  }
 
   if (memories.results.length > 0) {
     await think(ctx, `Fant ${memories.results.length} relevante minner.`);
@@ -404,7 +424,7 @@ export async function buildContext(
     // Non-critical — fortsett uten MCP
   }
 
-  return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools };
+  return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools, manifest };
 }
 
 // --- Context Filtering (YA: Phase-specific context filtering) ---
@@ -516,6 +536,7 @@ export function filterForPhase(
     memoryStrings: profile.needsMemory ? context.memoryStrings : [],
     docsStrings: profile.needsDocs ? context.docsStrings : [],
     mcpTools: profile.needsMcpTools ? context.mcpTools : [],
+    manifest: context.manifest,
   };
 
   // Enforce maxContextTokens — use compressContext with a phase-specific strategy

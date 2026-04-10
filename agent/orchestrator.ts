@@ -7,6 +7,7 @@ import { autoInitRepo } from "./helpers";
 import { submitReviewInternal } from "./review";
 import { db, acquireRepoLock, releaseRepoLock } from "./db";
 import { summarizeFile, DEFAULT_STRATEGY } from "./context-builder";
+import { getOrCreateManifest, formatManifestForContext } from "./manifest";
 import type {
   ProjectTask,
   CuratedContext,
@@ -155,6 +156,30 @@ export async function curateContext(
     }
   } catch {
     // Docs lookup failed — continue
+  }
+
+  // 5.5: Project manifest injection (D20)
+  try {
+    // Fetch tree for manifest generation if needed
+    let treeStringForManifest: string | undefined;
+    try {
+      const tree = await github.getTree({ owner: repoOwner, repo: repoName });
+      treeStringForManifest = tree.treeString || undefined;
+    } catch {
+      // Tree fetch failed — manifest may still load from cache
+    }
+    const manifest = await getOrCreateManifest(repoOwner, repoName, treeStringForManifest);
+    if (manifest) {
+      const manifestSection = formatManifestForContext(manifest);
+      // Prepend manifest as highest-priority context section (~500-800 tokens)
+      docsContext.unshift(manifestSection);
+      tokenEstimate += Math.ceil(manifestSection.length / 4);
+      log.info("curateContext: manifest injected", { repoOwner, repoName, version: manifest.version });
+    }
+  } catch (err) {
+    log.warn("curateContext: manifest injection failed (non-critical)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   // 6. Context compression — uses declarative strategy from DEFAULT_STRATEGY (D17)
