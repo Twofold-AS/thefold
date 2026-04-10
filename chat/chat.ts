@@ -1081,7 +1081,15 @@ async function processAIResponse(
 
     if (isCancelled(conversationId)) return;
 
-    // Step 6: Replace placeholder with actual response + metadata
+    // Step 6: If agent took over (start_task used), delete the empty placeholder —
+    // the agent creates its own agent_status message, so the placeholder would be a blank bubble.
+    const agentTookOver = (aiResponse.toolsUsed || []).includes("start_task");
+    if (agentTookOver) {
+      await db.exec`DELETE FROM messages WHERE id = ${placeholderId}::uuid AND content = ''`;
+      return; // agent handles everything from here
+    }
+
+    // Otherwise fill in the placeholder with the actual AI response
     await updateMessageContent(placeholderId, aiResponse.content);
     await updateMessageType(placeholderId, "chat");
 

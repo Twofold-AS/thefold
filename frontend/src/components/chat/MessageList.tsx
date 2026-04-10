@@ -92,12 +92,16 @@ export default function MessageList({
     msgEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgsHash]);
 
+  // Filter out empty assistant placeholders — these appear when the AI hands off to the
+  // agent via start_task but the backend placeholder wasn't deleted yet (or at all).
+  const visibleMsgs = msgs.filter(m => !(m.role === "assistant" && !m.content?.trim()));
+
   // Deduplicate: keep only the last agent message
   let lastAgentIdx = -1;
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (isAgentMessage(msgs[i])) { lastAgentIdx = i; break; }
+  for (let i = visibleMsgs.length - 1; i >= 0; i--) {
+    if (isAgentMessage(visibleMsgs[i])) { lastAgentIdx = i; break; }
   }
-  const dedupedMsgs = msgs.filter((m, i) => {
+  const dedupedMsgs = visibleMsgs.filter((m, i) => {
     if (!isAgentMessage(m)) return true;
     return i === lastAgentIdx;
   });
@@ -118,9 +122,9 @@ export default function MessageList({
     : null;
 
   // Compute agentIsDone for AgentStatusBar
-  const hasAgentMessages = msgs.some(m => isAgentMessage(m));
+  const hasAgentMessages = visibleMsgs.some(m => isAgentMessage(m));
   const agentIsDone = hasAgentMessages && (() => {
-    const agentMessages = msgs.filter(m => isAgentMessage(m));
+    const agentMessages = visibleMsgs.filter(m => isAgentMessage(m));
     const last = agentMessages[agentMessages.length - 1];
     if (!last) return false;
     try {
