@@ -298,6 +298,15 @@ export async function completeTask(
     }
   }
 
+  // === STEP 11.6: Knowledge distillation (D14, fire-and-forget) ===
+  // Distill learned rules only when the task succeeded with useful signal
+  const qualityScore = ctx.totalAttempts > 1
+    ? Math.max(3, 10 - ctx.totalAttempts)  // Score drops with more attempts
+    : (allFiles.length >= 2 ? 8 : 6);       // First-attempt: higher quality
+  maybeDistill(ctx, qualityScore).catch((err) =>
+    log.warn("maybeDistill failed", { error: String(err) })
+  );
+
   // === STEP 12: Final report + sandbox cleanup ===
   log.info("STEP 12: Cleanup and final report");
 
@@ -421,6 +430,83 @@ export async function completeTask(
     costUsd: ctx.totalCostUsd,
     tokensUsed: ctx.totalTokensUsed,
   };
+}
+
+// --- Knowledge Distillation (D14) ---
+
+/**
+ * D14: Distill learned rules from a completed task.
+ * Only runs when qualityScore >= 7 AND (retries > 0 OR fast-path pattern matched).
+ * Calls AI (haiku) to extract 0-3 rules, stores each via memory.storeKnowledge().
+ */
+export async function maybeDistill(
+  ctx: AgentExecutionContext,
+  qualityScore: number
+): Promise<void> {
+  if (qualityScore < 7) return;
+  if (ctx.totalAttempts <= 1 && !ctx.fastPathPattern) return;
+
+  try {
+    // Build compact history for AI
+    const errorSummary = ctx.attemptHistory
+      .filter((a) => a.result === "failure" && a.error)
+      .map((a, i) => `Attempt ${i + 1} failed: ${a.error?.substring(0, 200)}`)
+      .join("\n");
+
+    const prompt = [
+      "Extract 0-3 short, actionable rules learned from this completed task.",
+      "Rules should be concise (under 100 chars), generalizable, and useful for future similar tasks.",
+      "Return JSON array of objects: [{rule, category, context}]",
+      "Categories: coding, testing, debugging, architecture, tooling, security",
+      "If nothing useful was learned, return []",
+      "",
+      `Task: ${ctx.taskDescription.substring(0, 300)}`,
+      errorSummary ? `\nErrors encountered:\n${errorSummary}` : "",
+      `Attempts: ${ctx.totalAttempts}`,
+    ].join("\n");
+
+    const response = await ai.chat({
+      messages: [{ role: "user", content: prompt }],
+      memoryContext: [],
+      systemContext: "agent_review",
+      model: "claude-haiku-4-5",
+    });
+
+    // Parse JSON from AI response
+    const text = response.content ?? "";
+    const match = text.match(/\[[\s\S]*\]/);
+    if (!match) return;
+
+    let rules: Array<{ rule: string; category: string; context?: string }>;
+    try {
+      rules = JSON.parse(match[0]);
+    } catch {
+      return;
+    }
+
+    if (!Array.isArray(rules) || rules.length === 0) return;
+
+    // Store each rule (max 3)
+    for (const entry of rules.slice(0, 3)) {
+      if (!entry.rule || typeof entry.rule !== "string") continue;
+      try {
+        await memory.storeKnowledge({
+          rule: entry.rule.substring(0, 200),
+          category: entry.category ?? "general",
+          context: entry.context?.substring(0, 500),
+          sourceTaskId: ctx.thefoldTaskId,
+          sourceModel: ctx.selectedModel,
+          confidence: 0.5,
+        });
+      } catch (err) {
+        log.warn("storeKnowledge failed", { error: String(err) });
+      }
+    }
+
+    log.info("maybeDistill completed", { rules: rules.length, taskId: ctx.taskId });
+  } catch (err) {
+    log.warn("maybeDistill error", { error: String(err) });
+  }
 }
 
 // --- Helper: Procedural memory (YE) ---

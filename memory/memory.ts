@@ -893,6 +893,325 @@ export const searchPatterns = api(
   }
 );
 
+// --- Knowledge System (D13) ---
+
+interface StoreKnowledgeRequest {
+  rule: string;
+  category: string;
+  context?: string;
+  sourceTaskId?: string;
+  sourceModel?: string;
+  confidence?: number;
+}
+
+interface StoreKnowledgeResponse {
+  id: string;
+  deduplicated: boolean;
+}
+
+interface SearchKnowledgeRequest {
+  query: string;
+  threshold?: number;
+  limit?: number;
+}
+
+interface KnowledgeResult {
+  id: string;
+  rule: string;
+  category: string;
+  context?: string;
+  confidence: number;
+  timesApplied: number;
+  timesHelped: number;
+  timesHurt: number;
+  status: string;
+  createdAt: string;
+}
+
+interface SearchKnowledgeResponse {
+  results: KnowledgeResult[];
+}
+
+interface KnowledgeFeedbackRequest {
+  id: string;
+  helped: boolean;
+}
+
+interface KnowledgeFeedbackResponse {
+  updated: boolean;
+}
+
+interface ListKnowledgeRequest {
+  category?: string;
+  status?: string;
+  limit?: number;
+}
+
+interface ListKnowledgeResponse {
+  items: KnowledgeResult[];
+  total: number;
+}
+
+interface KnowledgeStatsResponse {
+  total: number;
+  active: number;
+  byCategory: Record<string, number>;
+  avgConfidence: number;
+  topRules: KnowledgeResult[];
+}
+
+// POST /memory/knowledge/store — Store a learned rule (internal)
+export const storeKnowledge = api(
+  { method: "POST", path: "/memory/knowledge/store", expose: false },
+  async (req: StoreKnowledgeRequest): Promise<StoreKnowledgeResponse> => {
+    const rule = sanitizeForMemory(req.rule);
+    if (rule.length < 10) {
+      throw APIError.invalidArgument("rule too short");
+    }
+
+    // Dedup: check if a similar rule exists via ILIKE
+    const existing = await db.queryRow<{ id: string; confidence: number }>`
+      SELECT id, confidence FROM knowledge
+      WHERE status = 'active'
+        AND rule ILIKE ${`%${rule.substring(0, 80)}%`}
+      LIMIT 1
+    `;
+
+    if (existing) {
+      // Strengthen existing rule: bump confidence slightly
+      const newConfidence = Math.min(1.0, existing.confidence + 0.05);
+      await db.exec`
+        UPDATE knowledge
+        SET confidence = ${newConfidence},
+            times_applied = times_applied + 1,
+            last_applied_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ${existing.id}::uuid
+      `;
+      return { id: existing.id, deduplicated: true };
+    }
+
+    const row = await db.queryRow<{ id: string }>`
+      INSERT INTO knowledge (rule, category, context, source_task_id, source_model, confidence)
+      VALUES (
+        ${rule},
+        ${req.category},
+        ${req.context ?? null},
+        ${req.sourceTaskId ?? null}::uuid,
+        ${req.sourceModel ?? null},
+        ${req.confidence ?? 0.5}
+      )
+      RETURNING id
+    `;
+
+    if (!row) throw APIError.internal("failed to store knowledge");
+    return { id: row.id, deduplicated: false };
+  }
+);
+
+// POST /memory/knowledge/search — Keyword search (internal)
+export const searchKnowledge = api(
+  { method: "POST", path: "/memory/knowledge/search", expose: false },
+  async (req: SearchKnowledgeRequest): Promise<SearchKnowledgeResponse> => {
+    const threshold = req.threshold ?? 0.3;
+    const limit = req.limit ?? 5;
+    const query = req.query.trim();
+
+    const rows = await db.query<{
+      id: string;
+      rule: string;
+      category: string;
+      context: string | null;
+      confidence: number;
+      times_applied: number;
+      times_helped: number;
+      times_hurt: number;
+      status: string;
+      created_at: string;
+    }>`
+      SELECT id, rule, category, context, confidence::float as confidence,
+             times_applied, times_helped, times_hurt, status, created_at
+      FROM knowledge
+      WHERE status = 'active'
+        AND confidence > ${threshold}
+        AND (rule ILIKE ${`%${query}%`} OR context ILIKE ${`%${query}%`})
+      ORDER BY confidence DESC
+      LIMIT ${limit}
+    `;
+
+    const results: KnowledgeResult[] = [];
+    for await (const row of rows) {
+      results.push({
+        id: row.id,
+        rule: row.rule,
+        category: row.category,
+        context: row.context ?? undefined,
+        confidence: Number(row.confidence),
+        timesApplied: Number(row.times_applied),
+        timesHelped: Number(row.times_helped),
+        timesHurt: Number(row.times_hurt),
+        status: row.status,
+        createdAt: String(row.created_at),
+      });
+    }
+
+    return { results };
+  }
+);
+
+// POST /memory/knowledge/feedback — Increment times_helped or times_hurt (internal)
+export const knowledgeFeedback = api(
+  { method: "POST", path: "/memory/knowledge/feedback", expose: false },
+  async (req: KnowledgeFeedbackRequest): Promise<KnowledgeFeedbackResponse> => {
+    if (req.helped) {
+      await db.exec`
+        UPDATE knowledge
+        SET times_helped = times_helped + 1,
+            times_applied = times_applied + 1,
+            last_applied_at = NOW(),
+            confidence = LEAST(1.0, confidence + 0.02),
+            updated_at = NOW()
+        WHERE id = ${req.id}::uuid
+      `;
+    } else {
+      await db.exec`
+        UPDATE knowledge
+        SET times_hurt = times_hurt + 1,
+            times_applied = times_applied + 1,
+            last_applied_at = NOW(),
+            confidence = GREATEST(0.0, confidence - 0.05),
+            updated_at = NOW()
+        WHERE id = ${req.id}::uuid
+      `;
+    }
+    return { updated: true };
+  }
+);
+
+// GET /memory/knowledge/list — List knowledge rules (auth)
+export const listKnowledge = api(
+  { method: "GET", path: "/memory/knowledge/list", expose: true, auth: true },
+  async (req: ListKnowledgeRequest): Promise<ListKnowledgeResponse> => {
+    const limit = req.limit ?? 50;
+    const statusFilter = req.status ?? "active";
+
+    const rows = await db.query<{
+      id: string;
+      rule: string;
+      category: string;
+      context: string | null;
+      confidence: number;
+      times_applied: number;
+      times_helped: number;
+      times_hurt: number;
+      status: string;
+      created_at: string;
+    }>`
+      SELECT id, rule, category, context, confidence::float as confidence,
+             times_applied, times_helped, times_hurt, status, created_at
+      FROM knowledge
+      WHERE (${statusFilter}::text IS NULL OR status = ${statusFilter})
+        AND (${req.category ?? null}::text IS NULL OR category = ${req.category ?? null})
+      ORDER BY confidence DESC, created_at DESC
+      LIMIT ${limit}
+    `;
+
+    const items: KnowledgeResult[] = [];
+    for await (const row of rows) {
+      items.push({
+        id: row.id,
+        rule: row.rule,
+        category: row.category,
+        context: row.context ?? undefined,
+        confidence: Number(row.confidence),
+        timesApplied: Number(row.times_applied),
+        timesHelped: Number(row.times_helped),
+        timesHurt: Number(row.times_hurt),
+        status: row.status,
+        createdAt: String(row.created_at),
+      });
+    }
+
+    const totalRow = await db.queryRow<{ count: number }>`
+      SELECT COUNT(*)::int as count FROM knowledge
+      WHERE (${statusFilter}::text IS NULL OR status = ${statusFilter})
+        AND (${req.category ?? null}::text IS NULL OR category = ${req.category ?? null})
+    `;
+
+    return { items, total: totalRow?.count ?? 0 };
+  }
+);
+
+// GET /memory/knowledge/stats — Knowledge statistics (auth)
+export const knowledgeStats = api(
+  { method: "GET", path: "/memory/knowledge/stats", expose: true, auth: true },
+  async (): Promise<KnowledgeStatsResponse> => {
+    const totalRow = await db.queryRow<{ count: number }>`
+      SELECT COUNT(*)::int as count FROM knowledge
+    `;
+    const activeRow = await db.queryRow<{ count: number }>`
+      SELECT COUNT(*)::int as count FROM knowledge WHERE status = 'active'
+    `;
+    const avgRow = await db.queryRow<{ avg: number }>`
+      SELECT COALESCE(AVG(confidence), 0)::float as avg FROM knowledge WHERE status = 'active'
+    `;
+
+    const catRows = await db.query<{ category: string; count: number }>`
+      SELECT category, COUNT(*)::int as count
+      FROM knowledge WHERE status = 'active'
+      GROUP BY category
+    `;
+    const byCategory: Record<string, number> = {};
+    for await (const row of catRows) {
+      byCategory[row.category] = row.count;
+    }
+
+    const topRows = await db.query<{
+      id: string;
+      rule: string;
+      category: string;
+      context: string | null;
+      confidence: number;
+      times_applied: number;
+      times_helped: number;
+      times_hurt: number;
+      status: string;
+      created_at: string;
+    }>`
+      SELECT id, rule, category, context, confidence::float as confidence,
+             times_applied, times_helped, times_hurt, status, created_at
+      FROM knowledge
+      WHERE status = 'active'
+      ORDER BY confidence DESC, times_helped DESC
+      LIMIT 5
+    `;
+
+    const topRules: KnowledgeResult[] = [];
+    for await (const row of topRows) {
+      topRules.push({
+        id: row.id,
+        rule: row.rule,
+        category: row.category,
+        context: row.context ?? undefined,
+        confidence: Number(row.confidence),
+        timesApplied: Number(row.times_applied),
+        timesHelped: Number(row.times_helped),
+        timesHurt: Number(row.times_hurt),
+        status: row.status,
+        createdAt: String(row.created_at),
+      });
+    }
+
+    return {
+      total: totalRow?.count ?? 0,
+      active: activeRow?.count ?? 0,
+      byCategory,
+      avgConfidence: avgRow?.avg ?? 0,
+      topRules,
+    };
+  }
+);
+
 // --- Crons ---
 
 const _cleanup = new CronJob("memory-cleanup", {

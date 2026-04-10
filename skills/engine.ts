@@ -1,6 +1,6 @@
 import { api, APIError } from "encore.dev/api";
 import log from "encore.dev/log";
-import { cache } from "~encore/clients";
+import { cache, memory } from "~encore/clients";
 import { db } from "./skills";
 
 // --- Types ---
@@ -33,6 +33,7 @@ interface SkillPipelineResult {
   injectedSkillIds: string[];
   tokensUsed: number;
   postRunSkills: ResolvedSkill[];
+  injectedKnowledgeIds?: string[];
 }
 
 interface SkillRunResult {
@@ -152,7 +153,27 @@ export const resolve = api(
     // 4. Build injected prompt from inject-phase skills
     const inject = selected.filter((s) => s.phase === "inject");
     const postRun = selected.filter((s) => s.phase === "post_run");
-    const injectedPrompt = inject.map((s) => s.promptFragment).join("\n\n");
+    let injectedPrompt = inject.map((s) => s.promptFragment).join("\n\n");
+
+    // 4.5. Inject learned knowledge rules (D14)
+    const injectedKnowledgeIds: string[] = [];
+    try {
+      const knowledgeResp = await memory.listKnowledge({ status: "active", limit: 5 });
+      const knowledgeRules = knowledgeResp.items.filter((k) => k.confidence > 0.4);
+
+      if (knowledgeRules.length > 0) {
+        const knowledgeSection = [
+          "## Learned Knowledge",
+          ...knowledgeRules.map((k) => `- [${k.category}] ${k.rule} (confidence: ${k.confidence.toFixed(2)})`),
+        ].join("\n");
+        injectedPrompt = injectedPrompt
+          ? `${injectedPrompt}\n\n${knowledgeSection}`
+          : knowledgeSection;
+        injectedKnowledgeIds.push(...knowledgeRules.map((k) => k.id));
+      }
+    } catch (knowledgeErr) {
+      log.warn("knowledge injection failed", { error: String(knowledgeErr) });
+    }
 
     const result: SkillPipelineResult = {
       preRunResults: [],
@@ -160,6 +181,7 @@ export const resolve = api(
       injectedSkillIds: inject.map((s) => s.id),
       tokensUsed,
       postRunSkills: postRun.map(toResolvedSkill),
+      injectedKnowledgeIds,
     };
 
     // Store in cache for 5 minutes (non-critical)
@@ -245,6 +267,7 @@ interface ExecutePostRunRequest {
   skills: ResolvedSkill[];
   aiOutput: string;
   context: SkillPipelineContext;
+  injectedKnowledgeIds?: string[];
 }
 
 interface ExecutePostRunResponse {
@@ -306,6 +329,15 @@ export const executePostRun = api(
         tokensUsed: 0,
         duration: Date.now() - start,
       });
+    }
+
+    // D14: Send feedback for injected knowledge rules
+    if (req.injectedKnowledgeIds && req.injectedKnowledgeIds.length > 0) {
+      for (const knowledgeId of req.injectedKnowledgeIds) {
+        memory.knowledgeFeedback({ id: knowledgeId, helped: allApproved }).catch((err) => {
+          log.warn("knowledgeFeedback failed", { id: knowledgeId, error: String(err) });
+        });
+      }
     }
 
     return {
