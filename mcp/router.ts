@@ -3,41 +3,20 @@ import log from "encore.dev/log";
 import { MCPClient, MCPTool, MCPToolCallResult } from "./client";
 import type { MCPServer } from "./types";
 import { db } from "./db";
+import {
+  markSessionActive,
+  markSessionInactive,
+  updateHeartbeat,
+  markServerError,
+  clearAllSessions,
+  getSessionsToReconnect,
+} from "./persistence";
 
 // In-memory pool of active MCP clients, keyed by server name
 const activeClients = new Map<string, MCPClient>();
 
 // Track whether we've done the initial reconnect on startup
 let reconnectDone = false;
-
-// --- Persistence helpers ---
-
-async function markSessionActive(serverName: string): Promise<void> {
-  await db.exec`
-    UPDATE mcp_servers
-    SET session_active    = true,
-        session_started_at = NOW(),
-        last_heartbeat_at  = NOW(),
-        updated_at         = NOW()
-    WHERE name = ${serverName}
-  `;
-}
-
-async function markSessionInactive(serverName: string): Promise<void> {
-  await db.exec`
-    UPDATE mcp_servers
-    SET session_active     = false,
-        last_heartbeat_at  = NULL,
-        updated_at         = NOW()
-    WHERE name = ${serverName}
-  `;
-}
-
-async function updateHeartbeat(serverName: string): Promise<void> {
-  await db.exec`
-    UPDATE mcp_servers SET last_heartbeat_at = NOW() WHERE name = ${serverName}
-  `;
-}
 
 // Update heartbeats for all running clients every 10 seconds
 setInterval(async () => {
@@ -62,36 +41,7 @@ async function reconnectPreviouslyActiveSessions(): Promise<void> {
   if (reconnectDone) return;
   reconnectDone = true;
 
-  const rows = db.query<{
-    id: string; name: string; command: string; args: string[];
-    env_vars: unknown; status: string; config_required: boolean;
-    installed_at: Date | null; created_at: Date; updated_at: Date;
-    description: string | null; category: string;
-  }>`
-    SELECT * FROM mcp_servers
-    WHERE session_active = true AND status = 'installed'
-    ORDER BY name
-  `;
-
-  const toReconnect: MCPServer[] = [];
-  for await (const row of rows) {
-    toReconnect.push({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      command: row.command,
-      args: row.args ?? [],
-      envVars: typeof row.env_vars === "string" ? JSON.parse(row.env_vars) : (row.env_vars as Record<string, string>) ?? {},
-      status: row.status as "installed",
-      category: row.category as MCPServer["category"],
-      config: {},
-      configRequired: row.config_required,
-      installedAt: row.installed_at?.toISOString() ?? null,
-      createdAt: row.created_at.toISOString(),
-      updatedAt: row.updated_at.toISOString(),
-    });
-  }
-
+  const toReconnect = await getSessionsToReconnect();
   if (toReconnect.length === 0) return;
 
   log.info("Reconnecting previously active MCP servers", { count: toReconnect.length });
@@ -112,9 +62,7 @@ async function reconnectPreviouslyActiveSessions(): Promise<void> {
     } catch (err) {
       log.warn("MCP server reconnect failed", { server: server.name, error: String(err) });
       await markSessionInactive(server.name);
-      await db.exec`
-        UPDATE mcp_servers SET status = 'error', updated_at = NOW() WHERE name = ${server.name}
-      `;
+      await markServerError(server.name);
     }
   }
 }
@@ -186,12 +134,7 @@ export async function startInstalledServers(): Promise<{
     } catch (err) {
       failedServers.push(server.name);
       log.warn("MCP server failed to start", { server: server.name, error: String(err) });
-
-      await db.exec`
-        UPDATE mcp_servers SET status = 'error', updated_at = NOW()
-        WHERE name = ${server.name}
-      `;
-      await markSessionInactive(server.name);
+      await markServerError(server.name);
     }
   }
 
@@ -243,13 +186,7 @@ export async function stopAllServers(): Promise<void> {
   activeClients.clear();
 
   // Persist: clear all session_active flags
-  if (names.length > 0) {
-    await db.exec`
-      UPDATE mcp_servers
-      SET session_active = false, last_heartbeat_at = NULL, updated_at = NOW()
-      WHERE name = ANY(${names}::text[])
-    `;
-  }
+  await clearAllSessions(names);
 }
 
 // --- getActiveToolsForAI ---

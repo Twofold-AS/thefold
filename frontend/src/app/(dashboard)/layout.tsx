@@ -50,7 +50,7 @@ const navGroups: NavGroup[] = [
     items: [
       { icon: Brain, label: "AI", href: "/ai" },
       { icon: Plug, label: "Integrasjoner", href: "/integrasjoner" },
-      { icon: Server, label: "MCP", href: "/mcp" },
+      { icon: Server, label: "MCP", href: "/innstillinger/mcp" },
       { icon: Database, label: "Memory", href: "/memory" },
       { icon: Activity, label: "Monitor", href: "/monitor" },
       { icon: Terminal, label: "Sandbox", href: "/sandbox" },
@@ -68,7 +68,7 @@ const ROUTE_LABELS: Record<string, string> = {
   "/knowledge": "Knowledge",
   "/ai": "AI",
   "/integrasjoner": "Integrasjoner",
-  "/mcp": "MCP",
+  "/innstillinger/mcp": "MCP",
   "/memory": "Memory",
   "/monitor": "Monitor",
   "/sandbox": "Sandbox",
