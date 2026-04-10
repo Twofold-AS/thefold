@@ -87,12 +87,20 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
   const client = new Anthropic({ apiKey: anthropicKey() });
   const maxLoops = options.maxLoops ?? MAX_TOOL_LOOPS;
 
+  // SSE routing key: prefer the TheFold task ID, fall back to conversation ID
+  const streamKey = options.toolContext.thefoldTaskId || options.toolContext.conversationId;
+
   // Accumulators
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   const toolsUsed: string[] = [];
   const filesWritten: Array<{ path: string; content: string }> = [];
   let sandboxId: string | undefined;
+
+  agentEventBus.emit(streamKey, createAgentEvent({
+    type: "agent.status",
+    data: { status: "running", phase: "tool_loop", message: "AI tool loop started" },
+  }));
 
   // Working message list (mutated as we append assistant + tool_result turns)
   const messages: Anthropic.MessageParam[] = options.messages as Anthropic.MessageParam[];
@@ -101,26 +109,17 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
     { type: "text", text: options.system, cache_control: { type: "ephemeral" } },
   ];
 
-  const taskId = options.toolContext.conversationId;
-
   for (let loop = 0; loop < maxLoops; loop++) {
     log.info("agent tool loop: iteration", {
       loop: loop + 1,
       maxLoops,
       toolsSoFar: toolsUsed.length,
-      conversationId: taskId,
+      conversationId: options.toolContext.conversationId,
     });
-
-    // Emit status at the start of each iteration
-    agentEventBus.emit(taskId, createAgentEvent("agent.status", {
-      status: "running",
-      phase: "tool-loop",
-      message: `Iteration ${loop + 1} of ${maxLoops}`,
-      loop: loop + 1,
-    }));
 
     // --- Call AI ---
     let response: Anthropic.Message;
+    const messageId = crypto.randomUUID();
 
     try {
       const stream = client.messages.stream({
@@ -131,13 +130,11 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
         tools: AGENT_TOOLS as Anthropic.Tool[],
       });
 
-      // Stream text deltas to SSE clients as they arrive
-      stream.on("text", (delta) => {
-        agentEventBus.emit(taskId, createAgentEvent("agent.message", {
-          role: "assistant",
-          content: "",
-          delta,
-          model: options.model,
+      // Emit text deltas as they arrive so the frontend can render streaming text
+      stream.on("text", (text) => {
+        agentEventBus.emit(streamKey, createAgentEvent({
+          type: "agent.message",
+          data: { delta: text, role: "assistant", messageId },
         }));
       });
 
@@ -145,10 +142,9 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error("agent tool loop: AI call failed", { loop, error: msg });
-      agentEventBus.emit(taskId, createAgentEvent("agent.error", {
-        message: msg,
-        code: "ai_error",
-        recoverable: false,
+      agentEventBus.emit(streamKey, createAgentEvent({
+        type: "agent.error",
+        data: { errorType: "ai_call_failed", message: msg, retryable: true },
       }));
       throw err;
     }
@@ -185,7 +181,16 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
         endpoint: "agent-tool-loop",
       });
 
-      const result: ToolLoopResult = {
+      agentEventBus.emit(streamKey, createAgentEvent({
+        type: "agent.done",
+        data: {
+          summary: finalText,
+          filesChanged: filesWritten.map((f) => f.path),
+          tokensUsed: totalInputTokens + totalOutputTokens,
+        },
+      }));
+
+      return {
         finalText,
         toolsUsed,
         filesWritten,
@@ -197,27 +202,6 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
         loopsUsed: loop + 1,
         stoppedAtMaxLoops: false,
       };
-
-      // Emit final message and done event
-      if (finalText) {
-        agentEventBus.emit(taskId, createAgentEvent("agent.message", {
-          role: "assistant",
-          content: finalText,
-          model: options.model,
-        }));
-      }
-      agentEventBus.emit(taskId, createAgentEvent("agent.done", {
-        finalText,
-        toolsUsed,
-        filesWritten: filesWritten.length,
-        totalInputTokens,
-        totalOutputTokens,
-        costUsd: result.costUsd,
-        loopsUsed: loop + 1,
-        stoppedAtMaxLoops: false,
-      }));
-
-      return result;
     }
 
     // --- Execute tool calls ---
@@ -234,30 +218,29 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
       log.info("agent tool loop: executing tool", {
         loop: loop + 1,
         tool: toolName,
-        conversationId: taskId,
+        conversationId: options.toolContext.conversationId,
       });
 
       toolsUsed.push(toolName);
 
-      // Emit before tool call
-      agentEventBus.emit(taskId, createAgentEvent("agent.tool_use", {
-        toolName,
-        toolUseId: block.id,
-        input: toolInput,
-        loopIteration: loop + 1,
+      agentEventBus.emit(streamKey, createAgentEvent({
+        type: "agent.tool_use",
+        data: { toolName, toolId: block.id, input: toolInput },
       }));
 
-      const toolStart = Date.now();
+      const toolCallStart = Date.now();
       const result = await executeAgentTool(toolName, toolInput, options.toolContext);
-      const toolDurationMs = Date.now() - toolStart;
+      const toolDurationMs = Date.now() - toolCallStart;
 
-      // Emit after tool call
-      agentEventBus.emit(taskId, createAgentEvent("agent.tool_result", {
-        toolName,
-        toolUseId: block.id,
-        content: result.content,
-        isError: result.isError ?? false,
-        durationMs: toolDurationMs,
+      agentEventBus.emit(streamKey, createAgentEvent({
+        type: "agent.tool_result",
+        data: {
+          toolId: block.id,
+          toolName,
+          result: result.content,
+          durationMs: toolDurationMs,
+          success: !result.isError,
+        },
       }));
 
       // Track side-effects for ExecutionResult mapping in D7
@@ -297,14 +280,8 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
   log.warn("agent tool loop: max loops reached", {
     maxLoops,
     toolsUsed: toolsUsed.join(", "),
-    conversationId: taskId,
+    conversationId: options.toolContext.conversationId,
   });
-
-  agentEventBus.emit(taskId, createAgentEvent("agent.error", {
-    message: `Tool loop stopped after ${maxLoops} iterations`,
-    code: "max_loops",
-    recoverable: false,
-  }));
 
   logTokenUsage({
     inputTokens: totalInputTokens,
@@ -315,28 +292,23 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
     endpoint: "agent-tool-loop",
   });
 
-  const costUsd = estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost;
-  const finalText = `[Tool loop stopped after ${maxLoops} iterations. Tools used: ${toolsUsed.join(", ")}]`;
-
-  agentEventBus.emit(taskId, createAgentEvent("agent.done", {
-    finalText,
-    toolsUsed,
-    filesWritten: filesWritten.length,
-    totalInputTokens,
-    totalOutputTokens,
-    costUsd,
-    loopsUsed: maxLoops,
-    stoppedAtMaxLoops: true,
+  agentEventBus.emit(streamKey, createAgentEvent({
+    type: "agent.done",
+    data: {
+      summary: `Tool loop stopped after ${maxLoops} iterations. Tools used: ${toolsUsed.join(", ")}`,
+      filesChanged: filesWritten.map((f) => f.path),
+      tokensUsed: totalInputTokens + totalOutputTokens,
+    },
   }));
 
   return {
-    finalText,
+    finalText: `[Tool loop stopped after ${maxLoops} iterations. Tools used: ${toolsUsed.join(", ")}]`,
     toolsUsed,
     filesWritten,
     sandboxId,
     totalInputTokens,
     totalOutputTokens,
-    costUsd,
+    costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
     modelUsed: options.model,
     loopsUsed: maxLoops,
     stoppedAtMaxLoops: true,
