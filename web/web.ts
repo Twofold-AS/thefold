@@ -48,8 +48,8 @@ export const scrape = api(
     try {
       apiKey = FirecrawlApiKey();
     } catch {
-      throw APIError.failedPrecondition(
-        "FirecrawlApiKey secret not configured",
+      throw APIError.unavailable(
+        "Web scraping service not configured. Set FirecrawlApiKey to enable.",
       );
     }
 
