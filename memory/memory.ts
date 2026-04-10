@@ -1428,6 +1428,71 @@ export const editManifest = api(
   }
 );
 
+// POST /memory/knowledge/archive — Archive low-confidence stale rules (internal, used by sleep cycle)
+export const archiveKnowledge = api(
+  { method: "POST", path: "/memory/knowledge/archive", expose: false },
+  async (): Promise<{ archived: number }> => {
+    // Archive rules with confidence < 0.3 AND not applied in last 30 days
+    const rows = await db.query<{ id: string }>`
+      UPDATE knowledge SET status = 'archived', updated_at = NOW()
+      WHERE status = 'active'
+        AND confidence < 0.3
+        AND (last_applied_at IS NULL OR last_applied_at < NOW() - INTERVAL '30 days')
+      RETURNING id
+    `;
+    let archived = 0;
+    for await (const _row of rows) archived++;
+    return { archived };
+  }
+);
+
+// POST /memory/knowledge/promote — Promote high-confidence frequently-used rules (internal)
+export const promoteKnowledge = api(
+  { method: "POST", path: "/memory/knowledge/promote", expose: false },
+  async (): Promise<{ promoted: number }> => {
+    // Promote rules with confidence > 0.8 AND applied more than 10 times
+    const rows = await db.query<{ id: string }>`
+      UPDATE knowledge SET status = 'promoted', promoted_at = NOW(), updated_at = NOW()
+      WHERE status = 'active'
+        AND confidence > 0.8
+        AND times_applied > 10
+      RETURNING id
+    `;
+    let promoted = 0;
+    for await (const _row of rows) promoted++;
+    return { promoted };
+  }
+);
+
+// POST /memory/knowledge/merge-duplicates — Archive duplicate rules sharing a common prefix (internal)
+export const mergeKnowledgeDuplicates = api(
+  { method: "POST", path: "/memory/knowledge/merge-duplicates", expose: false },
+  async (): Promise<{ merged: number }> => {
+    // Fetch active rules with confidence > 0.5, ordered oldest first
+    const rows = db.query<{ id: string; rule: string }>`
+      SELECT id, rule FROM knowledge
+      WHERE status = 'active' AND confidence > 0.5
+      ORDER BY created_at ASC LIMIT 100
+    `;
+    const allRules: Array<{ id: string; rule: string }> = [];
+    for await (const row of rows) allRules.push(row);
+
+    // Find duplicates by 30-char lowercase prefix, keep oldest, archive newer
+    const seen = new Map<string, string>(); // prefix → id
+    let merged = 0;
+    for (const rule of allRules) {
+      const prefix = rule.rule.substring(0, 30).toLowerCase().trim();
+      if (seen.has(prefix)) {
+        await db.exec`UPDATE knowledge SET status = 'archived', updated_at = NOW() WHERE id = ${rule.id}::uuid`;
+        merged++;
+      } else {
+        seen.set(prefix, rule.id);
+      }
+    }
+    return { merged };
+  }
+);
+
 // --- Crons ---
 
 const _cleanup = new CronJob("memory-cleanup", {
