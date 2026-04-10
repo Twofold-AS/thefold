@@ -46,17 +46,17 @@ export const chat = api(
 
     // Inject repo context if chatting from a specific repo
     if (req.repoName) {
-      system += `\n\nDu jobber i repoet: ${req.repoName}. Når brukeren refererer til "repoet", "prosjektet", eller "koden", mener de dette spesifikke repoet.`;
-      system += `\nVIKTIG: Hvis brukeren nevner et ANNET repo-navn enn "${req.repoName}", IKKE opprett task for det andre repoet. Si i stedet: "Du jobber i ${req.repoName}, men refererer til et annet repo. Bytt til riktig repo i navigasjonslinjen øverst først."`;
+      system += `\n\nYou are working in the repository: ${req.repoName}. When the user refers to "the repo", "the project", or "the code", they mean this specific repository.`;
+      system += `\nIMPORTANT: If the user mentions a DIFFERENT repo name than "${req.repoName}", do NOT create a task for that other repo. Instead tell them to switch to the correct repo in the navigation bar first.`;
     } else {
-      system += `\n\nBrukeren er i Global-modus (intet spesifikt repo valgt).`;
-      system += `\nHvis brukeren ber om å opprette et NYTT repo (f.eks. "Lag repo X"), gå videre og opprett task med det nye repo-navnet.`;
-      system += `\nHvis brukeren refererer til et EKSISTERENDE repo (f.eks. "Oppdater X-repoet"), si: "Du er i Global-modus. Bytt til det repoet i navigasjonslinjen øverst først."`;
+      system += `\n\nThe user is in Global mode (no specific repo selected).`;
+      system += `\nIf the user asks to create a NEW repo (e.g. "Create repo X"), proceed and create a task with the new repo name.`;
+      system += `\nIf the user refers to an EXISTING repo (e.g. "Update the X repo"), tell them to switch to that repo in the navigation bar first.`;
     }
 
     // Inject actual repo file content
     if (req.repoContext) {
-      system += `\n\n--- REPO-KONTEKST ---\nDette er FAKTISK innhold fra repoet. Basér svaret ditt KUN på dette — ALDRI dikt opp filer eller kode som ikke er her.\n${req.repoContext}`;
+      system += `\n\n--- REPOSITORY CONTEXT ---\nThis is ACTUAL content from the repository. Base your answer ONLY on this — NEVER fabricate files or code not present here.\n${req.repoContext}`;
     }
 
     if (req.memoryContext.length > 0) {
@@ -327,7 +327,7 @@ export const reviewProject = api(
     // Build file summary with token-trimming
     const MAX_FILE_TOKENS = 60000;
     let fileTokens = 0;
-    let fileSection = "## Alle filer\n\n";
+    let fileSection = "## All Files\n\n";
     const fullFiles: string[] = [];
     const summaryFiles: string[] = [];
 
@@ -341,22 +341,22 @@ export const reviewProject = api(
         fileTokens += fileTokenEst;
       } else {
         const lines = f.content.split("\n").length;
-        summaryFiles.push(`- ${f.path} (${f.action}, ${lines} linjer)`);
+        summaryFiles.push(`- ${f.path} (${f.action}, ${lines} lines)`);
       }
     }
 
     fileSection += fullFiles.join("\n");
     if (summaryFiles.length > 0) {
-      fileSection += `\n### Filer vist som sammendrag (token-grense)\n${summaryFiles.join("\n")}\n`;
+      fileSection += `\n### Files shown as summary (token limit)\n${summaryFiles.join("\n")}\n`;
     }
 
     // Build phase summary
-    let phaseSection = "## Faser og oppgaver\n\n";
+    let phaseSection = "## Phases and Tasks\n\n";
     for (const phase of req.phases) {
       phaseSection += `### ${phase.name}\n`;
       for (const task of phase.tasks) {
         const fileList = task.filesChanged.length > 0
-          ? ` (${task.filesChanged.length} filer: ${task.filesChanged.slice(0, 5).join(", ")}${task.filesChanged.length > 5 ? "..." : ""})`
+          ? ` (${task.filesChanged.length} files: ${task.filesChanged.slice(0, 5).join(", ")}${task.filesChanged.length > 5 ? "..." : ""})`
           : "";
         phaseSection += `- [${task.status}] ${task.title}${fileList}\n`;
       }
@@ -364,27 +364,27 @@ export const reviewProject = api(
     }
 
     const prompt = [
-      `## Prosjektbeskrivelse\n${req.projectDescription}\n`,
+      `## Project Description\n${req.projectDescription}\n`,
       phaseSection,
       fileSection,
-      `## Kostnad\nTotalt: $${req.totalCostUsd.toFixed(4)} (${req.totalTokensUsed} tokens)\n`,
+      `## Cost\nTotal: $${req.totalCostUsd.toFixed(4)} (${req.totalTokensUsed} tokens)\n`,
       "",
-      "Review hele dette prosjektet. Gi en samlet vurdering av:",
-      "1. Hva som ble bygget og hvorfor",
-      "2. Arkitektoniske valg som ble gjort",
-      "3. Samlet kodekvalitet (1-10)",
-      "4. Bekymringer eller svakheter",
-      "5. Viktige beslutninger å huske til fremtiden",
+      "Review this entire project. Provide an overall assessment of:",
+      "1. What was built and why",
+      "2. Architectural decisions made",
+      "3. Overall code quality (1-10)",
+      "4. Concerns or weaknesses",
+      "5. Important decisions to remember for the future",
       "",
-      "Svar KUN med JSON i dette formatet:",
+      "Respond with JSON ONLY in this format:",
       '{ "documentation": "markdown", "qualityScore": 7, "concerns": ["..."], "architecturalDecisions": ["..."], "memoriesExtracted": ["..."] }',
     ].join("\n");
 
     const systemPrompt = [
-      "Du er en senior arkitekt som reviewer et komplett prosjekt bygget av en AI-agent.",
-      "Du skal gi en helhetlig vurdering — ikke per-fil, men prosjektet som helhet.",
-      "Fokuser på: arkitektur, kodekvalitet, sikkerhet, testbarhet, vedlikeholdbarhet.",
-      "Svar KUN med gyldig JSON.",
+      "Review this complete project built by an AI agent.",
+      "Provide a holistic assessment — not per-file, but the project as a whole.",
+      "Focus on: architecture, code quality, security, testability, maintainability.",
+      "Respond with valid JSON only.",
     ].join("\n");
 
     const response = await callAIWithFallback({
@@ -412,7 +412,7 @@ export const reviewProject = api(
       return {
         documentation: response.content,
         qualityScore: 0,
-        concerns: ["Kunne ikke parse AI-respons som JSON — needs human review"],
+        concerns: ["Could not parse AI response as JSON — needs human review"],
         architecturalDecisions: [],
         memoriesExtracted: [],
         tokensUsed: response.tokensUsed,
@@ -1169,9 +1169,9 @@ export const generateFile = api(
       files: [req.fileSpec.filePath],
     });
 
-    let systemPrompt = `Du er en kode-generator. Returner KUN filinnholdet uten markdown-blokker, uten forklaring, uten kommentarer om hva du gjør. Bare ren kode.
+    let systemPrompt = `Generate the requested file. Return ONLY the file content — no markdown blocks, no explanations, no comments about what you are doing. Just raw code.
 
-Oppgave: ${sanitize(req.task)}`;
+Task: ${sanitize(req.task)}`;
 
     if (pipeline.systemPrompt) {
       systemPrompt += "\n\n" + pipeline.systemPrompt;
@@ -1268,7 +1268,7 @@ export const fixFile = api(
   async (req: FixFileRequest): Promise<FixFileResponse> => {
     const model = req.model || DEFAULT_MODEL;
 
-    const systemPrompt = `Du er en feilfikser. Du får en fil med TypeScript-feil. Returner den KORRIGERTE filen, komplett, uten markdown-blokker, uten forklaring. Bare ren kode.`;
+    const systemPrompt = `Fix the TypeScript errors in this file. Return the CORRECTED file, complete, without markdown blocks or explanations. Just raw code.`;
 
     let userPrompt = `## Fix errors in: ${req.filePath}\n\n`;
     userPrompt += `## Errors:\n${req.errors.slice(0, 10).join("\n")}\n\n`;
@@ -1333,47 +1333,44 @@ interface ExtractionResponse {
 export const callForExtraction = api(
   { method: "POST", path: "/ai/call-for-extraction", expose: false },
   async (req: ExtractionRequest): Promise<ExtractionResponse> => {
-    const systemPrompt = `Du er en kode-analytiker som identifiserer gjenbrukbare komponenter.
+    const systemPrompt = `Analyze the provided files and identify up to 3 reusable, self-contained components.
 
-Analyser filene og identifiser MAKS 3 selvstendige, gjenbrukbare komponenter.
+A good component has:
+- Clearly defined interface (exports)
+- Low coupling to the rest of the project
+- At least 50 lines of code (non-trivial)
+- Reuse value in other projects
+- Clear category
 
-En god komponent har:
-- Klart definert interface (eksporter)
-- Lav kobling til resten av prosjektet
-- Minst 50 linjer kode (ikke trivielt)
-- Gjenbruksverdi i andre prosjekter
-- Tydelig kategori
+Categories: auth, payments, pdf, email, api, database, ui, utility, testing, devops
 
-Kategorier: auth, payments, pdf, email, api, database, ui, utility, testing, devops
-
-Returner KUN gyldig JSON uten markdown-blokker. Format:
+Return ONLY valid JSON without markdown blocks. Format:
 {
   "components": [
     {
-      "name": "kebab-case-navn",
-      "description": "Kort beskrivelse",
-      "category": "kategori",
-      "files": [{"path": "sti", "content": ""}],
-      "entryPoint": "hovedfil.ts",
-      "dependencies": ["npm-pakke"],
+      "name": "kebab-case-name",
+      "description": "Short description",
+      "category": "category",
+      "files": [{"path": "path", "content": ""}],
+      "entryPoint": "main-file.ts",
+      "dependencies": ["npm-package"],
       "tags": ["tag1", "tag2"],
       "qualityScore": 75
     }
   ]
 }
 
-Hvis ingen gjenbrukbare komponenter finnes, returner: {"components": []}`;
+If no reusable components are found, return: {"components": []}`;
 
-    // Bygg bruker-prompt med filkontekst
-    let userPrompt = `Repo: ${sanitize(req.repo)}\nOppgave: ${sanitize(req.task)}\n\nFiler:\n`;
+    let userPrompt = `Repo: ${sanitize(req.repo)}\nTask: ${sanitize(req.task)}\n\nFiles:\n`;
     let tokenEstimate = 0;
     for (const f of req.files) {
-      if (tokenEstimate > 15000) break; // Token-grense
-      userPrompt += `\n--- ${f.path} (${f.lines} linjer) ---\n${sanitize(f.content)}\n`;
+      if (tokenEstimate > 15000) break;
+      userPrompt += `\n--- ${f.path} (${f.lines} lines) ---\n${sanitize(f.content)}\n`;
       tokenEstimate += f.content.length / 4;
     }
 
-    userPrompt += "\n\nIdentifiser gjenbrukbare komponenter fra disse filene.";
+    userPrompt += "\n\nIdentify reusable components from these files.";
 
     const response = await callAIWithFallback({
       model: "claude-sonnet-4-5-20250929", // Bruk rimelig modell
