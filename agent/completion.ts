@@ -5,6 +5,8 @@ import { agentReports } from "../chat/chat";
 import { savePhaseMetrics } from "./metrics";
 import { completeJob } from "./db";
 import { validateAgentScope } from "./helpers";
+import { updateDecisionCache, createDecisionEntry } from "./decision-cache";
+import { getPatternRegex } from "./pattern-matcher";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 
@@ -370,6 +372,35 @@ export async function completeTask(
     stopAllServers();
   } catch {
     // Non-critical
+  }
+
+  // === Decision cache update (D8) ===
+  // Fast-path: update confidence score for the matched pattern
+  if (ctx.fastPathPattern) {
+    updateDecisionCache(ctx.fastPathPattern, true).catch((err) =>
+      log.warn("updateDecisionCache fast-path failed", { error: String(err) })
+    );
+  } else if (ctx.totalAttempts === 1 && ctx.totalTokensUsed < 1000 && allFiles.length > 0) {
+    // Standard-path trivial task: promote to decision cache as future fast-path candidate
+    const taskDesc = ctx.taskDescription.toLowerCase();
+    // Derive a simple regex from the first 5 meaningful words
+    const words = taskDesc.match(/\b\w{3,}\b/g)?.slice(0, 5) ?? [];
+    if (words.length >= 2) {
+      const candidatePattern = words.slice(0, 3).join("_");
+      const candidateRegex = words.slice(0, 3).join("\\s+\\w*\\s*");
+      const existingRegex = getPatternRegex(candidatePattern);
+      createDecisionEntry({
+        pattern: candidatePattern,
+        patternRegex: existingRegex ?? candidateRegex,
+        strategy: "fast_path",
+        skipConfidence: true,
+        skipComplexity: true,
+        preferredModel: ctx.selectedModel,
+        initialConfidence: 0.6,
+      }).catch((err) =>
+        log.warn("createDecisionEntry from trivial task failed", { error: String(err) })
+      );
+    }
   }
 
   // Save phase metrics (non-critical)

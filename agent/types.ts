@@ -85,6 +85,8 @@ export interface AgentExecutionContext {
   progressSteps?: ProgressStep[];
   // Persistent job queue (XD)
   jobId?: string;
+  // Fast-path micro-decision (D8)
+  fastPathPattern?: string;
 }
 
 export interface AttemptRecord {

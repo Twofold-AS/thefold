@@ -26,6 +26,8 @@ import {
   type AuditOptions,
 } from "./helpers";
 import { checkRateLimit, recordTaskStart } from "./rate-limiter";
+import { matchPattern } from "./pattern-matcher";
+import { matchDecision } from "./decision-cache";
 
 // --- Database (shared) ---
 import { db, acquireRepoLock, releaseRepoLock, createJob, startJob, updateJobCheckpoint, completeJob, failJob, findResumableJobs, expireOldJobs } from "./db";
@@ -239,6 +241,141 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     if (await checkCancelled(ctx)) {
       sm.transitionTo("stopped"); ctx.phase = sm.current;
       return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
+    }
+
+    // === Fast-path micro-decision check (D7/D8) ===
+    // Run pattern matcher + decision cache in parallel before expensive AI steps.
+    // If either source has confidence > 0.85 AND flags skipConfidence + skipComplexity,
+    // we can bypass the AI confidence/complexity assessment and go straight to executePlan.
+    if (!useCurated && !options?.forceContinue) {
+      const [patternMatch, cachedDecision] = await Promise.all([
+        Promise.resolve(matchPattern(ctx.taskDescription)),
+        matchDecision(ctx.taskDescription),
+      ]);
+
+      const match = (cachedDecision?.confidence ?? 0) > (patternMatch?.confidence ?? 0)
+        ? cachedDecision
+        : patternMatch;
+
+      if (match && match.confidence > 0.85 && match.skipConfidence && match.skipComplexity) {
+        log.info("fast-path taken", {
+          taskId: ctx.taskId,
+          patternName: "patternName" in match ? match.patternName : undefined,
+          confidence: match.confidence,
+          strategy: match.strategy,
+          preferredModel: match.preferredModel,
+        });
+
+        // Override model selection with the fast-path preferred model
+        if (match.preferredModel) {
+          ctx.selectedModel = match.preferredModel;
+        }
+
+        // Stash the matched pattern name on ctx for use in completion.ts
+        ctx.fastPathPattern = "patternName" in match ? match.patternName : undefined;
+
+        // Skip to executePlan — jump past STEP 4 (confidence) and STEP 4.5 (complexity)
+        sm.transitionTo("planning");
+        ctx.phase = sm.current;
+        const fullCtx: AgentContext = { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools };
+        const planningCtx = filterForPhase(fullCtx, "planning");
+
+        const fastExecResult: ExecutionResult = await executePlan(
+          ctx,
+          planningCtx,
+          tracker,
+          { report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker },
+          { sandboxId: options?.sandboxId },
+        );
+
+        if (!fastExecResult.success || fastExecResult.earlyReturn) {
+          // Fall through to standard path if fast-path fails
+          log.info("fast-path execution failed, falling through to standard path", { taskId: ctx.taskId });
+          // Reset state machine to re-enter confidence step
+          sm.transitionTo("confidence");
+          ctx.phase = sm.current;
+        } else {
+          const fastAllFiles = fastExecResult.filesChanged;
+          const fastSandboxId = fastExecResult.sandboxId;
+
+          // collectOnly: return early with files — skip review/PR/cleanup
+          if (options?.collectOnly) {
+            if (ctx.jobId) {
+              tracker.end();
+              await savePhaseMetrics(ctx.jobId, ctx.taskId, tracker.getAll()).catch(() => {});
+            }
+            return {
+              success: true,
+              filesChanged: fastAllFiles.map((f) => f.path),
+              filesContent: fastAllFiles,
+              sandboxId: fastSandboxId,
+              costUsd: ctx.totalCostUsd,
+              tokensUsed: ctx.totalTokensUsed,
+              status: "completed",
+            };
+          }
+
+          // Fast-path succeeded — continue to review/completion
+          sm.transitionTo("reviewing");
+          ctx.phase = sm.current;
+
+          const fastReviewResult: ReviewResult = await handleReview(
+            ctx,
+            { allFiles: fastAllFiles, sandboxId: fastSandboxId, memoryStrings },
+            tracker,
+            { report, think, reportSteps, auditedStep, audit, shouldStopTask },
+            { skipReview: options?.skipReview },
+          );
+
+          if (fastReviewResult.earlyReturn) {
+            if (fastReviewResult.earlyReturn.errorMessage === "stopped") {
+              sm.transitionTo("stopped"); ctx.phase = sm.current;
+            }
+            return fastReviewResult.earlyReturn;
+          }
+
+          if (fastReviewResult.shouldPause) {
+            sm.transitionTo("pending_review"); ctx.phase = sm.current;
+            return {
+              success: true,
+              reviewId: fastReviewResult.reviewId,
+              status: "pending_review",
+              filesChanged: fastAllFiles.map((f) => f.path),
+              costUsd: ctx.totalCostUsd,
+              tokensUsed: ctx.totalTokensUsed,
+            };
+          }
+
+          if (fastReviewResult.skipReview) {
+            const fastCompResult: CompletionResult = await completeTask(
+              ctx,
+              {
+                allFiles: fastAllFiles,
+                sandboxId: fastSandboxId,
+                documentation: fastReviewResult.documentation,
+                memoriesExtracted: fastReviewResult.memoriesExtracted,
+                memoryStrings,
+              },
+              tracker,
+              { report, think, reportSteps, auditedStep, audit, updateLinearIfExists },
+            );
+
+            sm.transitionTo("completed"); ctx.phase = sm.current;
+            return {
+              success: fastCompResult.success,
+              prUrl: fastCompResult.prUrl,
+              filesChanged: fastCompResult.filesChanged,
+              costUsd: ctx.totalCostUsd,
+              tokensUsed: ctx.totalTokensUsed,
+            };
+          }
+
+          // Fallthrough — persist metrics
+          if (ctx.jobId) await savePhaseMetrics(ctx.jobId, ctx.taskId, tracker.getAll()).catch(() => {});
+          if (ctx.jobId) await completeJob(ctx.jobId).catch(() => {});
+          return { success: true, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed };
+        }
+      }
     }
 
     // === STEP 4: Assess Confidence ===
