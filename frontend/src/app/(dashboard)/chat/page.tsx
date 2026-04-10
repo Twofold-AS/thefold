@@ -7,7 +7,6 @@ import ChatComposer from "@/components/ChatComposer";
 import ChatInput from "@/components/ChatInput";
 import RobotIcon from "@/components/icons/RobotIcon";
 import Btn from "@/components/Btn";
-import AgentStream from "@/components/AgentStream";
 
 import { useApiData } from "@/lib/hooks";
 import {
@@ -16,15 +15,15 @@ import {
   sendMessage,
   cancelChatGeneration,
   deleteConversation,
-  repoConversationId,
   listSkills,
   listProviders,
-  approveReview,
-  rejectReview,
-  requestReviewChanges,
   type ConversationSummary,
   type Message,
 } from "@/lib/api";
+import { parseAndSetChatError } from "@/lib/chat-errors";
+import { createConversationId } from "@/lib/conversation-ids";
+import { useProcessedMessages, isAgentMessage } from "@/hooks/useProcessedMessages";
+import MessageWithAgent from "@/components/chat/MessageWithAgent";
 import { Trash2 } from "lucide-react";
 import { useRepoContext } from "@/lib/repo-context";
 
@@ -229,9 +228,7 @@ function ChatPageInner() {
       if (subagentsParam) setSubAgentsEnabled(true);
 
       const repoName = repoParam || selectedRepo?.name || null;
-      const convId = repoName
-        ? repoConversationId(repoName)
-        : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const convId = createConversationId(repoName);
 
       setAc(convId);
 
@@ -261,14 +258,7 @@ function ChatPageInner() {
         })
         .catch((e: unknown) => {
           setSending(false);
-          const msg = e instanceof Error ? e.message : "Noe gikk galt";
-          const lower = msg.toLowerCase();
-          if (lower.includes("credit") || lower.includes("billing") || lower.includes("quota") || lower.includes("brukt opp")) setChatError("AI-credits er brukt opp. Sjekk billing hos leverandøren.");
-          else if (lower.includes("rate limit") || lower.includes("429") || lower.includes("too many")) setChatError("For mange forespørsler — vent litt og prøv igjen.");
-          else if (lower.includes("api key") || lower.includes("api-nøkkel") || lower.includes("401") || lower.includes("ugyldig")) setChatError("API-nøkkelen er ugyldig. Sjekk AI-innstillingene.");
-          else if (lower.includes("unavailable") || lower.includes("503") || lower.includes("utilgjengelig") || lower.includes("overloaded")) setChatError("AI-tjenesten er midlertidig nede. Prøv igjen om litt.");
-          else if (lower.includes("context length") || lower.includes("too long")) setChatError("Meldingen er for lang. Prøv en kortere melding.");
-          else setChatError(msg);
+          parseAndSetChatError(e, setChatError);
         });
     }
   }, [autoMsg]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -284,9 +274,7 @@ function ChatPageInner() {
 
   const startNewChat = (msg: string) => {
     const repoName = selectedRepo?.name || null;
-    const convId = repoName
-      ? repoConversationId(repoName)
-      : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const convId = createConversationId(repoName);
     setAc(convId);
     setNewChat(false);
 
@@ -317,14 +305,7 @@ function ChatPageInner() {
       })
       .catch((e: unknown) => {
         setSending(false);
-        const msg = e instanceof Error ? e.message : "Noe gikk galt";
-        const lower = msg.toLowerCase();
-        if (lower.includes("credit") || lower.includes("billing") || lower.includes("quota") || lower.includes("brukt opp")) setChatError("AI-credits er brukt opp. Sjekk billing hos leverandøren.");
-        else if (lower.includes("rate limit") || lower.includes("429") || lower.includes("too many")) setChatError("For mange forespørsler — vent litt og prøv igjen.");
-        else if (lower.includes("api key") || lower.includes("api-nøkkel") || lower.includes("401") || lower.includes("ugyldig")) setChatError("API-nøkkelen er ugyldig. Sjekk AI-innstillingene.");
-        else if (lower.includes("unavailable") || lower.includes("503") || lower.includes("utilgjengelig") || lower.includes("overloaded")) setChatError("AI-tjenesten er midlertidig nede. Prøv igjen om litt.");
-        else if (lower.includes("context length") || lower.includes("too long")) setChatError("Meldingen er for lang. Prøv en kortere melding.");
-        else setChatError(msg);
+        parseAndSetChatError(e, setChatError);
       });
   };
 
@@ -373,23 +354,11 @@ function ChatPageInner() {
       })
       .catch((e: unknown) => {
         setSending(false);
-        const msg = e instanceof Error ? e.message : "Noe gikk galt";
-        const lower = msg.toLowerCase();
-        if (lower.includes("credit") || lower.includes("billing") || lower.includes("quota") || lower.includes("brukt opp")) setChatError("AI-credits er brukt opp. Sjekk billing hos leverandøren.");
-        else if (lower.includes("rate limit") || lower.includes("429") || lower.includes("too many")) setChatError("For mange forespørsler — vent litt og prøv igjen.");
-        else if (lower.includes("api key") || lower.includes("api-nøkkel") || lower.includes("401") || lower.includes("ugyldig")) setChatError("API-nøkkelen er ugyldig. Sjekk AI-innstillingene.");
-        else if (lower.includes("unavailable") || lower.includes("503") || lower.includes("utilgjengelig") || lower.includes("overloaded")) setChatError("AI-tjenesten er midlertidig nede. Prøv igjen om litt.");
-        else if (lower.includes("context length") || lower.includes("too long")) setChatError("Meldingen er for lang. Prøv en kortere melding.");
-        else setChatError(msg);
+        parseAndSetChatError(e, setChatError);
       });
   };
 
-  const isAgentMessage = (m: Message) =>
-    m.messageType === "agent_status" ||
-    m.messageType === "agent_thought" ||
-    m.messageType === "agent_progress" ||
-    m.messageType === "agent_report" ||
-    (m.role === "assistant" && m.content.startsWith("{") && m.content.includes("\"type\":"));
+  const { messages: dedupedMsgs, lastAgentMsg, mergeUnderChatId: mergedChatId } = useProcessedMessages(msgs);
 
   return (
     <div
@@ -619,34 +588,7 @@ function ChatPageInner() {
                 </span>
               </div>
             ) : (
-              (() => {
-                // Deduplicate: keep only the last agent message
-                let lastAgentIdx = -1;
-                for (let i = msgs.length - 1; i >= 0; i--) {
-                  if (isAgentMessage(msgs[i])) { lastAgentIdx = i; break; }
-                }
-                const dedupedMsgs = msgs.filter((m, i) => {
-                  if (!isAgentMessage(m)) return true;
-                  return i === lastAgentIdx;
-                });
-
-                // Find last agent message and the chat message to merge it under
-                const lastAgentMsg = dedupedMsgs.find(m => isAgentMessage(m));
-                const mergedChatId = lastAgentMsg
-                  ? (() => {
-                      // Find the last assistant chat message that comes before the agent message
-                      let found: string | null = null;
-                      for (const m of dedupedMsgs) {
-                        if (m.role === "assistant" && !isAgentMessage(m) && m.content?.trim()) {
-                          found = m.id;
-                        }
-                        if (m === lastAgentMsg) break;
-                      }
-                      return found;
-                    })()
-                  : null;
-
-                return dedupedMsgs.map((m) => {
+              dedupedMsgs.map((m) => {
                   const time = new Date(m.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" });
                   const isAgent = isAgentMessage(m);
 
@@ -686,39 +628,13 @@ function ChatPageInner() {
                             <RobotIcon size={16} />
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <AgentStream
+                            <MessageWithAgent
                               content={m.content}
-                              onCancel={() => { if (ac) cancelChatGeneration(ac).catch(() => {}); setSending(false); }}
-                              onApprove={async (reviewId) => {
-                                try {
-                                  await approveReview(reviewId);
-                                  refreshMsgs();
-                                } catch (e) {
-                                  setChatError(e instanceof Error ? e.message : "Godkjenning feilet");
-                                }
-                              }}
-                              onReject={async (reviewId) => {
-                                try {
-                                  await rejectReview(reviewId);
-                                  refreshMsgs();
-                                } catch (e) {
-                                  setChatError(e instanceof Error ? e.message : "Avvisning feilet");
-                                }
-                              }}
-                              onRequestChanges={async (reviewId, feedback) => {
-                                if (!feedback || feedback.trim() === "") {
-                                  setPendingReviewId(reviewId);
-                                  const input = document.querySelector<HTMLInputElement>('[data-chat-input]');
-                                  if (input) input.focus();
-                                  return;
-                                }
-                                try {
-                                  await requestReviewChanges(reviewId, feedback);
-                                  refreshMsgs();
-                                } catch (e) {
-                                  setChatError(e instanceof Error ? e.message : "Endring feilet");
-                                }
-                              }}
+                              conversationId={ac}
+                              onCancelSending={() => { if (ac) cancelChatGeneration(ac).catch(() => {}); setSending(false); }}
+                              onError={(msg) => setChatError(msg)}
+                              onRefresh={refreshMsgs}
+                              onPendingReview={setPendingReviewId}
                             />
                             <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
                           </div>
@@ -745,39 +661,13 @@ function ChatPageInner() {
                             {/* Merged agent-status under this chat message */}
                             {m.id === mergedChatId && lastAgentMsg && (
                               <div style={{ marginTop: 8 }}>
-                                <AgentStream
+                                <MessageWithAgent
                                   content={lastAgentMsg.content}
-                                  onCancel={() => { if (ac) cancelChatGeneration(ac).catch(() => {}); setSending(false); }}
-                                  onApprove={async (reviewId) => {
-                                    try {
-                                      await approveReview(reviewId);
-                                      refreshMsgs();
-                                    } catch (e) {
-                                      setChatError(e instanceof Error ? e.message : "Godkjenning feilet");
-                                    }
-                                  }}
-                                  onReject={async (reviewId) => {
-                                    try {
-                                      await rejectReview(reviewId);
-                                      refreshMsgs();
-                                    } catch (e) {
-                                      setChatError(e instanceof Error ? e.message : "Avvisning feilet");
-                                    }
-                                  }}
-                                  onRequestChanges={async (reviewId, feedback) => {
-                                    if (!feedback || feedback.trim() === "") {
-                                      setPendingReviewId(reviewId);
-                                      const input = document.querySelector<HTMLInputElement>('[data-chat-input]');
-                                      if (input) input.focus();
-                                      return;
-                                    }
-                                    try {
-                                      await requestReviewChanges(reviewId, feedback);
-                                      refreshMsgs();
-                                    } catch (e) {
-                                      setChatError(e instanceof Error ? e.message : "Endring feilet");
-                                    }
-                                  }}
+                                  conversationId={ac}
+                                  onCancelSending={() => { if (ac) cancelChatGeneration(ac).catch(() => {}); setSending(false); }}
+                                  onError={(msg) => setChatError(msg)}
+                                  onRefresh={refreshMsgs}
+                                  onPendingReview={setPendingReviewId}
                                 />
                               </div>
                             )}
@@ -805,8 +695,7 @@ function ChatPageInner() {
                       )}
                     </div>
                   );
-                });
-              })()
+              })
             )}
             {sending && !msgs.some(m => isAgentMessage(m)) && (
               <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "4px 0" }}>
