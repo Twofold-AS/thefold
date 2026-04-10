@@ -202,6 +202,11 @@ export default function SkillsPage() {
                   <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
                     {s.totalUses ?? 0}x brukt
                   </span>
+                  <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                    {(s.routingRules?.keywords?.length ?? 0) +
+                      (s.routingRules?.file_patterns?.length ?? 0) +
+                      (s.routingRules?.labels?.length ?? 0)} regler
+                  </span>
                 </div>
               </div>
             ))}
@@ -268,6 +273,29 @@ export default function SkillsPage() {
                 ))}
               </div>
 
+              <SectionLabel>PROMPT-FRAGMENT</SectionLabel>
+              <div
+                style={{
+                  fontSize: 12,
+                  fontFamily: T.mono,
+                  color: T.textSec,
+                  padding: "10px 12px",
+                  background: T.bg,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 6,
+                  marginBottom: 16,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  maxHeight: 160,
+                  overflow: "auto",
+                  lineHeight: 1.6,
+                }}
+              >
+                {sk.promptFragment || (
+                  <span style={{ color: T.textFaint }}>Ingen prompt-fragment.</span>
+                )}
+              </div>
+
               <SectionLabel>ROUTING REGLER</SectionLabel>
               <div
                 style={{
@@ -278,11 +306,25 @@ export default function SkillsPage() {
                   background: T.subtle,
                   border: `1px solid ${T.border}`,
                   borderRadius: 6,
-                  marginBottom: 16,
+                  marginBottom: 8,
                 }}
               >
                 {sk.routingRules?.keywords?.join(", ") ?? "ingen regler"}
               </div>
+              {(sk.routingRules?.file_patterns?.length || sk.routingRules?.labels?.length) ? (
+                <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+                  {sk.routingRules?.file_patterns?.length ? (
+                    <div style={{ flex: 1, fontSize: 11, fontFamily: T.mono, color: T.textFaint, padding: "6px 10px", background: T.subtle, borderRadius: 6 }}>
+                      filer: {sk.routingRules.file_patterns.join(", ")}
+                    </div>
+                  ) : null}
+                  {sk.routingRules?.labels?.length ? (
+                    <div style={{ flex: 1, fontSize: 11, fontFamily: T.mono, color: T.textFaint, padding: "6px 10px", background: T.subtle, borderRadius: 6 }}>
+                      labels: {sk.routingRules.labels.join(", ")}
+                    </div>
+                  ) : null}
+                </div>
+              ) : <div style={{ marginBottom: 16 }} />}
 
               <div style={{ display: "flex", gap: 8 }}>
                 <Toggle

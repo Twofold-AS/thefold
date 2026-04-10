@@ -11,6 +11,8 @@
 import log from "encore.dev/log";
 import { github, memory, sandbox, builder, tasks, ai, agent, skills } from "~encore/clients";
 import type { AgentToolName } from "./agent-tools";
+import { agentEventBus } from "./event-bus";
+import { createAgentEvent } from "./events";
 
 // --- Result type ---
 
@@ -55,6 +57,13 @@ export async function executeAgentTool(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.warn("agent tool call failed", { tool: name, error: msg });
+    // Emit tool-level error so SSE clients can display it without waiting for
+    // the tool-loop to surface it in the next iteration
+    agentEventBus.emit(ctx.conversationId, createAgentEvent("agent.error", {
+      message: `Tool ${name} failed: ${msg}`,
+      code: "tool_call_failed",
+      recoverable: true, // The AI can observe the error and try a different approach
+    }));
     return {
       content: JSON.stringify({ error: msg }),
       isError: true,
