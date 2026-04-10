@@ -2,44 +2,17 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { startInstalledServers, routeToolCall, stopAllServers, getActiveToolsForAI, routingStatus } from "./router";
 import { db } from "./db";
 
-// Mock secret to control feature flag
-vi.mock("encore.dev/config", () => ({
-  secret: (name: string) => {
-    return () => {
-      if (name === "MCPRoutingEnabled") {
-        return process.env.TEST_MCP_ROUTING_ENABLED || "false";
-      }
-      return "false";
-    };
-  },
-}));
-
 describe("MCP Router", () => {
   beforeEach(async () => {
     // Clean up ALL test data to ensure clean slate
     await db.exec`DELETE FROM mcp_servers`;
-
-    // Reset env var
-    delete process.env.TEST_MCP_ROUTING_ENABLED;
 
     // Clear active clients
     stopAllServers();
   });
 
   describe("startInstalledServers", () => {
-    it("should return empty arrays when feature flag is disabled", async () => {
-      process.env.TEST_MCP_ROUTING_ENABLED = "false";
-
-      const result = await startInstalledServers();
-
-      expect(result.tools).toEqual([]);
-      expect(result.startedServers).toEqual([]);
-      expect(result.failedServers).toEqual([]);
-    });
-
     it("should return empty arrays when no servers are installed", async () => {
-      process.env.TEST_MCP_ROUTING_ENABLED = "true";
-
       const result = await startInstalledServers();
 
       expect(result.tools).toEqual([]);
@@ -48,8 +21,6 @@ describe("MCP Router", () => {
     });
 
     it("should handle database query errors gracefully", async () => {
-      process.env.TEST_MCP_ROUTING_ENABLED = "true";
-
       // Function should not throw even if DB has issues
       const result = await startInstalledServers();
 
@@ -61,18 +32,7 @@ describe("MCP Router", () => {
   });
 
   describe("routeToolCall", () => {
-    it("should return error when feature flag is disabled", async () => {
-      process.env.TEST_MCP_ROUTING_ENABLED = "false";
-
-      const result = await routeToolCall("test-server", "test-tool", {});
-
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("disabled");
-    });
-
     it("should return error when server is not running", async () => {
-      process.env.TEST_MCP_ROUTING_ENABLED = "true";
-
       const result = await routeToolCall("nonexistent-server", "test-tool", {});
 
       expect(result.isError).toBe(true);
@@ -80,8 +40,6 @@ describe("MCP Router", () => {
     });
 
     it("should handle empty args gracefully", async () => {
-      process.env.TEST_MCP_ROUTING_ENABLED = "true";
-
       const result = await routeToolCall("test-server", "test-tool", {});
 
       expect(result).toBeDefined();
@@ -124,18 +82,7 @@ describe("MCP Router", () => {
   });
 
   describe("routingStatus endpoint", () => {
-    it("should return enabled status correctly when disabled", async () => {
-      process.env.TEST_MCP_ROUTING_ENABLED = "false";
-
-      const result = await routingStatus();
-
-      expect(result.enabled).toBe(false);
-      expect(Array.isArray(result.activeServers)).toBe(true);
-    });
-
-    it("should return enabled status correctly when enabled", async () => {
-      process.env.TEST_MCP_ROUTING_ENABLED = "true";
-
+    it("should return enabled as true", async () => {
       const result = await routingStatus();
 
       expect(result.enabled).toBe(true);

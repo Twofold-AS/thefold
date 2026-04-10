@@ -5,9 +5,6 @@ import { openaiProvider } from "./providers/openai";
 import { openrouterProvider } from "./providers/openrouter";
 import { fireworksProvider } from "./providers/fireworks";
 
-// --- Feature flag ---
-const MultiProviderEnabled = secret("MultiProviderEnabled");
-
 // --- API key secrets for each provider ---
 const AnthropicAPIKey = secret("AnthropicAPIKey");
 const OpenRouterApiKey = secret("OpenRouterApiKey");
@@ -39,34 +36,12 @@ const API_KEY_MAP: Record<string, () => string> = {
 };
 
 /**
- * Check if the multi-provider feature flag is enabled.
- * When disabled, only Anthropic is available (existing behavior).
- * When enabled, all registered providers are available.
- */
-export function isMultiProviderEnabled(): boolean {
-  try {
-    return MultiProviderEnabled() === "true";
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Get provider adapter by ID.
+ * All registered providers are available — DB controls which models are active.
  *
- * When MultiProviderEnabled is disabled, only "anthropic" is allowed.
- * When enabled, all registered providers are available.
- *
- * @throws Error if provider ID is unknown or not enabled
+ * @throws Error if provider ID is unknown
  */
 export function getProvider(providerId: string): AIProviderAdapter {
-  // When multi-provider is disabled, only Anthropic works
-  if (!isMultiProviderEnabled() && providerId !== "anthropic") {
-    throw new Error(
-      `Provider "${providerId}" is not available. Multi-provider support is disabled (MultiProviderEnabled = false). Only "anthropic" is available.`
-    );
-  }
-
   const provider = PROVIDER_MAP[providerId];
   if (!provider) {
     throw new Error(
@@ -129,12 +104,8 @@ export function transformProviderResponse(
 
 /**
  * List all registered provider IDs.
- * When multi-provider is disabled, only returns ["anthropic"].
  */
 export function listProviderIds(): string[] {
-  if (!isMultiProviderEnabled()) {
-    return ["anthropic"];
-  }
   return Object.keys(PROVIDER_MAP);
 }
 

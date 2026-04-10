@@ -1,1380 +1,27 @@
 import { api, APIError } from "encore.dev/api";
-import { secret } from "encore.dev/config";
-import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
 import log from "encore.dev/log";
-import { skills } from "~encore/clients";
-import { estimateCost, getUpgradeModel, type CostEstimate } from "./router";
 import { sanitize } from "./sanitize";
-
-// --- Secrets ---
-const anthropicKey = secret("AnthropicAPIKey");
-
-// Optional secrets - will be checked at runtime
-const openaiKey = secret("OpenAIAPIKey");
-const moonshotKey = secret("MoonshotAPIKey");
-
-// --- Constants ---
-const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
-const MAX_FALLBACK_UPGRADES = 2;
-
-// --- Types ---
-
-interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
-}
-
-// Direct chat — quick response, no code execution
-export interface ChatRequest {
-  messages: ChatMessage[];
-  memoryContext: string[];
-  systemContext: "direct_chat" | "agent_planning" | "agent_coding" | "agent_review";
-  model?: string; // Optional - uses DefaultAIModel if not set
-  repoName?: string; // Which repo the user is chatting about (from repo-chat)
-  repoOwner?: string; // GitHub owner/org for the repo
-  repoContext?: string; // Actual file content from the repo (tree + relevant files)
-  conversationId?: string; // For tool-use (e.g. start_task needs conversation reference)
-  aiName?: string; // User-configurable AI assistant name (default: "Jorgen Andre")
-}
-
-export interface ChatResponse {
-  content: string;
-  tokensUsed: number;
-  stopReason: string;
-  modelUsed: string;
-  costUsd: number;
-  toolsUsed?: string[];
-  lastCreatedTaskId?: string; // BUG 7 FIX: Pass task ID across chat turns
-  usage: {
-    inputTokens: number;
-    outputTokens: number;
-    totalTokens: number;
-  };
-  truncated: boolean;
-}
-
-// Structured agent call — returns JSON for the agent to parse
-export interface AgentThinkRequest {
-  task: string;
-  projectStructure: string; // file tree from GitHub
-  relevantFiles: FileContent[]; // actual file contents
-  memoryContext: string[];
-  docsContext: string[]; // from Context7
-  previousAttempt?: string; // if retrying after error
-  errorMessage?: string; // the error to fix
-  model?: string; // Optional - uses DefaultAIModel if not set
-}
-
-export interface FileContent {
-  path: string;
-  content: string;
-}
-
-export interface AgentThinkResponse {
-  plan: TaskStep[];
-  reasoning: string;
-  tokensUsed: number;
-  modelUsed: string;
-  costUsd: number;
-}
-
-export interface TaskStep {
-  description: string;
-  action: "create_file" | "modify_file" | "delete_file" | "run_command";
-  filePath?: string;
-  content?: string; // for create_file: full content. for modify_file: new content
-  command?: string; // for run_command
-}
-
-// Code generation — returns actual file contents
-export interface CodeGenRequest {
-  step: TaskStep;
-  projectContext: string; // relevant surrounding code
-  memoryContext: string[];
-  docsContext: string[];
-  encoreRules: boolean; // enforce Encore conventions
-  model?: string; // Optional - uses DefaultAIModel if not set
-}
-
-export interface CodeGenResponse {
-  files: GeneratedFile[];
-  explanation: string;
-  tokensUsed: number;
-  modelUsed: string;
-  costUsd: number;
-}
-
-export interface GeneratedFile {
-  path: string;
-  content: string;
-  action: "create" | "modify" | "delete";
-}
-
-// Code review — analyzes what was built, produces documentation
-export interface ReviewRequest {
-  taskDescription: string;
-  filesChanged: GeneratedFile[];
-  validationOutput: string;
-  memoryContext: string[];
-  model?: string; // Optional - uses DefaultAIModel if not set
-}
-
-export interface ReviewResponse {
-  documentation: string; // markdown doc for Linear/PR
-  memoriesExtracted: string[]; // key decisions to remember
-  qualityScore: number; // 1-10 self-assessment
-  concerns: string[]; // any issues found
-  tokensUsed: number;
-  modelUsed: string;
-  costUsd: number;
-}
-
-// --- AI Provider Detection ---
-
-type AIProvider = "anthropic" | "openai" | "moonshot";
-
-function getProvider(modelName: string): AIProvider {
-  if (modelName.startsWith("claude-")) return "anthropic";
-  if (modelName.startsWith("gpt-")) return "openai";
-  if (modelName.startsWith("moonshot-")) return "moonshot";
-  throw APIError.invalidArgument(`Unknown model: ${modelName}`);
-}
-
-// --- Helper Functions ---
-
-/**
- * Wrap a provider SDK error into a readable APIError.
- * Parses common error patterns across Anthropic, OpenAI, Fireworks, OpenRouter.
- */
-function wrapProviderError(provider: string, model: string, error: unknown): APIError {
-  const msg = error instanceof Error ? error.message : String(error);
-  const lower = msg.toLowerCase();
-
-  // Credit / billing
-  if (lower.includes("credit balance") || lower.includes("billing") || lower.includes("insufficient_quota") || lower.includes("payment required") || lower.includes("402")) {
-    return APIError.resourceExhausted(
-      `${provider} credits er brukt opp (modell: ${model}). Fyll pa via leverandorens dashboard.`
-    );
-  }
-
-  // Rate limit
-  if (lower.includes("rate limit") || lower.includes("rate_limit") || lower.includes("429") || lower.includes("too many requests")) {
-    return APIError.resourceExhausted(
-      `${provider} rate limit nadd (modell: ${model}). Vent litt og prov igjen.`
-    );
-  }
-
-  // Auth
-  if (lower.includes("401") || lower.includes("authentication") || lower.includes("invalid api key") || lower.includes("invalid_api_key") || lower.includes("unauthorized")) {
-    return APIError.unauthenticated(
-      `${provider} API-nokkel er ugyldig eller utlopt (modell: ${model}). Sjekk AI-innstillinger.`
-    );
-  }
-
-  // Overloaded / server error
-  if (lower.includes("overloaded") || lower.includes("503") || lower.includes("529") || lower.includes("server error") || lower.includes("500")) {
-    return APIError.unavailable(
-      `${provider} er midlertidig utilgjengelig (modell: ${model}). Prov igjen om litt.`
-    );
-  }
-
-  // Model not found
-  if (lower.includes("model not found") || lower.includes("not_found_error") || lower.includes("does not exist")) {
-    return APIError.notFound(
-      `Modellen "${model}" finnes ikke hos ${provider}. Sjekk modell-ID i AI-innstillinger.`
-    );
-  }
-
-  // Context length
-  if (lower.includes("context length") || lower.includes("maximum context") || lower.includes("token limit") || lower.includes("too long")) {
-    return APIError.invalidArgument(
-      `Meldingen er for lang for ${model}. Prov en kortere melding eller en modell med storre kontekstvindu.`
-    );
-  }
-
-  // Fallback
-  console.error(`[AI] ${provider} error (${model}):`, msg);
-  return APIError.internal(`${provider}-feil (${model}): ${msg}`);
-}
-
-function stripMarkdownJson(text: string): string {
-  let jsonText = text.trim();
-  const codeBlockMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (codeBlockMatch) {
-    jsonText = codeBlockMatch[1].trim();
-  }
-  return jsonText;
-}
-
-export interface AICallOptions {
-  model: string;
-  system: string;
-  messages: Array<{ role: "user" | "assistant"; content: string }>;
-  maxTokens: number;
-}
-
-export interface AICallResponse {
-  content: string;
-  tokensUsed: number;
-  stopReason: string;
-  modelUsed: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  costEstimate: CostEstimate;
-}
-
-async function callAI(options: AICallOptions): Promise<AICallResponse> {
-  const provider = getProvider(options.model);
-
-  switch (provider) {
-    case "anthropic":
-      return callAnthropic(options);
-    case "openai":
-      return callOpenAI(options);
-    case "moonshot":
-      return callMoonshot(options);
-  }
-}
-
-/**
- * Call AI with automatic fallback — if the model fails, upgrade to next tier.
- * Retries up to MAX_FALLBACK_UPGRADES times with progressively better models.
- */
-export async function callAIWithFallback(options: AICallOptions): Promise<AICallResponse> {
-  let currentModel = options.model;
-  let attempts = 0;
-
-  while (attempts <= MAX_FALLBACK_UPGRADES) {
-    try {
-      return await callAI({ ...options, model: currentModel });
-    } catch (error) {
-      attempts++;
-      const upgrade = getUpgradeModel(currentModel);
-
-      if (!upgrade || attempts > MAX_FALLBACK_UPGRADES) {
-        throw error; // No upgrade path or max attempts reached
-      }
-
-      // Upgrade to next tier and retry
-      currentModel = upgrade;
-    }
-  }
-
-  // Should not reach here, but TypeScript needs it
-  throw APIError.internal("model fallback exhausted");
-}
-
-async function callAnthropic(options: AICallOptions): Promise<AICallResponse> {
-  const client = new Anthropic({ apiKey: anthropicKey() });
-
-  // DEL 7A: Use cache_control for system prompts (stable per conversation)
-  const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
-    {
-      type: "text",
-      text: options.system,
-      cache_control: { type: "ephemeral" },
-    },
-  ];
-
-  let response;
-  try {
-    const stream = client.messages.stream({
-      model: options.model,
-      max_tokens: options.maxTokens,
-      system: systemBlocks,
-      messages: options.messages.map((m) => ({ role: m.role, content: m.content })),
-    });
-    response = await stream.finalMessage();
-  } catch (e) {
-    throw wrapProviderError("Anthropic", options.model, e);
-  }
-
-  const text = response.content.find((c) => c.type === "text");
-  if (!text || text.type !== "text") {
-    throw APIError.internal("no text in Anthropic response");
-  }
-
-  const inputTokens = response.usage.input_tokens;
-  const outputTokens = response.usage.output_tokens;
-  const cacheReadTokens = (response.usage as any).cache_read_input_tokens ?? 0;
-  const cacheCreationTokens = (response.usage as any).cache_creation_input_tokens ?? 0;
-
-  // DEL 7B: Token tracking
-  logTokenUsage({
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    model: options.model,
-    endpoint: "anthropic",
-  });
-
-  return {
-    content: text.text,
-    tokensUsed: inputTokens + outputTokens,
-    stopReason: response.stop_reason || "end_turn",
-    modelUsed: options.model,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    costEstimate: estimateCost(inputTokens, outputTokens, options.model),
-  };
-}
-
-async function callOpenAI(options: AICallOptions): Promise<AICallResponse> {
-  let apiKey: string;
-  try {
-    apiKey = openaiKey();
-  } catch {
-    throw APIError.failedPrecondition(
-      "OpenAI provider not configured. Set OpenAIAPIKey secret."
-    );
-  }
-
-  const client = new OpenAI({ apiKey });
-
-  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
-    { role: "system", content: options.system },
-    ...options.messages,
-  ];
-
-  let response;
-  try {
-    response = await client.chat.completions.create({
-      model: options.model,
-      max_tokens: options.maxTokens,
-      messages,
-    });
-  } catch (e) {
-    throw wrapProviderError("OpenAI", options.model, e);
-  }
-
-  const choice = response.choices[0];
-  if (!choice?.message?.content) {
-    throw APIError.internal("no content in OpenAI response");
-  }
-
-  const inputTokens = response.usage?.prompt_tokens || 0;
-  const outputTokens = response.usage?.completion_tokens || 0;
-
-  logTokenUsage({ inputTokens, outputTokens, cacheReadTokens: 0, cacheCreationTokens: 0, model: options.model, endpoint: "openai" });
-
-  return {
-    content: choice.message.content,
-    tokensUsed: response.usage?.total_tokens || 0,
-    stopReason: choice.finish_reason || "stop",
-    modelUsed: options.model,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-    costEstimate: estimateCost(inputTokens, outputTokens, options.model),
-  };
-}
-
-async function callMoonshot(options: AICallOptions): Promise<AICallResponse> {
-  let apiKey: string;
-  try {
-    apiKey = moonshotKey();
-  } catch {
-    throw APIError.failedPrecondition(
-      "Moonshot provider not configured. Set MoonshotAPIKey secret."
-    );
-  }
-
-  // Moonshot uses OpenAI-compatible API
-  const client = new OpenAI({
-    apiKey,
-    baseURL: "https://api.moonshot.cn/v1",
-  });
-
-  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
-    { role: "system", content: options.system },
-    ...options.messages,
-  ];
-
-  let response;
-  try {
-    response = await client.chat.completions.create({
-      model: options.model,
-      max_tokens: options.maxTokens,
-      messages,
-    });
-  } catch (e) {
-    throw wrapProviderError("Moonshot", options.model, e);
-  }
-
-  const choice = response.choices[0];
-  if (!choice?.message?.content) {
-    throw APIError.internal("no content in Moonshot response");
-  }
-
-  const inputTokensMoon = response.usage?.prompt_tokens || 0;
-  const outputTokensMoon = response.usage?.completion_tokens || 0;
-
-  logTokenUsage({ inputTokens: inputTokensMoon, outputTokens: outputTokensMoon, cacheReadTokens: 0, cacheCreationTokens: 0, model: options.model, endpoint: "moonshot" });
-
-  return {
-    content: choice.message.content,
-    tokensUsed: response.usage?.total_tokens || 0,
-    stopReason: choice.finish_reason || "stop",
-    modelUsed: options.model,
-    inputTokens: inputTokensMoon,
-    outputTokens: outputTokensMoon,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-    costEstimate: estimateCost(inputTokensMoon, outputTokensMoon, options.model),
-  };
-}
-
-// --- Token Tracking (DEL 7B) ---
-
-interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheCreationTokens: number;
-  model: string;
-  endpoint: string;
-}
-
-function logTokenUsage(usage: TokenUsage): void {
-  const cacheSavings = usage.cacheReadTokens > 0
-    ? ` (cache read: ${usage.cacheReadTokens}, cache creation: ${usage.cacheCreationTokens})`
-    : "";
-  log.info(`[AI Token Usage] ${usage.model} via ${usage.endpoint}: ${usage.inputTokens} in / ${usage.outputTokens} out${cacheSavings}`);
-}
-
-// --- System Prompts ---
-
-const DEFAULT_AI_NAME = "J\u00f8rgen Andr\u00e9";
-
-const BASE_RULES = `You are TheFold, an autonomous internal fullstack developer.
-
-## Absolute Rules — NEVER break these
-1. Backend APIs: ONLY use \`api()\` from "encore.dev/api"
-2. Secrets: ONLY use \`secret()\` from "encore.dev/config" — NEVER hardcode, NEVER use dotenv
-3. Databases: ONLY use \`SQLDatabase\` from "encore.dev/storage/sqldb"
-4. Pub/Sub: ONLY use \`Topic\`/\`Subscription\` from "encore.dev/pubsub"
-5. Cron: ONLY use \`CronJob\` from "encore.dev/cron"
-6. Cache: Use the cache service via \`~encore/clients\` (PostgreSQL-backed until CacheCluster is available)
-7. NEVER use Express, Fastify, Hono, Koa, or any HTTP framework
-8. NEVER use process.env, dotenv, or .env files for secrets
-9. NEVER hardcode API keys, tokens, passwords, or connection strings
-10. ALWAYS use TypeScript strict mode patterns
-
-## Quality Standards
-- Every function must have a clear single responsibility
-- Error handling must be explicit — no silent failures
-- All user-facing strings in Norwegian unless specified otherwise
-- SQL migrations must be idempotent where possible
-- Test coverage for critical paths`;
-
-const CONTEXT_PROMPTS: Record<string, string> = {
-  direct_chat: "", // Placeholder — overridden dynamically by getDirectChatPrompt()
-
-  agent_planning: `${BASE_RULES}
-
-You are planning how to implement a task. Respond with a JSON object:
-{
-  "plan": [
-    {
-      "description": "what this step does",
-      "action": "create_file|modify_file|delete_file|run_command",
-      "filePath": "path/to/file.ts",
-      "content": "file content or null",
-      "command": "npm install x or null"
-    }
-  ],
-  "reasoning": "why this approach"
-}
-
-Be precise. Every file must be complete — no placeholders, no "// TODO", no "...".
-Read the existing code carefully before modifying. Maintain existing patterns.`,
-
-  agent_coding: `${BASE_RULES}
-
-You are generating production code. Return ONLY the complete file content.
-No markdown fences, no explanations — just the code.
-The code must be complete, correct, and follow all Encore.ts conventions.
-Read Context7 docs carefully for correct API usage.`,
-
-  agent_review: `${BASE_RULES}
-
-You are reviewing code you just wrote. Be honest and critical.
-Respond with JSON:
-{
-  "documentation": "markdown describing what was built and why",
-  "memoriesExtracted": ["key decision 1", "architectural choice 2"],
-  "qualityScore": 8,
-  "concerns": ["potential issue 1"]
-}`,
-
-  project_decomposition: `${BASE_RULES}
-
-You are an experienced technical architect decomposing a large project request into atomic, independently executable tasks.
-
-## Decomposition Rules
-1. Each task MUST be independently executable with a fresh context window
-2. Each task should produce at most 3-5 files
-3. Tasks within the same phase can execute in parallel (no inter-dependencies within a phase)
-4. Tasks in later phases depend on earlier phases completing first
-5. Generate context_hints describing what each task needs from completed tasks
-6. Generate a compact conventions document (<2000 tokens) covering:
-   - File naming conventions
-   - Import patterns
-   - Error handling patterns
-   - Test patterns
-   - Framework-specific rules (Encore.ts in our case)
-
-## Output Format
-Respond with JSON only:
-{
-  "phases": [
-    {
-      "name": "Phase Name",
-      "description": "What this phase accomplishes",
-      "tasks": [
-        {
-          "title": "Short task title",
-          "description": "Detailed description sufficient for an autonomous agent to execute this task independently. Include specific file paths, patterns to follow, and expected outputs.",
-          "dependsOnIndices": [],
-          "contextHints": ["what context curator should fetch for this task"]
-        }
-      ]
-    }
-  ],
-  "conventions": "# Project Conventions\\n...",
-  "reasoning": "Explanation of decomposition strategy",
-  "estimatedTotalTasks": 12
-}
-
-## Phase Organization
-- Phase 0: Foundation (data models, schemas, types)
-- Phase 1: Core logic (services, business rules)
-- Phase 2: Integration (API endpoints, connections between services)
-- Phase 3: UI/Frontend (if applicable)
-- Phase 4: Tests and documentation
-
-## Task Description Quality
-Each task description must include:
-- What to build (specific files and their purpose)
-- How it connects to other parts (imports, API calls)
-- Patterns to follow (reference existing code or conventions)
-- Expected output (files created, types exported, endpoints added)`,
-
-  confidence_assessment: `${BASE_RULES}
-
-Du vurderer din egen evne til a fullfare en oppgave. Svar ALLTID pa norsk.
-
-Vurder oppgaven I KONTEKST av repoet:
-- Tomt repo = nye filer opprettes i roten, ingen eksisterende kode a ta hensyn til
-- Enkle oppgaver (lage statiske filer som HTML, CSS, README, config) = 100% confidence
-- Usikkerhet om prosjekttype (Encore, Next, etc.) er IKKE relevant for enkel fil-oppretting
-
-Analyser:
-1. **Oppgaveforstaelse (0-100):**
-   - Er oppgaven klart definert?
-   - Er det tvetydige krav?
-   - Forstar jeg onsket resultat?
-
-2. **Kodebase-kjennskap (0-100):**
-   - For tomme repoer: gi 100 (ingen eksisterende kode a forholde seg til)
-   - For eksisterende repoer: forstar jeg monsteret og strukturen?
-
-3. **Teknisk kompleksitet (0-100):**
-   - Er dette teknisk gjennomforbart?
-   - Har jeg de riktige verktoyene?
-
-4. **Testbarhet (0-100):**
-   - Kan jeg skrive tester for dette?
-   - For enkle fil-opprettelser uten logikk: gi 100
-
-**Poengretningslinjer:**
-- 95-100: Helt trygg, start umiddelbart. Bruk dette for: enkle fil-opprettelser, klare oppgaver, tomme repoer
-- 80-94: Trygg med smaa usikkerheter, fortsett
-- 60-79: Moderat trygg, klargjor spesifikke punkter forst
-- Under 60: Lav trygghet, klargjor ELLER del opp i deloppgaver
-
-**Anbefalte handlinger:**
-- "proceed": Overall >= 90, ingen store usikkerheter
-- "clarify": Overall 60-89, trenger spesifikke svar
-- "break_down": Overall < 60, for stort/komplekst
-
-Eksempler:
-- "Lag index.html og style.css med heading og styling" i tomt repo -> 100% proceed
-- "Implementer OAuth med Google" uten redirect URL -> 70% clarify
-- "Fiks buggen" uten stacktrace eller kontekst -> 50% clarify
-
-Svar med KUN JSON i dette formatet:
-{
-  "overall": 85,
-  "breakdown": {
-    "task_understanding": 90,
-    "codebase_familiarity": 80,
-    "technical_complexity": 85,
-    "test_coverage_feasible": 80
-  },
-  "uncertainties": ["spesifikt hva jeg er usikker pa"],
-  "recommended_action": "proceed",
-  "clarifying_questions": [],
-  "suggested_subtasks": []
-}
-
-Vaer spesifikk om usikkerheter og sporsmal. Aldri si "Jeg er usikker" — si noyaktig HVA du er usikker pa.`,
-};
-
-/** Build the direct_chat system prompt with a configurable AI name */
-function getDirectChatPrompt(aiName: string): string {
-  return `Du er ${aiName} — en autonom AI-utviklingsagent bygget med Encore.ts og Next.js. Du ER selve produktet. Når brukeren snakker om "repoet" eller "prosjektet", refererer de til kodebasen du opererer i.
-
-TheFold sine backend-services: gateway (auth), users (OTP login), chat (samtaler), ai (multi-model routing), agent (autonom task-kjøring), github (repo-operasjoner), sandbox (kodevalidering), linear (task-sync), memory (pgvector søk), skills (prompt-pipeline), monitor (health checks), cache (PostgreSQL cache), builder (kode-generering), tasks (oppgavestyring), mcp (server-integrasjoner), templates (scaffolding), registry (komponent-marketplace).
-
-Frontend: Next.js 15 dashboard med chat, tools, skills, marketplace, repo-oversikt, settings.
-
-${BASE_RULES}
-
-Regler:
-- Svar ALLTID på norsk
-- Svar ALLTID i ren tekst uten markdown-formatering. Aldri bruk **stjerner**, # headings, - bullets, eller annen markdown-syntaks. Skriv naturlig norsk prosa med avsnitt og linjeskift for struktur.
-- Bruk ALDRI emojier — ingen emojier overhodet. Ren tekst.
-- Vær konsis og direkte — korte svar, ikke lange utredninger
-- Ikke generer kode med mindre brukeren ber om det
-- Ikke lag lister med emojier
-- Når du analyserer et repo, beskriv det du faktisk finner — ikke gjett
-- For spørsmål som "se over repoet": gi en kort oppsummering (3-5 setninger) av hva du finner
-- For spørsmål som "hva bør vi endre": gi 3-5 konkrete forslag som korte punkter
-- Hvis brukeren vil at du GJØR endringer (ikke bare snakker om dem), forklar at de kan starte en task
-- Hvis du har repo-kontekst (filstruktur og kode), basér svaret ditt KUN på den faktiske koden du ser. ALDRI dikt opp filer, funksjoner, eller kode som ikke finnes i konteksten.
-- Hvis du IKKE har repo-kontekst, si det ærlig: "Jeg har ikke tilgang til filene i dette repoet akkurat nå." — ALDRI hallusinér innhold.
-- Du har tilgang til minner fra tidligere samtaler. Minner kan komme fra ANDRE repoer. Hvis repo-konteksten (faktiske filer) og minner er motstridende, STOL PÅ FIL-KONTEKSTEN — den er sannheten. Minner er hint, ikke fakta.
-
-Du har tilgang til verktøy for å gjøre handlinger:
-- create_task: Opprett en utviklingsoppgave
-- start_task: Start en oppgave — agenten begynner å jobbe. Kan matche oppgave via query (tittel-søk) eller automatisk finne siste ustartet oppgave
-- list_tasks: Se status på tasks
-- read_file: Les en fil fra repoet
-- search_code: Søk i kodebasen
-
-Du har tilgang til GitHub via en installert GitHub App i thefold-dev organisasjonen. Du KAN opprette nye repositories, lese og skrive til repos, commite kode, og opprette branches. Ikke si at du ikke kan gjøre dette.
-
-NÅR BRUKEREN BER DEG GJØRE NOE: Bruk verktøyene. Ikke bare forklar — GJØR det.
-- "Fiks denne buggen" → bruk create_task + start_task i SAMME tur
-- "Hva er status?" → bruk list_tasks
-- "Se på filen X" → bruk read_file
-- "Start oppgaven om index" → bruk start_task med query: "index"
-- "Kjør siste oppgave" → bruk start_task uten taskId (starter siste automatisk)
-
-VIKTIGE REGLER FOR OPPGAVER:
-
-1. Lag ALLTID kun ÉN oppgave per brukerforespørsel
-2. Beskriv ALT brukeren ber om i oppgavens title og description
-3. ALDRI lag flere tasks for å dekke én forespørsel
-4. Agenten håndterer dekomponering internt (repo-opprettelse, filskriving, osv)
-
-EKSEMPLER:
-- "Lag repo X med index.html" → ÉN task: "Lag repo X med index.html fil"
-- "Fiks bug Y og skriv tester" → ÉN task: "Fiks bug Y og skriv tester"
-- "Bygg en komplett TODO-app" → ÉN task: "Bygg TODO-app med CRUD endpoints"
-- "Opprett et repo og legg til en landing page" → ÉN task: "Opprett repo og lag landing page"
-
-ALDRI GJØR DETTE:
-- Lag separate tasks for "Opprett repo" og "Lag fil" — dette er ÉN oppgave
-- Lag flere create_task kall for samme forespørsel
-- Bruk dependsOn — dette er kun for orchestrator-modus
-
-- Vis ALDRI Task ID / UUID til brukeren — de trenger ikke se det
-- Etter create_task: oppsummer i 1-2 setninger, spor "Vil du at jeg starter oppgaven na?"
-- Nar brukeren bekrefter (ja/start/kjor): bruk start_task. Du trenger IKKE taskId — start_task finner riktig oppgave automatisk
-- ALLTID bruk start_task nar brukeren bekrefter — ALDRI bruk create_task pa nytt for samme oppgave`;
-}
-
-// --- Skills Pipeline Integration ---
-
-const CONTEXT_TO_SKILLS_CONTEXT: Record<string, string> = {
-  direct_chat: "chat",
-  agent_planning: "planning",
-  agent_coding: "coding",
-  agent_review: "review",
-  confidence_assessment: "planning",
-  project_decomposition: "planning",
-};
-
-const CONTEXT_TO_TASK_PHASE: Record<string, string> = {
-  direct_chat: "all",
-  agent_planning: "planning",
-  agent_coding: "coding",
-  agent_review: "reviewing",
-  confidence_assessment: "planning",
-  project_decomposition: "planning",
-};
-
-interface PipelineContext {
-  task: string;
-  repo?: string;
-  labels?: string[];
-  files?: string[];
-  userId?: string;
-  tokenBudget?: number;
-  taskType?: string;
-}
-
-interface PipelineResult {
-  systemPrompt: string;
-  skillIds: string[];
-  postRunSkillIds: string[];
-  tokensUsed: number;
-}
-
-async function buildSystemPromptWithPipeline(
-  baseContext: string,
-  pipelineCtx?: PipelineContext,
-  aiName?: string
-): Promise<PipelineResult> {
-  const resolvedAiName = aiName || DEFAULT_AI_NAME;
-  const basePrompt = baseContext === "direct_chat"
-    ? getDirectChatPrompt(resolvedAiName)
-    : (CONTEXT_PROMPTS[baseContext] || getDirectChatPrompt(resolvedAiName));
-
-  // If no pipeline context, fall back to legacy approach
-  if (!pipelineCtx) {
-    return await buildSystemPromptLegacy(baseContext, basePrompt);
-  }
-
-  try {
-    const resolved = await skills.resolve({
-      context: {
-        task: pipelineCtx.task,
-        repo: pipelineCtx.repo,
-        labels: pipelineCtx.labels,
-        files: pipelineCtx.files,
-        userId: pipelineCtx.userId || "system",
-        totalTokenBudget: pipelineCtx.tokenBudget || 4000,
-        taskType: pipelineCtx.taskType || CONTEXT_TO_TASK_PHASE[baseContext] || "all",
-      },
-    });
-
-    const result = resolved.result;
-
-    // Execute pre-run skills (v1: passthrough)
-    if (result.preRunResults && result.preRunResults.length > 0) {
-      // Pre-run skills are already resolved; in v1 they are always approved
-    }
-
-    // Build system prompt with injected skills
-    let prompt = basePrompt;
-    if (result.injectedPrompt) {
-      prompt += "\n\n## Active Skills\n" + result.injectedPrompt;
-    }
-
-    return {
-      systemPrompt: prompt,
-      skillIds: result.injectedSkillIds || [],
-      postRunSkillIds: (result.postRunSkills || []).map((s: { id: string }) => s.id),
-      tokensUsed: result.tokensUsed || 0,
-    };
-  } catch {
-    // Fallback to legacy if pipeline fails
-    return await buildSystemPromptLegacy(baseContext, basePrompt);
-  }
-}
-
-async function buildSystemPromptLegacy(baseContext: string, basePrompt: string): Promise<PipelineResult> {
-  const skillsContext = CONTEXT_TO_SKILLS_CONTEXT[baseContext] || "coding";
-  try {
-    const activeSkills = await skills.getActiveSkills({ context: skillsContext });
-    if (activeSkills.promptFragments.length === 0) {
-      return { systemPrompt: basePrompt, skillIds: [], postRunSkillIds: [], tokensUsed: 0 };
-    }
-    let prompt = basePrompt + "\n\n## Active Skills\n";
-    for (const fragment of activeSkills.promptFragments) {
-      prompt += `\n${fragment}\n`;
-    }
-    return { systemPrompt: prompt, skillIds: [], postRunSkillIds: [], tokensUsed: 0 };
-  } catch {
-    return { systemPrompt: basePrompt, skillIds: [], postRunSkillIds: [], tokensUsed: 0 };
-  }
-}
-
-async function logSkillResults(skillIds: string[], success: boolean, tokensUsed: number): Promise<void> {
-  const tokensPerSkill = skillIds.length > 0 ? Math.round(tokensUsed / skillIds.length) : 0;
-  for (const id of skillIds) {
-    try {
-      await skills.logResult({ skillId: id, success, tokensUsed: tokensPerSkill });
-    } catch {
-      // Non-critical, don't fail the request
-    }
-  }
-}
-
-// --- Chat Tool-Use (Function Calling) ---
-
-const CHAT_TOOLS: Array<{
-  name: string;
-  description: string;
-  input_schema: Record<string, unknown>;
-}> = [
-  {
-    name: "create_task",
-    description: "Opprett en ny utviklingsoppgave. Bruk dette når brukeren ber deg lage, bygge, fikse, eller endre noe i kodebasen.",
-    input_schema: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "Kort tittel for oppgaven — beskriv ALT brukeren ber om i én oppgave" },
-        description: { type: "string", description: "Detaljert beskrivelse av hva som skal gjøres. Inkluder alle steg." },
-        priority: { type: "number", enum: [1, 2, 3, 4], description: "1=Urgent, 2=High, 3=Normal, 4=Low" },
-        repoName: { type: "string", description: "Hvilket repo oppgaven gjelder" },
-      },
-      required: ["title", "description"],
-    },
-  },
-  {
-    name: "start_task",
-    description: "Start en oppgave — agenten begynner å jobbe. Bruk dette når brukeren sier 'start', 'kjør', 'begynn', 'ja'. Tre måter å identifisere oppgaven: (1) oppgi taskId (UUID), (2) oppgi query for å matche oppgavetittel, (3) utelat begge for å starte siste ustartet oppgave. Foretrekk å kalle start_task direkte etter create_task i samme tur.",
-    input_schema: {
-      type: "object",
-      properties: {
-        taskId: { type: "string", description: "Task UUID — eksakt ID" },
-        query: { type: "string", description: "Søketekst for å matche oppgavetittel, f.eks. 'index' eller 'style.css'" },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "list_tasks",
-    description: "List oppgaver for et repo. Bruk dette når brukeren spør om status, hva som gjenstår, osv.",
-    input_schema: {
-      type: "object",
-      properties: {
-        repoName: { type: "string" },
-        status: { type: "string", enum: ["backlog", "planned", "in_progress", "in_review", "done", "blocked"] },
-      },
-    },
-  },
-  {
-    name: "read_file",
-    description: "Les en spesifikk fil fra repoet. Bruk dette når brukeren ber deg se på en fil, eller du trenger mer kontekst.",
-    input_schema: {
-      type: "object",
-      properties: {
-        repoName: { type: "string" },
-        path: { type: "string", description: "Filsti i repoet" },
-      },
-      required: ["repoName", "path"],
-    },
-  },
-  {
-    name: "search_code",
-    description: "Søk etter relevante filer i repoet basert på en beskrivelse.",
-    input_schema: {
-      type: "object",
-      properties: {
-        repoName: { type: "string" },
-        query: { type: "string" },
-      },
-      required: ["repoName", "query"],
-    },
-  },
-];
-
-// Sanitize repo name — GitHub only allows alphanumeric, hyphens, underscores, dots
-function sanitizeRepoName(name: string): string {
-  if (!name) return "";
-  return name
-    .trim()
-    .replace(/\s+/g, "-")           // spaces → hyphens
-    .replace(/[^a-zA-Z0-9._-]/g, "") // remove invalid chars
-    .replace(/^[-_.]+/, "")          // don't start with special chars
-    .replace(/[-_.]+$/, "")          // don't end with special chars
-    .substring(0, 100);              // GitHub max 100 chars
-}
-
-async function executeToolCall(
-  name: string,
-  input: Record<string, unknown>,
-  repoName?: string,
-  conversationId?: string,
-  repoOwner?: string,
-): Promise<Record<string, unknown>> {
-  const owner = repoOwner || "";
-
-  switch (name) {
-    case "create_task": {
-      console.log("[DEBUG-AF] === CREATE_TASK TOOL ===");
-      console.log("[DEBUG-AF] Input:", JSON.stringify(input).substring(0, 300));
-
-      const { tasks: tasksClient } = await import("~encore/clients");
-      let taskRepo = sanitizeRepoName((input.repoName as string) || repoName || "") || undefined;
-      if (!taskRepo) {
-        // Prøv å ekstrahere repo-navn fra task title
-        const repoMatch = (input.title as string).match(/repo\s+[""]?([A-Za-z0-9_-]+)[""]?/i);
-        if (repoMatch) taskRepo = repoMatch[1];
-      }
-
-      // Duplicate check — prevent creating same task twice (fuzzy matching)
-      try {
-        const existing = await tasksClient.listTasks({ repo: taskRepo, limit: 20 });
-        const title = (input.title as string).toLowerCase();
-        const duplicate = existing.tasks.find((t: { title: string; status: string; repo?: string }) => {
-          if (["deleted", "done", "blocked", "failed"].includes(t.status)) return false;
-          const existingTitle = t.title.toLowerCase();
-          const titleMatch = existingTitle === title ||
-            existingTitle.includes(title.substring(0, 30)) ||
-            title.includes(existingTitle.substring(0, 30));
-          const repoMatch = !taskRepo || !t.repo || t.repo === taskRepo;
-          return titleMatch && repoMatch;
-        });
-        if (duplicate) {
-          console.log("[DEBUG-AF] Duplicate found:", duplicate.id);
-          return { success: false, taskId: duplicate.id, message: `Oppgave "${input.title}" finnes allerede (ID: ${duplicate.id})` };
-        }
-      } catch { /* non-critical — proceed with creation */ }
-
-      const result = await tasksClient.createTask({
-        title: input.title as string,
-        description: (input.description as string) || "",
-        priority: (input.priority as number) || 3,
-        repo: taskRepo,
-        source: "chat",
-      });
-
-      console.log("[DEBUG-AF] Task created with ID:", result.task.id);
-
-      // Fire-and-forget: enrich task with AI complexity assessment
-      enrichTaskWithAI(result.task.id, input.title as string, (input.description as string) || "", taskRepo).catch((e) =>
-        log.error("Task enrichment failed:", { error: e instanceof Error ? e.message : String(e) })
-      );
-
-      return { success: true, taskId: result.task.id, message: `Oppgave opprettet: "${input.title}". Bruk start_task for å starte den.` };
-    }
-
-    case "start_task": {
-      console.log("[DEBUG-AF] === START_TASK TOOL ===");
-      console.log("[DEBUG-AF] Input taskId:", input.taskId);
-      console.log("[DEBUG-AF] conversationId:", conversationId);
-
-      try {
-        const { tasks: tasksClient } = await import("~encore/clients");
-        let taskId = String(input.taskId || "").trim();
-
-        // UUID validation
-        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-        // BUG 7 FIX: If taskId is missing/invalid, find task by query match or latest unstarted
-        if (!taskId || !uuidRegex.test(taskId)) {
-          console.log("[DEBUG-AF] No valid taskId provided, searching for task...");
-          const taskRepo = repoName || undefined;
-          const query = String(input.query || "").trim().toLowerCase();
-          try {
-            const existing = await tasksClient.listTasks({ repo: taskRepo, limit: 20 });
-            const unstarted = existing.tasks
-              .filter((t: { status: string }) =>
-                ["backlog", "planned"].includes(t.status)
-              )
-              .sort((a: { createdAt: string }, b: { createdAt: string }) =>
-                new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-              );
-
-            if (unstarted.length === 0) {
-              return { success: false, error: "Ingen ustartet oppgave funnet. Opprett en oppgave først med create_task." };
-            }
-
-            if (query) {
-              // Match by query — find best title match
-              const matched = unstarted.find((t: { title: string }) =>
-                t.title.toLowerCase().includes(query)
-              );
-              if (matched) {
-                taskId = matched.id;
-                console.log(`[DEBUG-AF] Query "${query}" matched task:`, taskId, `"${matched.title}"`);
-              } else {
-                // No match — list available tasks for AI to report
-                const available = unstarted.slice(0, 5).map((t: { title: string; id: string }) => `• "${t.title}" (${t.id})`).join("\n");
-                return { success: false, error: `Ingen oppgave matcher "${input.query}". Tilgjengelige oppgaver:\n${available}` };
-              }
-            } else {
-              // No query — use latest unstarted
-              taskId = unstarted[0].id;
-              console.log("[DEBUG-AF] Auto-resolved to latest unstarted task:", taskId, `"${unstarted[0].title}"`);
-            }
-          } catch (e) {
-            console.log("[DEBUG-AF] Task search failed:", e);
-            return { success: false, error: `Kunne ikke søke etter oppgaver: ${e instanceof Error ? e.message : String(e)}` };
-          }
-        }
-
-        console.log("[DEBUG-AF] Using taskId:", taskId);
-
-        // Verify task exists and get repo info + status
-        let taskData: { repo?: string | null; title?: string | null; status?: string | null; errorMessage?: string | null } | null = null;
-        try {
-          const result = await tasksClient.getTaskInternal({ id: taskId });
-          if (result?.task) {
-            taskData = { repo: result.task.repo, title: result.task.title, status: result.task.status, errorMessage: result.task.errorMessage };
-            console.log("[DEBUG-AF] Task found:", taskData.title, "status:", taskData.status, "repo:", taskData.repo);
-          }
-        } catch (e) {
-          console.log("[DEBUG-AF] ERROR: getTaskInternal failed:", e instanceof Error ? e.message : String(e));
-          taskData = null;
-        }
-
-        if (!taskData) {
-          console.log("[DEBUG-AF] ERROR: Task not found:", taskId);
-          return { success: false, error: `Fant ikke oppgave med ID ${taskId}` };
-        }
-
-        // Status guard — blocked/done/in_progress tasks cannot be started
-        if (taskData.status === "blocked") {
-          console.log("[DEBUG-AF] Task is blocked:", taskData.errorMessage);
-          return { success: false, error: `Oppgaven "${taskData.title}" er blokkert${taskData.errorMessage ? ": " + taskData.errorMessage : ""}. Opprett en ny oppgave.` };
-        }
-        if (taskData.status === "done") {
-          console.log("[DEBUG-AF] Task already done");
-          return { success: false, error: "Oppgaven er allerede fullfort." };
-        }
-        if (taskData.status === "in_progress") {
-          console.log("[DEBUG-AF] Task already in_progress");
-          return { success: false, error: "Oppgaven kjorer allerede." };
-        }
-
-        // Update status to in_progress
-        try {
-          await tasksClient.updateTaskStatus({ id: taskId, status: "in_progress" });
-          console.log("[DEBUG-AF] Task status updated to in_progress");
-        } catch (e) {
-          console.log("[DEBUG-AF] WARNING: Failed to update task status:", e);
-        }
-
-        // Start agent with correct repo from task or chat context
-        const { agent: agentClient } = await import("~encore/clients");
-        const startPayload = {
-          conversationId: conversationId || "tool-" + Date.now(),
-          taskId,
-          userMessage: "Start oppgave: " + taskData.title,
-          thefoldTaskId: taskId,
-          repoName: sanitizeRepoName(taskData.repo || repoName || ""),
-          repoOwner: repoOwner || "",
-        };
-
-        console.log("[DEBUG-AF] Calling agent.startTask with:", JSON.stringify(startPayload).substring(0, 500));
-
-        agentClient.startTask(startPayload).then(() => {
-          console.log("[DEBUG-AF] agent.startTask promise resolved");
-        }).catch(async (e: Error) => {
-          console.error("[DEBUG-AF] ERROR: agent.startTask FAILED:", e.message);
-          try {
-            await tasksClient.updateTaskStatus({ id: taskId, status: "blocked", errorMessage: e.message?.substring(0, 500) });
-            console.log("[DEBUG-AF] Task marked as blocked after agent failure");
-          } catch { /* non-critical */ }
-        });
-
-        console.log("[DEBUG-AF] agent.startTask fired (async)");
-        return { success: true, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber na.` };
-      } catch (e) {
-        console.error("[DEBUG-AF] START_TASK CRASHED:", e instanceof Error ? e.message : String(e));
-        return { success: false, error: e instanceof Error ? e.message : String(e) };
-      }
-    }
-
-    case "list_tasks": {
-      const { tasks: tasksClient } = await import("~encore/clients");
-      const result = await tasksClient.listTasks({
-        repo: (input.repoName as string) || repoName || undefined,
-        status: (input.status || undefined) as any,
-      });
-      return { tasks: result.tasks.map((t: { id: string; title: string; status: string; priority: number }) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority })), total: result.total };
-    }
-
-    case "read_file": {
-      const { github: ghClient } = await import("~encore/clients");
-      try {
-        const file = await ghClient.getFile({
-          owner,
-          repo: (input.repoName as string) || repoName || "",
-          path: input.path as string,
-        });
-        return { path: input.path, content: file.content?.substring(0, 5000) };
-      } catch {
-        return { error: `Kunne ikke lese ${input.path}` };
-      }
-    }
-
-    case "search_code": {
-      const { github: ghClient } = await import("~encore/clients");
-      try {
-        const repo = (input.repoName as string) || repoName || "";
-        const tree = await ghClient.getTree({ owner, repo });
-        const relevant = await ghClient.findRelevantFiles({
-          owner,
-          repo,
-          taskDescription: input.query as string,
-          tree: tree.tree,
-        });
-        return { matchingFiles: relevant.paths };
-      } catch {
-        return { error: "Kunne ikke søke i repoet" };
-      }
-    }
-
-    default:
-      return { error: `Ukjent tool: ${name}` };
-  }
-}
-
-/** Fire-and-forget: assess complexity and update task with enrichment data */
-async function enrichTaskWithAI(taskId: string, title: string, description: string, repoName?: string) {
-  try {
-    const { tasks: tasksClient } = await import("~encore/clients");
-
-    const complexity = await assessComplexity({
-      taskDescription: title + "\n" + description,
-      projectStructure: "",
-      fileCount: 0,
-    });
-
-    await tasksClient.updateTask({
-      id: taskId,
-      estimatedComplexity: complexity.complexity,
-      estimatedTokens: complexity.tokensUsed,
-    });
-  } catch (e) {
-    log.error("enrichTaskWithAI failed:", { taskId, error: e instanceof Error ? e.message : String(e) });
-  }
-}
-
-async function callAnthropicWithTools(options: AICallOptions & {
-  tools: typeof CHAT_TOOLS;
-  repoName?: string;
-  repoOwner?: string;
-  conversationId?: string;
-}): Promise<AICallResponse & { toolsUsed: string[]; lastCreatedTaskId?: string }> {
-  const client = new Anthropic({ apiKey: anthropicKey() });
-
-  const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
-    { type: "text", text: options.system, cache_control: { type: "ephemeral" } },
-  ];
-
-  const allToolsUsed: string[] = [];
-  let totalInputTokens = 0;
-  let totalOutputTokens = 0;
-  let totalCost = 0;
-  let lastCreatedTaskId: string | null = null;
-
-  // Mutable messages array for tool-loop
-  const messages: Array<{ role: "user" | "assistant"; content: string | any[] }> = [
-    ...options.messages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
-  ];
-
-  const MAX_TOOL_LOOPS = 10;
-
-  for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
-    console.log(`[DEBUG-AH] Tool loop iteration ${loop + 1}`);
-
-    const responseStream = client.messages.stream({
-      model: options.model,
-      max_tokens: options.maxTokens,
-      system: systemBlocks,
-      messages,
-      tools: options.tools as any,
-    });
-    const response = await responseStream.finalMessage();
-
-    totalInputTokens += response.usage.input_tokens;
-    totalOutputTokens += response.usage.output_tokens;
-
-    console.log(`[DEBUG-AH] Stop reason: ${response.stop_reason}, content blocks: ${response.content.length}`);
-
-    // If end_turn or no tool_use — return final content
-    if (response.stop_reason !== "tool_use") {
-      const textContent = response.content
-        .filter((block: any) => block.type === "text")
-        .map((block: any) => block.text)
-        .join("");
-
-      console.log(`[DEBUG-AH] Final content length: ${textContent.length}`);
-
-      const cacheReadTokens = (response.usage as unknown as Record<string, number>).cache_read_input_tokens ?? 0;
-      const cacheCreationTokens = (response.usage as unknown as Record<string, number>).cache_creation_input_tokens ?? 0;
-
-      logTokenUsage({
-        inputTokens: totalInputTokens,
-        outputTokens: totalOutputTokens,
-        cacheReadTokens,
-        cacheCreationTokens,
-        model: options.model,
-        endpoint: "anthropic-tools",
-      });
-
-      return {
-        content: textContent,
-        tokensUsed: totalInputTokens + totalOutputTokens,
-        stopReason: response.stop_reason || "end_turn",
-        modelUsed: options.model,
-        inputTokens: totalInputTokens,
-        outputTokens: totalOutputTokens,
-        cacheReadTokens,
-        cacheCreationTokens,
-        costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
-        toolsUsed: allToolsUsed,
-        lastCreatedTaskId: lastCreatedTaskId || undefined,
-      };
-    }
-
-    // stop_reason === "tool_use" — execute tools
-    const toolUseBlocks = response.content.filter((block: any) => block.type === "tool_use");
-    const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }> = [];
-
-    for (const toolBlock of toolUseBlocks) {
-      const toolName = (toolBlock as any).name;
-      const toolInput = { ...(toolBlock as any).input } as Record<string, unknown>;
-
-      console.log(`[DEBUG-AH] Executing tool: ${toolName}, input: ${JSON.stringify(toolInput).substring(0, 300)}`);
-      allToolsUsed.push(toolName);
-
-      // For start_task, prefer lastCreatedTaskId over potentially hallucinated input
-      if (toolName === "start_task" && lastCreatedTaskId) {
-        console.log(`[DEBUG-AH] start_task: overriding taskId ${toolInput.taskId} → ${lastCreatedTaskId}`);
-        toolInput.taskId = lastCreatedTaskId;
-      }
-
-      try {
-        // Check if this is an MCP tool call
-        if (toolName.startsWith("mcp_")) {
-          // Parse: mcp_{serverName}_{toolName}
-          const parts = toolName.split("_");
-          if (parts.length >= 3) {
-            const serverName = parts[1];
-            const actualToolName = parts.slice(2).join("_");
-
-            console.log(`[DEBUG-AH] MCP tool call: ${serverName}/${actualToolName}`);
-
-            try {
-              const { mcp } = await import("~encore/clients");
-              const mcpResult = await mcp.callTool({
-                serverName,
-                toolName: actualToolName,
-                args: toolInput,
-              });
-
-              // Konverter MCP-resultat til Anthropic tool_result format
-              const resultText = mcpResult.result.content
-                .map((c: any) => c.text ?? "")
-                .filter(Boolean)
-                .join("\n");
-
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: (toolBlock as any).id,
-                content: resultText || "OK",
-                is_error: mcpResult.result.isError ?? false,
-              });
-
-              console.log(`[DEBUG-AH] MCP tool result: ${resultText.substring(0, 200)}`);
-            } catch (mcpErr) {
-              console.error(`[DEBUG-AH] MCP tool ${toolName} FAILED:`, mcpErr);
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: (toolBlock as any).id,
-                content: `MCP tool call failed: ${String(mcpErr)}`,
-                is_error: true,
-              });
-            }
-          } else {
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: (toolBlock as any).id,
-              content: `Invalid MCP tool name format: ${toolName}`,
-              is_error: true,
-            });
-          }
-        } else {
-          // Block multiple create_task calls in the same conversation turn
-          if (toolName === "create_task" && lastCreatedTaskId) {
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: (toolBlock as any).id,
-              content: JSON.stringify({
-                success: false,
-                message: "Du har allerede opprettet en oppgave i denne samtalen. Beskriv alt i én oppgave i stedet for flere.",
-              }),
-            });
-            continue;
-          }
-
-          // Regular tool call
-          const result = await executeToolCall(toolName, toolInput, options.repoName, options.conversationId, options.repoOwner);
-
-          // Track lastCreatedTaskId
-          if (toolName === "create_task" && result?.taskId) {
-            lastCreatedTaskId = result.taskId as string;
-            console.log(`[DEBUG-AH] lastCreatedTaskId: ${lastCreatedTaskId}`);
-          }
-
-          console.log(`[DEBUG-AH] Tool ${toolName} result: ${JSON.stringify(result).substring(0, 200)}`);
-
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: (toolBlock as any).id,
-            content: JSON.stringify(result),
-          });
-        }
-      } catch (e) {
-        console.error(`[DEBUG-AH] Tool ${toolName} FAILED:`, e);
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: (toolBlock as any).id,
-          content: JSON.stringify({ error: String(e) }),
-          is_error: true,
-        });
-      }
-    }
-
-    // CRITICAL: Append assistant response AND tool results to messages for next iteration
-    messages.push({
-      role: "assistant",
-      content: response.content as any, // Includes BOTH text and tool_use blocks
-    });
-    messages.push({
-      role: "user",
-      content: toolResults,
-    });
-
-    console.log(`[DEBUG-AH] Sent tool results back, looping... (tools so far: ${allToolsUsed.join(", ")})`);
-  }
-
-  // Max loops reached
-  console.warn("[DEBUG-AH] Max tool loops reached!");
-
-  const cacheReadTokens = 0;
-  const cacheCreationTokens = 0;
-
-  logTokenUsage({
-    inputTokens: totalInputTokens,
-    outputTokens: totalOutputTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    model: options.model,
-    endpoint: "anthropic-tools",
-  });
-
-  return {
-    content: "Beklager, for mange verktøy-kall. Prøv igjen med en enklere forespørsel.",
-    tokensUsed: totalInputTokens + totalOutputTokens,
-    stopReason: "max_loops",
-    modelUsed: options.model,
-    inputTokens: totalInputTokens,
-    outputTokens: totalOutputTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
-    toolsUsed: allToolsUsed,
-    lastCreatedTaskId: lastCreatedTaskId || undefined,
-  };
-}
+import {
+  BASE_RULES,
+  buildSystemPromptWithPipeline, logSkillResults,
+} from "./prompts";
+import { callAIWithFallback, stripMarkdownJson, DEFAULT_MODEL } from "./call";
+import { callWithTools, CHAT_TOOLS } from "./tools";
+
+// --- Types (re-exported from ./types) ---
+export type {
+  ChatRequest, ChatResponse, AgentThinkRequest, FileContent,
+  AgentThinkResponse, TaskStep, CodeGenRequest, CodeGenResponse,
+  GeneratedFile, ReviewRequest, ReviewResponse,
+  AICallOptions, AICallResponse,
+} from "./types";
+
+import type {
+  ChatMessage, ChatRequest, ChatResponse, AgentThinkRequest,
+  AgentThinkResponse, TaskStep, CodeGenRequest, CodeGenResponse,
+  GeneratedFile, ReviewRequest, ReviewResponse,
+  AICallOptions, AICallResponse, FileContent,
+} from "./types";
 
 // --- Endpoints ---
 
@@ -1399,17 +46,17 @@ export const chat = api(
 
     // Inject repo context if chatting from a specific repo
     if (req.repoName) {
-      system += `\n\nDu jobber i repoet: ${req.repoName}. Når brukeren refererer til "repoet", "prosjektet", eller "koden", mener de dette spesifikke repoet.`;
-      system += `\nVIKTIG: Hvis brukeren nevner et ANNET repo-navn enn "${req.repoName}", IKKE opprett task for det andre repoet. Si i stedet: "Du jobber i ${req.repoName}, men refererer til et annet repo. Bytt til riktig repo i navigasjonslinjen øverst først."`;
+      system += `\n\nYou are working in the repository: ${req.repoName}. When the user refers to "the repo", "the project", or "the code", they mean this specific repository.`;
+      system += `\nIMPORTANT: If the user mentions a DIFFERENT repo name than "${req.repoName}", do NOT create a task for that other repo. Instead tell them to switch to the correct repo in the navigation bar first.`;
     } else {
-      system += `\n\nBrukeren er i Global-modus (intet spesifikt repo valgt).`;
-      system += `\nHvis brukeren ber om å opprette et NYTT repo (f.eks. "Lag repo X"), gå videre og opprett task med det nye repo-navnet.`;
-      system += `\nHvis brukeren refererer til et EKSISTERENDE repo (f.eks. "Oppdater X-repoet"), si: "Du er i Global-modus. Bytt til det repoet i navigasjonslinjen øverst først."`;
+      system += `\n\nThe user is in Global mode (no specific repo selected).`;
+      system += `\nIf the user asks to create a NEW repo (e.g. "Create repo X"), proceed and create a task with the new repo name.`;
+      system += `\nIf the user refers to an EXISTING repo (e.g. "Update the X repo"), tell them to switch to that repo in the navigation bar first.`;
     }
 
     // Inject actual repo file content
     if (req.repoContext) {
-      system += `\n\n--- REPO-KONTEKST ---\nDette er FAKTISK innhold fra repoet. Basér svaret ditt KUN på dette — ALDRI dikt opp filer eller kode som ikke er her.\n${req.repoContext}`;
+      system += `\n\n--- REPOSITORY CONTEXT ---\nThis is ACTUAL content from the repository. Base your answer ONLY on this — NEVER fabricate files or code not present here.\n${req.repoContext}`;
     }
 
     if (req.memoryContext.length > 0) {
@@ -1420,8 +67,8 @@ export const chat = api(
     }
 
     // ALWAYS use tool-use — AI decides whether to invoke tools (create_task, start_task, etc.)
-    console.log("[DEBUG-AG] ai.chat: using callAnthropicWithTools, repoName:", req.repoName || "(none)");
-    const toolResponse = await callAnthropicWithTools({
+    console.log("[DEBUG-AG] ai.chat: using callWithTools, repoName:", req.repoName || "(none)");
+    const toolResponse = await callWithTools({
       model,
       system,
       messages: req.messages,
@@ -1430,6 +77,10 @@ export const chat = api(
       repoName: req.repoName,
       repoOwner: req.repoOwner,
       conversationId: req.conversationId,
+      assessComplexityFn: async (r) => {
+        const result = await assessComplexity(r);
+        return { complexity: result.complexity, tokensUsed: result.tokensUsed };
+      },
     });
 
     await logSkillResults(pipeline.skillIds, true, toolResponse.tokensUsed);
@@ -1676,7 +327,7 @@ export const reviewProject = api(
     // Build file summary with token-trimming
     const MAX_FILE_TOKENS = 60000;
     let fileTokens = 0;
-    let fileSection = "## Alle filer\n\n";
+    let fileSection = "## All Files\n\n";
     const fullFiles: string[] = [];
     const summaryFiles: string[] = [];
 
@@ -1690,22 +341,22 @@ export const reviewProject = api(
         fileTokens += fileTokenEst;
       } else {
         const lines = f.content.split("\n").length;
-        summaryFiles.push(`- ${f.path} (${f.action}, ${lines} linjer)`);
+        summaryFiles.push(`- ${f.path} (${f.action}, ${lines} lines)`);
       }
     }
 
     fileSection += fullFiles.join("\n");
     if (summaryFiles.length > 0) {
-      fileSection += `\n### Filer vist som sammendrag (token-grense)\n${summaryFiles.join("\n")}\n`;
+      fileSection += `\n### Files shown as summary (token limit)\n${summaryFiles.join("\n")}\n`;
     }
 
     // Build phase summary
-    let phaseSection = "## Faser og oppgaver\n\n";
+    let phaseSection = "## Phases and Tasks\n\n";
     for (const phase of req.phases) {
       phaseSection += `### ${phase.name}\n`;
       for (const task of phase.tasks) {
         const fileList = task.filesChanged.length > 0
-          ? ` (${task.filesChanged.length} filer: ${task.filesChanged.slice(0, 5).join(", ")}${task.filesChanged.length > 5 ? "..." : ""})`
+          ? ` (${task.filesChanged.length} files: ${task.filesChanged.slice(0, 5).join(", ")}${task.filesChanged.length > 5 ? "..." : ""})`
           : "";
         phaseSection += `- [${task.status}] ${task.title}${fileList}\n`;
       }
@@ -1713,27 +364,27 @@ export const reviewProject = api(
     }
 
     const prompt = [
-      `## Prosjektbeskrivelse\n${req.projectDescription}\n`,
+      `## Project Description\n${req.projectDescription}\n`,
       phaseSection,
       fileSection,
-      `## Kostnad\nTotalt: $${req.totalCostUsd.toFixed(4)} (${req.totalTokensUsed} tokens)\n`,
+      `## Cost\nTotal: $${req.totalCostUsd.toFixed(4)} (${req.totalTokensUsed} tokens)\n`,
       "",
-      "Review hele dette prosjektet. Gi en samlet vurdering av:",
-      "1. Hva som ble bygget og hvorfor",
-      "2. Arkitektoniske valg som ble gjort",
-      "3. Samlet kodekvalitet (1-10)",
-      "4. Bekymringer eller svakheter",
-      "5. Viktige beslutninger å huske til fremtiden",
+      "Review this entire project. Provide an overall assessment of:",
+      "1. What was built and why",
+      "2. Architectural decisions made",
+      "3. Overall code quality (1-10)",
+      "4. Concerns or weaknesses",
+      "5. Important decisions to remember for the future",
       "",
-      "Svar KUN med JSON i dette formatet:",
+      "Respond with JSON ONLY in this format:",
       '{ "documentation": "markdown", "qualityScore": 7, "concerns": ["..."], "architecturalDecisions": ["..."], "memoriesExtracted": ["..."] }',
     ].join("\n");
 
     const systemPrompt = [
-      "Du er en senior arkitekt som reviewer et komplett prosjekt bygget av en AI-agent.",
-      "Du skal gi en helhetlig vurdering — ikke per-fil, men prosjektet som helhet.",
-      "Fokuser på: arkitektur, kodekvalitet, sikkerhet, testbarhet, vedlikeholdbarhet.",
-      "Svar KUN med gyldig JSON.",
+      "Review this complete project built by an AI agent.",
+      "Provide a holistic assessment — not per-file, but the project as a whole.",
+      "Focus on: architecture, code quality, security, testability, maintainability.",
+      "Respond with valid JSON only.",
     ].join("\n");
 
     const response = await callAIWithFallback({
@@ -1761,7 +412,7 @@ export const reviewProject = api(
       return {
         documentation: response.content,
         qualityScore: 0,
-        concerns: ["Kunne ikke parse AI-respons som JSON — needs human review"],
+        concerns: ["Could not parse AI response as JSON — needs human review"],
         architecturalDecisions: [],
         memoriesExtracted: [],
         tokensUsed: response.tokensUsed,
@@ -2518,9 +1169,9 @@ export const generateFile = api(
       files: [req.fileSpec.filePath],
     });
 
-    let systemPrompt = `Du er en kode-generator. Returner KUN filinnholdet uten markdown-blokker, uten forklaring, uten kommentarer om hva du gjør. Bare ren kode.
+    let systemPrompt = `Generate the requested file. Return ONLY the file content — no markdown blocks, no explanations, no comments about what you are doing. Just raw code.
 
-Oppgave: ${sanitize(req.task)}`;
+Task: ${sanitize(req.task)}`;
 
     if (pipeline.systemPrompt) {
       systemPrompt += "\n\n" + pipeline.systemPrompt;
@@ -2617,7 +1268,7 @@ export const fixFile = api(
   async (req: FixFileRequest): Promise<FixFileResponse> => {
     const model = req.model || DEFAULT_MODEL;
 
-    const systemPrompt = `Du er en feilfikser. Du får en fil med TypeScript-feil. Returner den KORRIGERTE filen, komplett, uten markdown-blokker, uten forklaring. Bare ren kode.`;
+    const systemPrompt = `Fix the TypeScript errors in this file. Return the CORRECTED file, complete, without markdown blocks or explanations. Just raw code.`;
 
     let userPrompt = `## Fix errors in: ${req.filePath}\n\n`;
     userPrompt += `## Errors:\n${req.errors.slice(0, 10).join("\n")}\n\n`;
@@ -2682,47 +1333,44 @@ interface ExtractionResponse {
 export const callForExtraction = api(
   { method: "POST", path: "/ai/call-for-extraction", expose: false },
   async (req: ExtractionRequest): Promise<ExtractionResponse> => {
-    const systemPrompt = `Du er en kode-analytiker som identifiserer gjenbrukbare komponenter.
+    const systemPrompt = `Analyze the provided files and identify up to 3 reusable, self-contained components.
 
-Analyser filene og identifiser MAKS 3 selvstendige, gjenbrukbare komponenter.
+A good component has:
+- Clearly defined interface (exports)
+- Low coupling to the rest of the project
+- At least 50 lines of code (non-trivial)
+- Reuse value in other projects
+- Clear category
 
-En god komponent har:
-- Klart definert interface (eksporter)
-- Lav kobling til resten av prosjektet
-- Minst 50 linjer kode (ikke trivielt)
-- Gjenbruksverdi i andre prosjekter
-- Tydelig kategori
+Categories: auth, payments, pdf, email, api, database, ui, utility, testing, devops
 
-Kategorier: auth, payments, pdf, email, api, database, ui, utility, testing, devops
-
-Returner KUN gyldig JSON uten markdown-blokker. Format:
+Return ONLY valid JSON without markdown blocks. Format:
 {
   "components": [
     {
-      "name": "kebab-case-navn",
-      "description": "Kort beskrivelse",
-      "category": "kategori",
-      "files": [{"path": "sti", "content": ""}],
-      "entryPoint": "hovedfil.ts",
-      "dependencies": ["npm-pakke"],
+      "name": "kebab-case-name",
+      "description": "Short description",
+      "category": "category",
+      "files": [{"path": "path", "content": ""}],
+      "entryPoint": "main-file.ts",
+      "dependencies": ["npm-package"],
       "tags": ["tag1", "tag2"],
       "qualityScore": 75
     }
   ]
 }
 
-Hvis ingen gjenbrukbare komponenter finnes, returner: {"components": []}`;
+If no reusable components are found, return: {"components": []}`;
 
-    // Bygg bruker-prompt med filkontekst
-    let userPrompt = `Repo: ${sanitize(req.repo)}\nOppgave: ${sanitize(req.task)}\n\nFiler:\n`;
+    let userPrompt = `Repo: ${sanitize(req.repo)}\nTask: ${sanitize(req.task)}\n\nFiles:\n`;
     let tokenEstimate = 0;
     for (const f of req.files) {
-      if (tokenEstimate > 15000) break; // Token-grense
-      userPrompt += `\n--- ${f.path} (${f.lines} linjer) ---\n${sanitize(f.content)}\n`;
+      if (tokenEstimate > 15000) break;
+      userPrompt += `\n--- ${f.path} (${f.lines} lines) ---\n${sanitize(f.content)}\n`;
       tokenEstimate += f.content.length / 4;
     }
 
-    userPrompt += "\n\nIdentifiser gjenbrukbare komponenter fra disse filene.";
+    userPrompt += "\n\nIdentify reusable components from these files.";
 
     const response = await callAIWithFallback({
       model: "claude-sonnet-4-5-20250929", // Bruk rimelig modell

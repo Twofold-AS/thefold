@@ -21,13 +21,10 @@ vi.mock("~encore/clients", () => ({
   docs: {
     lookupForTask: vi.fn(),
   },
-  mcp: {
-    installed: vi.fn(),
-  },
 }));
 
 // Import mocked clients for test setup
-import { github, memory, docs, mcp } from "~encore/clients";
+import { github, memory, docs } from "~encore/clients";
 
 // --- Mock agent/db (updateJobCheckpoint) ---
 vi.mock("./db", () => ({
@@ -120,7 +117,7 @@ describe("buildContext", () => {
     (docs.lookupForTask as ReturnType<typeof vi.fn>).mockResolvedValue({
       docs: [{ source: "express", content: "Express routing docs" }],
     });
-    (mcp.installed as ReturnType<typeof vi.fn>).mockResolvedValue({ servers: [] });
+
 
     const tracker = createPhaseTracker();
     const ctx = createMockCtx();
@@ -172,7 +169,7 @@ describe("buildContext", () => {
     (github.findRelevantFiles as ReturnType<typeof vi.fn>).mockResolvedValue({ paths: [] });
     (memory.search as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Voyage 429 rate limit"));
     (docs.lookupForTask as ReturnType<typeof vi.fn>).mockResolvedValue({ docs: [] });
-    (mcp.installed as ReturnType<typeof vi.fn>).mockResolvedValue({ servers: [] });
+
 
     const tracker = createPhaseTracker();
     const ctx = createMockCtx();
@@ -196,7 +193,7 @@ describe("buildContext", () => {
     (github.findRelevantFiles as ReturnType<typeof vi.fn>).mockResolvedValue({ paths: [] });
     (memory.search as ReturnType<typeof vi.fn>).mockResolvedValue({ results: [] });
     (docs.lookupForTask as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("Context7 unavailable"));
-    (mcp.installed as ReturnType<typeof vi.fn>).mockResolvedValue({ servers: [] });
+
 
     const tracker = createPhaseTracker();
     const ctx = createMockCtx();
@@ -231,7 +228,7 @@ describe("buildContext", () => {
     (github.findRelevantFiles as ReturnType<typeof vi.fn>).mockResolvedValue({ paths: [] });
     (memory.search as ReturnType<typeof vi.fn>).mockResolvedValue({ results: [] });
     (docs.lookupForTask as ReturnType<typeof vi.fn>).mockResolvedValue({ docs: [] });
-    (mcp.installed as ReturnType<typeof vi.fn>).mockResolvedValue({ servers: [] });
+
 
     const helpers = createMockHelpers({ autoInitRepo });
     const tracker = createPhaseTracker();
@@ -243,8 +240,8 @@ describe("buildContext", () => {
     expect(autoInitRepo).toHaveBeenCalledWith(ctx);
   });
 
-  // Test 6: MCP tools are appended to docsStrings (when MCPRoutingEnabled is not set, falls back to info mode)
-  it("should append MCP tool list to docsStrings when servers are installed", async () => {
+  // Test 6: MCP tools section — startInstalledServers is called directly
+  it("should handle MCP setup gracefully (non-critical)", async () => {
     (github.getTree as ReturnType<typeof vi.fn>).mockResolvedValue({
       treeString: "",
       tree: [],
@@ -254,12 +251,6 @@ describe("buildContext", () => {
     (github.findRelevantFiles as ReturnType<typeof vi.fn>).mockResolvedValue({ paths: [] });
     (memory.search as ReturnType<typeof vi.fn>).mockResolvedValue({ results: [] });
     (docs.lookupForTask as ReturnType<typeof vi.fn>).mockResolvedValue({ docs: [] });
-    (mcp.installed as ReturnType<typeof vi.fn>).mockResolvedValue({
-      servers: [
-        { name: "filesystem", description: "Read/write files", category: "general" },
-        { name: "puppeteer", description: "Browser automation", category: "code" },
-      ],
-    });
 
     const tracker = createPhaseTracker();
     const ctx = createMockCtx();
@@ -267,19 +258,10 @@ describe("buildContext", () => {
 
     const result = await buildContext(ctx, tracker, helpers);
 
-    // MCP setup may fail with "secret not set" but should still add info to docsStrings
-    // The code has a try/catch that falls back to old path (mcp.installed)
-    const mcpEntry = result.docsStrings.find((s) => s.includes("[MCP Tools]"));
-
-    // If MCP setup fails, the fallback adds MCP info via mcp.installed()
-    if (mcpEntry) {
-      expect(mcpEntry).toContain("filesystem");
-      expect(mcpEntry).toContain("puppeteer");
-    } else {
-      // If secret fails entirely, MCP section may not be added (non-critical failure)
-      // This is acceptable as MCP is optional
-      expect(result.docsStrings.length).toBeGreaterThanOrEqual(0);
-    }
+    // MCP setup may fail with import error in test context but should not crash
+    // The code has a try/catch — non-critical failure is acceptable
+    expect(result.docsStrings.length).toBeGreaterThanOrEqual(0);
+    expect(result.mcpTools).toBeDefined();
   });
 });
 

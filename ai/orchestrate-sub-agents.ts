@@ -2,7 +2,7 @@
 
 import log from "encore.dev/log";
 import { secret } from "encore.dev/config";
-import { callAIWithFallback } from "./ai";
+import { callAIWithFallback } from "./call";
 import { estimateCost } from "./router";
 import {
   type SubAgent,

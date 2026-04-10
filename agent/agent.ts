@@ -14,6 +14,8 @@ import { assessAndRoute, type ConfidenceResult } from "./confidence";
 import { executePlan, type ExecutionResult } from "./execution";
 import { handleReview, type ReviewResult } from "./review-handler";
 import { completeTask, type CompletionResult } from "./completion";
+import { runAgentToolLoop, buildToolLoopInitialMessage } from "./tool-loop";
+import type { AgentToolContext } from "./agent-tool-executor";
 
 // --- Helpers (extracted in XK) ---
 import {
@@ -30,6 +32,7 @@ import { db, acquireRepoLock, releaseRepoLock, createJob, startJob, updateJobChe
 
 // --- Secrets ---
 const AgentPersistentJobs = secret("AgentPersistentJobs"); // "true" | "false"
+const AgentToolLoopEnabled = secret("AgentToolLoopEnabled"); // "true" | "false" — replaces executePlan with AI tool loop
 
 // --- Types ---
 
@@ -293,13 +296,67 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       savedPercent: Math.round((1 - planningTokens / fullTokens) * 100),
     });
 
-    const executionOutcome: ExecutionResult = await executePlan(
-      ctx,
-      planningContext,
-      tracker,
-      { report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker },
-      { sandboxId: options?.sandboxId },
-    );
+    // === AgentToolLoopEnabled: replace executePlan with AI-driven tool loop ===
+    let executionOutcome: ExecutionResult;
+
+    const useToolLoop = (() => {
+      try { return AgentToolLoopEnabled() === "true"; } catch { return false; }
+    })();
+
+    if (useToolLoop) {
+      await report(ctx, "Starter AI tool-loop...", "working");
+
+      const toolCtx: AgentToolContext = {
+        repoOwner:      ctx.repoOwner,
+        repoName:       ctx.repoName,
+        conversationId: ctx.conversationId,
+        thefoldTaskId:  ctx.thefoldTaskId,
+      };
+
+      const initialMsg = buildToolLoopInitialMessage({
+        taskDescription: ctx.taskDescription,
+        repoOwner:       ctx.repoOwner,
+        repoName:        ctx.repoName,
+        treeString:      planningContext.treeString,
+        memoryContext:   planningContext.memoryStrings,
+      });
+
+      const loopResult = await runAgentToolLoop({
+        model:       ctx.selectedModel,
+        system:      `You are TheFold, an autonomous coding agent. Complete the task using the available tools. Write files via repo_write_file after creating a sandbox with build_create_sandbox. Validate with build_validate when done.`,
+        messages:    [{ role: "user", content: initialMsg }],
+        toolContext: toolCtx,
+      });
+
+      ctx.totalCostUsd    += loopResult.costUsd;
+      ctx.totalTokensUsed += loopResult.totalInputTokens + loopResult.totalOutputTokens;
+
+      executionOutcome = {
+        success:      !loopResult.stoppedAtMaxLoops && loopResult.filesWritten.length > 0,
+        filesChanged: loopResult.filesWritten.map((f) => ({ ...f, action: "create" })),
+        sandboxId:    loopResult.sandboxId ?? options?.sandboxId ?? "",
+        planSummary:  loopResult.finalText.substring(0, 500),
+        costUsd:      loopResult.costUsd,
+        tokensUsed:   loopResult.totalInputTokens + loopResult.totalOutputTokens,
+        errorMessage: loopResult.stoppedAtMaxLoops ? "Tool loop reached max iterations" : undefined,
+      };
+
+      log.info("agent tool loop completed", {
+        taskId:      ctx.taskId,
+        loopsUsed:   loopResult.loopsUsed,
+        toolsUsed:   loopResult.toolsUsed.join(", "),
+        filesWritten: loopResult.filesWritten.length,
+        sandboxId:   loopResult.sandboxId,
+      });
+    } else {
+      executionOutcome = await executePlan(
+        ctx,
+        planningContext,
+        tracker,
+        { report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker },
+        { sandboxId: options?.sandboxId },
+      );
+    }
 
     if (executionOutcome.earlyReturn) {
       if (executionOutcome.earlyReturn.errorMessage === "stopped") {

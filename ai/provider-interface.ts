@@ -1,5 +1,4 @@
 // --- Multi-AI Provider Abstraction Layer ---
-// Feature flag: MultiProviderEnabled (default "false" — only Anthropic)
 // This module defines the standard interface for AI providers.
 // Each provider implements transformRequest/transformResponse to normalize
 // the differences between Anthropic, OpenAI, OpenRouter, Fireworks, etc.
