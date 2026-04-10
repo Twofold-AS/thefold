@@ -158,6 +158,11 @@ export interface ProjectTask {
   attemptCount: number;
   startedAt?: Date;
   completedAt?: Date;
+  // D23: Contract-based decomposition
+  inputContracts?: string[];
+  outputContracts?: string[];
+  contractsVerified?: boolean;
+  verificationNotes?: string;
 }
 
 export interface CuratedContext {

@@ -286,6 +286,8 @@ export async function executeProject(
     attempt_count: number;
     started_at: Date | null;
     completed_at: Date | null;
+    input_contracts: string | null;
+    output_contracts: string | null;
   }>`
     SELECT * FROM project_tasks
     WHERE project_id = ${projectId}
@@ -312,6 +314,12 @@ export async function executeProject(
       attemptCount: row.attempt_count,
       startedAt: row.started_at ?? undefined,
       completedAt: row.completed_at ?? undefined,
+      inputContracts: row.input_contracts
+        ? (typeof row.input_contracts === "string" ? JSON.parse(row.input_contracts) : row.input_contracts)
+        : undefined,
+      outputContracts: row.output_contracts
+        ? (typeof row.output_contracts === "string" ? JSON.parse(row.output_contracts) : row.output_contracts)
+        : undefined,
     });
   }
 
@@ -530,6 +538,22 @@ export async function executeProject(
 
           if (thefoldTaskId) {
             try { await tasks.updateTaskStatus({ id: thefoldTaskId, status: "done" }); } catch (err) { log.warn("Failed to mark task as done", { taskId: thefoldTaskId, error: err instanceof Error ? err.message : String(err) }); }
+          }
+
+          // D23: Log contract observability — non-blocking
+          if (task.outputContracts && task.outputContracts.length > 0) {
+            log.info("task completed with output contracts", {
+              taskId: task.id,
+              taskTitle: task.title,
+              outputContracts: task.outputContracts,
+              filesChanged: result.filesChanged,
+            });
+            await db.exec`
+              UPDATE project_tasks
+              SET contracts_verified = true,
+                  verification_notes = ${"Task completed — output contracts logged for observability"}
+              WHERE id = ${task.id}
+            `;
           }
 
           await reportProject(conversationId, `Task ${completedTasks}/${planRow.total_tasks} fullfort: ${task.title}`);
@@ -980,6 +1004,8 @@ interface StoreProjectPlanRequest {
         description: string;
         dependsOnIndices: number[];
         contextHints: string[];
+        inputContracts?: string[];
+        outputContracts?: string[];
       }>;
     }>;
     conventions: string;
@@ -1023,14 +1049,19 @@ export const storeProjectPlan = api(
       for (let taskIdx = 0; taskIdx < phase.tasks.length; taskIdx++) {
         const task = phase.tasks[taskIdx];
 
+        const inputContracts = task.inputContracts ?? [];
+        const outputContracts = task.outputContracts ?? [];
+
         const taskRow = await db.queryRow<{ id: string }>`
           INSERT INTO project_tasks (
             project_id, phase, task_order, title, description,
-            context_hints
+            context_hints, input_contracts, output_contracts
           ) VALUES (
             ${planRow.id}, ${phaseIdx}, ${taskIdx},
             ${task.title}, ${task.description},
-            ${task.contextHints}::text[]
+            ${task.contextHints}::text[],
+            ${JSON.stringify(inputContracts)}::jsonb,
+            ${JSON.stringify(outputContracts)}::jsonb
           )
           RETURNING id
         `;

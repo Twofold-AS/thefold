@@ -795,6 +795,8 @@ interface DecomposeProjectResponse {
       description: string;
       dependsOnIndices: number[];
       contextHints: string[];
+      inputContracts?: string[];
+      outputContracts?: string[];
     }>;
   }>;
   conventions: string;
@@ -825,7 +827,10 @@ export const decomposeProject = api(
       }
     }
 
-    prompt += `Decompose this request into atomic tasks organized in phases. Respond with JSON only.`;
+    prompt += `Decompose this request into atomic tasks organized in phases. Respond with JSON only.\n\n`;
+    prompt += `For each task, also provide:\n`;
+    prompt += `- inputContracts: list of what this task depends on from previous tasks (e.g. "UserService.createUser() function exported", "auth middleware in gateway/auth.ts")\n`;
+    prompt += `- outputContracts: list of what this task produces that other tasks need (e.g. "POST /users endpoint", "JWT token interface exported from types.ts")`;
 
     const pipeline = await buildSystemPromptWithPipeline("project_decomposition", {
       task: req.userMessage,
