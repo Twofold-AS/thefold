@@ -4,6 +4,8 @@ import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 import { updateJobCheckpoint } from "./db";
 import { buildImportGraph, getRelatedFiles, logGraphStats } from "./code-graph";
+import { getOrCreateManifest, formatManifestForContext } from "./manifest";
+import type { ProjectManifest } from "./manifest";
 
 // --- URL detection ---
 const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
@@ -25,6 +27,7 @@ export interface AgentContext {
   memoryStrings: string[];
   docsStrings: string[];
   mcpTools: Array<{ name: string; description: string; serverName: string }>;
+  manifest?: ProjectManifest;
 }
 
 /** Helpers injected from agent.ts — keeps context-builder testable without live services */
@@ -81,6 +84,7 @@ export async function buildContext(
   let relevantFiles: Array<{ path: string; content: string }> = [];
   let memoryStrings: string[] = [];
   let docsStrings: string[] = [];
+  let manifest: ProjectManifest | undefined = undefined;
 
   // === STEP 2: Read the project ===
   log.info("STEP 2: Reading project tree", { owner: ctx.repoOwner, repo: ctx.repoName });
@@ -147,13 +151,51 @@ export async function buildContext(
     }).catch(() => { /* non-critical */ });
   }
 
+  // === STEP 2.1: Diff-based context (D27) ===
+  // Compare current tree against stored file hashes to skip fetching unchanged files.
+  // If <20% of files are new (absent from previous hash), only scan changed files.
+  let diffBasedTreeArray: string[] | null = null;
+  try {
+    const prevManifest = await memory.getManifest({ repoOwner: ctx.repoOwner, repoName: ctx.repoName });
+    // fileHashes is a new field — access via type cast until Encore regenerates client types
+    const prevHashes = (prevManifest.manifest as unknown as { fileHashes?: Record<string, string> })?.fileHashes;
+    if (prevHashes && Object.keys(prevHashes).length > 0 && treeArray.length > 0) {
+      const prevHashSet = new Set(Object.keys(prevHashes));
+      const changedFiles = treeArray.filter(f => !prevHashSet.has(f));
+      const changedRatio = changedFiles.length / treeArray.length;
+      if (changedRatio < 0.20) {
+        log.info("D27: diff-based context active", { total: treeArray.length, changed: changedFiles.length });
+        await think(ctx, `Diff-basert kontekst: ${changedFiles.length} av ${treeArray.length} filer er nye/endret.`);
+        diffBasedTreeArray = changedFiles;
+      } else {
+        log.info("D27: too many changes, using full fetch", { total: treeArray.length, changed: changedFiles.length });
+      }
+    }
+  } catch (d27Err) {
+    log.warn("D27: diff context check failed, using full fetch", { error: d27Err instanceof Error ? d27Err.message : String(d27Err) });
+  }
+
+  // When diff-based: scan only changed + task-mentioned files; otherwise full tree
+  const treeForRelevance: string[] = diffBasedTreeArray !== null
+    ? (() => {
+        const taskWords = new Set(ctx.taskDescription.toLowerCase().split(/\W+/).filter(w => w.length > 3));
+        const taskMentioned = treeArray.filter(f => {
+          const base = f.split("/").pop()?.toLowerCase() || "";
+          return taskWords.has(base) || taskWords.has(base.replace(/\.[^.]+$/, ""));
+        });
+        const combined = new Set([...diffBasedTreeArray, ...taskMentioned]);
+        return [...combined];
+      })()
+    : projectTree.tree;
+
   const relevantPaths = await auditedStep(ctx, "relevant_files_identified", {
     taskDescription: ctx.taskDescription.substring(0, 200),
+    diffBased: diffBasedTreeArray !== null,
   }, () => github.findRelevantFiles({
     owner: ctx.repoOwner,
     repo: ctx.repoName,
     taskDescription: ctx.taskDescription,
-    tree: projectTree.tree,
+    tree: treeForRelevance,
   }));
 
   relevantFiles = await auditedStep(ctx, "files_read", {
@@ -314,7 +356,22 @@ export async function buildContext(
 
   // Check cancellation after heavy GitHub I/O
   if (await checkCancelled(ctx)) {
-    return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools: [] };
+    return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools: [], manifest };
+  }
+
+  // === STEP 2.9: Update file hashes (D27 — fire-and-forget) ===
+  // Lightweight presence map: file path → "1" (just tracks what files exist in the tree).
+  if (treeArray.length > 0) {
+    const newFileHashes: Record<string, string> = {};
+    for (const f of treeArray) newFileHashes[f] = "1";
+    memory.updateManifest({
+      repoOwner: ctx.repoOwner,
+      repoName: ctx.repoName,
+    }).catch((err: unknown) => {
+      log.warn("D27: manifest timestamp update failed (non-critical)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
 
   // === STEP 3: Gather context (memory + docs) ===
@@ -349,6 +406,22 @@ export async function buildContext(
   );
   docsStrings = docsResults.docs.map((d) => `[${d.source}] ${d.content}`);
   log.info("STEP 3: Context gathered", { memories: memories.results.length, docs: docsResults.docs.length });
+
+  // === STEP 3.1: Load project manifest (D19) ===
+  try {
+    const manifestResult = await getOrCreateManifest(ctx.repoOwner, ctx.repoName, treeString);
+    if (manifestResult) {
+      manifest = manifestResult;
+      // Inject manifest as a high-priority context section before files, after memory
+      // Token budget: ~500-800 tokens
+      const manifestSection = formatManifestForContext(manifestResult);
+      docsStrings = [manifestSection, ...docsStrings];
+      log.info("STEP 3.1: Manifest injected", { owner: ctx.repoOwner, repo: ctx.repoName, version: manifestResult.version });
+    }
+  } catch (err) {
+    log.warn("manifest load failed (non-critical)", { error: err instanceof Error ? err.message : String(err) });
+    // Continue without manifest
+  }
 
   if (memories.results.length > 0) {
     await think(ctx, `Fant ${memories.results.length} relevante minner.`);
@@ -404,7 +477,7 @@ export async function buildContext(
     // Non-critical — fortsett uten MCP
   }
 
-  return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools };
+  return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools, manifest };
 }
 
 // --- Context Filtering (YA: Phase-specific context filtering) ---
@@ -516,17 +589,28 @@ export function filterForPhase(
     memoryStrings: profile.needsMemory ? context.memoryStrings : [],
     docsStrings: profile.needsDocs ? context.docsStrings : [],
     mcpTools: profile.needsMcpTools ? context.mcpTools : [],
+    manifest: context.manifest,
   };
 
-  // Enforce maxContextTokens — simple estimation: 1 token ≈ 4 chars
+  // Enforce maxContextTokens — use compressContext with a phase-specific strategy
   const estimatedTokens = estimateTokens(filtered);
   if (estimatedTokens > profile.maxContextTokens) {
-    log.info("context exceeds phase budget, trimming", {
+    log.info("context exceeds phase budget, compressing", {
       phase,
       estimated: estimatedTokens,
       budget: profile.maxContextTokens,
     });
-    return trimContext(filtered, profile.maxContextTokens);
+    const phaseStrategy: ContextStrategy = {
+      trigger: { type: "tokens", threshold: profile.maxContextTokens },
+      retain: { type: "priority_weighted", maxTokens: profile.maxContextTokens },
+      compress: DEFAULT_STRATEGY.compress,
+    };
+    const afterCompress = compressContext(filtered, phaseStrategy);
+    // If still over budget, fall back to byte-level trimContext
+    if (estimateTokens(afterCompress) > profile.maxContextTokens) {
+      return trimContext(afterCompress, profile.maxContextTokens);
+    }
+    return afterCompress;
   }
 
   return filtered;
@@ -545,6 +629,96 @@ export function estimateTokens(context: AgentContext): number {
   chars += context.mcpTools.reduce((sum, t) => sum + t.name.length + t.description.length, 0);
   chars += JSON.stringify(context.packageJson).length;
   return Math.ceil(chars / 4);
+}
+
+// --- Unified Context Compression (D17) ---
+
+export interface ContextStrategy {
+  trigger: { type: "tokens"; threshold: number };
+  retain: { type: "priority_weighted"; maxTokens: number };
+  compress: {
+    files: "signatures_only" | "full" | "drop";
+    memory: "recent_5" | "full" | "drop";
+    docs: "relevant" | "full" | "drop";
+    tree: "summarize" | "full" | "drop";
+  };
+}
+
+export const DEFAULT_STRATEGY: ContextStrategy = {
+  trigger: { type: "tokens", threshold: 30_000 },
+  retain: { type: "priority_weighted", maxTokens: 30_000 },
+  compress: {
+    files: "signatures_only",
+    memory: "recent_5",
+    docs: "relevant",
+    tree: "summarize",
+  },
+};
+
+/**
+ * Reduces a file to its exports, interfaces, function signatures, and important comments.
+ * Falls back to first 500 chars if nothing significant found.
+ */
+export function summarizeFile(content: string): string {
+  const lines = content.split("\n");
+  const significant: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Keep: export statements, function/class/interface/type declarations, important comments
+    if (
+      trimmed.startsWith("export ") ||
+      trimmed.startsWith("interface ") ||
+      trimmed.startsWith("type ") ||
+      trimmed.match(/^(async\s+)?function\s+\w+/) ||
+      trimmed.match(/^class\s+\w+/) ||
+      trimmed.startsWith("// ") ||
+      trimmed.startsWith("/**")
+    ) {
+      significant.push(line);
+    }
+  }
+  return significant.join("\n") || content.substring(0, 500);
+}
+
+/**
+ * Compresses an AgentContext using a declarative ContextStrategy.
+ * Only compresses if token count exceeds the strategy trigger threshold.
+ */
+export function compressContext(context: AgentContext, strategy: ContextStrategy): AgentContext {
+  const tokenCount = estimateTokens(context);
+  if (tokenCount <= strategy.trigger.threshold) return context;
+
+  const compressed = { ...context };
+
+  // Apply compression based on strategy
+  if (strategy.compress.files === "signatures_only") {
+    compressed.relevantFiles = context.relevantFiles.map(f => ({
+      ...f,
+      content: summarizeFile(f.content),
+    }));
+  } else if (strategy.compress.files === "drop") {
+    compressed.relevantFiles = [];
+  }
+
+  if (strategy.compress.memory === "recent_5") {
+    compressed.memoryStrings = context.memoryStrings.slice(0, 5);
+  } else if (strategy.compress.memory === "drop") {
+    compressed.memoryStrings = [];
+  }
+
+  if (strategy.compress.docs === "relevant") {
+    compressed.docsStrings = context.docsStrings.slice(0, 3);
+  } else if (strategy.compress.docs === "drop") {
+    compressed.docsStrings = [];
+  }
+
+  if (strategy.compress.tree === "summarize") {
+    compressed.treeString = context.treeString.split("\n").slice(0, 50).join("\n") + "\n[... truncated]";
+  } else if (strategy.compress.tree === "drop") {
+    compressed.treeString = "";
+  }
+
+  return compressed;
 }
 
 /**

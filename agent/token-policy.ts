@@ -1,4 +1,5 @@
 import log from "encore.dev/log";
+import type { AgentPhase } from "./state-machine";
 
 /**
  * Token budget limits per agent phase.
@@ -62,4 +63,39 @@ export function remainingBudget(phase: string, tokensUsed: number): number | und
   const limit = PHASE_TOKEN_LIMITS[phase];
   if (limit === undefined) return undefined;
   return Math.max(0, limit - tokensUsed);
+}
+
+/**
+ * Policy action returned by enforcePolicy.
+ * - "continue": within budget, no action needed
+ * - "warn": at or just over budget, log a warning
+ * - "stop": significantly over budget (>=1.5x), stop the phase
+ */
+export type PolicyAction = "continue" | "warn" | "stop";
+
+/**
+ * Budget map keyed by AgentPhase — mirrors PHASE_TOKEN_LIMITS but typed to AgentPhase.
+ */
+const PHASE_BUDGETS: Partial<Record<AgentPhase, number>> = {
+  context: 50_000,
+  confidence: 10_000,
+  planning: 30_000,
+  building: 200_000,
+  validating: 50_000,
+  reviewing: 30_000,
+};
+
+/**
+ * Enforce the token policy for a given phase.
+ * Returns "stop" when tokensUsed >= 1.5x the budget (severe overage).
+ * Returns "warn" when tokensUsed >= 1.0x the budget (at or just over limit).
+ * Returns "continue" otherwise.
+ */
+export function enforcePolicy(phase: AgentPhase, tokensUsed: number): PolicyAction {
+  const budget = PHASE_BUDGETS[phase];
+  if (!budget) return "continue";
+  const ratio = tokensUsed / budget;
+  if (ratio >= 1.5) return "stop";
+  if (ratio >= 1.0) return "warn";
+  return "continue";
 }

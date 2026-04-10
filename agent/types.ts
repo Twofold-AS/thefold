@@ -85,6 +85,16 @@ export interface AgentExecutionContext {
   progressSteps?: ProgressStep[];
   // Persistent job queue (XD)
   jobId?: string;
+  // Fast-path micro-decision (D8)
+  fastPathPattern?: string;
+}
+
+export interface RetryProductivity {
+  attemptNumber: number;
+  filesChanged: number;
+  validationErrorsFixed: number;
+  newErrorsIntroduced: number;
+  outputTokens: number;
 }
 
 export interface AttemptRecord {
@@ -94,6 +104,7 @@ export interface AttemptRecord {
   error?: string;
   duration: number;
   tokensUsed: number;
+  productivity?: RetryProductivity;
 }
 
 export interface ErrorPattern {
@@ -147,6 +158,11 @@ export interface ProjectTask {
   attemptCount: number;
   startedAt?: Date;
   completedAt?: Date;
+  // D23: Contract-based decomposition
+  inputContracts?: string[];
+  outputContracts?: string[];
+  contractsVerified?: boolean;
+  verificationNotes?: string;
 }
 
 export interface CuratedContext {

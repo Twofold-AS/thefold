@@ -26,13 +26,15 @@ import {
   type AuditOptions,
 } from "./helpers";
 import { checkRateLimit, recordTaskStart } from "./rate-limiter";
+import { matchPattern } from "./pattern-matcher";
+import { matchDecision } from "./decision-cache";
 
 // --- Database (shared) ---
 import { db, acquireRepoLock, releaseRepoLock, createJob, startJob, updateJobCheckpoint, completeJob, failJob, findResumableJobs, expireOldJobs } from "./db";
 
 // --- Secrets ---
 const AgentPersistentJobs = secret("AgentPersistentJobs"); // "true" | "false"
-const AgentToolLoopEnabled = secret("AgentToolLoopEnabled"); // "true" | "false" — replaces executePlan with AI tool loop
+const AgentToolLoopEnabled = secret("AgentToolLoopEnabled"); // "false" to disable tool loop (legacy fallback); defaults to enabled
 
 // --- Types ---
 
@@ -241,6 +243,141 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
       return { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "cancelled" };
     }
 
+    // === Fast-path micro-decision check (D7/D8) ===
+    // Run pattern matcher + decision cache in parallel before expensive AI steps.
+    // If either source has confidence > 0.85 AND flags skipConfidence + skipComplexity,
+    // we can bypass the AI confidence/complexity assessment and go straight to executePlan.
+    if (!useCurated && !options?.forceContinue) {
+      const [patternMatch, cachedDecision] = await Promise.all([
+        Promise.resolve(matchPattern(ctx.taskDescription)),
+        matchDecision(ctx.taskDescription),
+      ]);
+
+      const match = (cachedDecision?.confidence ?? 0) > (patternMatch?.confidence ?? 0)
+        ? cachedDecision
+        : patternMatch;
+
+      if (match && match.confidence > 0.85 && match.skipConfidence && match.skipComplexity) {
+        log.info("fast-path taken", {
+          taskId: ctx.taskId,
+          patternName: "patternName" in match ? match.patternName : undefined,
+          confidence: match.confidence,
+          strategy: match.strategy,
+          preferredModel: match.preferredModel,
+        });
+
+        // Override model selection with the fast-path preferred model
+        if (match.preferredModel) {
+          ctx.selectedModel = match.preferredModel;
+        }
+
+        // Stash the matched pattern name on ctx for use in completion.ts
+        ctx.fastPathPattern = "patternName" in match ? match.patternName : undefined;
+
+        // Skip to executePlan — jump past STEP 4 (confidence) and STEP 4.5 (complexity)
+        sm.transitionTo("planning");
+        ctx.phase = sm.current;
+        const fullCtx: AgentContext = { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools };
+        const planningCtx = filterForPhase(fullCtx, "planning");
+
+        const fastExecResult: ExecutionResult = await executePlan(
+          ctx,
+          planningCtx,
+          tracker,
+          { report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker },
+          { sandboxId: options?.sandboxId },
+        );
+
+        if (!fastExecResult.success || fastExecResult.earlyReturn) {
+          // Fall through to standard path if fast-path fails
+          log.info("fast-path execution failed, falling through to standard path", { taskId: ctx.taskId });
+          // Reset state machine to re-enter confidence step
+          sm.transitionTo("confidence");
+          ctx.phase = sm.current;
+        } else {
+          const fastAllFiles = fastExecResult.filesChanged;
+          const fastSandboxId = fastExecResult.sandboxId;
+
+          // collectOnly: return early with files — skip review/PR/cleanup
+          if (options?.collectOnly) {
+            if (ctx.jobId) {
+              tracker.end();
+              await savePhaseMetrics(ctx.jobId, ctx.taskId, tracker.getAll()).catch(() => {});
+            }
+            return {
+              success: true,
+              filesChanged: fastAllFiles.map((f) => f.path),
+              filesContent: fastAllFiles,
+              sandboxId: fastSandboxId,
+              costUsd: ctx.totalCostUsd,
+              tokensUsed: ctx.totalTokensUsed,
+              status: "completed",
+            };
+          }
+
+          // Fast-path succeeded — continue to review/completion
+          sm.transitionTo("reviewing");
+          ctx.phase = sm.current;
+
+          const fastReviewResult: ReviewResult = await handleReview(
+            ctx,
+            { allFiles: fastAllFiles, sandboxId: fastSandboxId, memoryStrings },
+            tracker,
+            { report, think, reportSteps, auditedStep, audit, shouldStopTask },
+            { skipReview: options?.skipReview },
+          );
+
+          if (fastReviewResult.earlyReturn) {
+            if (fastReviewResult.earlyReturn.errorMessage === "stopped") {
+              sm.transitionTo("stopped"); ctx.phase = sm.current;
+            }
+            return fastReviewResult.earlyReturn;
+          }
+
+          if (fastReviewResult.shouldPause) {
+            sm.transitionTo("pending_review"); ctx.phase = sm.current;
+            return {
+              success: true,
+              reviewId: fastReviewResult.reviewId,
+              status: "pending_review",
+              filesChanged: fastAllFiles.map((f) => f.path),
+              costUsd: ctx.totalCostUsd,
+              tokensUsed: ctx.totalTokensUsed,
+            };
+          }
+
+          if (fastReviewResult.skipReview) {
+            const fastCompResult: CompletionResult = await completeTask(
+              ctx,
+              {
+                allFiles: fastAllFiles,
+                sandboxId: fastSandboxId,
+                documentation: fastReviewResult.documentation,
+                memoriesExtracted: fastReviewResult.memoriesExtracted,
+                memoryStrings,
+              },
+              tracker,
+              { report, think, reportSteps, auditedStep, audit, updateLinearIfExists },
+            );
+
+            sm.transitionTo("completed"); ctx.phase = sm.current;
+            return {
+              success: fastCompResult.success,
+              prUrl: fastCompResult.prUrl,
+              filesChanged: fastCompResult.filesChanged,
+              costUsd: ctx.totalCostUsd,
+              tokensUsed: ctx.totalTokensUsed,
+            };
+          }
+
+          // Fallthrough — persist metrics
+          if (ctx.jobId) await savePhaseMetrics(ctx.jobId, ctx.taskId, tracker.getAll()).catch(() => {});
+          if (ctx.jobId) await completeJob(ctx.jobId).catch(() => {});
+          return { success: true, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed };
+        }
+      }
+    }
+
     // === STEP 4: Assess Confidence ===
     sm.transitionTo("confidence");
     ctx.phase = sm.current;
@@ -297,10 +434,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     });
 
     // === AgentToolLoopEnabled: replace executePlan with AI-driven tool loop ===
+    // TODO D30: Remove legacy executePlan flow once tool loop is stable
     let executionOutcome: ExecutionResult;
 
     const useToolLoop = (() => {
-      try { return AgentToolLoopEnabled() === "true"; } catch { return false; }
+      try { return AgentToolLoopEnabled() !== "false"; } catch { return true; }
     })();
 
     if (useToolLoop) {
@@ -576,6 +714,38 @@ export const startTask = api(
       await recordTaskStart(req.userId).catch(() => { /* non-critical */ });
     }
 
+    // D29: Check for resumable jobs (auto-resume infrastructure)
+    // Currently non-blocking: just logs if a resumable job exists for this task/repo.
+    // Full resume logic is future work — agent always executes fresh for now.
+    try {
+      const allResumableJobs = await findResumableJobs();
+      // Filter to this repo only
+      const repoJobs = allResumableJobs.filter(
+        j => j.repoOwner === ctx.repoOwner && j.repoName === ctx.repoName
+      );
+      if (repoJobs.length > 0) {
+        const matchingJob = repoJobs.find(j => j.taskId === req.taskId);
+        if (matchingJob) {
+          log.info("D29: resumable job found for this task (infrastructure ready, full resume is future work)", {
+            taskId: req.taskId,
+            jobId: matchingJob.id,
+            phase: matchingJob.currentPhase,
+            attempts: matchingJob.attempts,
+          });
+        } else {
+          log.info("D29: resumable jobs exist for this repo (different tasks)", {
+            count: repoJobs.length,
+            taskId: req.taskId,
+          });
+        }
+      }
+    } catch (err) {
+      // Non-critical — log and continue
+      log.warn("D29: resumable job check failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // Persistent job tracking
     let jobId: string | undefined;
     try {
@@ -635,14 +805,12 @@ export const respondToClarification = api(
     const taskResult = await tasks.getTaskInternal({ id: req.taskId });
     const task = taskResult.task;
 
-    // Resolve repoOwner from task or GitHub App
-    let clarifyOwner = task.repoOwner || "";
-    if (!clarifyOwner.trim()) {
-      try {
-        const { owner } = await github.getGitHubOwner();
-        clarifyOwner = owner;
-      } catch { /* fallback to empty */ }
-    }
+    // Resolve repoOwner from GitHub App (task type doesn't carry owner)
+    let clarifyOwner = "";
+    try {
+      const { owner } = await github.getGitHubOwner();
+      clarifyOwner = owner;
+    } catch { /* fallback to empty */ }
 
     const ctx: TaskContext = {
       conversationId: req.conversationId,
@@ -699,14 +867,12 @@ export const forceContinue = api(
     const taskResult = await tasks.getTaskInternal({ id: req.taskId });
     const task = taskResult.task;
 
-    // Resolve repoOwner from task or GitHub App
-    let forceOwner = task.repoOwner || "";
-    if (!forceOwner.trim()) {
-      try {
-        const { owner } = await github.getGitHubOwner();
-        forceOwner = owner;
-      } catch { /* fallback to empty */ }
-    }
+    // Resolve repoOwner from GitHub App (task type doesn't carry owner)
+    let forceOwner = "";
+    try {
+      const { owner } = await github.getGitHubOwner();
+      forceOwner = owner;
+    } catch { /* fallback to empty */ }
 
     const ctx: TaskContext = {
       conversationId: req.conversationId,

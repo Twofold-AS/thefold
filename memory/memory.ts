@@ -1,5 +1,4 @@
 import { api, APIError } from "encore.dev/api";
-import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
@@ -8,6 +7,7 @@ import { calculateImportanceScore, calculateDecayedRelevance } from "./decay";
 import type { MemoryType } from "./decay";
 import { sanitizeForMemory } from "../ai/sanitize";
 import { createHash } from "node:crypto";
+import { db } from "./db";
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -18,8 +18,6 @@ function hashContent(content: string): string {
 // const voyageKey = secret("VoyageAPIKey");
 // NOTE: OpenAIAPIKey secret must be configured in Encore secrets for this to work.
 const OpenAIApiKey = secret("OpenAIAPIKey");
-
-const db = new SQLDatabase("memory", { migrations: "./migrations" });
 
 (async () => {
   try { await db.queryRow`SELECT 1`; console.log("[memory] db warmed"); }
@@ -890,6 +888,759 @@ export const searchPatterns = api(
     }
 
     return { patterns };
+  }
+);
+
+// --- Knowledge System (D13) ---
+
+interface StoreKnowledgeRequest {
+  rule: string;
+  category: string;
+  context?: string;
+  sourceTaskId?: string;
+  sourceModel?: string;
+  confidence?: number;
+}
+
+interface StoreKnowledgeResponse {
+  id: string;
+  deduplicated: boolean;
+}
+
+interface SearchKnowledgeRequest {
+  query: string;
+  threshold?: number;
+  limit?: number;
+}
+
+interface KnowledgeResult {
+  id: string;
+  rule: string;
+  category: string;
+  context?: string;
+  confidence: number;
+  timesApplied: number;
+  timesHelped: number;
+  timesHurt: number;
+  status: string;
+  createdAt: string;
+}
+
+interface SearchKnowledgeResponse {
+  results: KnowledgeResult[];
+}
+
+interface KnowledgeFeedbackRequest {
+  id: string;
+  helped: boolean;
+}
+
+interface KnowledgeFeedbackResponse {
+  updated: boolean;
+}
+
+interface ListKnowledgeRequest {
+  category?: string;
+  status?: string;
+  limit?: number;
+}
+
+interface ListKnowledgeResponse {
+  items: KnowledgeResult[];
+  total: number;
+}
+
+interface KnowledgeStatsResponse {
+  total: number;
+  active: number;
+  byCategory: Record<string, number>;
+  avgConfidence: number;
+  topRules: KnowledgeResult[];
+}
+
+// POST /memory/knowledge/store — Store a learned rule (internal)
+export const storeKnowledge = api(
+  { method: "POST", path: "/memory/knowledge/store", expose: false },
+  async (req: StoreKnowledgeRequest): Promise<StoreKnowledgeResponse> => {
+    const rule = sanitizeForMemory(req.rule);
+    if (rule.length < 10) {
+      throw APIError.invalidArgument("rule too short");
+    }
+
+    // Dedup: check if a similar rule exists via ILIKE
+    const existing = await db.queryRow<{ id: string; confidence: number }>`
+      SELECT id, confidence FROM knowledge
+      WHERE status = 'active'
+        AND rule ILIKE ${`%${rule.substring(0, 80)}%`}
+      LIMIT 1
+    `;
+
+    if (existing) {
+      // Strengthen existing rule: bump confidence slightly
+      const newConfidence = Math.min(1.0, existing.confidence + 0.05);
+      await db.exec`
+        UPDATE knowledge
+        SET confidence = ${newConfidence},
+            times_applied = times_applied + 1,
+            last_applied_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ${existing.id}::uuid
+      `;
+      return { id: existing.id, deduplicated: true };
+    }
+
+    const row = await db.queryRow<{ id: string }>`
+      INSERT INTO knowledge (rule, category, context, source_task_id, source_model, confidence)
+      VALUES (
+        ${rule},
+        ${req.category},
+        ${req.context ?? null},
+        ${req.sourceTaskId ?? null}::uuid,
+        ${req.sourceModel ?? null},
+        ${req.confidence ?? 0.5}
+      )
+      RETURNING id
+    `;
+
+    if (!row) throw APIError.internal("failed to store knowledge");
+    return { id: row.id, deduplicated: false };
+  }
+);
+
+// POST /memory/knowledge/search — Keyword search (internal)
+export const searchKnowledge = api(
+  { method: "POST", path: "/memory/knowledge/search", expose: false },
+  async (req: SearchKnowledgeRequest): Promise<SearchKnowledgeResponse> => {
+    const threshold = req.threshold ?? 0.3;
+    const limit = req.limit ?? 5;
+    const query = req.query.trim();
+
+    const rows = await db.query<{
+      id: string;
+      rule: string;
+      category: string;
+      context: string | null;
+      confidence: number;
+      times_applied: number;
+      times_helped: number;
+      times_hurt: number;
+      status: string;
+      created_at: string;
+    }>`
+      SELECT id, rule, category, context, confidence::float as confidence,
+             times_applied, times_helped, times_hurt, status, created_at
+      FROM knowledge
+      WHERE status = 'active'
+        AND confidence > ${threshold}
+        AND (rule ILIKE ${`%${query}%`} OR context ILIKE ${`%${query}%`})
+      ORDER BY confidence DESC
+      LIMIT ${limit}
+    `;
+
+    const results: KnowledgeResult[] = [];
+    for await (const row of rows) {
+      results.push({
+        id: row.id,
+        rule: row.rule,
+        category: row.category,
+        context: row.context ?? undefined,
+        confidence: Number(row.confidence),
+        timesApplied: Number(row.times_applied),
+        timesHelped: Number(row.times_helped),
+        timesHurt: Number(row.times_hurt),
+        status: row.status,
+        createdAt: String(row.created_at),
+      });
+    }
+
+    return { results };
+  }
+);
+
+// POST /memory/knowledge/feedback — Increment times_helped or times_hurt (internal)
+export const knowledgeFeedback = api(
+  { method: "POST", path: "/memory/knowledge/feedback", expose: false },
+  async (req: KnowledgeFeedbackRequest): Promise<KnowledgeFeedbackResponse> => {
+    if (req.helped) {
+      await db.exec`
+        UPDATE knowledge
+        SET times_helped = times_helped + 1,
+            times_applied = times_applied + 1,
+            last_applied_at = NOW(),
+            confidence = LEAST(1.0, confidence + 0.02),
+            updated_at = NOW()
+        WHERE id = ${req.id}::uuid
+      `;
+    } else {
+      await db.exec`
+        UPDATE knowledge
+        SET times_hurt = times_hurt + 1,
+            times_applied = times_applied + 1,
+            last_applied_at = NOW(),
+            confidence = GREATEST(0.0, confidence - 0.05),
+            updated_at = NOW()
+        WHERE id = ${req.id}::uuid
+      `;
+    }
+    return { updated: true };
+  }
+);
+
+// GET /memory/knowledge/list — List knowledge rules (auth)
+export const listKnowledge = api(
+  { method: "GET", path: "/memory/knowledge/list", expose: true, auth: true },
+  async (req: ListKnowledgeRequest): Promise<ListKnowledgeResponse> => {
+    const limit = req.limit ?? 50;
+    const statusFilter = req.status ?? "active";
+
+    const rows = await db.query<{
+      id: string;
+      rule: string;
+      category: string;
+      context: string | null;
+      confidence: number;
+      times_applied: number;
+      times_helped: number;
+      times_hurt: number;
+      status: string;
+      created_at: string;
+    }>`
+      SELECT id, rule, category, context, confidence::float as confidence,
+             times_applied, times_helped, times_hurt, status, created_at
+      FROM knowledge
+      WHERE (${statusFilter}::text IS NULL OR status = ${statusFilter})
+        AND (${req.category ?? null}::text IS NULL OR category = ${req.category ?? null})
+      ORDER BY confidence DESC, created_at DESC
+      LIMIT ${limit}
+    `;
+
+    const items: KnowledgeResult[] = [];
+    for await (const row of rows) {
+      items.push({
+        id: row.id,
+        rule: row.rule,
+        category: row.category,
+        context: row.context ?? undefined,
+        confidence: Number(row.confidence),
+        timesApplied: Number(row.times_applied),
+        timesHelped: Number(row.times_helped),
+        timesHurt: Number(row.times_hurt),
+        status: row.status,
+        createdAt: String(row.created_at),
+      });
+    }
+
+    const totalRow = await db.queryRow<{ count: number }>`
+      SELECT COUNT(*)::int as count FROM knowledge
+      WHERE (${statusFilter}::text IS NULL OR status = ${statusFilter})
+        AND (${req.category ?? null}::text IS NULL OR category = ${req.category ?? null})
+    `;
+
+    return { items, total: totalRow?.count ?? 0 };
+  }
+);
+
+// GET /memory/knowledge/stats — Knowledge statistics (auth)
+export const knowledgeStats = api(
+  { method: "GET", path: "/memory/knowledge/stats", expose: true, auth: true },
+  async (): Promise<KnowledgeStatsResponse> => {
+    const totalRow = await db.queryRow<{ count: number }>`
+      SELECT COUNT(*)::int as count FROM knowledge
+    `;
+    const activeRow = await db.queryRow<{ count: number }>`
+      SELECT COUNT(*)::int as count FROM knowledge WHERE status = 'active'
+    `;
+    const avgRow = await db.queryRow<{ avg: number }>`
+      SELECT COALESCE(AVG(confidence), 0)::float as avg FROM knowledge WHERE status = 'active'
+    `;
+
+    const catRows = await db.query<{ category: string; count: number }>`
+      SELECT category, COUNT(*)::int as count
+      FROM knowledge WHERE status = 'active'
+      GROUP BY category
+    `;
+    const byCategory: Record<string, number> = {};
+    for await (const row of catRows) {
+      byCategory[row.category] = row.count;
+    }
+
+    const topRows = await db.query<{
+      id: string;
+      rule: string;
+      category: string;
+      context: string | null;
+      confidence: number;
+      times_applied: number;
+      times_helped: number;
+      times_hurt: number;
+      status: string;
+      created_at: string;
+    }>`
+      SELECT id, rule, category, context, confidence::float as confidence,
+             times_applied, times_helped, times_hurt, status, created_at
+      FROM knowledge
+      WHERE status = 'active'
+      ORDER BY confidence DESC, times_helped DESC
+      LIMIT 5
+    `;
+
+    const topRules: KnowledgeResult[] = [];
+    for await (const row of topRows) {
+      topRules.push({
+        id: row.id,
+        rule: row.rule,
+        category: row.category,
+        context: row.context ?? undefined,
+        confidence: Number(row.confidence),
+        timesApplied: Number(row.times_applied),
+        timesHelped: Number(row.times_helped),
+        timesHurt: Number(row.times_hurt),
+        status: row.status,
+        createdAt: String(row.created_at),
+      });
+    }
+
+    return {
+      total: totalRow?.count ?? 0,
+      active: activeRow?.count ?? 0,
+      byCategory,
+      avgConfidence: avgRow?.avg ?? 0,
+      topRules,
+    };
+  }
+);
+
+// --- Manifest Endpoints ---
+
+export interface ProjectManifest {
+  id: string;
+  repoOwner: string;
+  repoName: string;
+  summary: string | null;
+  techStack: string[];
+  services: unknown[];
+  dataModels: unknown[];
+  contracts: unknown[];
+  conventions: string | null;
+  knownPitfalls: string | null;
+  fileCount: number | null;
+  lastAnalyzedAt: string | null;
+  version: number;
+  /** D27: Map of file path → simple hash (mtime-based or content-based) for diff detection */
+  fileHashes?: Record<string, string>;
+}
+
+interface GetManifestRequest {
+  repoOwner: string;
+  repoName: string;
+}
+
+interface GetManifestResponse {
+  manifest: ProjectManifest | null;
+}
+
+interface UpdateManifestRequest {
+  repoOwner: string;
+  repoName: string;
+  summary?: string | null;
+  techStack?: string[];
+  services?: unknown[];
+  dataModels?: unknown[];
+  contracts?: unknown[];
+  /** D27: Map of file path → hash string, for diff-based context detection */
+  fileHashes?: Record<string, string>;
+  conventions?: string | null;
+  knownPitfalls?: string | null;
+  fileCount?: number | null;
+  changedFiles?: string[]; // used to bump version + updated_at only
+}
+
+interface UpdateManifestResponse {
+  manifest: ProjectManifest;
+}
+
+// POST /memory/manifest/get (expose: false) — get manifest by owner/repo
+export const getManifest = api(
+  { method: "POST", path: "/memory/manifest/get", expose: false },
+  async (req: GetManifestRequest): Promise<GetManifestResponse> => {
+    const row = await db.queryRow<{
+      id: string;
+      repo_owner: string;
+      repo_name: string;
+      summary: string | null;
+      tech_stack: string[] | string;
+      services: unknown;
+      data_models: unknown;
+      contracts: unknown;
+      conventions: string | null;
+      known_pitfalls: string | null;
+      file_count: number | null;
+      last_analyzed_at: string | null;
+      version: number;
+      file_hashes: unknown;
+    }>`
+      SELECT id, repo_owner, repo_name, summary, tech_stack, services, data_models,
+             contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version,
+             file_hashes
+      FROM project_manifests
+      WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
+    `;
+
+    if (!row) return { manifest: null };
+
+    const techStack = typeof row.tech_stack === "string" ? JSON.parse(row.tech_stack) : (row.tech_stack || []);
+    const services = typeof row.services === "string" ? JSON.parse(row.services) : (row.services || []);
+    const dataModels = typeof row.data_models === "string" ? JSON.parse(row.data_models) : (row.data_models || []);
+    const contracts = typeof row.contracts === "string" ? JSON.parse(row.contracts) : (row.contracts || []);
+    const fileHashes = typeof row.file_hashes === "string"
+      ? JSON.parse(row.file_hashes)
+      : (row.file_hashes as Record<string, string> || {});
+
+    return {
+      manifest: {
+        id: row.id,
+        repoOwner: row.repo_owner,
+        repoName: row.repo_name,
+        summary: row.summary,
+        techStack,
+        services,
+        dataModels,
+        contracts,
+        conventions: row.conventions,
+        knownPitfalls: row.known_pitfalls,
+        fileCount: row.file_count,
+        lastAnalyzedAt: row.last_analyzed_at ? String(row.last_analyzed_at) : null,
+        version: row.version,
+        fileHashes,
+      },
+    };
+  }
+);
+
+// POST /memory/manifest/update (expose: false) — upsert manifest
+export const updateManifest = api(
+  { method: "POST", path: "/memory/manifest/update", expose: false },
+  async (req: UpdateManifestRequest): Promise<UpdateManifestResponse> => {
+    // changedFiles-only path: just bump version + updated_at
+    if (req.changedFiles !== undefined && Object.keys(req).filter(k => !["repoOwner", "repoName", "changedFiles"].includes(k)).length === 0) {
+      await db.exec`
+        UPDATE project_manifests
+        SET version = version + 1, updated_at = NOW()
+        WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
+      `;
+      const existing = await db.queryRow<{ id: string; repo_owner: string; repo_name: string; summary: string | null; tech_stack: string[] | string; services: unknown; data_models: unknown; contracts: unknown; conventions: string | null; known_pitfalls: string | null; file_count: number | null; last_analyzed_at: string | null; version: number }>`
+        SELECT id, repo_owner, repo_name, summary, tech_stack, services, data_models,
+               contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version
+        FROM project_manifests
+        WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
+      `;
+      if (!existing) throw APIError.notFound("manifest not found");
+      const techStack = typeof existing.tech_stack === "string" ? JSON.parse(existing.tech_stack) : (existing.tech_stack || []);
+      const services = typeof existing.services === "string" ? JSON.parse(existing.services) : (existing.services || []);
+      const dataModels = typeof existing.data_models === "string" ? JSON.parse(existing.data_models) : (existing.data_models || []);
+      const contracts = typeof existing.contracts === "string" ? JSON.parse(existing.contracts) : (existing.contracts || []);
+      return { manifest: { id: existing.id, repoOwner: existing.repo_owner, repoName: existing.repo_name, summary: existing.summary, techStack, services, dataModels, contracts, conventions: existing.conventions, knownPitfalls: existing.known_pitfalls, fileCount: existing.file_count, lastAnalyzedAt: existing.last_analyzed_at ? String(existing.last_analyzed_at) : null, version: existing.version } };
+    }
+
+    const techStack = req.techStack ?? [];
+    const services = req.services ?? [];
+    const dataModels = req.dataModels ?? [];
+    const contracts = req.contracts ?? [];
+
+    const row = await db.queryRow<{
+      id: string;
+      repo_owner: string;
+      repo_name: string;
+      summary: string | null;
+      tech_stack: string[] | string;
+      services: unknown;
+      data_models: unknown;
+      contracts: unknown;
+      conventions: string | null;
+      known_pitfalls: string | null;
+      file_count: number | null;
+      last_analyzed_at: string | null;
+      version: number;
+      file_hashes: unknown;
+    }>`
+      INSERT INTO project_manifests (repo_owner, repo_name, summary, tech_stack, services, data_models, contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version, file_hashes)
+      VALUES (
+        ${req.repoOwner},
+        ${req.repoName},
+        ${req.summary ?? null},
+        ${techStack}::text[],
+        ${JSON.stringify(services)}::jsonb,
+        ${JSON.stringify(dataModels)}::jsonb,
+        ${JSON.stringify(contracts)}::jsonb,
+        ${req.conventions ?? null},
+        ${req.knownPitfalls ?? null},
+        ${req.fileCount ?? null},
+        NOW(),
+        1,
+        ${JSON.stringify(req.fileHashes ?? {})}::jsonb
+      )
+      ON CONFLICT (repo_owner, repo_name) DO UPDATE SET
+        summary = COALESCE(EXCLUDED.summary, project_manifests.summary),
+        tech_stack = CASE WHEN array_length(EXCLUDED.tech_stack, 1) > 0 THEN EXCLUDED.tech_stack ELSE project_manifests.tech_stack END,
+        services = EXCLUDED.services,
+        data_models = EXCLUDED.data_models,
+        contracts = EXCLUDED.contracts,
+        conventions = COALESCE(EXCLUDED.conventions, project_manifests.conventions),
+        known_pitfalls = COALESCE(EXCLUDED.known_pitfalls, project_manifests.known_pitfalls),
+        file_count = COALESCE(EXCLUDED.file_count, project_manifests.file_count),
+        last_analyzed_at = NOW(),
+        version = project_manifests.version + 1,
+        updated_at = NOW(),
+        file_hashes = CASE
+          WHEN EXCLUDED.file_hashes::text != '{}'::jsonb::text
+          THEN EXCLUDED.file_hashes
+          ELSE project_manifests.file_hashes
+        END
+      RETURNING id, repo_owner, repo_name, summary, tech_stack, services, data_models,
+                contracts, conventions, known_pitfalls, file_count, last_analyzed_at, version,
+                file_hashes
+    `;
+
+    if (!row) throw APIError.internal("failed to upsert manifest");
+
+    const retTechStack = typeof row.tech_stack === "string" ? JSON.parse(row.tech_stack) : (row.tech_stack || []);
+    const retServices = typeof row.services === "string" ? JSON.parse(row.services) : (row.services || []);
+    const retDataModels = typeof row.data_models === "string" ? JSON.parse(row.data_models) : (row.data_models || []);
+    const retContracts = typeof row.contracts === "string" ? JSON.parse(row.contracts) : (row.contracts || []);
+    const retFileHashes = typeof row.file_hashes === "string"
+      ? JSON.parse(row.file_hashes)
+      : (row.file_hashes as Record<string, string> || {});
+
+    return {
+      manifest: {
+        id: row.id,
+        repoOwner: row.repo_owner,
+        repoName: row.repo_name,
+        summary: row.summary,
+        techStack: retTechStack,
+        services: retServices,
+        dataModels: retDataModels,
+        contracts: retContracts,
+        conventions: row.conventions,
+        knownPitfalls: row.known_pitfalls,
+        fileCount: row.file_count,
+        lastAnalyzedAt: row.last_analyzed_at ? String(row.last_analyzed_at) : null,
+        version: row.version,
+        fileHashes: retFileHashes,
+      },
+    };
+  }
+);
+
+// GET /memory/manifest/view (expose: true, auth: true) — view manifest
+export const viewManifest = api(
+  { method: "GET", path: "/memory/manifest/view", expose: true, auth: true },
+  async (req: GetManifestRequest): Promise<GetManifestResponse> => {
+    return getManifest(req);
+  }
+);
+
+// POST /memory/manifest/edit (expose: true, auth: true) — edit manifest
+export const editManifest = api(
+  { method: "POST", path: "/memory/manifest/edit", expose: true, auth: true },
+  async (req: UpdateManifestRequest): Promise<UpdateManifestResponse> => {
+    return updateManifest(req);
+  }
+);
+
+// POST /memory/knowledge/archive — Archive low-confidence stale rules (internal, used by sleep cycle)
+export const archiveKnowledge = api(
+  { method: "POST", path: "/memory/knowledge/archive", expose: false },
+  async (): Promise<{ archived: number }> => {
+    // Archive rules with confidence < 0.3 AND not applied in last 30 days
+    const rows = await db.query<{ id: string }>`
+      UPDATE knowledge SET status = 'archived', updated_at = NOW()
+      WHERE status = 'active'
+        AND confidence < 0.3
+        AND (last_applied_at IS NULL OR last_applied_at < NOW() - INTERVAL '30 days')
+      RETURNING id
+    `;
+    let archived = 0;
+    for await (const _row of rows) archived++;
+    return { archived };
+  }
+);
+
+// POST /memory/knowledge/promote — Promote high-confidence frequently-used rules (internal)
+export const promoteKnowledge = api(
+  { method: "POST", path: "/memory/knowledge/promote", expose: false },
+  async (): Promise<{ promoted: number }> => {
+    // Promote rules with confidence > 0.8 AND applied more than 10 times
+    const rows = await db.query<{ id: string }>`
+      UPDATE knowledge SET status = 'promoted', promoted_at = NOW(), updated_at = NOW()
+      WHERE status = 'active'
+        AND confidence > 0.8
+        AND times_applied > 10
+      RETURNING id
+    `;
+    let promoted = 0;
+    for await (const _row of rows) promoted++;
+    return { promoted };
+  }
+);
+
+// POST /memory/knowledge/merge-duplicates — Archive duplicate rules sharing a common prefix (internal)
+export const mergeKnowledgeDuplicates = api(
+  { method: "POST", path: "/memory/knowledge/merge-duplicates", expose: false },
+  async (): Promise<{ merged: number }> => {
+    // Fetch active rules with confidence > 0.5, ordered oldest first
+    const rows = db.query<{ id: string; rule: string }>`
+      SELECT id, rule FROM knowledge
+      WHERE status = 'active' AND confidence > 0.5
+      ORDER BY created_at ASC LIMIT 100
+    `;
+    const allRules: Array<{ id: string; rule: string }> = [];
+    for await (const row of rows) allRules.push(row);
+
+    // Find duplicates by 30-char lowercase prefix, keep oldest, archive newer
+    const seen = new Map<string, string>(); // prefix → id
+    let merged = 0;
+    for (const rule of allRules) {
+      const prefix = rule.rule.substring(0, 30).toLowerCase().trim();
+      if (seen.has(prefix)) {
+        await db.exec`UPDATE knowledge SET status = 'archived', updated_at = NOW() WHERE id = ${rule.id}::uuid`;
+        merged++;
+      } else {
+        seen.set(prefix, rule.id);
+      }
+    }
+    return { merged };
+  }
+);
+
+// --- Dependency Graph (D27) ---
+
+interface GetGraphRequest {
+  repoOwner: string;
+  repoName: string;
+}
+
+interface GetGraphResponse {
+  graph: Record<string, string[]> | null;
+  fileCount: number;
+  edgeCount: number;
+  analyzedAt: string | null;
+}
+
+interface UpdateGraphRequest {
+  repoOwner: string;
+  repoName: string;
+  graph: Record<string, string[]>;
+  fileCount: number;
+  edgeCount: number;
+}
+
+interface UpdateGraphResponse {
+  ok: boolean;
+}
+
+// POST /memory/graph/get (expose: false) — get dependency graph for a repo
+export const getGraph = api(
+  { method: "POST", path: "/memory/graph/get", expose: false },
+  async (req: GetGraphRequest): Promise<GetGraphResponse> => {
+    const row = await db.queryRow<{
+      graph: unknown;
+      file_count: number;
+      edge_count: number;
+      analyzed_at: string | null;
+    }>`
+      SELECT graph, file_count, edge_count, analyzed_at
+      FROM project_dependency_graph
+      WHERE repo_owner = ${req.repoOwner} AND repo_name = ${req.repoName}
+    `;
+
+    if (!row) {
+      return { graph: null, fileCount: 0, edgeCount: 0, analyzedAt: null };
+    }
+
+    const graph = typeof row.graph === "string"
+      ? JSON.parse(row.graph)
+      : (row.graph as Record<string, string[]> || {});
+
+    return {
+      graph,
+      fileCount: row.file_count,
+      edgeCount: row.edge_count,
+      analyzedAt: row.analyzed_at ? String(row.analyzed_at) : null,
+    };
+  }
+);
+
+// POST /memory/graph/update (expose: false) — upsert dependency graph for a repo
+export const updateGraph = api(
+  { method: "POST", path: "/memory/graph/update", expose: false },
+  async (req: UpdateGraphRequest): Promise<UpdateGraphResponse> => {
+    await db.exec`
+      INSERT INTO project_dependency_graph (repo_owner, repo_name, graph, file_count, edge_count, analyzed_at)
+      VALUES (
+        ${req.repoOwner},
+        ${req.repoName},
+        ${JSON.stringify(req.graph)}::jsonb,
+        ${req.fileCount},
+        ${req.edgeCount},
+        NOW()
+      )
+      ON CONFLICT (repo_owner, repo_name) DO UPDATE SET
+        graph       = EXCLUDED.graph,
+        file_count  = EXCLUDED.file_count,
+        edge_count  = EXCLUDED.edge_count,
+        analyzed_at = NOW()
+    `;
+    return { ok: true };
+  }
+);
+
+// --- Episodic Memory (D26) ---
+
+interface StoreEpisodeRequest {
+  title: string;
+  content: string;
+  sourceRepo?: string;
+  relatedTaskIds?: string[];
+  tags?: string[];
+}
+
+interface StoreEpisodeResponse {
+  id: string;
+}
+
+/**
+ * D26: Store an episode-type memory capturing a completed task's narrative.
+ * Episodes are structured summaries (title + content) with 180-day TTL.
+ * Stored with memoryType="episode", trustLevel="agent".
+ */
+export const storeEpisode = api(
+  { method: "POST", path: "/memory/episode/store", expose: false },
+  async (req: StoreEpisodeRequest): Promise<StoreEpisodeResponse> => {
+    const episodeContent = sanitizeForMemory(`# ${req.title}\n\n${req.content}`);
+    const contentHash = hashContent(episodeContent);
+    const embedding = await embed(episodeContent);
+    const vec = `[${embedding.join(",")}]`;
+    const tags = [...(req.tags ?? []), "episode"];
+    const ttlDays = 180; // Episodes last longer than regular memories
+
+    const row = await db.queryRow`
+      INSERT INTO memories (
+        content, category, embedding,
+        memory_type, source_repo,
+        tags, ttl_days, pinned, relevance_score, content_hash, trust_level
+      )
+      VALUES (
+        ${episodeContent}, ${"agent"},
+        ${vec}::vector,
+        ${"episode"}, ${req.sourceRepo ?? null},
+        ${tags}::text[], ${ttlDays}, false, ${0.75}, ${contentHash}, ${"agent"}
+      )
+      RETURNING id
+    `;
+
+    if (!row) throw new Error("failed to store episode memory");
+    return { id: row.id as string };
   }
 );
 

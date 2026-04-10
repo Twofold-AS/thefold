@@ -22,13 +22,13 @@ describe("Slack/Discord two-way", () => {
   });
 
   it("web source does not trigger webhook", () => {
-    const source = "web";
+    const source: string = "web";
     const shouldRoute = source === "slack" || source === "discord";
     expect(shouldRoute).toBe(false);
   });
 
   it("api source does not trigger webhook", () => {
-    const source = "api";
+    const source: string = "api";
     const shouldRoute = source === "slack" || source === "discord";
     expect(shouldRoute).toBe(false);
   });
@@ -40,7 +40,7 @@ describe("Slack/Discord two-way", () => {
   });
 
   it("discord source triggers webhook routing", () => {
-    const source = "discord";
+    const source: string = "discord";
     const shouldRoute = source === "slack" || source === "discord";
     expect(shouldRoute).toBe(true);
   });

@@ -795,6 +795,8 @@ interface DecomposeProjectResponse {
       description: string;
       dependsOnIndices: number[];
       contextHints: string[];
+      inputContracts?: string[];
+      outputContracts?: string[];
     }>;
   }>;
   conventions: string;
@@ -825,7 +827,10 @@ export const decomposeProject = api(
       }
     }
 
-    prompt += `Decompose this request into atomic tasks organized in phases. Respond with JSON only.`;
+    prompt += `Decompose this request into atomic tasks organized in phases. Respond with JSON only.\n\n`;
+    prompt += `For each task, also provide:\n`;
+    prompt += `- inputContracts: list of what this task depends on from previous tasks (e.g. "UserService.createUser() function exported", "auth middleware in gateway/auth.ts")\n`;
+    prompt += `- outputContracts: list of what this task produces that other tasks need (e.g. "POST /users endpoint", "JWT token interface exported from types.ts")`;
 
     const pipeline = await buildSystemPromptWithPipeline("project_decomposition", {
       task: req.userMessage,
@@ -1400,5 +1405,84 @@ If no reusable components are found, return: {"components": []}`;
       });
       return { components: [] };
     }
+  }
+);
+
+// --- D12: AI Memory Consolidation ---
+
+interface ConsolidateMemoriesRequest {
+  memories: Array<{ id: string; content: string; memoryType: string }>;
+  context?: string;
+}
+
+interface ConsolidateMemoriesResponse {
+  consolidatedContent: string;
+  keyInsights: string[];
+  tokensUsed: number;
+  costUsd: number;
+}
+
+/**
+ * Synthesize a cluster of related memories into a single consolidated insight.
+ * Used by the Dream Engine (D11) weekly consolidation cron.
+ */
+export const consolidateMemories = api(
+  { method: "POST", path: "/ai/consolidate-memories", expose: false },
+  async (req: ConsolidateMemoriesRequest): Promise<ConsolidateMemoriesResponse> => {
+    if (req.memories.length === 0) {
+      return { consolidatedContent: "", keyInsights: [], tokensUsed: 0, costUsd: 0 };
+    }
+
+    // Use Haiku for cost efficiency — this runs in bulk weekly
+    const model = "claude-haiku-4-5-20250929";
+
+    const memorySections = req.memories
+      .map((m, i) => `[Memory ${i + 1}] (type: ${m.memoryType})\n${m.content}`)
+      .join("\n\n---\n\n");
+
+    const contextNote = req.context ? `\nContext: ${req.context}\n` : "";
+
+    const systemPrompt = `You are a memory consolidation assistant. Given a set of related memories,
+synthesize them into a single, concise, actionable insight that captures the essential knowledge.
+Do NOT simply concatenate — synthesize and distill.
+Respond with valid JSON only, no markdown:
+{
+  "consolidated": "single paragraph synthesizing the key insight",
+  "keyInsights": ["short insight 1", "short insight 2"]
+}`;
+
+    const userPrompt = `${contextNote}
+Consolidate these ${req.memories.length} related memories into one synthesized insight:
+
+${memorySections}
+
+Respond with JSON only.`;
+
+    const response = await callAIWithFallback({
+      model,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+      maxTokens: 1024,
+    });
+
+    let consolidatedContent = "";
+    let keyInsights: string[] = [];
+
+    try {
+      const parsed = JSON.parse(stripMarkdownJson(response.content));
+      consolidatedContent = parsed.consolidated ?? "";
+      keyInsights = Array.isArray(parsed.keyInsights) ? parsed.keyInsights : [];
+    } catch {
+      // Fallback: use the raw response as the consolidated content
+      consolidatedContent = response.content.trim().substring(0, 1000);
+      log.warn("consolidateMemories: JSON parse failed, using raw response");
+    }
+
+    return {
+      consolidatedContent,
+      keyInsights,
+      tokensUsed: response.tokensUsed,
+      costUsd: response.costEstimate.totalCost,
+    };
   }
 );

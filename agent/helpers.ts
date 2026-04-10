@@ -1,6 +1,7 @@
 import log from "encore.dev/log";
 import { github, linear, sandbox, tasks } from "~encore/clients";
 import { agentReports } from "../chat/chat";
+import { checkPermission as _checkPermission, type PermissionContext, type PermissionResult } from "./permissions";
 import {
   serializeMessage,
   buildStatusMessage,
@@ -320,11 +321,25 @@ export async function shouldStopTask(ctx: AgentExecutionContext, phase: string, 
   return false;
 }
 
+// --- Permission Layer (D15) ---
+
+/**
+ * Re-export checkPermission from permissions.ts for use by agent modules.
+ * Wraps the function to keep the import surface clean.
+ */
+export async function checkPermission(
+  action: string,
+  ctx: PermissionContext,
+): Promise<PermissionResult> {
+  return _checkPermission(action, ctx);
+}
+
 // --- GitHub scope validation (ASI02) ---
 
 /**
  * Validates that a GitHub operation targets the repo bound to this agent context.
  * Throws if owner or repo mismatch — hard block on cross-repo writes.
+ * Also checks the repo_create_pr permission via the permission layer.
  */
 export function validateAgentScope(ctx: AgentExecutionContext, owner: string, repo: string): void {
   if (owner !== ctx.repoOwner || repo !== ctx.repoName) {
@@ -332,6 +347,15 @@ export function validateAgentScope(ctx: AgentExecutionContext, owner: string, re
       `Scope violation: agent bound to ${ctx.repoOwner}/${ctx.repoName}, tried ${owner}/${repo}`
     );
   }
+  // Fire-and-forget permission check for observability (grunnmur — not blocking)
+  _checkPermission("repo_create_pr", {
+    repoOwner: owner,
+    repoName: repo,
+  }).catch((err) => {
+    log.warn("validateAgentScope: permission check failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
 }
 
 // --- Auto-init for empty repos ---

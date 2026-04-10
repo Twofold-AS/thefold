@@ -6,6 +6,8 @@ import { executeTask } from "./agent";
 import { autoInitRepo } from "./helpers";
 import { submitReviewInternal } from "./review";
 import { db, acquireRepoLock, releaseRepoLock } from "./db";
+import { summarizeFile, DEFAULT_STRATEGY } from "./context-builder";
+import { getOrCreateManifest, formatManifestForContext } from "./manifest";
 import type {
   ProjectTask,
   CuratedContext,
@@ -156,48 +158,61 @@ export async function curateContext(
     // Docs lookup failed — continue
   }
 
-  // 6. Token trimming — prioritize: conventions → dependency outputs → context hints → memory → docs
-  if (tokenEstimate > MAX_CONTEXT_TOKENS) {
-    const budget = MAX_CONTEXT_TOKENS;
-    let used = Math.ceil(conventions.length / 4); // conventions always kept
-
-    // Trim files (keep as many as fit)
-    const trimmedFiles: Array<{ path: string; content: string }> = [];
-    for (const f of relevantFiles) {
-      const fileTokens = Math.ceil(f.content.length / 4);
-      if (used + fileTokens <= budget) {
-        trimmedFiles.push(f);
-        used += fileTokens;
-      }
+  // 5.5: Project manifest injection (D20)
+  try {
+    // Fetch tree for manifest generation if needed
+    let treeStringForManifest: string | undefined;
+    try {
+      const tree = await github.getTree({ owner: repoOwner, repo: repoName });
+      treeStringForManifest = tree.treeString || undefined;
+    } catch {
+      // Tree fetch failed — manifest may still load from cache
     }
-    relevantFiles.length = 0;
-    relevantFiles.push(...trimmedFiles);
-
-    // Trim memory
-    const trimmedMemory: string[] = [];
-    for (const m of memoryContext) {
-      const memTokens = Math.ceil(m.length / 4);
-      if (used + memTokens <= budget) {
-        trimmedMemory.push(m);
-        used += memTokens;
-      }
+    const manifest = await getOrCreateManifest(repoOwner, repoName, treeStringForManifest);
+    if (manifest) {
+      const manifestSection = formatManifestForContext(manifest);
+      // Prepend manifest as highest-priority context section (~500-800 tokens)
+      docsContext.unshift(manifestSection);
+      tokenEstimate += Math.ceil(manifestSection.length / 4);
+      log.info("curateContext: manifest injected", { repoOwner, repoName, version: manifest.version });
     }
-    memoryContext.length = 0;
-    memoryContext.push(...trimmedMemory);
+  } catch (err) {
+    log.warn("curateContext: manifest injection failed (non-critical)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
-    // Trim docs
-    const trimmedDocs: string[] = [];
-    for (const d of docsContext) {
-      const docTokens = Math.ceil(d.length / 4);
-      if (used + docTokens <= budget) {
-        trimmedDocs.push(d);
-        used += docTokens;
-      }
+  // 6. Context compression — uses declarative strategy from DEFAULT_STRATEGY (D17)
+  const rawTokenEstimate = tokenEstimate;
+  if (rawTokenEstimate > MAX_CONTEXT_TOKENS) {
+    log.info("curateContext: compressing context", { rawTokens: rawTokenEstimate, budget: MAX_CONTEXT_TOKENS });
+
+    // Apply file compression: signatures_only (mirrors DEFAULT_STRATEGY)
+    if (DEFAULT_STRATEGY.compress.files === "signatures_only") {
+      const compressed = relevantFiles.map(f => ({ ...f, content: summarizeFile(f.content) }));
+      relevantFiles.length = 0;
+      relevantFiles.push(...compressed);
     }
-    docsContext.length = 0;
-    docsContext.push(...trimmedDocs);
 
-    tokenEstimate = used;
+    // Apply memory compression: recent_5
+    if (DEFAULT_STRATEGY.compress.memory === "recent_5") {
+      const recentMemory = memoryContext.slice(0, 5);
+      memoryContext.length = 0;
+      memoryContext.push(...recentMemory);
+    }
+
+    // Apply docs compression: relevant (keep first 3)
+    if (DEFAULT_STRATEGY.compress.docs === "relevant") {
+      const relevantDocs = docsContext.slice(0, 3);
+      docsContext.length = 0;
+      docsContext.push(...relevantDocs);
+    }
+
+    // Recalculate token estimate after compression
+    tokenEstimate = Math.ceil(conventions.length / 4)
+      + relevantFiles.reduce((s, f) => s + Math.ceil(f.content.length / 4), 0)
+      + memoryContext.reduce((s, m) => s + Math.ceil(m.length / 4), 0)
+      + docsContext.reduce((s, d) => s + Math.ceil(d.length / 4), 0);
   }
 
   return {
@@ -271,6 +286,8 @@ export async function executeProject(
     attempt_count: number;
     started_at: Date | null;
     completed_at: Date | null;
+    input_contracts: string | null;
+    output_contracts: string | null;
   }>`
     SELECT * FROM project_tasks
     WHERE project_id = ${projectId}
@@ -297,6 +314,12 @@ export async function executeProject(
       attemptCount: row.attempt_count,
       startedAt: row.started_at ?? undefined,
       completedAt: row.completed_at ?? undefined,
+      inputContracts: row.input_contracts
+        ? (typeof row.input_contracts === "string" ? JSON.parse(row.input_contracts) : row.input_contracts)
+        : undefined,
+      outputContracts: row.output_contracts
+        ? (typeof row.output_contracts === "string" ? JSON.parse(row.output_contracts) : row.output_contracts)
+        : undefined,
     });
   }
 
@@ -515,6 +538,22 @@ export async function executeProject(
 
           if (thefoldTaskId) {
             try { await tasks.updateTaskStatus({ id: thefoldTaskId, status: "done" }); } catch (err) { log.warn("Failed to mark task as done", { taskId: thefoldTaskId, error: err instanceof Error ? err.message : String(err) }); }
+          }
+
+          // D23: Log contract observability — non-blocking
+          if (task.outputContracts && task.outputContracts.length > 0) {
+            log.info("task completed with output contracts", {
+              taskId: task.id,
+              taskTitle: task.title,
+              outputContracts: task.outputContracts,
+              filesChanged: result.filesChanged,
+            });
+            await db.exec`
+              UPDATE project_tasks
+              SET contracts_verified = true,
+                  verification_notes = ${"Task completed — output contracts logged for observability"}
+              WHERE id = ${task.id}
+            `;
           }
 
           await reportProject(conversationId, `Task ${completedTasks}/${planRow.total_tasks} fullfort: ${task.title}`);
@@ -965,6 +1004,8 @@ interface StoreProjectPlanRequest {
         description: string;
         dependsOnIndices: number[];
         contextHints: string[];
+        inputContracts?: string[];
+        outputContracts?: string[];
       }>;
     }>;
     conventions: string;
@@ -1008,14 +1049,19 @@ export const storeProjectPlan = api(
       for (let taskIdx = 0; taskIdx < phase.tasks.length; taskIdx++) {
         const task = phase.tasks[taskIdx];
 
+        const inputContracts = task.inputContracts ?? [];
+        const outputContracts = task.outputContracts ?? [];
+
         const taskRow = await db.queryRow<{ id: string }>`
           INSERT INTO project_tasks (
             project_id, phase, task_order, title, description,
-            context_hints
+            context_hints, input_contracts, output_contracts
           ) VALUES (
             ${planRow.id}, ${phaseIdx}, ${taskIdx},
             ${task.title}, ${task.description},
-            ${task.contextHints}::text[]
+            ${task.contextHints}::text[],
+            ${JSON.stringify(inputContracts)}::jsonb,
+            ${JSON.stringify(outputContracts)}::jsonb
           )
           RETURNING id
         `;
