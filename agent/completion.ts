@@ -9,6 +9,7 @@ import { updateDecisionCache, createDecisionEntry } from "./decision-cache";
 import { getPatternRegex } from "./pattern-matcher";
 import { runHooks } from "./hooks";
 import { updateManifest as updateProjectManifest } from "./manifest";
+import { recordRoutingPattern } from "./routing-patterns";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 
@@ -441,6 +442,15 @@ export async function completeTask(
       log.warn("savePhaseMetrics failed", { error: err instanceof Error ? err.message : String(err) });
     }
     await completeJob(ctx.jobId).catch((err) => log.warn("completeJob failed", { error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  // === D22: Record routing pattern for future 0-token routing ===
+  // Fire-and-forget — non-critical observability
+  if (ctx.userMessage) {
+    recordRoutingPattern(ctx.userMessage, {
+      success: true,
+      model: ctx.selectedModel,
+    }).catch((err) => log.warn("recordRoutingPattern failed", { error: String(err) }));
   }
 
   return {
