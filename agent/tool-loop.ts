@@ -17,6 +17,8 @@ import { AGENT_TOOLS } from "./agent-tools";
 import type { AgentToolName } from "./agent-tools";
 import { executeAgentTool } from "./agent-tool-executor";
 import type { AgentToolContext } from "./agent-tool-executor";
+import { agentEventBus } from "./event-bus";
+import { createAgentEvent } from "./events";
 
 // --- Secrets ---
 const anthropicKey = secret("AnthropicAPIKey");
@@ -85,12 +87,20 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
   const client = new Anthropic({ apiKey: anthropicKey() });
   const maxLoops = options.maxLoops ?? MAX_TOOL_LOOPS;
 
+  // SSE routing key: prefer the TheFold task ID, fall back to conversation ID
+  const streamKey = options.toolContext.thefoldTaskId || options.toolContext.conversationId;
+
   // Accumulators
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   const toolsUsed: string[] = [];
   const filesWritten: Array<{ path: string; content: string }> = [];
   let sandboxId: string | undefined;
+
+  agentEventBus.emit(streamKey, createAgentEvent({
+    type: "agent.status",
+    data: { status: "running", phase: "tool_loop", message: "AI tool loop started" },
+  }));
 
   // Working message list (mutated as we append assistant + tool_result turns)
   const messages: Anthropic.MessageParam[] = options.messages as Anthropic.MessageParam[];
@@ -109,6 +119,7 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
 
     // --- Call AI ---
     let response: Anthropic.Message;
+    const messageId = crypto.randomUUID();
 
     try {
       const stream = client.messages.stream({
@@ -118,10 +129,23 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
         messages,
         tools: AGENT_TOOLS as Anthropic.Tool[],
       });
+
+      // Emit text deltas as they arrive so the frontend can render streaming text
+      stream.on("text", (text) => {
+        agentEventBus.emit(streamKey, createAgentEvent({
+          type: "agent.message",
+          data: { delta: text, role: "assistant", messageId },
+        }));
+      });
+
       response = await stream.finalMessage();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error("agent tool loop: AI call failed", { loop, error: msg });
+      agentEventBus.emit(streamKey, createAgentEvent({
+        type: "agent.error",
+        data: { errorType: "ai_call_failed", message: msg, retryable: true },
+      }));
       throw err;
     }
 
@@ -157,6 +181,15 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
         endpoint: "agent-tool-loop",
       });
 
+      agentEventBus.emit(streamKey, createAgentEvent({
+        type: "agent.done",
+        data: {
+          summary: finalText,
+          filesChanged: filesWritten.map((f) => f.path),
+          tokensUsed: totalInputTokens + totalOutputTokens,
+        },
+      }));
+
       return {
         finalText,
         toolsUsed,
@@ -190,7 +223,25 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
 
       toolsUsed.push(toolName);
 
+      agentEventBus.emit(streamKey, createAgentEvent({
+        type: "agent.tool_use",
+        data: { toolName, toolId: block.id, input: toolInput },
+      }));
+
+      const toolCallStart = Date.now();
       const result = await executeAgentTool(toolName, toolInput, options.toolContext);
+      const toolDurationMs = Date.now() - toolCallStart;
+
+      agentEventBus.emit(streamKey, createAgentEvent({
+        type: "agent.tool_result",
+        data: {
+          toolId: block.id,
+          toolName,
+          result: result.content,
+          durationMs: toolDurationMs,
+          success: !result.isError,
+        },
+      }));
 
       // Track side-effects for ExecutionResult mapping in D7
       if (toolName === "repo_write_file" && !result.isError) {
@@ -240,6 +291,15 @@ export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLo
     model: options.model,
     endpoint: "agent-tool-loop",
   });
+
+  agentEventBus.emit(streamKey, createAgentEvent({
+    type: "agent.done",
+    data: {
+      summary: `Tool loop stopped after ${maxLoops} iterations. Tools used: ${toolsUsed.join(", ")}`,
+      filesChanged: filesWritten.map((f) => f.path),
+      tokensUsed: totalInputTokens + totalOutputTokens,
+    },
+  }));
 
   return {
     finalText: `[Tool loop stopped after ${maxLoops} iterations. Tools used: ${toolsUsed.join(", ")}]`,

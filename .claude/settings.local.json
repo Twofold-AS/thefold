@@ -21,7 +21,13 @@
       "Bash(for page in home chat ai repos components settings login)",
       "Bash(do echo -n \"$page: \")",
       "Bash(done)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(xargs -I {} bash -c 'count=$\\(find \"\"{}\"\" -type f | wc -l\\); echo \"\"$\\(basename {}\\): $count\"\"')",
+      "Bash(sort -t: -k2 -rn)",
+      "Bash(python3:*)",
+      "Bash(node -e:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
