@@ -23,8 +23,6 @@ import type {
   AICallOptions, AICallResponse, FileContent,
 } from "./types";
 
-// --- Chat Tool-Use (moved to ./tools.ts) ---
-
 // --- Endpoints ---
 
 // Direct chat
