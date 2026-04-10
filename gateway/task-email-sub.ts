@@ -1,9 +1,9 @@
 import { Subscription } from "encore.dev/pubsub";
 import log from "encore.dev/log";
 import { taskEvents } from "../tasks/tasks";
-import { sendEmail } from "./email";
+import { sendEmail, jobCompletionEmail } from "./email";
 
-// F3: Email notifications for completed tasks
+// Wire jobCompletionEmail template to task completion events
 const _taskEmailSub = new Subscription(taskEvents, "email-task-completed", {
   handler: async (event) => {
     if (event.action !== "completed") return;
@@ -11,13 +11,21 @@ const _taskEmailSub = new Subscription(taskEvents, "email-task-completed", {
     try {
       const { users: usersClient, tasks: tasksClient } = await import("~encore/clients");
 
-      // Look up the task to find who created it
+      // Look up the task to find who created it and review metadata
       let userId: string | null = null;
+      let taskTitle = event.taskId;
+      let prUrl = "https://app.thefold.dev/tasks";
+      let filesChanged = 0;
+      let costUsd = 0;
+      let qualityScore: number | undefined;
+
       try {
         const taskData = await tasksClient.getTaskInternal({ id: event.taskId });
         userId = taskData.task.createdBy;
+        taskTitle = taskData.task.title;
+        prUrl = taskData.task.prUrl || prUrl;
       } catch {
-        // Task lookup failed — skip
+        // Task lookup failed — fall back to taskId as title
       }
 
       if (!userId) {
@@ -28,25 +36,35 @@ const _taskEmailSub = new Subscription(taskEvents, "email-task-completed", {
       const userInfo = await usersClient.getUser({ userId });
       if (!userInfo?.email) return;
 
-      // Check if user has email notifications enabled
+      // Respect opt-out preference
       const prefs = userInfo.preferences;
       if (prefs && typeof prefs === "object" && (prefs as Record<string, unknown>).emailNotifications === false) return;
 
-      const taskTitle = event.taskId;
-      const repo = event.repo || "Ingen";
+      // Fetch review data for quality score and file count if available
+      try {
+        const { agent: agentClient } = await import("~encore/clients");
+        const reviews = await agentClient.listReviews({ taskId: event.taskId, limit: 1 });
+        const review = reviews.reviews?.[0];
+        if (review) {
+          filesChanged = review.fileCount ?? 0;
+          qualityScore = review.qualityScore ?? undefined;
+          prUrl = review.prUrl || prUrl;
+        }
+      } catch {
+        // Review lookup is optional
+      }
 
-      await sendEmail({
-        to: userInfo.email,
-        subject: `TheFold: Oppgave fullført — ${taskTitle}`,
-        html: `<div style="font-family: monospace; max-width: 600px; margin: 0 auto;">
-          <h2 style="border-bottom: 1px solid #333;">Oppgave fullført</h2>
-          <p>Oppgaven <strong>${taskTitle}</strong> er fullført.</p>
-          <p>Repo: ${repo}</p>
-          <p><a href="https://app.thefold.dev/tasks" style="color: #0066cc;">Se oppgaver →</a></p>
-        </div>`,
+      const template = jobCompletionEmail({
+        taskTitle,
+        prUrl,
+        filesChanged,
+        costUsd,
+        qualityScore,
       });
 
-      log.info("Task completion email sent", { taskId: event.taskId });
+      await sendEmail({ to: userInfo.email, ...template });
+
+      log.info("Task completion email sent", { taskId: event.taskId, to: userInfo.email });
     } catch (err) {
       log.warn("Task completion email failed", {
         taskId: event.taskId,
