@@ -157,7 +157,7 @@ async function executeToolCall(
         );
       }
 
-      return { success: true, taskId: result.task.id, message: `Oppgave opprettet: "${input.title}". Bruk start_task for å starte den.` };
+      return { success: true, taskId: result.task.id, message: `Oppgave opprettet: "${input.title}". Kaller start_task nå.` };
     }
 
     case "start_task": {

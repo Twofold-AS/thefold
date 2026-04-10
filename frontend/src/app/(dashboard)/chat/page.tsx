@@ -372,6 +372,7 @@ function ChatPageInner() {
           msgsLoading={msgsLoading}
           ac={ac}
           sending={sending}
+          activeTaskId={activeTaskId}
           thinkSeconds={thinkSeconds}
           streamStatusText={streamStatusText}
           chatError={chatError}

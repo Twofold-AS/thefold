@@ -59,6 +59,7 @@ interface MessageListProps {
   loading: boolean;
   ac: string | null;
   sending: boolean;
+  activeTaskId?: string | null;
   thinkSeconds: number;
   streamStatusText?: string | null;
   chatError: string | null;
@@ -74,6 +75,7 @@ export default function MessageList({
   loading,
   ac,
   sending,
+  activeTaskId,
   thinkSeconds,
   streamStatusText,
   chatError,
@@ -228,10 +230,10 @@ export default function MessageList({
       )}
 
       {/* Typing indicator for direct chat; AgentStatusBar handles agent tasks */}
-      {sending && !hasAgentMessages && (
+      {sending && !activeTaskId && (
         <TypingIndicator statusText={streamStatusText ?? "Tenker..."} />
       )}
-      {sending && hasAgentMessages && (
+      {sending && activeTaskId && (
         <AgentStatusBar
           sending={sending}
           thinkSeconds={thinkSeconds}
