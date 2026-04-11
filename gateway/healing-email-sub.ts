@@ -1,6 +1,6 @@
 import { Subscription } from "encore.dev/pubsub";
 import log from "encore.dev/log";
-import { healingEvents } from "../registry/registry";
+import { healingEvents } from "../registry/events";
 import { sendEmail, healingReportEmail } from "./email";
 
 // Wire healingReportEmail template to registry healing events
@@ -12,10 +12,14 @@ const _healingEmailSub = new Subscription(healingEvents, "email-healing-report",
       // Send healing report to all users with admin role (or first admin found)
       let adminEmail: string | null = null;
       try {
-        const adminUsers = await usersClient.listAdmins({});
-        adminEmail = adminUsers.users?.[0]?.email ?? null;
+        // listAdmins not yet implemented — skip gracefully
+        const fn = (usersClient as Record<string, unknown>)["listAdmins"];
+        if (typeof fn === "function") {
+          const adminUsers = await (fn as (req: Record<string, never>) => Promise<{ users?: { email: string }[] }>)({});
+          adminEmail = adminUsers.users?.[0]?.email ?? null;
+        }
       } catch {
-        // listAdmins may not exist — fall back gracefully
+        // Fall back gracefully
       }
 
       if (!adminEmail) {

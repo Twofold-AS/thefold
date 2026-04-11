@@ -3,9 +3,9 @@ import { Subscription } from "encore.dev/pubsub";
 import log from "encore.dev/log";
 import { createHmac, timingSafeEqual } from "crypto";
 import { db } from "./db";
-import { taskEvents } from "../tasks/tasks";
+import { taskEvents } from "../tasks/events";
 import { agentErrorEvents } from "../agent/event-bus";
-import { healingEvents } from "../registry/registry";
+import { healingEvents } from "../registry/events";
 
 // --- Types ---
 

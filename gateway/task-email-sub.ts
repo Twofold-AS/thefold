@@ -1,6 +1,6 @@
 import { Subscription } from "encore.dev/pubsub";
 import log from "encore.dev/log";
-import { taskEvents } from "../tasks/tasks";
+import { taskEvents } from "../tasks/events";
 import { sendEmail, jobCompletionEmail } from "./email";
 
 // Wire jobCompletionEmail template to task completion events

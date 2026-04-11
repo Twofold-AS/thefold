@@ -1,6 +1,6 @@
 import log from "encore.dev/log";
 import { agent, github, linear, memory, sandbox, tasks, ai, registry } from "~encore/clients";
-import { agentReports } from "../chat/chat";
+import { agentReports } from "../chat/events";
 import { savePhaseMetrics } from "./metrics";
 import { completeJob } from "./db";
 import { validateAgentScope } from "./helpers";

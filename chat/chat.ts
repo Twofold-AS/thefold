@@ -1,7 +1,11 @@
 import { api, APIError } from "encore.dev/api";
 import { getAuthData } from "~encore/auth";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
-import { Topic, Subscription } from "encore.dev/pubsub";
+import { Subscription } from "encore.dev/pubsub";
+
+// Re-export from isolated events file for backward compatibility
+export { agentReports, chatResponses, type AgentReport, type ChatResponse } from "./events";
+import { agentReports, chatResponses } from "./events";
 
 // --- Database ---
 
@@ -13,35 +17,6 @@ export const db = new SQLDatabase("chat", {
   try { await db.queryRow`SELECT 1`; console.log("[chat] db warmed"); }
   catch (e) { console.warn("[chat] warmup failed:", e); }
 })();
-
-// --- Pub/Sub: Agent reports back to chat ---
-
-export interface AgentReport {
-  conversationId: string;
-  taskId: string;
-  content: string;
-  status: "working" | "completed" | "failed" | "needs_input";
-  prUrl?: string;
-  filesChanged?: string[];
-  completionMessage?: string;
-}
-
-export const agentReports = new Topic<AgentReport>("agent-reports", {
-  deliveryGuarantee: "at-least-once",
-});
-
-// --- Pub/Sub: Chat response routing (two-way Slack/Discord) ---
-
-export interface ChatResponse {
-  conversationId: string;
-  content: string;
-  source: string;  // "web" | "slack" | "discord" | "api"
-  metadata: Record<string, string>;
-}
-
-export const chatResponses = new Topic<ChatResponse>("chat-responses", {
-  deliveryGuarantee: "at-least-once",
-});
 
 import log from "encore.dev/log";
 
@@ -351,7 +326,7 @@ function parseReportToSteps(report: AgentReport): Array<{ label: string; icon: s
 }
 
 // Subscribe to build progress and notify users
-import { buildProgress } from "../builder/db";
+import { buildProgress } from "../builder/events";
 
 const _buildProgressSub = new Subscription(buildProgress, "chat-build-progress", {
   handler: async (event) => {
@@ -394,7 +369,7 @@ const _buildProgressSub = new Subscription(buildProgress, "chat-build-progress",
 });
 
 // Subscribe to task events and notify users
-import { taskEvents } from "../tasks/tasks";
+import { taskEvents } from "../tasks/events";
 
 const _taskEventsSub = new Subscription(taskEvents, "chat-task-events", {
   handler: async (event) => {
@@ -428,7 +403,7 @@ const _taskEventsSub = new Subscription(taskEvents, "chat-task-events", {
 });
 
 // Subscribe to healing events and notify users
-import { healingEvents } from "../registry/registry";
+import { healingEvents } from "../registry/events";
 
 const _healingSub = new Subscription(healingEvents, "store-healing-notification", {
   handler: async (event) => {

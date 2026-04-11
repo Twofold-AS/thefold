@@ -2,8 +2,10 @@
 // Extracted to avoid circular dependency between builder.ts and phases.ts
 
 import { SQLDatabase } from "encore.dev/storage/sqldb";
-import { Topic } from "encore.dev/pubsub";
-import type { BuildProgressEvent, BuildPhase, BuildJobStatus } from "./types";
+import type { BuildPhase, BuildJobStatus } from "./types";
+
+// Re-export from isolated events file for backward compatibility
+export { buildProgress, type BuildProgressEvent } from "./events";
 
 export const db = new SQLDatabase("builder", {
   migrations: "./migrations",
@@ -13,10 +15,6 @@ export const db = new SQLDatabase("builder", {
   try { await db.queryRow`SELECT 1`; console.log("[builder] db warmed"); }
   catch (e) { console.warn("[builder] warmup failed:", e); }
 })();
-
-export const buildProgress = new Topic<BuildProgressEvent>("build-progress", {
-  deliveryGuarantee: "at-least-once",
-});
 
 export async function recordStep(
   jobId: string, stepNumber: number, phase: string, action: string, filePath: string | null,

@@ -1,28 +1,17 @@
 import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
-import { Topic } from "encore.dev/pubsub";
 import log from "encore.dev/log";
 import { linear } from "~encore/clients";
 import { ai } from "~encore/clients";
 import type { Task, TaskStatus, TaskSource } from "./types";
 
+// Re-export from isolated events file for backward compatibility
+export { taskEvents, type TaskEvent } from "./events";
+import { taskEvents } from "./events";
+
 // --- Database ---
 
 const db = new SQLDatabase("tasks", { migrations: "./migrations" });
-
-// --- Pub/Sub ---
-
-export interface TaskEvent {
-  taskId: string;
-  action: "created" | "updated" | "started" | "completed" | "blocked" | "synced";
-  repo: string | null;
-  source: TaskSource;
-  timestamp: string;
-}
-
-export const taskEvents = new Topic<TaskEvent>("task-events", {
-  deliveryGuarantee: "at-least-once",
-});
 
 // --- Row parsing helper ---
 

@@ -2,7 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import log from "encore.dev/log";
 import { getAuthData } from "~encore/auth";
 import { github, linear, memory, sandbox, tasks } from "~encore/clients";
-import { agentReports } from "../chat/chat";
+import { agentReports } from "../chat/events";
 import { db } from "./db";
 import { executeTask } from "./agent";
 import { startDependentTasks, generateBranchName, generateConventionalCommit, buildPRDescription } from "./completion";

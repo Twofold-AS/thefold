@@ -2,7 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
 import { github, linear, sandbox, users, tasks, mcp } from "~encore/clients";
-import { agentReports } from "../chat/chat";
+import { agentReports } from "../chat/events";
 import { type ModelMode } from "../ai/router";
 import type { AgentExecutionContext, CuratedContext } from "./types";
 import { createStateMachine } from "./state-machine";

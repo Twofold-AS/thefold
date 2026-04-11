@@ -1,7 +1,7 @@
 import { api, APIError } from "encore.dev/api";
 import { github, memory, docs, ai, tasks, sandbox } from "~encore/clients";
 import log from "encore.dev/log";
-import { agentReports } from "../chat/chat";
+import { agentReports } from "../chat/events";
 import { executeTask } from "./agent";
 import { autoInitRepo } from "./helpers";
 import { submitReviewInternal } from "./review";

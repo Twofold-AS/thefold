@@ -1,6 +1,6 @@
 import log from "encore.dev/log";
 import { github, linear, sandbox, tasks } from "~encore/clients";
-import { agentReports } from "../chat/chat";
+import { agentReports } from "../chat/events";
 import { checkPermission as _checkPermission, type PermissionContext, type PermissionResult } from "./permissions";
 import {
   serializeMessage,

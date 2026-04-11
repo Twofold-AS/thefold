@@ -1,8 +1,12 @@
 import { api, APIError } from "encore.dev/api";
-import { Topic, Subscription } from "encore.dev/pubsub";
+import { Subscription } from "encore.dev/pubsub";
 import log from "encore.dev/log";
 import { db } from "./db";
 import { tasks } from "~encore/clients";
+
+// Re-export from isolated events file for backward compatibility
+export { healingEvents, type HealingNotification } from "./events";
+import { healingEvents } from "./events";
 import type {
   Component,
   ComponentFile,
@@ -16,16 +20,9 @@ import type {
   FindForTaskRequest,
   TriggerHealingRequest,
   HealingStatusRequest,
-  HealingNotification,
   UseComponentWithVarsRequest,
   UseComponentWithVarsResponse,
 } from "./types";
-
-// --- Pub/Sub ---
-
-export const healingEvents = new Topic<HealingNotification>("healing-events", {
-  deliveryGuarantee: "at-least-once",
-});
 
 // --- Helpers ---
 
