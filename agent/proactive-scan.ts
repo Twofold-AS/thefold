@@ -69,7 +69,7 @@ export const runProactiveScan = api(
           sourceRepo: repoPath,
           tags: ["proactive-scan", "health"],
           trustLevel: "agent",
-        }).catch((err) =>
+        }).catch((err: unknown) =>
           log.warn("proactive scan memory store failed", { repo: repoPath, error: String(err) })
         );
       }
