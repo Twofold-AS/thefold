@@ -226,14 +226,35 @@ export const executePreRun = api(
         validationErrors.push("Missing userId");
       }
 
+      // Confidence threshold check: skip skills that have historically underperformed
+      // Use routing_rules.min_confidence override, or default threshold of 0.2
+      const minConfidence: number = typeof skill.routingRules?.min_confidence === "number"
+        ? skill.routingRules.min_confidence as number
+        : 0.2;
+
+      let confidenceScore = 0.5; // default when unknown
+      try {
+        const row = await db.queryRow<{ confidence_score: number }>`
+          SELECT COALESCE(confidence_score, 0.5)::float as confidence_score
+          FROM skills WHERE id = ${skill.id}::uuid
+        `;
+        if (row) confidenceScore = row.confidence_score;
+      } catch { /* DB error — use default */ }
+
+      if (confidenceScore < minConfidence) {
+        validationErrors.push(`Skill confidence (${confidenceScore.toFixed(2)}) below threshold (${minConfidence})`);
+      }
+
       // Context enrichment: add metadata about the skill being applied
       const enrichedContext: Record<string, unknown> = {
         skillName: skill.name,
         skillPriority: skill.priority,
         tokenEstimate: skill.tokenEstimate,
+        confidenceScore,
         hasRepo: !!req.context.repo,
         fileCount: req.context.files?.length ?? 0,
         labelCount: req.context.labels?.length ?? 0,
+        routingMatched: Object.keys(skill.routingRules).length > 0,
       };
 
       const approved = validationErrors.length === 0;
@@ -300,6 +321,22 @@ export const executePostRun = api(
       }
       if (lowerOutput.includes("// todo") || lowerOutput.includes("// ...")) {
         qualityIssues.push("AI output contains placeholder code (TODO or ...)");
+      }
+
+      // Routing-rules-based quality gates
+      const rules = skill.routingRules || {};
+      if (rules.require_tests === true) {
+        const hasTestCode = lowerOutput.includes("describe(") || lowerOutput.includes("it(") || lowerOutput.includes("test(") || lowerOutput.includes(".test.") || lowerOutput.includes("expect(");
+        if (!hasTestCode) qualityIssues.push("Skill requires test code but none found in output");
+      }
+      if (rules.require_types === true) {
+        const hasTypes = lowerOutput.includes("interface ") || lowerOutput.includes("type ") || lowerOutput.includes(": string") || lowerOutput.includes(": number");
+        if (!hasTypes) qualityIssues.push("Skill requires TypeScript types but none found in output");
+      }
+      if (rules.min_output_length && typeof rules.min_output_length === "number") {
+        if (req.aiOutput.length < rules.min_output_length) {
+          qualityIssues.push(`Output too short: ${req.aiOutput.length} < required ${rules.min_output_length} chars`);
+        }
       }
 
       const approved = qualityIssues.length === 0;
