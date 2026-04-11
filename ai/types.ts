@@ -31,6 +31,7 @@ export interface ChatResponse {
   costUsd: number;
   toolsUsed?: string[];
   lastCreatedTaskId?: string; // BUG 7 FIX: Pass task ID across chat turns
+  lastStartedTaskId?: string; // Task ID when start_task was called directly (without create_task)
   usage: {
     inputTokens: number;
     outputTokens: number;

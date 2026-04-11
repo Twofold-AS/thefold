@@ -17,6 +17,7 @@ import {
   repoConversationId,
   listSkills,
   listProviders,
+  forceContinueTask,
   type Message,
 } from "@/lib/api";
 import { useRepoContext } from "@/lib/repo-context";
@@ -94,7 +95,7 @@ function ChatPageInner() {
   });
 
   // SSE streaming: connect for agent tasks (activeTaskId) or direct chat (ac as key)
-  const { messages: sseMessages, status: streamStatus, agentStartedTaskId } = useAgentStream(
+  const { messages: sseMessages, status: streamStatus, agentStartedTaskId, stalled: streamStalled } = useAgentStream(
     sending ? (activeTaskId || ac) : null,
     {
       onDone: () => {
@@ -354,6 +355,15 @@ function ChatPageInner() {
     setActiveTaskId(null);
   };
 
+  const handleForceContinue = async () => {
+    if (!activeTaskId || !ac) return;
+    try {
+      await forceContinueTask(activeTaskId, ac);
+    } catch {
+      // Non-critical — agent may have already resumed
+    }
+  };
+
   const handleDelete = async (id: string) => {
     await deleteConversation(id);
     if (ac === id) {
@@ -413,33 +423,87 @@ function ChatPageInner() {
           />
         </div>
       ) : (
-        <ChatContainer
-          title={cur ? cur.title || "Ny samtale" : "\u2014"}
-          subtitle={curRepo ?? undefined}
-          msgs={displayMsgs}
-          msgsLoading={msgsLoading}
-          ac={ac}
-          sending={sending}
-          activeTaskId={activeTaskId}
-          thinkSeconds={thinkSeconds}
-          streamStatusText={streamStatusText}
-          chatError={chatError}
-          onClearError={() => setChatError(null)}
-          onCancel={handleCancel}
-          onApprove={handleApprove}
-          onReject={handleReject}
-          onRequestChanges={handleRequestChanges}
-          onSend={handleSend}
-          pendingReviewId={pendingReviewId}
-          skills={availableSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
-          selectedSkillIds={selectedSkillIds}
-          onSkillsChange={setSelectedSkillIds}
-          subAgentsEnabled={subAgentsEnabled}
-          onSubAgentsToggle={() => setSubAgentsEnabled(p => !p)}
-          models={allModels}
-          selectedModel={selectedModel}
-          onModelChange={setSelectedModel}
-        />
+        <div style={{ position: "relative", display: "flex", flexDirection: "column", minHeight: 0 }}>
+          {/* Stall banner — shown when no SSE event for 60s during active agent task */}
+          {streamStalled && sending && activeTaskId && (
+            <div style={{
+              position: "absolute",
+              top: 12,
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 50,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              background: T.surface,
+              border: `1px solid ${T.warning}`,
+              borderRadius: 8,
+              padding: "10px 16px",
+              fontSize: 13,
+              color: T.warning,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
+            }}>
+              <span>Agenten har stoppet å svare</span>
+              <button
+                onClick={handleForceContinue}
+                style={{
+                  background: T.accent,
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "5px 12px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  fontFamily: T.sans,
+                }}
+              >
+                Fortsett
+              </button>
+              <button
+                onClick={handleCancel}
+                style={{
+                  background: "transparent",
+                  color: T.textMuted,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 6,
+                  padding: "5px 10px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  fontFamily: T.sans,
+                }}
+              >
+                Avbryt
+              </button>
+            </div>
+          )}
+          <ChatContainer
+            title={cur ? cur.title || "Ny samtale" : "\u2014"}
+            subtitle={curRepo ?? undefined}
+            msgs={displayMsgs}
+            msgsLoading={msgsLoading}
+            ac={ac}
+            sending={sending}
+            activeTaskId={activeTaskId}
+            thinkSeconds={thinkSeconds}
+            streamStatusText={streamStatusText}
+            chatError={chatError}
+            onClearError={() => setChatError(null)}
+            onCancel={handleCancel}
+            onApprove={handleApprove}
+            onReject={handleReject}
+            onRequestChanges={handleRequestChanges}
+            onSend={handleSend}
+            pendingReviewId={pendingReviewId}
+            skills={availableSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
+            selectedSkillIds={selectedSkillIds}
+            onSkillsChange={setSelectedSkillIds}
+            subAgentsEnabled={subAgentsEnabled}
+            onSubAgentsToggle={() => setSubAgentsEnabled(p => !p)}
+            models={allModels}
+            selectedModel={selectedModel}
+            onModelChange={setSelectedModel}
+          />
+        </div>
       )}
     </div>
   );

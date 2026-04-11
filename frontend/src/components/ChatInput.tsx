@@ -106,9 +106,22 @@ export default function ChatInput({
           value={v}
           onChange={(e) => setV(e.target.value)}
           onKeyDown={(e) => {
+            // Cmd+Enter (Mac) or Ctrl+Enter (Windows) — always send
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && v) {
+              e.preventDefault();
+              doSend();
+              return;
+            }
+            // Plain Enter without Shift — send
             if (e.key === "Enter" && !e.shiftKey && v) {
               e.preventDefault();
               doSend();
+              return;
+            }
+            // Escape — close open dropdowns
+            if (e.key === "Escape") {
+              setSkillsOpen(false);
+              setModelOpen(false);
             }
           }}
           placeholder={placeholder}

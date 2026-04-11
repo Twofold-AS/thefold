@@ -6,6 +6,7 @@ import { getToken } from "../lib/auth";
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 const MAX_RETRIES = 3;
 const BACKOFF_BASE_MS = 1000;
+const STALL_TIMEOUT_MS = 60_000; // 60 s without events → stalled
 
 export interface StreamMessage {
   id: string;
@@ -32,6 +33,7 @@ interface AgentStreamState {
   error: string | null;
   thinkingText: string | null;
   agentStartedTaskId: string | null;
+  stalled: boolean; // true when no SSE event received for STALL_TIMEOUT_MS
 }
 
 interface UseAgentStreamOptions {
@@ -47,6 +49,7 @@ const INITIAL_STATE: AgentStreamState = {
   error: null,
   thinkingText: null,
   agentStartedTaskId: null,
+  stalled: false,
 };
 
 export function useAgentStream(
@@ -59,9 +62,18 @@ export function useAgentStream(
   const esRef = useRef<EventSource | null>(null);
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeTaskIdRef = useRef<string | null>(null);
   const optionsRef = useRef(options);
   optionsRef.current = options;
+
+  const resetStallTimer = useCallback(() => {
+    if (stallTimerRef.current) clearTimeout(stallTimerRef.current);
+    setState((prev) => (prev.stalled ? { ...prev, stalled: false } : prev));
+    stallTimerRef.current = setTimeout(() => {
+      setState((prev) => ({ ...prev, stalled: true }));
+    }, STALL_TIMEOUT_MS);
+  }, []);
 
   const cleanup = useCallback(() => {
     if (esRef.current) {
@@ -71,6 +83,10 @@ export function useAgentStream(
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
+    }
+    if (stallTimerRef.current) {
+      clearTimeout(stallTimerRef.current);
+      stallTimerRef.current = null;
     }
   }, []);
 
@@ -86,11 +102,13 @@ export function useAgentStream(
       const es = new EventSource(url);
       esRef.current = es;
 
-      setState((prev) => ({ ...prev, isStreaming: true, error: null }));
+      setState((prev) => ({ ...prev, isStreaming: true, error: null, stalled: false }));
+      resetStallTimer();
 
       // New streamed assistant message chunk.
       // Wire format: { timestamp, data: { role, content, delta, model } }
       es.addEventListener("agent.message", (e: MessageEvent) => {
+        resetStallTimer();
         try {
           const raw = JSON.parse(e.data);
           // Unwrap the { timestamp, data } envelope; fall back to flat for legacy
@@ -119,6 +137,7 @@ export function useAgentStream(
       // Agent called a tool.
       // Wire format: { timestamp, data: { toolName, toolUseId, input, loopIteration } }
       es.addEventListener("agent.tool_use", (e: MessageEvent) => {
+        resetStallTimer();
         try {
           const raw = JSON.parse(e.data);
           const data = raw.data ?? raw;
@@ -141,6 +160,7 @@ export function useAgentStream(
       // Tool execution completed.
       // Wire format: { timestamp, data: { toolUseId, toolName, content, isError, durationMs } }
       es.addEventListener("agent.tool_result", (e: MessageEvent) => {
+        resetStallTimer();
         try {
           const raw = JSON.parse(e.data);
           const data = raw.data ?? raw;
@@ -170,6 +190,7 @@ export function useAgentStream(
       // Phase / status update.
       // Wire format: { timestamp, data: { status, phase, message, loop } }
       es.addEventListener("agent.status", (e: MessageEvent) => {
+        resetStallTimer();
         try {
           const raw = JSON.parse(e.data);
           // Support both nested { timestamp, data: { status, phase } } and flat
@@ -191,6 +212,7 @@ export function useAgentStream(
       // Extended thinking text.
       // Wire format: { timestamp, data: { thought } }
       es.addEventListener("agent.thinking", (e: MessageEvent) => {
+        resetStallTimer();
         try {
           const raw = JSON.parse(e.data);
           const data = raw.data ?? raw;
@@ -265,7 +287,7 @@ export function useAgentStream(
         }, delay);
       };
     },
-    [cleanup]
+    [cleanup, resetStallTimer]
   );
 
   useEffect(() => {
@@ -292,5 +314,6 @@ export function useAgentStream(
     error: state.error,
     thinkingText: state.thinkingText,
     agentStartedTaskId: state.agentStartedTaskId,
+    stalled: state.stalled,
   };
 }

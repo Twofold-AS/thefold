@@ -93,6 +93,7 @@ export const chat = api(
       costUsd: toolResponse.costEstimate.totalCost,
       toolsUsed: toolResponse.toolsUsed.length > 0 ? toolResponse.toolsUsed : undefined,
       lastCreatedTaskId: toolResponse.lastCreatedTaskId,
+      lastStartedTaskId: toolResponse.lastStartedTaskId,
       usage: {
         inputTokens: toolResponse.inputTokens,
         outputTokens: toolResponse.outputTokens,

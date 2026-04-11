@@ -21,11 +21,11 @@ import { ChevronLeft, ExternalLink, Check, X, FileCode, AlertTriangle, Lightbulb
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function statusVariant(status: string): "success" | "accent" | "error" | "default" | "warning" {
+function statusVariant(status: string): "success" | "accent" | "error" | "default" | "info" {
   if (status === "approved") return "success";
   if (status === "pending") return "accent";
   if (status === "rejected") return "error";
-  if (status === "changes_requested") return "warning";
+  if (status === "changes_requested") return "info";
   return "default";
 }
 
@@ -194,7 +194,6 @@ export default function ReviewDetailPage({ params }: { params: Promise<{ id: str
             <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
               <MetaItem label="Review ID" value={review.id.substring(0, 12) + "…"} mono />
               <MetaItem label="Task" value={review.taskId.substring(0, 12) + "…"} mono />
-              {review.repoName && <MetaItem label="Repo" value={review.repoName} mono />}
               <MetaItem label="Opprettet" value={formatDate(review.createdAt)} />
               {review.reviewedAt && (
                 <MetaItem label="Gjennomgått" value={formatDate(review.reviewedAt)} />

@@ -1142,14 +1142,13 @@ async function processAIResponse(
     // When agent took over via start_task tool: emit agent_started so the frontend SSE hook
     // switches its stream key from conversationId → agent taskId. Do NOT emit agent.done here —
     // the agent's own SSE stream will emit done when the full task (including review) is complete.
-    const agentTookOver = (aiResponse.toolsUsed || []).includes("start_task") && aiResponse.lastCreatedTaskId;
+    // start_task can be called after create_task (lastCreatedTaskId) OR directly (lastStartedTaskId)
+    const startedTaskId = aiResponse.lastStartedTaskId || aiResponse.lastCreatedTaskId;
+    const agentTookOver = (aiResponse.toolsUsed || []).includes("start_task") && startedTaskId;
     if (agentTookOver) {
-      agentEvt.emitChatEvent({
-        streamKey: conversationId,
-        eventType: "agent.status",
-        data: { status: "agent_started", phase: aiResponse.lastCreatedTaskId },
-      }).catch(() => {});
-      return; // frontend will connect to agent SSE and watch from there
+      // SSE agent_started was already emitted from ai/tools.ts during tool execution.
+      // We skip agent.done here so the frontend stays in "sending" state until the agent finishes.
+      return; // frontend switches SSE stream via agentStartedTaskId received during tool execution
     }
 
     // Direct chat (no agent): emit agent.done so frontend stops the sending indicator

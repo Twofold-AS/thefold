@@ -13,6 +13,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { RepoProvider, useRepoContext } from "@/lib/repo-context";
+import { ErrorBoundary } from "@/components/shared/ErrorBoundary";
 
 const { sidebarWidth: SW, sidebarCollapsed: SWC, contentWidth: CW, innerWidth: IW, headerHeight: HH } = Layout;
 
@@ -580,7 +581,9 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
                     ))}
                   </div>
                 )}
-                {children}
+                <ErrorBoundary>
+                  {children}
+                </ErrorBoundary>
               </div>
             </div>
           </div>
