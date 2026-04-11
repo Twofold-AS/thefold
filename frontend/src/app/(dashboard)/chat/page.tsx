@@ -120,6 +120,17 @@ function ChatPageInner() {
     }
   }, [agentStartedTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // When the agent submits a review (status: "pending_review" arrives via SSE on taskId),
+  // stop the sending spinner and immediately refresh messages — the review record is already
+  // in the DB by the time the SSE event is emitted (store-agent-report writes DB first).
+  useEffect(() => {
+    if (streamStatus === "pending_review" && sending) {
+      setSending(false);
+      setActiveTaskId(null);
+      refreshMsgs();
+    }
+  }, [streamStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Poll messages every 8s while watching an agent task — catches review messages that arrive
   // via pub/sub after the agent completes its work (agent.done hasn't fired yet during review wait).
   useEffect(() => {

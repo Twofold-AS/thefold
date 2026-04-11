@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { T } from "@/lib/tokens";
 import CheckIcon from "@/components/icons/CheckIcon";
 import Btn from "@/components/Btn";
@@ -184,14 +184,28 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
 
   const reviewId = progress?.report?.reviewId;
+  const reviewFetchAttempts = useRef(0);
   useEffect(() => {
     if (!reviewId || reviewFiles !== null) return;
-    getReview(reviewId)
-      .then(({ review }) => {
-        const files = Array.isArray(review.filesChanged) ? review.filesChanged : [];
-        setReviewFiles(files as ReviewFileInfo[]);
-      })
-      .catch(() => setReviewFiles([])); // silently ignore — button still works without files
+    reviewFetchAttempts.current = 0;
+
+    const fetchFiles = () => {
+      getReview(reviewId)
+        .then(({ review }) => {
+          const files = Array.isArray(review.filesChanged) ? review.filesChanged : [];
+          setReviewFiles(files as ReviewFileInfo[]);
+        })
+        .catch(() => {
+          reviewFetchAttempts.current += 1;
+          if (reviewFetchAttempts.current < 3) {
+            // Retry up to 2 times with increasing delay (review data may not be ready yet)
+            setTimeout(fetchFiles, reviewFetchAttempts.current * 2000);
+          } else {
+            setReviewFiles([]); // give up after 3 attempts — buttons still work
+          }
+        });
+    };
+    fetchFiles();
   }, [reviewId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleApprove = async () => {

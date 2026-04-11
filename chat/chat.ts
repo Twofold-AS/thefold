@@ -150,6 +150,44 @@ const _ = new Subscription(agentReports, "store-agent-report", {
           `;
         }
 
+        // Emit SSE on taskId so the frontend (which switches SSE stream from conversationId →
+        // taskId when the agent starts) receives real-time completion/review notifications.
+        // DB is written above before the emit, so frontend refreshMsgs() will find the data.
+        if (report.taskId) {
+          try {
+            const { agent: agentEvt } = await import("~encore/clients");
+            if (progress.status === "done" || progress.status === "failed") {
+              // Signal task completion — frontend onDone fires, sending=false, refreshMsgs
+              await agentEvt.emitChatEvent({
+                streamKey: report.taskId,
+                eventType: "agent.done",
+                data: {
+                  finalText: progress.summary || "",
+                  toolsUsed: [],
+                  filesWritten: progress.report?.filesChanged?.length || 0,
+                  totalInputTokens: 0,
+                  totalOutputTokens: 0,
+                  costUsd: progress.report?.costUsd || 0,
+                  loopsUsed: 0,
+                  stoppedAtMaxLoops: false,
+                },
+              });
+            } else if (progress.status === "waiting") {
+              // Review submitted — frontend should stop spinner and refresh to show review UI
+              await agentEvt.emitChatEvent({
+                streamKey: report.taskId,
+                eventType: "agent.status",
+                data: { status: "pending_review", phase: "reviewing" },
+              });
+            }
+          } catch (err) {
+            log.warn("store-agent-report: SSE emit failed (non-critical)", {
+              taskId: report.taskId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
         return;
       }
       // If deserializeProgress returned null, fall through to legacy handling below
