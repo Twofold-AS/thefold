@@ -6,9 +6,11 @@ import RobotIcon from "@/components/icons/RobotIcon";
 import AgentStream from "@/components/AgentStream";
 import AgentStatusBar from "@/components/chat/AgentStatusBar";
 import TypingIndicator from "@/components/chat/TypingIndicator";
+import MemoryInsight from "@/components/chat/MemoryInsight";
 import type { Message } from "@/lib/api";
 
 export function isAgentMessage(m: Message): boolean {
+  if (m.messageType === "memory_insight") return false;
   return (
     m.messageType === "agent_status" ||
     m.messageType === "agent_thought" ||
@@ -94,14 +96,19 @@ export default function MessageList({
 
   // Filter out empty assistant placeholders — these appear when the AI hands off to the
   // agent via start_task but the backend placeholder wasn't deleted yet (or at all).
-  const visibleMsgs = msgs.filter(m => !(m.role === "assistant" && !m.content?.trim()));
+  // Also filter out memory_insight if no actual content exists.
+  const visibleMsgs = msgs.filter(m => {
+    if (m.messageType === "memory_insight") return !!m.content?.trim();
+    return !(m.role === "assistant" && !m.content?.trim());
+  });
 
-  // Deduplicate: keep only the last agent message
+  // Deduplicate: keep only the last agent message (memory_insight always shown)
   let lastAgentIdx = -1;
   for (let i = visibleMsgs.length - 1; i >= 0; i--) {
     if (isAgentMessage(visibleMsgs[i])) { lastAgentIdx = i; break; }
   }
   const dedupedMsgs = visibleMsgs.filter((m, i) => {
+    if (m.messageType === "memory_insight") return true;
     if (!isAgentMessage(m)) return true;
     return i === lastAgentIdx;
   });
@@ -181,6 +188,13 @@ export default function MessageList({
                     </div>
                     <div style={{ fontSize: 10, color: T.textFaint, textAlign: "right", marginTop: 2 }}>{time}</div>
                   </div>
+                </div>
+              )}
+
+              {/* MEMORY INSIGHT */}
+              {m.messageType === "memory_insight" && (
+                <div style={{ padding: "2px 0" }}>
+                  <MemoryInsight content={m.content} />
                 </div>
               )}
 

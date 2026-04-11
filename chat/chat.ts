@@ -460,7 +460,7 @@ interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress" | "memory_insight";
   metadata: string | null;
   createdAt: string;
   updatedAt: string;
@@ -852,6 +852,107 @@ export const send = api(
   }
 );
 
+// --- Onboarding repo scan (7.4) ---
+
+async function performOnboardingScan(repoOwner: string, repoName: string, conversationId: string): Promise<void> {
+  const { github: gh, memory: mem, ai: aiClient } = await import("~encore/clients");
+  const repo = `${repoOwner}/${repoName}`;
+
+  // Fetch file tree
+  let tree: string[] = [];
+  let treeString = "";
+  try {
+    const result = await gh.getTree({ owner: repoOwner, repo: repoName });
+    tree = result.tree || [];
+    treeString = result.treeString || tree.join("\n");
+    if (result.empty || tree.length === 0) return; // Empty repo — nothing to scan
+  } catch { return; }
+
+  // Fetch key files for profiling
+  const keyFilePaths = ["package.json", "README.md", "encore.app", "tsconfig.json", "encore.service.ts"];
+  const fileContents: Record<string, string> = {};
+  await Promise.all(
+    keyFilePaths.map(async (path) => {
+      try {
+        const file = await gh.getFile({ owner: repoOwner, repo: repoName, path });
+        if (file?.content) fileContents[path] = file.content.slice(0, 2000);
+      } catch { /* not all key files exist */ }
+    })
+  );
+
+  // Build a profile summary using AI
+  const filesSummary = Object.entries(fileContents)
+    .map(([p, c]) => `--- ${p} ---\n${c}`)
+    .join("\n\n");
+
+  const profilePrompt = `Analyze this repository and write a concise repo profile (max 400 words) covering:
+1. What this project does
+2. Tech stack and frameworks
+3. Architecture patterns (services, databases, APIs)
+4. Key conventions (naming, file structure, testing)
+5. Important files and entry points
+
+Repo: ${repo}
+File tree (${tree.length} files):
+${treeString.slice(0, 1500)}
+
+Key files:
+${filesSummary.slice(0, 3000)}
+
+Write the profile in English as a structured summary an AI agent can use as context.`;
+
+  let profile = "";
+  try {
+    const resp = await aiClient.chat({
+      messages: [{ role: "user", content: profilePrompt }],
+      systemContext: "direct_chat",
+      model: "claude-haiku-4-5-20251001", // Fast + cheap for scanning
+    });
+    profile = resp.content;
+  } catch { return; }
+
+  if (!profile || profile.length < 50) return;
+
+  // Store as high-priority pinned memory
+  await mem.store({
+    content: `Repo profile for ${repo}:\n\n${profile}`,
+    category: "repo_profile",
+    memoryType: "decision",
+    sourceRepo: repo,
+    tags: ["repo_profile", "onboarding", repoName, "high-priority"],
+    pinned: true,
+    ttlDays: 365,
+    trustLevel: "system",
+  });
+
+  // Also store tech stack as a separate shorter memory for fast retrieval
+  const stackLines = profile.split("\n").filter((l) =>
+    /tech|stack|framework|language|library|typescript|react|next|encore|postgres|api/i.test(l)
+  ).slice(0, 5);
+  if (stackLines.length > 0) {
+    await mem.store({
+      content: `Tech stack for ${repo}: ${stackLines.join(". ")}`,
+      category: "tech_stack",
+      memoryType: "decision",
+      sourceRepo: repo,
+      tags: ["tech_stack", repoName],
+      pinned: true,
+      ttlDays: 365,
+      trustLevel: "system",
+    });
+  }
+
+  // Notify user in chat that repo was indexed
+  const notif = `🗂️ Jeg har indeksert **${repoName}** (${tree.length} filer) og lagret en repo-profil i kunnskapsbasen. Jeg vil nå bruke denne konteksten i alle fremtidige svar.`;
+  await db.exec`
+    INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+    VALUES (${conversationId}, 'assistant', ${notif}, 'chat',
+            ${JSON.stringify({ type: "onboarding_scan", repo })}::jsonb)
+  `;
+
+  log.info("onboarding scan complete", { repo, fileCount: tree.length });
+}
+
 // --- Async AI processing (fire-and-forget from sendMessage) ---
 
 // C2: Quick complexity heuristic for auto model routing
@@ -935,12 +1036,33 @@ async function processAIResponse(
     if (isCancelled(conversationId)) return;
 
     // Step 4: Search memories — only for complex queries (saves tokens and time)
-    let memories: { results: { content: string }[] } = { results: [] };
+    let memories: { results: Array<{ content: string; memoryType?: string; decayedScore?: number; createdAt?: string }> } = { results: [] };
     if (intent === "task_request" || intent === "repo_review" || userContent.length > 100) {
       try {
         memories = await memory.search({ query: userContent, limit: 5 });
       } catch (e) {
         console.error("Memory search failed:", e);
+      }
+    }
+
+    // Step 4.1: Onboarding scan — if this is the first interaction with a repo, index it (7.4)
+    if (repoName && repoOwner) {
+      try {
+        const existingRepoMems = await memory.search({
+          query: `repo profile ${repoName}`,
+          limit: 1,
+          sourceRepo: `${repoOwner}/${repoName}`,
+        });
+        const hasRepoProfile = existingRepoMems.results && existingRepoMems.results.length > 0;
+
+        if (!hasRepoProfile) {
+          // Fire-and-forget onboarding scan — don't block chat response
+          performOnboardingScan(repoOwner, repoName, conversationId).catch((e) =>
+            console.warn("[onboarding] scan failed:", e)
+          );
+        }
+      } catch {
+        // Non-critical
       }
     }
 
@@ -1194,6 +1316,27 @@ async function processAIResponse(
       }
     } catch {
       // Non-critical
+    }
+
+    // Store memory_insight message if memories were used (7.1: memory visibility in chat)
+    if (memories.results && memories.results.length > 0) {
+      const insightContent = JSON.stringify({
+        type: "memory_insight",
+        memories: (memories.results as Array<{ content: string; memoryType?: string; decayedScore?: number; createdAt?: string }>)
+          .slice(0, 3)
+          .map((r) => ({
+            content: r.content.substring(0, 200),
+            memoryType: r.memoryType || "general",
+            decayedScore: r.decayedScore || 0,
+            createdAt: r.createdAt,
+          })),
+        count: memories.results.length,
+      });
+      db.exec`
+        INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+        VALUES (${conversationId}, 'assistant', ${insightContent}, 'memory_insight',
+                ${JSON.stringify({ memoryCount: memories.results.length })}::jsonb)
+      `.catch(() => {});
     }
 
     // Extract memories (fire-and-forget)
