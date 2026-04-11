@@ -1655,6 +1655,157 @@ export const storeEpisode = api(
   }
 );
 
+// --- FASE 10: Codebase Intelligence ---
+
+/**
+ * 10.1: Index an entire repo for semantic code search.
+ * Incremental — skips if commitHash matches last indexed commit.
+ * Embeds a content snippet per file (first 1500 chars) and stores in code_index.
+ */
+export const indexRepo = api(
+  { method: "POST", path: "/memory/index-repo", expose: true, auth: true },
+  async (req: {
+    repoName: string;
+    owner: string;
+    files: Array<{ path: string; content: string }>;
+    commitHash: string;
+  }): Promise<{ indexed: number; skipped: boolean; commitHash: string; message: string }> => {
+    // Check if already indexed at this commit
+    const meta = await db.queryRow<{ commit_hash: string; file_count: number }>`
+      SELECT commit_hash, file_count FROM code_index_meta WHERE repo_name = ${req.repoName}
+    `;
+
+    if (meta && meta.commit_hash === req.commitHash) {
+      return {
+        indexed: meta.file_count,
+        skipped: true,
+        commitHash: req.commitHash,
+        message: `Repo already indexed at commit ${req.commitHash.substring(0, 8)} (${meta.file_count} files)`,
+      };
+    }
+
+    // Filter to indexable code files only
+    const CODE_EXTENSIONS = /\.(ts|tsx|js|jsx|py|go|rs|java|cs|rb|php|swift|kt|c|cpp|h)$/i;
+    const indexableFiles = req.files.filter((f) => CODE_EXTENSIONS.test(f.path) && f.content.length > 50);
+
+    let indexed = 0;
+    const BATCH_SIZE = 20;
+
+    for (let i = 0; i < indexableFiles.length; i += BATCH_SIZE) {
+      const batch = indexableFiles.slice(i, i + BATCH_SIZE);
+
+      await Promise.allSettled(batch.map(async (file) => {
+        try {
+          // Build a rich snippet: path + first 1500 chars of content
+          const snippet = `// File: ${file.path}\n${file.content.substring(0, 1500)}`;
+          const embedding = await embed(snippet);
+          const language = file.path.split(".").pop() ?? "unknown";
+
+          await db.exec`
+            INSERT INTO code_index (repo_name, file_path, content_snippet, embedding, commit_hash, language, updated_at)
+            VALUES (
+              ${req.repoName}, ${file.path}, ${snippet},
+              ${JSON.stringify(embedding)}::vector,
+              ${req.commitHash}, ${language}, now()
+            )
+            ON CONFLICT (repo_name, file_path) DO UPDATE SET
+              content_snippet = EXCLUDED.content_snippet,
+              embedding = EXCLUDED.embedding,
+              commit_hash = EXCLUDED.commit_hash,
+              language = EXCLUDED.language,
+              updated_at = now()
+          `;
+          indexed++;
+        } catch (err) {
+          log.warn("code index: failed to embed file", {
+            file: file.path,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }));
+    }
+
+    // Update meta
+    await db.exec`
+      INSERT INTO code_index_meta (repo_name, commit_hash, file_count, indexed_at)
+      VALUES (${req.repoName}, ${req.commitHash}, ${indexed}, now())
+      ON CONFLICT (repo_name) DO UPDATE SET
+        commit_hash = EXCLUDED.commit_hash,
+        file_count = EXCLUDED.file_count,
+        indexed_at = now()
+    `;
+
+    log.info("code index: repo indexed", { repoName: req.repoName, indexed, commitHash: req.commitHash.substring(0, 8) });
+
+    return {
+      indexed,
+      skipped: false,
+      commitHash: req.commitHash,
+      message: `Indexed ${indexed} files (${indexableFiles.length - indexed} failed)`,
+    };
+  }
+);
+
+/**
+ * 10.2: Semantic code search — natural-language query against indexed codebase.
+ * Returns files ranked by semantic similarity to the query.
+ */
+export const searchCode = api(
+  { method: "POST", path: "/memory/search-code", expose: true, auth: true },
+  async (req: {
+    query: string;
+    repoName: string;
+    limit?: number;
+    language?: string;
+  }): Promise<{ results: Array<{ filePath: string; snippet: string; similarity: number; language: string }> }> => {
+    const limit = Math.min(req.limit ?? 10, 30);
+
+    const queryEmbedding = await embed(req.query);
+    const embeddingStr = JSON.stringify(queryEmbedding);
+
+    type CodeIndexRow = { file_path: string; content_snippet: string; similarity: number; language: string };
+
+    let rows: ReturnType<typeof db.query<CodeIndexRow>>;
+
+    if (req.language) {
+      rows = db.query<CodeIndexRow>`
+        SELECT file_path, content_snippet,
+               1 - (embedding <=> ${embeddingStr}::vector) AS similarity,
+               language
+        FROM code_index
+        WHERE repo_name = ${req.repoName}
+          AND language = ${req.language}
+          AND embedding IS NOT NULL
+        ORDER BY embedding <=> ${embeddingStr}::vector
+        LIMIT ${limit}
+      `;
+    } else {
+      rows = db.query<CodeIndexRow>`
+        SELECT file_path, content_snippet,
+               1 - (embedding <=> ${embeddingStr}::vector) AS similarity,
+               language
+        FROM code_index
+        WHERE repo_name = ${req.repoName}
+          AND embedding IS NOT NULL
+        ORDER BY embedding <=> ${embeddingStr}::vector
+        LIMIT ${limit}
+      `;
+    }
+
+    const results: Array<{ filePath: string; snippet: string; similarity: number; language: string }> = [];
+    for await (const row of rows) {
+      results.push({
+        filePath: row.file_path,
+        snippet: row.content_snippet.substring(0, 500),
+        similarity: typeof row.similarity === "string" ? parseFloat(row.similarity) : row.similarity,
+        language: row.language,
+      });
+    }
+
+    return { results };
+  }
+);
+
 // --- Crons ---
 
 const _cleanup = new CronJob("memory-cleanup", {

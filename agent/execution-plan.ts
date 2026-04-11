@@ -8,6 +8,7 @@ import {
   sumTokens,
   createSharedAgentContext,
 } from "../ai/orchestrate-sub-agents";
+import { buildImportGraph, analyzeImpact } from "./code-graph";
 import { addStep, reportProgress, buildSteps } from "./helpers";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
@@ -156,6 +157,42 @@ export async function runPlanPhase(
   await reportSteps(ctx, "Planlegger", [
     { label: `Plan klar: ${planStepCount} steg`, status: "done" },
   ], { title: `Utfører plan 0/${planStepCount}`, planProgress: { current: 0, total: planStepCount } });
+
+  // === STEP 5.4: Impact analysis (FASE 10.3) — analyze blast radius of planned file changes ===
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const planFilePaths: string[] = (plan.plan as any[])
+      .filter((s) => s.filePath && s.action !== "run_command")
+      .map((s) => s.filePath as string);
+
+    if (planFilePaths.length > 0 && contextData.relevantFiles.length > 0) {
+      const graph = buildImportGraph(contextData.relevantFiles);
+      const impactResults = planFilePaths.map((fp: string) => analyzeImpact(graph, fp));
+
+      const highRiskFiles = impactResults.filter((r) => r.riskLevel === "high");
+      const mediumRiskFiles = impactResults.filter((r) => r.riskLevel === "medium");
+      const totalImpacted = new Set(impactResults.flatMap((r) => r.impactedFiles)).size;
+
+      if (highRiskFiles.length > 0 || totalImpacted > 3) {
+        const riskSummary = highRiskFiles.length > 0
+          ? `⚠ ${highRiskFiles.length} høy-risiko fil(er) — endringer kan påvirke ${totalImpacted} andre filer`
+          : `${mediumRiskFiles.length} medium-risiko fil(er) — ${totalImpacted} filer kan påvirkes`;
+
+        await think(ctx, `Impaktanalyse: ${riskSummary}`);
+
+        log.info("impact analysis complete", {
+          planFiles: planFilePaths.length,
+          totalImpacted,
+          highRisk: highRiskFiles.length,
+          mediumRisk: mediumRiskFiles.length,
+        });
+      }
+    }
+  } catch (err) {
+    log.warn("impact analysis failed (non-critical)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // === STEP 5.5: Fetch error patterns from memory ===
   try {

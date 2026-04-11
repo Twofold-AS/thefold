@@ -178,6 +178,72 @@ export function getRelatedFiles(
   return [...related];
 }
 
+// --- Impact Analysis (FASE 10.3) ---
+
+export interface ImpactAnalysis {
+  /** Files that directly or indirectly import the target file */
+  impactedFiles: string[];
+  /** Risk level based on number of affected files */
+  riskLevel: "low" | "medium" | "high";
+  /** Human-readable reason */
+  reason: string;
+  /** Depth breakdown: how many files at each traversal depth */
+  depthBreakdown: Record<number, string[]>;
+}
+
+/**
+ * Analyze the blast radius of changing a file.
+ * Traverses importedBy links to find all files that would be affected
+ * by changes to the given filePath.
+ *
+ * @param graph Import graph from buildImportGraph
+ * @param filePath File being changed
+ * @param maxDepth How deep to traverse (default: 3)
+ */
+export function analyzeImpact(
+  graph: ImportGraph,
+  filePath: string,
+  maxDepth: number = 3,
+): ImpactAnalysis {
+  const depthBreakdown: Record<number, string[]> = {};
+  const visited = new Set<string>();
+
+  function traverse(path: string, depth: number) {
+    if (depth > maxDepth || visited.has(path)) return;
+    visited.add(path);
+
+    const importers = graph.importedBy.get(path) || [];
+    for (const importer of importers) {
+      if (!depthBreakdown[depth]) depthBreakdown[depth] = [];
+      depthBreakdown[depth].push(importer);
+      traverse(importer, depth + 1);
+    }
+  }
+
+  traverse(filePath, 1);
+
+  const impactedFiles = Object.values(depthBreakdown).flat();
+  const uniqueImpacted = [...new Set(impactedFiles)].filter((f) => f !== filePath);
+
+  let riskLevel: "low" | "medium" | "high";
+  let reason: string;
+
+  if (uniqueImpacted.length >= 6) {
+    riskLevel = "high";
+    reason = `${uniqueImpacted.length} files depend on this file — high risk of cascading breakage`;
+  } else if (uniqueImpacted.length >= 2) {
+    riskLevel = "medium";
+    reason = `${uniqueImpacted.length} files depend on this file — moderate impact`;
+  } else {
+    riskLevel = "low";
+    reason = uniqueImpacted.length === 0
+      ? "No other files import this file — isolated change"
+      : `Only 1 file imports this file — low blast radius`;
+  }
+
+  return { impactedFiles: uniqueImpacted, riskLevel, reason, depthBreakdown };
+}
+
 /**
  * Logg import-graf statistikk for debugging.
  */
