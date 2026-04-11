@@ -2,7 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import { secret } from "encore.dev/config";
 import log from "encore.dev/log";
 import { cache } from "~encore/clients";
-import { isGitHubAppEnabled, getInstallationToken, getInstalledOrg } from "./github-app";
+import { getInstallationToken, getInstalledOrg } from "./github-app";
 
 const githubToken = secret("GitHubToken");
 
@@ -13,7 +13,7 @@ const githubToken = secret("GitHubToken");
  * Prefers GitHub App installation token when enabled, falls back to PAT.
  */
 async function resolveToken(owner?: string): Promise<string> {
-  if (owner && isGitHubAppEnabled()) {
+  if (owner) {
     try {
       const token = await getInstallationToken(owner);
       return token;
@@ -414,11 +414,11 @@ export const createPR = api(
         log.error("createPR: repo not found — verify the repo exists and the token has access", {
           owner: req.owner,
           repo: req.repo,
-          usingGitHubApp: isGitHubAppEnabled(),
+          usingGitHubApp: true,
         });
         throw APIError.notFound(
           `Repository ${req.owner}/${req.repo} not found. ` +
-          `Verify: (1) the repo exists on GitHub, (2) the ${isGitHubAppEnabled() ? "GitHub App is installed on the org" : "GitHubToken PAT has access to the repo"}.`
+          `Verify: (1) the repo exists on GitHub, (2) the GitHub App is installed on the org or GitHubToken PAT has access to the repo.`
         );
       }
       throw repoErr;
@@ -822,10 +822,6 @@ interface CreateRepoResponse {
 export const createRepo = api(
   { method: "POST", path: "/github/repo/create", expose: true, auth: true },
   async (req: CreateRepoRequest): Promise<CreateRepoResponse> => {
-    if (!isGitHubAppEnabled()) {
-      throw APIError.failedPrecondition("GitHub App not enabled. Set GitHubAppEnabled=true");
-    }
-
     // Sanitize repo name — spaces and special chars break git URLs
     const safeName = req.name
       .trim()

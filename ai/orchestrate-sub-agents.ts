@@ -1,7 +1,6 @@
 // Sub-agent orchestration: planning, parallel execution, and result merging
 
 import log from "encore.dev/log";
-import { secret } from "encore.dev/config";
 import { callAIWithFallback } from "./call";
 import { estimateCost } from "./router";
 import {
@@ -13,14 +12,6 @@ import {
   getSystemPromptForRole,
   getMaxTokensForRole,
 } from "./sub-agents";
-
-// --- Feature Flag ---
-
-const DynamicSubAgentsEnabled = secret("DynamicSubAgentsEnabled");
-
-export function isDynamicSubAgentsEnabled(): boolean {
-  try { return DynamicSubAgentsEnabled() === "true"; } catch { return false; }
-}
 
 // --- Types ---
 
@@ -154,11 +145,6 @@ export async function planSubAgentsDynamic(
   budgetMode: BudgetMode,
   userHint?: string,
 ): Promise<SubAgentPlan> {
-  // If feature flag is off, fall back to old logic
-  if (!isDynamicSubAgentsEnabled()) {
-    return planSubAgents(taskDescription, planSummary, complexity, budgetMode);
-  }
-
   try {
     const plannerPrompt = `You are a planner that decides if a coding task needs sub-agents.
 Analyze the task and decide:

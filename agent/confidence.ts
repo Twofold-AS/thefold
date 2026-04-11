@@ -2,7 +2,7 @@ import log from "encore.dev/log";
 import { ai, tasks } from "~encore/clients";
 import { selectOptimalModel } from "../ai/router";
 import { updateJobCheckpoint } from "./db";
-import { useNewContract } from "./messages";
+
 import { addStep, reportProgress, buildSteps } from "./helpers";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
@@ -150,55 +150,25 @@ export async function assessAndRoute(
         repoName: `${ctx.repoOwner}/${ctx.repoName}`,
       });
 
-      if (useNewContract()) {
-        // === NEW CONTRACT: Natural question via AgentProgress ===
-        // Send ONE question (the most important) as a natural question in the message stream
-        const singleQuestion = confidence.clarifying_questions?.[0]
-          || confidence.uncertainties?.[0]
-          || "Kan du utdype oppgaven?";
+      // Send ONE question (the most important) as a natural question in the message stream
+      const singleQuestion = confidence.clarifying_questions?.[0]
+        || confidence.uncertainties?.[0]
+        || "Kan du utdype oppgaven?";
 
-        addStep(ctx, {
-          id: "confidence",
-          label: `Confidence: ${confidence.overall}%`,
-          detail: "Trenger avklaring",
-          done: false,
-        });
+      addStep(ctx, {
+        id: "confidence",
+        label: `Confidence: ${confidence.overall}%`,
+        detail: "Trenger avklaring",
+        done: false,
+      });
 
-        await reportProgress(ctx, {
-          status: "waiting",
-          phase: "clarification",
-          summary: "Trenger avklaring",
-          steps: buildSteps(ctx),
-          question: singleQuestion,
-        });
-      } else {
-        // === LEGACY CONTRACT: Build clarification message ===
-        let msg = `Jeg er usikker (${confidence.overall}% sikker) og trenger avklaringer:\n\n`;
-        msg += `**Usikkerheter:**\n`;
-        confidence.uncertainties.forEach((u: string, i: number) => {
-          msg += `${i + 1}. ${u}\n`;
-        });
-        if (confidence.clarifying_questions && confidence.clarifying_questions.length > 0) {
-          msg += `\n**Spørsmål:**\n`;
-          confidence.clarifying_questions.forEach((q: string, i: number) => {
-            msg += `${i + 1}. ${q}\n`;
-          });
-        }
-        msg += `\nVennligst gi mer informasjon før jeg starter.`;
-
-        // Build questions list for frontend AgentClarification component
-        const clarificationQuestions = [
-          ...(confidence.uncertainties || []),
-          ...(confidence.clarifying_questions || []),
-        ];
-
-        await reportSteps(ctx, "Venter", [
-          { label: `Konfidenssjekk: ${confidence.overall}%`, status: "done" },
-        ], {
-          title: "Trenger avklaring",
-          questions: clarificationQuestions.length > 0 ? clarificationQuestions : [msg],
-        });
-      }
+      await reportProgress(ctx, {
+        status: "waiting",
+        phase: "clarification",
+        summary: "Trenger avklaring",
+        steps: buildSteps(ctx),
+        question: singleQuestion,
+      });
 
       // Update task status for chat routing
       if (ctx.thefoldTaskId) {

@@ -9,7 +9,6 @@ const linearAPIKey = secret("LinearAPIKey");
 const voyageAPIKey = secret("VoyageAPIKey");
 const resendAPIKey = secret("ResendAPIKey");
 const authSecret = secret("AuthSecret");
-const monitorEnabled = secret("MonitorEnabled");
 
 interface SecretStatus {
   name: string;
@@ -40,7 +39,6 @@ export const secretsStatus = api(
         { name: "VoyageAPIKey", configured: isConfigured(voyageAPIKey) },
         { name: "ResendAPIKey", configured: isConfigured(resendAPIKey) },
         { name: "AuthSecret", configured: isConfigured(authSecret) },
-        { name: "MonitorEnabled", configured: isConfigured(monitorEnabled) },
       ],
     };
   }

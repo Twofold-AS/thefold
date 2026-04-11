@@ -1,20 +1,7 @@
 import { api } from "encore.dev/api";
-import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
 import { db } from "./db";
-
-// --- Feature flag ---
-
-const HealingPipelineEnabled = secret("HealingPipelineEnabled");
-
-function isHealingEnabled(): boolean {
-  try {
-    return HealingPipelineEnabled() === "true";
-  } catch {
-    return false;
-  }
-}
 
 // --- Types ---
 
@@ -38,10 +25,6 @@ interface MaintenanceReport {
 // --- Core healing logic ---
 
 export async function healComponent(componentId: string): Promise<HealingReport> {
-  if (!isHealingEnabled()) {
-    return { action: "skipped", reason: "Healing disabled by feature flag" };
-  }
-
   const component = await db.queryRow<{
     id: string;
     name: string;
@@ -140,13 +123,6 @@ export const runMaintenance = api(
       issues: [],
       recommendations: [],
     };
-
-    if (!isHealingEnabled()) {
-      report.recommendations.push(
-        "Healing is disabled. Set HealingPipelineEnabled=true to enable."
-      );
-      return report;
-    }
 
     const rows = db.query<{ id: string; name: string; quality_score: number }>`
       SELECT id, name, quality_score FROM components ORDER BY quality_score ASC

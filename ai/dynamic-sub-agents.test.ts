@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractSubAgentHint, isDynamicSubAgentsEnabled } from "./orchestrate-sub-agents";
+import { extractSubAgentHint } from "./orchestrate-sub-agents";
 
 describe("dynamic sub-agents (ZN)", () => {
   describe("extractSubAgentHint", () => {
@@ -42,15 +42,6 @@ describe("dynamic sub-agents (ZN)", () => {
       const result = extractSubAgentHint("kjor parallell med 3 arbeidere");
       expect(result).toBeDefined();
       expect(result).toContain("3");
-    });
-  });
-
-  describe("isDynamicSubAgentsEnabled", () => {
-    it("defaults to false when secret is not set", () => {
-      // In test environment, secret() throws since DynamicSubAgentsEnabled is not set
-      // isDynamicSubAgentsEnabled() catches and returns false
-      const result = isDynamicSubAgentsEnabled();
-      expect(result).toBe(false);
     });
   });
 

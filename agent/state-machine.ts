@@ -1,8 +1,4 @@
-import { secret } from "encore.dev/config";
 import log from "encore.dev/log";
-
-// Feature flag — Encore secret (package level)
-const AgentStateMachineStrict = secret("AgentStateMachineStrict");
 
 // All legal phases
 export type AgentPhase =
@@ -55,15 +51,6 @@ export interface AgentStateMachine {
   reset(): void;
 }
 
-function isStrictMode(): boolean {
-  try {
-    return AgentStateMachineStrict() === "true";
-  } catch {
-    // Secret not set or error reading — default to permissive mode
-    return false;
-  }
-}
-
 export function createStateMachine(taskId: string): AgentStateMachine {
   let current: AgentPhase = "idle";
   const history: Array<{ from: AgentPhase; to: AgentPhase; timestamp: number }> = [];
@@ -84,20 +71,12 @@ export function createStateMachine(taskId: string): AgentStateMachine {
 
       if (!allowed) {
         log.warn(`[STATE-MACHINE] Illegal transition: ${from} -> ${next} for task ${taskId}`);
-
-        if (isStrictMode()) {
-          return {
-            allowed: false,
-            from,
-            to: next,
-            reason: `Illegal transition: ${from} -> ${next}`,
-          };
-        }
-
-        // Permissive mode: allow but log
-        current = next;
-        history.push({ from, to: next, timestamp: Date.now() });
-        return { allowed: true, from, to: next };
+        return {
+          allowed: false,
+          from,
+          to: next,
+          reason: `Illegal transition: ${from} -> ${next}`,
+        };
       }
 
       current = next;

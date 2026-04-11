@@ -7,7 +7,6 @@ import { sandbox } from "~encore/clients";
 import log from "encore.dev/log";
 
 // --- Feature flags ---
-const monitorEnabled = secret("MonitorEnabled");
 const repoWatchEnabled = secret("RepoWatchEnabled");
 const dailyDigestEnabled = secret("DailyDigestEnabled");
 
@@ -387,19 +386,6 @@ export const history = api(
 export const runDailyChecks = api(
   { method: "POST", path: "/monitor/daily-check", expose: false },
   async (): Promise<{ ran: boolean; message: string }> => {
-    // Feature flag: check MonitorEnabled secret
-    let enabled = false;
-    try {
-      enabled = monitorEnabled() === "true";
-    } catch {
-      // Secret not set — disabled
-    }
-
-    if (!enabled) {
-      log.info("Monitor daily check: disabled (MonitorEnabled != 'true')");
-      return { ran: false, message: "Monitor disabled — set MonitorEnabled secret to 'true' to enable" };
-    }
-
     log.info("Monitor daily check: running");
 
     // Get repos to check from recent health_checks (known repos)

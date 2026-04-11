@@ -19,7 +19,6 @@ import { scanFile } from "./file-scanner";
 
 const githubToken = secret("GitHubToken");
 const sandboxMode = secret("SandboxMode"); // "docker" | "filesystem"
-const SandboxAdvancedPipeline = secret("SandboxAdvancedPipeline");
 
 // --- Mode helper ---
 
@@ -31,15 +30,6 @@ function getSandboxMode(): "docker" | "filesystem" {
     // Secret not set — default to filesystem
   }
   return "filesystem";
-}
-
-function isAdvancedPipelineEnabled(): boolean {
-  try {
-    return SandboxAdvancedPipeline() === "true";
-  } catch {
-    // Secret not set — default to disabled
-    return false;
-  }
 }
 
 // Sandboxes are directories on the VPS, isolated by unique IDs
@@ -135,16 +125,14 @@ export const create = api(
       });
 
       // Ta "before" snapshot for Docker mode
-      if (isAdvancedPipelineEnabled()) {
-        try {
-          const runner = dockerRunner(id);
-          const snapshot = await takeDockerSnapshot(runner);
-          snapshotCache.set(id, snapshot);
-          log.info("docker snapshot taken", { sandboxId: id, fileCount: snapshot.size });
-        } catch (err) {
-          log.warn("docker snapshot capture failed", { sandboxId: id, error: String(err) });
-          // Non-critical — continue without snapshot
-        }
+      try {
+        const runner = dockerRunner(id);
+        const snapshot = await takeDockerSnapshot(runner);
+        snapshotCache.set(id, snapshot);
+        log.info("docker snapshot taken", { sandboxId: id, fileCount: snapshot.size });
+      } catch (err) {
+        log.warn("docker snapshot capture failed", { sandboxId: id, error: String(err) });
+        // Non-critical — continue without snapshot
       }
 
       return { id };
@@ -214,16 +202,14 @@ export const create = api(
       }
 
       // Ta "before" snapshot for fremtidig sammenligning
-      if (isAdvancedPipelineEnabled()) {
-        try {
-          const repoDir = path.join(dir, "repo");
-          const snapshot = takeSnapshot(repoDir);
-          snapshotCache.set(id, snapshot);
-          log.info("sandbox snapshot taken", { sandboxId: id, fileCount: snapshot.size });
-        } catch (err) {
-          log.warn("snapshot capture failed", { sandboxId: id, error: String(err) });
-          // Non-critical — continue without snapshot
-        }
+      try {
+        const repoDir = path.join(dir, "repo");
+        const snapshot = takeSnapshot(repoDir);
+        snapshotCache.set(id, snapshot);
+        log.info("sandbox snapshot taken", { sandboxId: id, fileCount: snapshot.size });
+      } catch (err) {
+        log.warn("snapshot capture failed", { sandboxId: id, error: String(err) });
+        // Non-critical — continue without snapshot
       }
     } catch (error) {
       // Clean up on failure
@@ -514,9 +500,6 @@ async function runSnapshotComparison(
   isDocker: boolean,
   sandboxId: string,
 ): Promise<ValidationStepResult> {
-  if (!isAdvancedPipelineEnabled()) {
-    return { step: "snapshot", success: true, errors: [], warnings: ["Snapshot comparison disabled by feature flag"] };
-  }
 
   const beforeSnapshot = snapshotCache.get(sandboxId);
   if (!beforeSnapshot) {
@@ -589,9 +572,6 @@ async function runPerformanceBenchmark(
   repoDir: string,
   isDocker: boolean,
 ): Promise<ValidationStepResult> {
-  if (!isAdvancedPipelineEnabled()) {
-    return { step: "performance", success: true, errors: [], warnings: ["Performance benchmarks disabled by feature flag"] };
-  }
 
   const warnings: string[] = [];
   const metrics: Record<string, number> = {};

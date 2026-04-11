@@ -1,7 +1,4 @@
-import { secret } from "encore.dev/config";
 import type { AgentPhase } from "./state-machine";
-
-const ProgressMessageEnabled = secret("ProgressMessageEnabled");
 
 // ============================================================
 // NEW CONTRACT — AgentProgress (unified message type)
@@ -243,13 +240,9 @@ function convertLegacyStatus(parsed: Record<string, unknown>): AgentMessage {
   };
 }
 
-// Feature flag helper
+// Always use new contract
 export function useNewContract(): boolean {
-  try {
-    return ProgressMessageEnabled() === "true";
-  } catch {
-    return false;
-  }
+  return true;
 }
 
 // === CONVENIENCE BUILDERS (legacy, kept for backward compat) ===

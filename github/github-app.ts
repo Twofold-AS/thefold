@@ -3,18 +3,9 @@ import log from "encore.dev/log";
 
 const GitHubAppId = secret("GitHubAppId");
 const GitHubAppPrivateKey = secret("GitHubAppPrivateKey");
-const GitHubAppEnabled = secret("GitHubAppEnabled");
 
 // Token cache: { [owner]: { token, expiresAt } }
 const tokenCache: Record<string, { token: string; expiresAt: number }> = {};
-
-export function isGitHubAppEnabled(): boolean {
-  try {
-    return GitHubAppEnabled() === "true";
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Generate JWT for GitHub App authentication.
@@ -118,10 +109,6 @@ let cachedInstalledOrg: { owner: string; expiresAt: number } | null = null;
 export async function getInstalledOrg(): Promise<string | null> {
   if (cachedInstalledOrg && cachedInstalledOrg.expiresAt > Date.now()) {
     return cachedInstalledOrg.owner;
-  }
-
-  if (!isGitHubAppEnabled()) {
-    return null;
   }
 
   try {

@@ -1,5 +1,4 @@
 import log from "encore.dev/log";
-import { secret } from "encore.dev/config";
 import { agent, github, linear, memory, sandbox, tasks, ai, registry } from "~encore/clients";
 import { agentReports } from "../chat/chat";
 import { savePhaseMetrics } from "./metrics";
@@ -13,10 +12,6 @@ import { recordRoutingPattern } from "./routing-patterns";
 import { checkTokenAnomaly, checkCostAnomaly } from "./anomaly";
 import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
-
-// --- Secrets ---
-
-const RegistryExtractionEnabled = secret("RegistryExtractionEnabled");
 
 // --- Types ---
 
@@ -186,9 +181,7 @@ export async function completeTask(
   // === STEP 9.5: Registry auto-extraction (fire-and-forget) ===
   log.info("STEP 9.5: Registry auto-extraction");
   try {
-    const enabled = RegistryExtractionEnabled();
-    if (enabled === "true" && allFiles.length >= 2) {
-      // Fire-and-forget — don't wait for extraction to complete
+    if (allFiles.length >= 2) {
       extractAndRegisterComponents({
         repo: `${ctx.repoOwner}/${ctx.repoName}`,
         files: allFiles.map((f) => ({ path: f.path, content: f.content })),

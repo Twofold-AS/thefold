@@ -1,10 +1,5 @@
-import { secret } from "encore.dev/config";
 import log from "encore.dev/log";
 import { ai, registry } from "~encore/clients";
-
-// --- Secrets ---
-
-const RegistryExtractionEnabled = secret("RegistryExtractionEnabled");
 
 // --- Types ---
 
@@ -29,14 +24,6 @@ export async function extractComponents(params: {
   files: Array<{ path: string; content: string }>;
   taskDescription: string;
 }): Promise<ExtractedComponent[]> {
-  // Feature flag check
-  let enabled = "false";
-  try { enabled = RegistryExtractionEnabled(); } catch { /* not set */ }
-  if (enabled !== "true") {
-    log.info("registry extraction disabled by feature flag");
-    return [];
-  }
-
   // Minimum fil-antall for å vurdere extraction
   if (params.files.length < 2) {
     log.info("too few files for extraction", { fileCount: params.files.length });

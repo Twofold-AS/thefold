@@ -91,7 +91,7 @@ async function sendToDiscordDirect(webhookUrl: string, message: string): Promise
 
 // --- Agent Message Parser (cross-service boundary — types duplicated from agent/messages.ts) ---
 
-import { deserializeMessage, mapReportStatusToPhase, buildStatusContent, deserializeProgress, useNewContract } from "./agent-message-parser";
+import { deserializeMessage, mapReportStatusToPhase, buildStatusContent, deserializeProgress } from "./agent-message-parser";
 
 // Subscribe to agent reports and UPDATE existing agent_status (not create new agent_report)
 const _ = new Subscription(agentReports, "store-agent-report", {
@@ -624,51 +624,22 @@ export const send = api(
     // If so, route the message as a clarification response
     if (!req.chatOnly) {
       try {
-        // === NEW CONTRACT: Check agent_progress messages with status="waiting" ===
-        if (useNewContract()) {
-          const lastProgress = await db.queryRow<{ content: string; metadata: string }>`
-            SELECT content, metadata::text FROM messages
-            WHERE conversation_id = ${req.conversationId}
-              AND message_type = 'agent_progress'
-            ORDER BY updated_at DESC LIMIT 1
-          `;
-          if (lastProgress) {
-            const progress = deserializeProgress(lastProgress.content);
-            const progressMeta = typeof lastProgress.metadata === "string"
-              ? JSON.parse(lastProgress.metadata)
-              : lastProgress.metadata;
-            if (progress?.status === "waiting" && progressMeta?.taskId) {
-              // Route to agent as clarification response
-              const { agent: agentClient } = await import("~encore/clients");
-              await agentClient.respondToClarification({
-                taskId: progressMeta.taskId,
-                response: req.message,
-                conversationId: req.conversationId,
-              });
-              return { message: msg, agentTriggered: false };
-            }
-          }
-        }
-
-        // === LEGACY CONTRACT: Check agent_status messages ===
-        const agentStatusMsg = await db.queryRow<{ content: string; metadata: string }>`
+        // Check agent_progress messages with status="waiting" — route as clarification response
+        const lastProgress = await db.queryRow<{ content: string; metadata: string }>`
           SELECT content, metadata::text FROM messages
           WHERE conversation_id = ${req.conversationId}
-            AND message_type = 'agent_status'
-          ORDER BY created_at DESC LIMIT 1
+            AND message_type = 'agent_progress'
+          ORDER BY updated_at DESC LIMIT 1
         `;
-        if (agentStatusMsg) {
-          const agentParsed = deserializeMessage(agentStatusMsg.content);
-          const meta = typeof agentStatusMsg.metadata === "string" ? JSON.parse(agentStatusMsg.metadata) : agentStatusMsg.metadata;
-          // Detect clarification: new format "clarification" type OR legacy "Venter" phase without reviewData
-          const isClarification = agentParsed?.type === "clarification"
-            || (agentParsed?.type === "status" && agentParsed.phase === "needs_input")
-            || (!agentParsed && (() => { try { const p = JSON.parse(agentStatusMsg.content); return p.phase === "Venter" && !p.reviewData; } catch { return false; } })());
-          if (isClarification && meta?.taskId) {
-            // Route to agent as clarification response
+        if (lastProgress) {
+          const progress = deserializeProgress(lastProgress.content);
+          const progressMeta = typeof lastProgress.metadata === "string"
+            ? JSON.parse(lastProgress.metadata)
+            : lastProgress.metadata;
+          if (progress?.status === "waiting" && progressMeta?.taskId) {
             const { agent: agentClient } = await import("~encore/clients");
             await agentClient.respondToClarification({
-              taskId: meta.taskId,
+              taskId: progressMeta.taskId,
               response: req.message,
               conversationId: req.conversationId,
             });
