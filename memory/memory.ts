@@ -19,11 +19,6 @@ function hashContent(content: string): string {
 // NOTE: OpenAIAPIKey secret must be configured in Encore secrets for this to work.
 const OpenAIApiKey = secret("OpenAIAPIKey");
 
-(async () => {
-  try { await db.queryRow`SELECT 1`; console.log("[memory] db warmed"); }
-  catch (e) { console.warn("[memory] warmup failed:", e); }
-})();
-
 /** Hybrid search weighting: 60% semantic (vector), 40% keyword (BM25) */
 export const HYBRID_ALPHA = 0.6;
 
@@ -1765,10 +1760,10 @@ export const searchCode = api(
 
     type CodeIndexRow = { file_path: string; content_snippet: string; similarity: number; language: string };
 
-    let rows: ReturnType<typeof db.query<CodeIndexRow>>;
+    const results: Array<{ filePath: string; snippet: string; similarity: number; language: string }> = [];
 
     if (req.language) {
-      rows = db.query<CodeIndexRow>`
+      for await (const row of db.query<CodeIndexRow>`
         SELECT file_path, content_snippet,
                1 - (embedding <=> ${embeddingStr}::vector) AS similarity,
                language
@@ -1778,9 +1773,16 @@ export const searchCode = api(
           AND embedding IS NOT NULL
         ORDER BY embedding <=> ${embeddingStr}::vector
         LIMIT ${limit}
-      `;
+      `) {
+        results.push({
+          filePath: row.file_path,
+          snippet: row.content_snippet.substring(0, 500),
+          similarity: typeof row.similarity === "string" ? parseFloat(row.similarity) : row.similarity,
+          language: row.language,
+        });
+      }
     } else {
-      rows = db.query<CodeIndexRow>`
+      for await (const row of db.query<CodeIndexRow>`
         SELECT file_path, content_snippet,
                1 - (embedding <=> ${embeddingStr}::vector) AS similarity,
                language
@@ -1789,17 +1791,14 @@ export const searchCode = api(
           AND embedding IS NOT NULL
         ORDER BY embedding <=> ${embeddingStr}::vector
         LIMIT ${limit}
-      `;
-    }
-
-    const results: Array<{ filePath: string; snippet: string; similarity: number; language: string }> = [];
-    for await (const row of rows) {
-      results.push({
-        filePath: row.file_path,
-        snippet: row.content_snippet.substring(0, 500),
-        similarity: typeof row.similarity === "string" ? parseFloat(row.similarity) : row.similarity,
-        language: row.language,
-      });
+      `) {
+        results.push({
+          filePath: row.file_path,
+          snippet: row.content_snippet.substring(0, 500),
+          similarity: typeof row.similarity === "string" ? parseFloat(row.similarity) : row.similarity,
+          language: row.language,
+        });
+      }
     }
 
     return { results };
