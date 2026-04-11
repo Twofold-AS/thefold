@@ -111,12 +111,30 @@ function ChatPageInner() {
     }
   );
 
-  // Bug 4: when AI tool-use starts an agent task mid-chat, switch SSE stream to agent's taskId
+  // When AI tool-use starts an agent task mid-chat, switch SSE stream to agent's taskId.
+  // The backend emits agent.status { status: "agent_started", phase: taskId } which the
+  // SSE hook captures as agentStartedTaskId. Switching activeTaskId reconnects the SSE.
   useEffect(() => {
     if (agentStartedTaskId && agentStartedTaskId !== activeTaskId) {
       setActiveTaskId(agentStartedTaskId);
     }
   }, [agentStartedTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll messages every 8s while watching an agent task — catches review messages that arrive
+  // via pub/sub after the agent completes its work (agent.done hasn't fired yet during review wait).
+  useEffect(() => {
+    if (!sending || !activeTaskId) return;
+    const iv = setInterval(() => { refreshMsgs(); }, 8000);
+    return () => clearInterval(iv);
+  }, [sending, activeTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trailing refreshes after send stops — catches any late pub/sub messages (review, completion)
+  // that arrive after the SSE agent.done but before the DB is fully consistent.
+  useEffect(() => {
+    if (sending || !ac) return;
+    const timers = [2000, 8000, 20000].map(d => setTimeout(() => { refreshMsgs(); }, d));
+    return () => timers.forEach(clearTimeout);
+  }, [sending]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Convert SSE messages to Message shape for display while streaming
   const sseAsMsgs: Message[] = ac
@@ -153,24 +171,41 @@ function ChatPageInner() {
 
   // Polling fallback for direct chat (no SSE task stream active).
   // Starts 3 s after send (gives SSE a chance), then polls every 2 s for up to 90 s.
-  // Stops as soon as the last assistant message has non-empty content.
+  // Bug B fix: after finding the first non-empty response, keeps polling for another 20 s
+  // to catch self-review messages that arrive via pub/sub (async, up to ~15 s late).
   useEffect(() => {
     if (!sending || activeTaskId || !ac) return;
 
     let stopped = false;
+    let firstContentAt: number | null = null;
     const intervals: ReturnType<typeof setInterval>[] = [];
     const timeouts: ReturnType<typeof setTimeout>[] = [];
+
+    const isReviewMsg = (content: string) => {
+      try { const p = JSON.parse(content); return p.type === "review" || (p.type === "progress" && p.status === "waiting"); }
+      catch { return false; }
+    };
 
     const poll = async () => {
       if (stopped) return;
       try {
         const result = await getChatHistory(ac, 50);
         if (stopped) return;
-        const lastAssistant = [...result.messages].reverse().find(m => m.role === "assistant");
-        if (lastAssistant?.content && lastAssistant.content.trim().length > 0) {
+
+        const assistantMsgs = result.messages.filter(m => m.role === "assistant" && m.content?.trim());
+        const hasContent = assistantMsgs.length > 0;
+        const hasReview = assistantMsgs.some(m => isReviewMsg(m.content));
+
+        if (hasContent) {
           setMsgData({ messages: result.messages, hasMore: result.hasMore });
-          setSending(false);
-          stopped = true;
+
+          if (firstContentAt === null) firstContentAt = Date.now();
+
+          // Stop now if review message found, or 20 s elapsed since first content
+          if (hasReview || Date.now() - firstContentAt > 20000) {
+            setSending(false);
+            stopped = true;
+          }
         }
       } catch {
         // ignore transient errors during polling

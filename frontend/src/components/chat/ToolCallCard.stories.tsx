@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import ToolCallCard from "./ToolCallCard";
+import { ToolCallCard } from "./ToolCallCard";
 import type { ToolCall } from "@/hooks/useAgentStream";
 
 const meta: Meta<typeof ToolCallCard> = {

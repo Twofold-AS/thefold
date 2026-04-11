@@ -102,8 +102,13 @@ const _ = new Subscription(agentReports, "store-agent-report", {
     console.log("[DEBUG-AF] content:", report.content?.substring(0, 200));
 
     // === NEW CONTRACT: AgentProgress → single agent_progress row per task ===
-    if (useNewContract()) {
-      const progress = deserializeProgress(report.content);
+    // Always handle type:"progress" regardless of feature flag — this is what reportProgress() emits
+    // and it carries the reviewId needed for the review UI. Flag check was causing reviewId to be lost.
+    // Only match true new-contract messages (type:"progress"), not legacy types handled below.
+    {
+      let _isNewContract = false;
+      try { _isNewContract = JSON.parse(report.content)?.type === "progress"; } catch {}
+      const progress = _isNewContract ? deserializeProgress(report.content) : null;
       if (progress) {
         const progressMetadata = JSON.stringify({
           taskId: report.taskId,
@@ -1081,19 +1086,11 @@ async function processAIResponse(
 
     if (isCancelled(conversationId)) return;
 
-    // Step 6: If agent took over (start_task used), delete the empty placeholder —
-    // the agent creates its own agent_status message, so the placeholder would be a blank bubble.
-    const agentTookOver = (aiResponse.toolsUsed || []).includes("start_task");
-    if (agentTookOver) {
-      await db.exec`DELETE FROM messages WHERE id = ${placeholderId}::uuid AND content = ''`;
-      return; // agent handles everything from here
-    }
-
-    // Otherwise fill in the placeholder with the actual AI response
+    // Step 6: Save AI response to DB
     await updateMessageContent(placeholderId, aiResponse.content);
     await updateMessageType(placeholderId, "chat");
 
-    // Save token/cost metadata on the AI message (include lastCreatedTaskId for BUG 7 fix)
+    // Save token/cost metadata (include lastCreatedTaskId so frontend can detect agent handoff)
     await db.exec`UPDATE messages SET metadata = ${JSON.stringify({
       model: aiResponse.modelUsed,
       tokens: aiResponse.usage,
@@ -1104,7 +1101,20 @@ async function processAIResponse(
       ...(aiResponse.lastCreatedTaskId ? { lastCreatedTaskId: aiResponse.lastCreatedTaskId } : {}),
     })}::jsonb WHERE id = ${placeholderId}::uuid`;
 
-    // Emit agent.done so frontend knows to refresh messages (Bug 2 fix)
+    // When agent took over via start_task tool: emit agent_started so the frontend SSE hook
+    // switches its stream key from conversationId → agent taskId. Do NOT emit agent.done here —
+    // the agent's own SSE stream will emit done when the full task (including review) is complete.
+    const agentTookOver = (aiResponse.toolsUsed || []).includes("start_task") && aiResponse.lastCreatedTaskId;
+    if (agentTookOver) {
+      agentEvt.emitChatEvent({
+        streamKey: conversationId,
+        eventType: "agent.status",
+        data: { status: "agent_started", phase: aiResponse.lastCreatedTaskId },
+      }).catch(() => {});
+      return; // frontend will connect to agent SSE and watch from there
+    }
+
+    // Direct chat (no agent): emit agent.done so frontend stops the sending indicator
     agentEvt.emitChatEvent({
       streamKey: conversationId,
       eventType: "agent.done",
