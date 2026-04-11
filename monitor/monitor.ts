@@ -515,6 +515,7 @@ export const runRepoWatch = api(
                 }],
                 systemContext: "direct_chat",
                 model: "claude-haiku-4-5-20251001",
+                memoryContext: [],
               });
 
               let parsed: { breakingChanges?: string[]; cveRisks?: string[] } = {};
@@ -633,10 +634,18 @@ export const watchFindings = api(
   }
 );
 
+// No-arg wrapper required by CronJob (runRepoWatch takes optional params)
+export const runRepoWatchCron = api(
+  { method: "POST", path: "/monitor/repo-watch-cron", expose: false },
+  async (): Promise<void> => {
+    await runRepoWatch({});
+  }
+);
+
 const _repoWatchCron = new CronJob("repo-watch", {
   title: "Proactive repo watch — commits and CVE scanning",
   every: "30m",
-  endpoint: runRepoWatch,
+  endpoint: runRepoWatchCron,
 });
 
 // ============================================================
@@ -706,6 +715,7 @@ Format: Start with "📊 **Daglig oppsummering**", then bullet points with the m
         messages: [{ role: "user", content: digestPrompt }],
         systemContext: "direct_chat",
         model: "claude-haiku-4-5-20251001",
+        memoryContext: [],
       });
       digestContent = resp.content;
     } catch (err) {

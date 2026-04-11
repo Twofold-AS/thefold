@@ -878,6 +878,7 @@ Write the profile in English as a structured summary an AI agent can use as cont
       messages: [{ role: "user", content: profilePrompt }],
       systemContext: "direct_chat",
       model: "claude-haiku-4-5-20251001", // Fast + cheap for scanning
+      memoryContext: [],
     });
     profile = resp.content;
   } catch { return; }
@@ -1433,4 +1434,28 @@ export const conversations = api(
     return { conversations: convList };
   }
 );
+
+// --- Re-exports from sub-files (backwards compat) ---
+export { approveFromChat, requestChangesFromChat, rejectFromChat } from "./chat-review";
+export { getRepoActivity, getCostSummary, notifications } from "./chat-crud";
+
+// --- Internal helper: log repo activity ---
+
+async function logRepoActivity(
+  repoName: string,
+  eventType: string,
+  title: string,
+  description?: string,
+  userId?: string,
+  metadata?: Record<string, unknown>
+) {
+  try {
+    await db.exec`
+      INSERT INTO repo_activity (repo_name, event_type, title, description, user_id, metadata)
+      VALUES (${repoName}, ${eventType}, ${title}, ${description || null}, ${userId || null}, ${JSON.stringify(metadata || {})}::jsonb)
+    `;
+  } catch (e) {
+    console.error("Failed to log activity:", e);
+  }
+}
 

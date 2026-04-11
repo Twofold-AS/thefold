@@ -3,6 +3,18 @@ import log from "encore.dev/log";
 
 const GitHubAppId = secret("GitHubAppId");
 const GitHubAppPrivateKey = secret("GitHubAppPrivateKey");
+const GitHubAppEnabled = secret("GitHubAppEnabled");
+
+/**
+ * Returns true if the GitHub App integration is enabled via feature flag.
+ */
+export function isGitHubAppEnabled(): boolean {
+  try {
+    return GitHubAppEnabled() === "true";
+  } catch {
+    return false;
+  }
+}
 
 // Token cache: { [owner]: { token, expiresAt } }
 const tokenCache: Record<string, { token: string; expiresAt: number }> = {};

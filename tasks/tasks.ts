@@ -10,11 +10,6 @@ import type { Task, TaskStatus, TaskSource } from "./types";
 
 const db = new SQLDatabase("tasks", { migrations: "./migrations" });
 
-(async () => {
-  try { await db.queryRow`SELECT 1`; console.log("[tasks] db warmed"); }
-  catch (e) { console.warn("[tasks] warmup failed:", e); }
-})();
-
 // --- Pub/Sub ---
 
 export interface TaskEvent {

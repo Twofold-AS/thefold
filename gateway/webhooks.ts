@@ -161,10 +161,10 @@ async function dispatchEvent(
 /** task.completed */
 const _taskWebhookSub = new Subscription(taskEvents, "webhook-task-events", {
   handler: async (event) => {
-    if (event.action !== "completed" && event.action !== "failed") return;
-    await dispatchEvent(event.repo, `task.${event.action}`, {
+    if (event.action !== "completed") return;
+    await dispatchEvent(event.repo ?? undefined, `task.${event.action}`, {
       taskId: event.taskId,
-      repo: event.repo,
+      repo: event.repo ?? undefined,
       action: event.action,
     });
   },

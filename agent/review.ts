@@ -181,6 +181,7 @@ export const getReview = api(
 interface ListReviewsRequest {
   status?: string;
   repoName?: string;
+  taskId?: string;
   limit?: number;
   offset?: number;
 }
