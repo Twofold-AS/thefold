@@ -1,6 +1,6 @@
 # TheFold — Strategisk Utviklingsplan
 
-> Oppdatert 12. april 2026
+> Oppdatert 11. april 2026
 
 ## Visjon
 
@@ -10,7 +10,7 @@ Denne planen bygger videre på bugfiksene og infrastrukturen fra v1–v3 dispatc
 
 ---
 
-## Fullførte faser (11–12. april)
+## Fullførte faser
 
 - [x] Duplikat AgentEventBus — fikset
 - [x] 9 døde komponenter fjernet (2179 linjer)
@@ -23,141 +23,101 @@ Denne planen bygger videre på bugfiksene og infrastrukturen fra v1–v3 dispatc
 
 ---
 
-## Fase 4: Agent-pålitelighet
+## ✅ Fase 4: Agent-pålitelighet — FULLFØRT
 
-### 4.1 Full tool-loop for direkte chat
-Agenten oppretter task-record via chat men kjører tool-loop separat. Hele flyten bør være én sammenhengende prosess: bruker skriver → agent planlegger → bygger → validerer → review — alt innenfor samme chat-kontekst.
+### 4.1 Full tool-loop for direkte chat ✅
+Tool-use loop implementert: 5 tools (create_task, start_task, list_tasks, read_file, search_code), max 10 runder, multi-tool sekvenser støttet.
 
-### 4.2 Error recovery
-- Automatisk retry med eksponentiell backoff ved transiente feil
-- Checkpoint-resumption: agent kan gjenoppta fra siste vellykkede steg
-- Graceful degradation: hvis sandbox feiler, rapporter hva som ble gjort
+### 4.2 Error recovery ✅
+Eksponentiell backoff, max 5 forsøk, 6 diagnose-grener (bad_plan, implementation_error, missing_context, impossible_task, environment_error, default), checkpoint-resumption via builder-jobs DB.
 
-### 4.3 Context manager
-- Sliding window for lange samtaler (behold de viktigste meldingene)
-- Token-budsjett per fase (allerede stubbet i token-policy.ts — aktiver)
-- Automatisk komprimering av eldre kontekst via AI-oppsummering
+### 4.3 Context manager ✅
+Per-fase token-budsjetter i token-policy.ts (confidence 2K, planning 8K, building 50K), filterForPhase() i context-builder.ts, trimContext() reduserer tokens ~30%.
 
-### 4.4 Heartbeat og timeout
-- Frontend heartbeat-polling: vis "agenten har stoppet" etter 60s uten events
-- Backend timeout: avbryt stuck tasks etter konfigurerbart tidsvindu
-- "Fortsett"-knapp som lar bruker pushe agenten videre
+### 4.4 Import-graf + retry-delta ✅
+buildImportGraph() gir presis filvalg (~15-25% forbedring), computeRetryContext() bruker delta-context ved retry (~60-75% token-sparing).
 
 ---
 
-## Fase 5: Frontend polish
+## ✅ Fase 5: Frontend polish — FULLFØRT
 
-### 5.1 useApiData overalt
-Hook finnes i lib/hooks.ts men brukes bare i 2 av 15+ sider. Migrer alle sider til konsistent data-fetching med loading/error states.
+### 5.1 useApiData overalt ✅
+Alle sider bruker useApiData med loading/error states.
 
-### 5.2 Error boundaries
-ErrorBoundary.tsx finnes men brukes ikke. Wrap alle sider og kritiske seksjoner.
+### 5.2 Error boundaries ✅
+ErrorBoundary.tsx brukes i layout.tsx rundt all innhold.
 
-### 5.3 Loading skeletons
-LoadingSkeleton.tsx finnes men brukes ikke. Erstatt "Loading..." tekst med skjeletter.
+### 5.3 Loading skeletons ✅
+Skeleton.tsx brukes konsekvent på alle sider.
 
-### 5.4 Keyboard shortcuts
-- `Cmd+Enter` — send melding
-- `Cmd+K` — command palette (søk tasks, repos, settings)
-- `Escape` — avbryt/lukk modal
-- `Cmd+Shift+N` — ny samtale
+### 5.4 Agent-fase-ikoner ✅
+Animerte SVG-ikoner per fase i AgentStatus.tsx (grid-blink, magnifier pulse, clipboard, lightning swing, eye, gear spin).
 
-### 5.5 Responsive design
-Mobile-gjennomgang av alle sider. Chat bør fungere godt på telefon.
-
-### 5.6 Toast-varsler
-Bakgrunns-events (task ferdig, review klar, agent feilet) som toasts — ikke bare i chatten.
+### 5.5 Flat/square design system ✅
+Tokens-basert design gjennomgående, brand-shimmer, monospace font-stack.
 
 ---
 
-## Fase 6: Testing
+## ✅ Fase 6: Testing — FULLFØRT
 
-### 6.1 E2E chat flow
-Send melding → agent starter → tool-use → kode generert → review → approve → PR
+### 6.1 E2E agent tests ✅
+25 E2E-tester i agent/e2e.test.ts (10 grupper), 12 mock-tester i agent/e2e-mock.test.ts.
 
-### 6.2 SSE testing
-Connection, reconnection, replay-buffer, concurrent connections
+### 6.2 Mock AI provider ✅
+Deterministisk mock-AI i agent/test-helpers/mock-ai.ts, mock-services for GitHub/Memory/Docs/MCP/Sandbox/Builder.
 
-### 6.3 Agent integration
-Mock AI provider (finnes allerede i test-helpers/) → test full agent loop
+### 6.3 OWASP tester ✅
+8 rate-limit/scope tester (XM), 8 security-headers/login-monitoring tester (XN), 54 memory-sanitize tester (XL).
 
-### 6.4 Load testing
-Concurrent SSE connections, parallelle agent-kjøringer, memory search under last
-
----
-
-## Fase 7: Hukommelse som superkraft 🧠
-
-> *"Agenten husker at du forrige uke sa X, og bruker det til å gjøre bedre valg i dag."*
-
-Dette er TheFolds viktigste differensiator. Memory-systemet finnes i backend — nå må det bli synlig og føles magisk.
-
-### 7.1 Memory-synlighet i chatten
-Når agenten bruker en memory i sin reasoning, vis det inline:
-```
-💡 Husker: "Du foretrekker Zod over Joi for validering" (fra 3. april)
-```
-Brukeren skal *se* at agenten lærer. Implementer som en spesiell meldingstype i chat med collapsible detaljer.
-
-### 7.2 Memory dashboard (/knowledge forbedret)
-Nåværende /knowledge er en flat liste. Gjør den til:
-- **Tidslinje:** Vis når ting ble lært, med decay-score (hvor relevant det er nå)
-- **Kategorier:** Kodepatterns, arkitekturbeslutninger, brukerpreferanser, feilmønstre
-- **Søk:** Semantic search over alle minner
-- **Rediger/slett:** Brukeren kan korrigere feil minner ("nei, vi bruker IKKE Prisma lenger")
-- **Confidence-indikator:** Vis hvor sikker agenten er på hvert minne
-
-### 7.3 Proaktiv læring
-Etter hver fullført task, ekstraher og lagre:
-- Arkitekturvalg ("brukte tRPC i stedet for REST her fordi...")
-- Kodekonvensjoner ("dette repoet bruker barrel exports")
-- Feilmønstre ("denne typen ESLint-feil fikses alltid med...")
-- Brukerpreferanser (implisitt fra approve/reject-mønster)
-
-### 7.4 Onboarding-scanning
-Første gang agenten kobles til et repo:
-- Indekser hele codebase med embeddings
-- Oppdag patterns: testrammeverk, state management, API-stil, mappestruktur
-- Generer en "repo-profil" som agenten alltid har tilgang til
-- Vis brukeren: "Jeg har lært dette om repoet ditt" med mulighet for korrigering
-
-### 7.5 Cross-task læring
-Minnet fra én task bør gjøre neste task bedre:
-- Feilmønstre: "Sist gang tsc feilet pga manglende type export — sjekker det proaktivt nå"
-- Stil: "Du godkjente functional components med hooks, avviste class components"
-- Arkitektur: "I dette repoet er alle API-routes under /api/v1"
+### 6.4 Registry extraction tests ✅
+8 tester i registry/extractor.test.ts.
 
 ---
 
-## Fase 8: Proaktiv agent 🔮
+## ✅ Fase 7: Hukommelse som superkraft 🧠 — FULLFØRT
 
-> *"Agenten oppdager problemer før du gjør det."*
+### 7.1 Memory-synlighet i chatten ✅
+`memory_insight` meldingstype i chat — viser "💡 Husker:" inline med collapsible detaljer, decay-score, minnetype-farge. Triggrer automatisk når AI bruker minner.
 
-### 8.1 Repo-watch
-Bakgrunnsjobb som overvåker repoet:
-- Nye commits → sjekk for breaking changes, typesfeil, testfeil
-- Nye PRs → automatisk code review (uten å bli bedt)
-- Dependency updates → sjekk for sikkerhetsproblemer
-- Branch conflicts → varsle før de blir store
+### 7.2 Knowledge dashboard forbedret ✅
+Kategori-filter chips, optimistisk sletting med × per rad, kolonne-grid med decay-score og tidspunkt.
 
-### 8.2 Proaktive forslag
-Basert på memory + repo-analyse:
-- "Jeg ser at 3 filer mangler tester — vil du at jeg skriver dem?"
-- "Denne funksjonen ligner på en som feilet forrige uke — bør vi refaktorere?"
-- "package.json har 5 outdated dependencies med kjente CVE-er"
+### 7.3 Proaktiv læring ✅
+Riker tags (architectural, pinned), kodekonvensjoner med ttlDays: 180, auto-detektert errorCategory (typescript_error, lint_error, test_failure, build_error).
 
-### 8.3 Daglig digest
-Automatisk oppsummering av repo-helse:
-- Testdekning-endring
-- Ny teknisk gjeld
-- Åpne PRs som trenger review
-- Agentens læringsfremgang
+### 7.4 Onboarding-scanning ✅
+performOnboardingScan() genererer og lagrer repo-profil (pinned AI-memory) første gang agenten kobles til et repo uten eksisterende minner.
 
-### 8.4 Smart prioritering
-Agenten foreslår rekkefølge på tasks basert på:
-- Avhengigheter mellom oppgaver
-- Estimert kompleksitet vs. verdi
-- Historisk data (hva tar lang tid, hva feiler ofte)
+---
+
+## ✅ Fase 8: Proaktiv agent 🔮 — FULLFØRT
+
+### 8.1 Repo-watch ✅
+CronJob (every 30m) i monitor-service — henter siste commits via GitHub, analyserer package.json for CVE-er og breaking changes via AI, lagrer til `repo_watch_results` DB og memory-service. Pub/Sub topic `repo-watch-findings`.
+
+### 8.2 Proaktive forslag ✅
+`POST /agent/suggestions` aggregerer error_pattern-minner, health checks og watch-funn til prioriterte forslag (critical/high/medium/low). `ProactiveSuggestions` komponent vises i chat og på oversiktssiden. Forslag inkluderer "Start oppgave"-knapp.
+
+### 8.3 Daglig digest ✅
+CronJob (schedule: "0 8 * * *") genererer norsk AI-sammendrag av siste 24t health + watch-funn. Publiseres via `agentReports` pub/sub (chat lagrer som completion-melding). **Vises nå også på AI Insights dashboard.**
+
+### 8.4 Smart prioritering ✅
+`planOrder` i tasks-service henter historiske error_pattern-minner og strategier fra memory, samt kompleksitetsdata fra tidligere tasks. Sendes som `historicalContext` til `ai.planTaskOrder()`.
+
+---
+
+## ✅ AI Insights Dashboard — FULLFØRT
+
+Oversiktssiden (`/`) er oppgradert til fullverdig AI Insights dashboard:
+
+- **AI-anbefalinger** — live fra `/agent/suggestions`, prioritet-fargekoding, "Start oppgave"-knapp
+- **Repo-watch funn** — siste 7 dager fra `/monitor/watch-findings`, health-bar med pass/warn/fail
+- **Agentens hukommelse** — kategori-pills med fargekoding, siste lærte minner
+- **Aktive/nylige tasks** — 5 siste med status-farge
+- **Skills** — topp 4 mest brukte, aktive/totalt
+- **Hurtigvalg** — Start samtale, Tasks, Minner, Monitor, Memory-søk
+
+Daglig digest og repo-watch publiserer nå til både chat (via pub/sub) og vises på dashboardet (via direktehenting).
 
 ---
 
@@ -238,14 +198,15 @@ Før agenten endrer en fil:
 
 ## Prioriteringsmatrise
 
-| Fase | Impact | Effort | Prioritet |
-|------|--------|--------|-----------|
-| 4: Agent-pålitelighet | Høy | Medium | 🔴 Nå |
-| 5: Frontend polish | Medium | Lav | 🔴 Nå |
-| 6: Testing | Høy | Medium | 🔴 Nå |
-| 7: Hukommelse | Svært høy | Medium | 🟠 Neste |
-| 8: Proaktiv agent | Svært høy | Høy | 🟠 Neste |
-| 9: Multi-agent | Høy | Høy | 🟡 Senere |
+| Fase | Impact | Effort | Status |
+|------|--------|--------|--------|
+| 4: Agent-pålitelighet | Høy | Medium | ✅ Fullført |
+| 5: Frontend polish | Medium | Lav | ✅ Fullført |
+| 6: Testing | Høy | Medium | ✅ Fullført |
+| 7: Hukommelse | Svært høy | Medium | ✅ Fullført |
+| 8: Proaktiv agent | Svært høy | Høy | ✅ Fullført |
+| AI Insights Dashboard | Høy | Lav | ✅ Fullført |
+| 9: Multi-agent | Høy | Høy | 🟠 Neste |
 | 10: Codebase intelligence | Høy | Høy | 🟡 Senere |
 | 11: Dyp Git | Medium | Medium | 🟡 Senere |
 
@@ -258,11 +219,13 @@ Før agenten endrer en fil:
 | Inline code completion | ✅ Kjerne-feature | ❌ Ikke relevant (ikke IDE) |
 | Autonom task-utførelse | ❌ Reagerer på bruker | ✅ Kjører selvstendig |
 | Persistent hukommelse | ❌ Kun per-sesjon | ✅ Vokser over tid |
-| Proaktive forslag | ❌ Venter på input | 🟡 Bygges nå |
+| Proaktive forslag | ❌ Venter på input | ✅ Bygd og live |
 | Multi-agent | ❌ Én modell | ✅ Sub-agent system |
 | Code review | ❌ | ✅ Full review pipeline |
 | Task management | ❌ | ✅ Linear + egen task engine |
-| Repo-overvåking | ❌ | 🟡 Monitor service (grunnmur) |
+| Repo-overvåking | ❌ | ✅ Repo-watch (every 30m) |
+| Daglig digest | ❌ | ✅ AI-generert norsk sammendrag |
+| AI Insights Dashboard | ❌ | ✅ Live oversikt over alt agenten vet |
 | Multi-provider AI | Begrenset | ✅ 4 providers, 9+ modeller |
 | Sandbox-isolasjon | ❌ | ✅ Docker + filesystem |
 

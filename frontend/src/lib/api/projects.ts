@@ -150,6 +150,20 @@ export async function getMonitorHistory(repo: string, limit?: number) {
   }>("/monitor/history", { method: "POST", body: { repo, limit: limit || 20 } });
 }
 
+export async function getWatchFindings() {
+  return apiFetch<{
+    findings: Array<{
+      id: string;
+      repo: string;
+      findingType: "new_commit" | "cve" | "breaking_change" | "test_failure" | "info";
+      severity: "info" | "warning" | "critical";
+      summary: string;
+      details: Record<string, unknown>;
+      createdAt: string;
+    }>;
+  }>("/monitor/watch-findings", { method: "GET" });
+}
+
 // --- Cache API ---
 
 export async function getCacheStats() {
