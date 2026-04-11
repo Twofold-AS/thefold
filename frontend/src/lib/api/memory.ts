@@ -53,3 +53,7 @@ export async function getMemoryStats() {
     expiringSoon: number;
   }>("/memory/stats", { method: "GET" });
 }
+
+export async function deleteMemory(id: string) {
+  return apiFetch<{ success: boolean }>(`/memory/${id}`, { method: "DELETE" });
+}

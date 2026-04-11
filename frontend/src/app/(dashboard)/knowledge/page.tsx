@@ -1,13 +1,16 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { T } from "@/lib/tokens";
 import { GR } from "@/components/GridRow";
 import SectionLabel from "@/components/SectionLabel";
 import Tag from "@/components/Tag";
 import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
-import { searchMemories, MemorySearchResult } from "@/lib/api";
+import { searchMemories, deleteMemory, MemorySearchResult } from "@/lib/api";
+
+const MEMORY_TYPES = ["decision", "error_pattern", "strategy", "session", "skill", "task", "general"] as const;
+type MemoryTypeFilter = (typeof MEMORY_TYPES)[number] | "all";
 
 function formatAge(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -17,38 +20,55 @@ function formatAge(dateStr: string): string {
   return `${days}d`;
 }
 
-function ConfidenceBar({ value }: { value: number }) {
+function typeVariant(memoryType: string): "accent" | "error" | "success" | "default" {
+  switch (memoryType) {
+    case "decision": return "accent";
+    case "error_pattern": return "error";
+    case "strategy": return "success";
+    default: return "default";
+  }
+}
+
+function DecayBar({ value }: { value: number }) {
   const pct = Math.round(value * 100);
   const color = pct >= 70 ? T.success : pct >= 40 ? T.accent : T.warning;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <div
-        style={{
-          flex: 1,
-          height: 4,
-          background: T.subtle,
-          borderRadius: 2,
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            width: `${pct}%`,
-            height: "100%",
-            background: color,
-            borderRadius: 2,
-            transition: "width 0.3s ease",
-          }}
-        />
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{ flex: 1, height: 3, background: T.subtle, borderRadius: 2, overflow: "hidden" }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 2, transition: "width 0.3s ease" }} />
       </div>
-      <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted, width: 30 }}>
+      <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textMuted, width: 28, textAlign: "right" }}>
         {pct}%
       </span>
     </div>
   );
 }
 
-function EntryRow({ m, expanded, onToggle }: { m: MemorySearchResult; expanded: boolean; onToggle: () => void }) {
+function EntryRow({
+  m,
+  expanded,
+  onToggle,
+  onDelete,
+}: {
+  m: MemorySearchResult;
+  expanded: boolean;
+  onToggle: () => void;
+  onDelete: (id: string) => void;
+}) {
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm("Slett dette minnet?")) return;
+    setDeleting(true);
+    try {
+      await deleteMemory(m.id);
+      onDelete(m.id);
+    } catch {
+      setDeleting(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -56,36 +76,30 @@ function EntryRow({ m, expanded, onToggle }: { m: MemorySearchResult; expanded: 
         background: expanded ? T.subtle : "transparent",
         cursor: "pointer",
         transition: "background 0.15s",
+        opacity: deleting ? 0.4 : 1,
       }}
       onClick={onToggle}
     >
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 120px 100px 60px 24px",
+          gridTemplateColumns: "1fr 110px 90px 48px 28px",
           alignItems: "center",
-          padding: "12px 16px",
+          padding: "11px 16px",
           gap: 12,
         }}
       >
         {/* Content preview */}
         <div>
           <div style={{ fontSize: 13, color: T.text, lineHeight: 1.4 }}>
-            {m.content.length > 80 ? m.content.slice(0, 80) + "…" : m.content}
+            {m.content.length > 90 ? m.content.slice(0, 90) + "…" : m.content}
           </div>
-          <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-            <Tag
-              variant={
-                m.memoryType === "error_pattern"
-                  ? "error"
-                  : m.memoryType === "decision"
-                  ? "accent"
-                  : "default"
-              }
-            >
-              {m.memoryType}
-            </Tag>
+          <div style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "center" }}>
+            <Tag variant={typeVariant(m.memoryType)}>{m.memoryType}</Tag>
             <span style={{ fontSize: 10, color: T.textFaint }}>{formatAge(m.createdAt)}</span>
+            {m.tags?.slice(0, 2).map((t) => (
+              <span key={t} style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>{t}</span>
+            ))}
           </div>
         </div>
 
@@ -94,9 +108,9 @@ function EntryRow({ m, expanded, onToggle }: { m: MemorySearchResult; expanded: 
           {m.sourceRepo ?? "—"}
         </div>
 
-        {/* Confidence */}
+        {/* Decay */}
         <div>
-          <ConfidenceBar value={Number(m.relevanceScore) || 0} />
+          <DecayBar value={Number(m.decayedScore) || 0} />
         </div>
 
         {/* Usage */}
@@ -104,26 +118,33 @@ function EntryRow({ m, expanded, onToggle }: { m: MemorySearchResult; expanded: 
           {m.accessCount}x
         </div>
 
-        {/* Chevron */}
-        <div
+        {/* Delete */}
+        <button
+          onClick={handleDelete}
+          disabled={deleting}
+          title="Slett"
           style={{
-            fontSize: 10,
+            background: "none",
+            border: "none",
             color: T.textFaint,
-            transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
-            transition: "transform 0.15s",
-            textAlign: "center",
+            cursor: "pointer",
+            fontSize: 14,
+            padding: 0,
+            lineHeight: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
           }}
+          onMouseOver={(e) => (e.currentTarget.style.color = T.error)}
+          onMouseOut={(e) => (e.currentTarget.style.color = T.textFaint)}
         >
-          ▶
-        </div>
+          ×
+        </button>
       </div>
 
       {expanded && (
         <div
-          style={{
-            padding: "0 16px 16px",
-            borderTop: `1px solid ${T.border}`,
-          }}
+          style={{ padding: "0 16px 14px", borderTop: `1px solid ${T.border}` }}
           onClick={(e) => e.stopPropagation()}
         >
           <div
@@ -143,15 +164,16 @@ function EntryRow({ m, expanded, onToggle }: { m: MemorySearchResult; expanded: 
           >
             {m.content}
           </div>
-          <div style={{ display: "flex", gap: 16, marginTop: 10 }}>
+          <div style={{ display: "flex", gap: 16, marginTop: 10, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>id: {m.id.slice(0, 8)}…</span>
             <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-              id: {m.id.slice(0, 8)}…
-            </span>
-            <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-              similarity: {((Number(m.similarity) || 0) * 100).toFixed(1)}%
+              sim: {((Number(m.similarity) || 0) * 100).toFixed(1)}%
             </span>
             <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
               decay: {((Number(m.decayedScore) || 0) * 100).toFixed(1)}%
+            </span>
+            <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+              relevans: {((Number(m.relevanceScore) || 0) * 100).toFixed(1)}%
             </span>
             {m.tags?.length > 0 && (
               <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
@@ -168,7 +190,9 @@ function EntryRow({ m, expanded, onToggle }: { m: MemorySearchResult; expanded: 
 export default function KnowledgePage() {
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState<MemoryTypeFilter>("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -178,11 +202,20 @@ export default function KnowledgePage() {
   }, [query]);
 
   const { data, loading } = useApiData(
-    () => searchMemories(debouncedQuery, { limit: 40 }),
-    [debouncedQuery],
+    () => searchMemories(debouncedQuery, {
+      limit: 50,
+      memoryType: typeFilter !== "all" ? typeFilter : undefined,
+    }),
+    [debouncedQuery, typeFilter],
   );
 
-  const results: MemorySearchResult[] = data?.results ?? [];
+  const handleDelete = useCallback((id: string) => {
+    setDeletedIds((prev) => new Set([...prev, id]));
+    if (expandedId === id) setExpandedId(null);
+  }, [expandedId]);
+
+  const allResults: MemorySearchResult[] = data?.results ?? [];
+  const results = allResults.filter((r) => !deletedIds.has(r.id));
 
   return (
     <>
@@ -199,7 +232,7 @@ export default function KnowledgePage() {
           Kunnskapsbase
         </h2>
         <p style={{ fontSize: 13, color: T.textMuted }}>
-          Søk i semantisk minne — mønster, beslutninger og kontekst fra tidligere oppgaver.
+          Semantisk minne — mønster, beslutninger og kontekst fra tidligere oppgaver.
         </p>
       </div>
 
@@ -265,6 +298,31 @@ export default function KnowledgePage() {
         </div>
       </GR>
 
+      {/* Category filter chips */}
+      <GR>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", paddingTop: 12 }}>
+          {(["all", ...MEMORY_TYPES] as const).map((type) => (
+            <button
+              key={type}
+              onClick={() => setTypeFilter(type)}
+              style={{
+                padding: "4px 12px",
+                borderRadius: 999,
+                border: `1px solid ${typeFilter === type ? T.accent : T.border}`,
+                background: typeFilter === type ? T.accentDim : "transparent",
+                color: typeFilter === type ? T.accent : T.textMuted,
+                fontSize: 11,
+                fontFamily: T.mono,
+                cursor: "pointer",
+                transition: "all 0.15s",
+              }}
+            >
+              {type === "all" ? "Alle" : type}
+            </button>
+          ))}
+        </div>
+      </GR>
+
       {/* Results */}
       <GR mb={40}>
         <div
@@ -279,14 +337,14 @@ export default function KnowledgePage() {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "1fr 120px 100px 60px 24px",
+              gridTemplateColumns: "1fr 110px 90px 48px 28px",
               padding: "8px 16px",
               gap: 12,
               background: T.subtle,
               borderBottom: `1px solid ${T.border}`,
             }}
           >
-            {["INNHOLD", "KILDE", "RELEVANS", "BRUK", ""].map((h, i) => (
+            {["INNHOLD", "KILDE", "STYRKE", "BRUK", ""].map((h, i) => (
               <div
                 key={i}
                 style={{
@@ -308,21 +366,18 @@ export default function KnowledgePage() {
               <Skeleton rows={6} />
             </div>
           ) : results.length === 0 ? (
-            <div
-              style={{
-                padding: "48px 24px",
-                textAlign: "center",
-              }}
-            >
+            <div style={{ padding: "48px 24px", textAlign: "center" }}>
               <div style={{ fontSize: 32, marginBottom: 12 }}>🔍</div>
               <div style={{ fontSize: 14, color: T.textMuted }}>
                 {debouncedQuery
                   ? `Ingen minner funnet for "${debouncedQuery}"`
+                  : typeFilter !== "all"
+                  ? `Ingen minner av type "${typeFilter}"`
                   : "Ingen minner lagret ennå."}
               </div>
-              {debouncedQuery && (
+              {(debouncedQuery || typeFilter !== "all") && (
                 <div style={{ fontSize: 12, color: T.textFaint, marginTop: 6 }}>
-                  Prøv et bredere søkeord.
+                  Prøv et bredere søkeord eller fjern filteret.
                 </div>
               )}
             </div>
@@ -334,6 +389,7 @@ export default function KnowledgePage() {
                   m={m}
                   expanded={expandedId === m.id}
                   onToggle={() => setExpandedId(expandedId === m.id ? null : m.id)}
+                  onDelete={handleDelete}
                 />
               ))}
               <div

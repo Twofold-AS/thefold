@@ -552,6 +552,17 @@ export const consolidate = api(
 );
 
 // POST /memory/cleanup — Delete expired memories (called by cron)
+export const deleteMemory = api(
+  { method: "DELETE", path: "/memory/:id", expose: true, auth: true },
+  async ({ id }: { id: string }): Promise<{ success: boolean }> => {
+    const result = await db.queryRow<{ id: string }>`
+      DELETE FROM memories WHERE id = ${id}::uuid RETURNING id
+    `;
+    if (!result) throw APIError.notFound("memory not found");
+    return { success: true };
+  }
+);
+
 export const cleanup = api(
   { method: "POST", path: "/memory/cleanup", expose: false },
   async (): Promise<CleanupResponse> => {
@@ -695,6 +706,18 @@ export const stats = api(
       avgRelevanceScore: avgRow?.avg ?? 0,
       expiringSoon: expiringRow?.count ?? 0,
     };
+  }
+);
+
+// DELETE /memory/:id — Delete a specific memory by ID
+export const deleteMemory = api(
+  { method: "DELETE", path: "/memory/:id", expose: true, auth: true },
+  async ({ id }: { id: string }): Promise<{ success: boolean }> => {
+    const result = await db.queryRow<{ id: string }>`
+      DELETE FROM memories WHERE id = ${id}::uuid RETURNING id
+    `;
+    if (!result) throw APIError.notFound("memory not found");
+    return { success: true };
   }
 );
 

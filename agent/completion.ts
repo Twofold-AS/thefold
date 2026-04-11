@@ -241,26 +241,71 @@ export async function completeTask(
 
   // === STEP 11: Store memories (fire-and-forget) ===
   log.info("STEP 11: Storing memories", { count: memoriesExtracted.length });
+  const repo = `${ctx.repoOwner}/${ctx.repoName}`;
+
   for (const mem of memoriesExtracted) {
+    // Enrich decision memories with richer tags and metadata (7.3)
+    const isArchDecision = /architect|pattern|design|service|database|schema|auth/i.test(mem);
+    const isConvention = /convention|naming|style|format|lint|prettier|eslint/i.test(mem);
+    const tags = [
+      "decision",
+      isArchDecision ? "architectural" : null,
+      isConvention ? "convention" : null,
+      ctx.repoName,
+    ].filter(Boolean) as string[];
+
     memory.store({
       content: mem,
-      category: "decision",
+      category: isArchDecision ? "architectural_decision" : isConvention ? "code_convention" : "decision",
       linearTaskId: ctx.taskId,
       memoryType: "decision",
-      sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
+      sourceRepo: repo,
+      tags,
+      pinned: isArchDecision, // pin architectural decisions so they don't decay
     }).catch((e: unknown) => log.warn("memory.store decision failed", { error: String(e) }));
   }
 
-  // Store error patterns from attemptHistory
+  // Store error patterns from attemptHistory with resolution context (7.3)
   for (const attempt of ctx.attemptHistory) {
     if (attempt.result === "failure" && attempt.error) {
+      const errorCategory = attempt.error.includes("tsc") || attempt.error.includes("TypeScript")
+        ? "typescript_error"
+        : attempt.error.includes("eslint") || attempt.error.includes("lint")
+        ? "lint_error"
+        : attempt.error.includes("test") || attempt.error.includes("jest") || attempt.error.includes("vitest")
+        ? "test_failure"
+        : "build_error";
+
       memory.store({
-        content: `Error pattern in ${ctx.repoName}: ${attempt.error.substring(0, 500)}`,
-        category: "error_pattern",
+        content: `Error pattern in ${ctx.repoName} [${errorCategory}]: ${attempt.error.substring(0, 500)}\nResolved: ${ctx.totalAttempts > 1 ? "yes (required retry)" : "first attempt succeeded"}`,
+        category: errorCategory,
         linearTaskId: ctx.taskId,
         memoryType: "error_pattern",
-        sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
+        sourceRepo: repo,
+        tags: [errorCategory, ctx.repoName, "auto-extracted"],
       }).catch((e: unknown) => log.warn("memory.store error_pattern failed", { error: String(e) }));
+    }
+  }
+
+  // Store code conventions detected from changed files (7.3)
+  const fileExtensions = [...new Set(allFiles.map((f) => f.path.split(".").pop()).filter(Boolean))];
+  const hasTypeScript = fileExtensions.includes("ts") || fileExtensions.includes("tsx");
+  const hasTests = allFiles.some((f) => f.path.includes(".test.") || f.path.includes(".spec."));
+  if (allFiles.length >= 3 && hasTypeScript) {
+    const conventions: string[] = [];
+    if (hasTests) conventions.push("Tests included alongside implementation files");
+    if (allFiles.some((f) => f.path.includes("migrations/"))) conventions.push("Database migrations used for schema changes");
+    if (allFiles.some((f) => f.path.includes("types.ts"))) conventions.push("Types extracted to separate types.ts file");
+    if (conventions.length > 0) {
+      memory.store({
+        content: `Code conventions in ${ctx.repoName}:\n${conventions.map((c) => `- ${c}`).join("\n")}`,
+        category: "code_convention",
+        linearTaskId: ctx.taskId,
+        memoryType: "decision",
+        sourceRepo: repo,
+        tags: ["convention", ctx.repoName, "auto-detected"],
+        ttlDays: 180, // conventions are long-lived
+      }).catch((e: unknown) => log.warn("memory.store convention failed", { error: String(e) }));
     }
   }
 

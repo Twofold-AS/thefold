@@ -7,7 +7,7 @@ export interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress" | "memory_insight";
   metadata: string | null;
   createdAt: string;
   updatedAt?: string;
