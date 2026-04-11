@@ -3,14 +3,14 @@ import log from "encore.dev/log";
 
 const GitHubAppId = secret("GitHubAppId");
 const GitHubAppPrivateKey = secret("GitHubAppPrivateKey");
-const GitHubAppEnabled = secret("GitHubAppEnabled");
 
 /**
- * Returns true if the GitHub App integration is enabled via feature flag.
+ * Returns true if the GitHub App credentials are configured.
+ * No feature flag — enabled automatically when secrets are set.
  */
 export function isGitHubAppEnabled(): boolean {
   try {
-    return GitHubAppEnabled() === "true";
+    return !!(GitHubAppId() && GitHubAppPrivateKey());
   } catch {
     return false;
   }

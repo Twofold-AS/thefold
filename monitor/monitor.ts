@@ -2,13 +2,8 @@ import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { CronJob } from "encore.dev/cron";
 import { Topic } from "encore.dev/pubsub";
-import { secret } from "encore.dev/config";
 import { sandbox } from "~encore/clients";
 import log from "encore.dev/log";
-
-// --- Feature flags ---
-const repoWatchEnabled = secret("RepoWatchEnabled");
-const dailyDigestEnabled = secret("DailyDigestEnabled");
 
 // --- Database ---
 
@@ -381,7 +376,7 @@ export const history = api(
   }
 );
 
-// --- Cron: Daily health check (feature-flagged via MonitorEnabled secret) ---
+// --- Cron: Daily health check ---
 
 export const runDailyChecks = api(
   { method: "POST", path: "/monitor/daily-check", expose: false },
@@ -453,12 +448,6 @@ interface RepoWatchResponse {
 export const runRepoWatch = api(
   { method: "POST", path: "/monitor/repo-watch", expose: false },
   async (req: RepoWatchRequest): Promise<RepoWatchResponse> => {
-    let enabled = false;
-    try { enabled = repoWatchEnabled() === "true"; } catch { /* not set */ }
-    if (!enabled) {
-      return { ran: false, findings: 0, message: "RepoWatchEnabled != 'true'" };
-    }
-
     const { github: gh, memory: mem, ai: aiClient } = await import("~encore/clients");
 
     // Determine repos to watch
@@ -655,12 +644,6 @@ const _repoWatchCron = new CronJob("repo-watch", {
 export const runDailyDigest = api(
   { method: "POST", path: "/monitor/daily-digest", expose: false },
   async (): Promise<{ ran: boolean; message: string }> => {
-    let enabled = false;
-    try { enabled = dailyDigestEnabled() === "true"; } catch { /* not set */ }
-    if (!enabled) {
-      return { ran: false, message: "DailyDigestEnabled != 'true'" };
-    }
-
     const { ai: aiClient, memory: mem } = await import("~encore/clients");
 
     // Collect repo health metrics from last 24h

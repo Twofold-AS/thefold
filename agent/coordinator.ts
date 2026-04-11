@@ -3,21 +3,14 @@
 // Sub-agents get scoped tool sets and emit events via agentEventBus with
 // prefixed task IDs ("parentTaskId:sub:N").
 //
-// Feature flag: MultiAgentEnabled secret ("true" | "false")
+// Multi-agent coordination — always enabled (no feature flag)
 
-import { secret } from "encore.dev/config";
 import log from "encore.dev/log";
 import type { AgentToolName } from "./agent-tools";
 import { SubAgent, type SubAgentResult } from "./sub-agent";
 
-const MultiAgentEnabled = secret("MultiAgentEnabled"); // "true" | "false"
-
 export function isMultiAgentEnabled(): boolean {
-  try {
-    return MultiAgentEnabled() === "true";
-  } catch {
-    return false;
-  }
+  return true;
 }
 
 export interface SpawnOptions {
@@ -38,10 +31,6 @@ export class AgentCoordinator {
    * Returns the sub-task ID that can be passed to waitForAll / cancelAll.
    */
   spawnSubAgent(opts: SpawnOptions): SubAgent {
-    if (!isMultiAgentEnabled()) {
-      throw new Error("MultiAgentEnabled feature flag is not set — sub-agents are disabled");
-    }
-
     const index = this.counter++;
     const agent = new SubAgent({
       parentTaskId: this.parentTaskId,

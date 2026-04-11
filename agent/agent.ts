@@ -1,5 +1,4 @@
 import { api, APIError } from "encore.dev/api";
-import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
 import { github, linear, sandbox, users, tasks, mcp } from "~encore/clients";
@@ -32,9 +31,7 @@ import { matchDecision } from "./decision-cache";
 // --- Database (shared) ---
 import { db, acquireRepoLock, releaseRepoLock, createJob, startJob, updateJobCheckpoint, completeJob, failJob, findResumableJobs, expireOldJobs } from "./db";
 
-// --- Secrets ---
-const AgentPersistentJobs = secret("AgentPersistentJobs"); // "true" | "false"
-const AgentToolLoopEnabled = secret("AgentToolLoopEnabled"); // "false" to disable tool loop (legacy fallback); defaults to enabled
+// All features active by default — no feature flags
 
 // --- Types ---
 
@@ -437,11 +434,8 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     // TODO D30: Remove legacy executePlan flow once tool loop is stable
     let executionOutcome: ExecutionResult;
 
-    const useToolLoop = (() => {
-      try { return AgentToolLoopEnabled() !== "false"; } catch { return true; }
-    })();
-
-    if (useToolLoop) {
+    // Tool loop is always enabled
+    {
       await report(ctx, "Starter AI tool-loop...", "working");
 
       const toolCtx: AgentToolContext = {
@@ -486,14 +480,6 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         filesWritten: loopResult.filesWritten.length,
         sandboxId:   loopResult.sandboxId,
       });
-    } else {
-      executionOutcome = await executePlan(
-        ctx,
-        planningContext,
-        tracker,
-        { report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker },
-        { sandboxId: options?.sandboxId },
-      );
     }
 
     if (executionOutcome.earlyReturn) {
@@ -746,21 +732,20 @@ export const startTask = api(
       });
     }
 
-    // Persistent job tracking
+    // Persistent job tracking — always active
     let jobId: string | undefined;
     try {
-      const persistentJobs = AgentPersistentJobs().toLowerCase() === "true";
-      if (persistentJobs) {
-        jobId = await createJob({
-          taskId: req.taskId,
-          conversationId: req.conversationId,
-          repoOwner: ctx.repoOwner,
-          repoName: ctx.repoName,
-        });
-        await startJob(jobId);
-        ctx.jobId = jobId;
-      }
-    } catch { /* non-critical */ }
+      jobId = await createJob({
+        taskId: req.taskId,
+        conversationId: req.conversationId,
+        repoOwner: ctx.repoOwner,
+        repoName: ctx.repoName,
+      });
+      await startJob(jobId);
+      ctx.jobId = jobId;
+    } catch (err) {
+      log.warn("persistent job creation failed", { error: err instanceof Error ? err.message : String(err) });
+    }
 
     // Fire and forget
     executeTask(ctx)
@@ -1261,145 +1246,6 @@ export const getAuditStats = api(
       averageDurationMs: avgDurationRow?.avg_ms || 0,
       actionTypeCounts,
       recentFailures,
-    };
-  }
-);
-
-// ============================================================
-// 8.2: Proactive suggestions endpoint
-// ============================================================
-
-export interface Suggestion {
-  id: string;
-  type: "test_coverage" | "outdated_dep" | "error_pattern" | "cve" | "similar_failure" | "health";
-  priority: "low" | "medium" | "high" | "critical";
-  title: string;
-  description: string;
-  repo?: string;
-  actionLabel?: string;
-  actionTaskDescription?: string; // Pre-filled task description for "Start task"
-}
-
-interface GetSuggestionsRequest {
-  repo?: string;
-  limit?: number;
-}
-
-interface GetSuggestionsResponse {
-  suggestions: Suggestion[];
-  generatedAt: string;
-}
-
-export const getSuggestions = api(
-  { method: "POST", path: "/agent/suggestions", expose: true, auth: true },
-  async (req: GetSuggestionsRequest): Promise<GetSuggestionsResponse> => {
-    const limit = req.limit ?? 8;
-    const suggestions: Suggestion[] = [];
-
-    const { memory: mem } = await import("~encore/clients");
-
-    // --- 1. Error patterns from memory ---
-    try {
-      const errMems = await mem.search({
-        query: "error pattern typescript lint test failure",
-        limit: 5,
-        memoryType: "error_pattern",
-        sourceRepo: req.repo,
-      });
-      for (const m of (errMems.results || []).slice(0, 3)) {
-        suggestions.push({
-          id: `err-${m.id.slice(0, 8)}`,
-          type: "error_pattern",
-          priority: "medium",
-          title: "Kjent feilmønster",
-          description: m.content.slice(0, 150),
-          repo: m.sourceRepo,
-          actionLabel: "Fiks feilen",
-          actionTaskDescription: `Fiks feilmønster: ${m.content.slice(0, 200)}`,
-        });
-      }
-    } catch { /* non-critical */ }
-
-    // --- 2. Health check findings ---
-    try {
-      const { monitor: monitorClient } = await import("~encore/clients");
-      const health = await monitorClient.health();
-      for (const [repo, checks] of Object.entries(health.repos)) {
-        if (req.repo && repo !== req.repo) continue;
-        for (const check of checks) {
-          if (check.status === "fail") {
-            const typeMap: Record<string, Suggestion["type"]> = {
-              test_coverage: "test_coverage",
-              dependency_audit: "outdated_dep",
-              code_quality: "health",
-              doc_freshness: "health",
-            };
-            suggestions.push({
-              id: `health-${repo}-${check.checkType}`,
-              type: typeMap[check.checkType] ?? "health",
-              priority: "high",
-              title: check.checkType === "test_coverage"
-                ? "Lav testdekning"
-                : check.checkType === "dependency_audit"
-                ? "Sikkerhetssårbarheter i avhengigheter"
-                : `${check.checkType} feilet`,
-              description: check.suggestedAction || JSON.stringify(check.details).slice(0, 100),
-              repo,
-              actionLabel: "Start oppgave",
-              actionTaskDescription: `${check.checkType === "test_coverage" ? "Øk testdekning" : check.checkType === "dependency_audit" ? "Oppdater sårbare avhengigheter" : "Fiks " + check.checkType} i ${repo}`,
-            });
-          }
-        }
-      }
-    } catch { /* monitor not running or no data */ }
-
-    // --- 3. CVE / breaking change findings from repo-watch ---
-    try {
-      const { monitor: monitorClient } = await import("~encore/clients");
-      const findings = await monitorClient.watchFindings();
-      for (const f of (findings.findings || []).slice(0, 3)) {
-        if (req.repo && f.repo !== req.repo) continue;
-        suggestions.push({
-          id: `watch-${f.id.slice(0, 8)}`,
-          type: f.findingType === "cve" ? "cve" : "outdated_dep",
-          priority: f.severity === "critical" ? "critical" : f.severity === "warn" ? "high" : "medium",
-          title: f.findingType === "cve" ? `CVE: ${f.summary.slice(0, 60)}` : `Endring: ${f.summary.slice(0, 60)}`,
-          description: f.summary,
-          repo: f.repo,
-          actionLabel: "Oppdater",
-          actionTaskDescription: `Fiks ${f.findingType === "cve" ? "CVE-sårbarhet" : "breaking change"}: ${f.summary} i ${f.repo}`,
-        });
-      }
-    } catch { /* repo-watch not running */ }
-
-    // --- 4. Strategy memories — "this type of task works well" ---
-    try {
-      const stratMems = await mem.search({
-        query: req.repo ? `strategy ${req.repo.split("/")[1]}` : "strategy first-attempt-success",
-        limit: 3,
-        memoryType: "strategy",
-        sourceRepo: req.repo,
-      });
-      for (const m of (stratMems.results || []).slice(0, 2)) {
-        if (m.decayedScore && m.decayedScore > 0.5) continue; // Only show if still fresh
-        suggestions.push({
-          id: `strat-${m.id.slice(0, 8)}`,
-          type: "similar_failure",
-          priority: "low",
-          title: "Tidligere strategi tilgjengelig",
-          description: `Lignende oppgave ble løst: ${m.content.slice(0, 120)}`,
-          repo: m.sourceRepo,
-        });
-      }
-    } catch { /* non-critical */ }
-
-    // Sort by priority
-    const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
-    suggestions.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
-
-    return {
-      suggestions: suggestions.slice(0, limit),
-      generatedAt: new Date().toISOString(),
     };
   }
 );
