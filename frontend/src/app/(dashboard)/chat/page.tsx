@@ -132,7 +132,9 @@ function ChatPageInner() {
   // that arrive after the SSE agent.done but before the DB is fully consistent.
   useEffect(() => {
     if (sending || !ac) return;
-    const timers = [2000, 8000, 20000].map(d => setTimeout(() => { refreshMsgs(); }, d));
+    // Extra 60 s refresh catches review/completion messages that arrive very
+    // late via pub/sub (e.g. slow Linear sync or heavy AI review call).
+    const timers = [2000, 8000, 20000, 60000].map(d => setTimeout(() => { refreshMsgs(); }, d));
     return () => timers.forEach(clearTimeout);
   }, [sending]); // eslint-disable-line react-hooks/exhaustive-deps
 

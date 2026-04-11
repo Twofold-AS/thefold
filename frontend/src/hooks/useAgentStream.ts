@@ -88,19 +88,24 @@ export function useAgentStream(
 
       setState((prev) => ({ ...prev, isStreaming: true, error: null }));
 
-      // New streamed assistant message chunk
+      // New streamed assistant message chunk.
+      // Wire format: { timestamp, data: { role, content, delta, model } }
       es.addEventListener("agent.message", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
+          const raw = JSON.parse(e.data);
+          // Unwrap the { timestamp, data } envelope; fall back to flat for legacy
+          const data = raw.data ?? raw;
           setState((prev) => ({
             ...prev,
             thinkingText: null,
             messages: [
               ...prev.messages,
               {
-                id: data.id ?? crypto.randomUUID(),
+                // SSE id: field is the canonical event ID for dedup
+                id: e.lastEventId || crypto.randomUUID(),
                 role: "assistant",
-                content: data.content ?? "",
+                // During streaming, content="" and delta has the chunk
+                content: data.content || data.delta || "",
                 model: data.model,
               },
             ],
@@ -111,13 +116,16 @@ export function useAgentStream(
         }
       });
 
-      // Agent called a tool
+      // Agent called a tool.
+      // Wire format: { timestamp, data: { toolName, toolUseId, input, loopIteration } }
       es.addEventListener("agent.tool_use", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
           const toolCall: ToolCall = {
-            id: data.id ?? crypto.randomUUID(),
-            toolName: data.tool_name ?? data.toolName ?? "unknown",
+            // toolUseId is the Anthropic block ID used to correlate with tool_result
+            id: data.toolUseId ?? crypto.randomUUID(),
+            toolName: data.toolName ?? "unknown",
             input: data.input ?? {},
             status: "running",
           };
@@ -130,19 +138,24 @@ export function useAgentStream(
         }
       });
 
-      // Tool execution completed
+      // Tool execution completed.
+      // Wire format: { timestamp, data: { toolUseId, toolName, content, isError, durationMs } }
       es.addEventListener("agent.tool_result", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
-          const isError = data.is_error ?? data.isError ?? false;
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
+          // Match by toolUseId (same Anthropic block ID set in tool_use)
+          const toolUseId = data.toolUseId;
+          const isError = data.isError ?? false;
           setState((prev) => ({
             ...prev,
             toolCalls: prev.toolCalls.map((tc) =>
-              tc.id === data.id
+              tc.id === toolUseId
                 ? {
                     ...tc,
-                    result: data.result,
-                    durationMs: data.duration_ms ?? data.durationMs,
+                    // content field holds the serialised tool result
+                    result: data.content,
+                    durationMs: data.durationMs,
                     isError,
                     status: isError ? "error" : "done",
                   }
@@ -154,17 +167,17 @@ export function useAgentStream(
         }
       });
 
-      // Phase / status update
+      // Phase / status update.
+      // Wire format: { timestamp, data: { status, phase, message, loop } }
       es.addEventListener("agent.status", (e: MessageEvent) => {
         try {
           const raw = JSON.parse(e.data);
-          // Support both nested format ({ timestamp, data: { status, phase } })
-          // and flat format ({ status, phase }) for backward compatibility
+          // Support both nested { timestamp, data: { status, phase } } and flat
           const payload = raw.data ?? raw;
           setState((prev) => ({
             ...prev,
             status: payload.status ?? payload.phase ?? prev.status,
-            // Capture taskId when AI tool-use starts an agent task (Bug 4)
+            // Capture taskId when AI tool-use starts an agent task
             agentStartedTaskId:
               payload.status === "agent_started" && payload.phase
                 ? (payload.phase as string)
@@ -175,24 +188,30 @@ export function useAgentStream(
         }
       });
 
-      // Extended thinking text
+      // Extended thinking text.
+      // Wire format: { timestamp, data: { thought } }
       es.addEventListener("agent.thinking", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
+          // New field is "thought"; fall back to "text" for legacy compatibility
           setState((prev) => ({
             ...prev,
-            thinkingText: data.text ?? "Thinking...",
+            thinkingText: data.thought ?? data.text ?? "Thinking...",
           }));
         } catch {
           // ignore
         }
       });
 
-      // Stream-level error reported by server
+      // Stream-level error reported by server.
+      // Wire format: { timestamp, data: { message, code?, recoverable? } }
       es.addEventListener("agent.error", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
-          const errMsg = data.error ?? data.message ?? "Stream error";
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
+          // New field is "message"; fall back to "error" for legacy compatibility
+          const errMsg = data.message ?? data.error ?? "Stream error";
           setState((prev) => ({
             ...prev,
             isStreaming: false,

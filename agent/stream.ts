@@ -80,8 +80,9 @@ export const streamAgentEvents = api.raw(
       return;
     }
 
-    // Last-Event-ID for reconnect tracking (events are not buffered/replayed,
-    // but we log it so we can add replay later without changing the API)
+    // Last-Event-ID sent by the client when reconnecting after a dropped connection.
+    // We replay any buffered events that arrived after this ID so the client
+    // doesn't miss events that were emitted between disconnect and reconnect.
     const lastEventId = req.headers["last-event-id"] as string | undefined;
 
     // ── SSE headers ──────────────────────────────────────────────────────────
@@ -113,6 +114,31 @@ export const streamAgentEvents = api.raw(
     };
 
     writeHeartbeat();
+
+    // ── Replay buffered events for reconnecting clients ──────────────────────
+    // When the client sends Last-Event-ID we replay any events that arrived
+    // in the buffer after that ID, then continue with live events.
+    if (lastEventId) {
+      const buffer = agentEventBus.getBuffer(taskId);
+      const resumeIdx = buffer.findIndex((ev) => ev.id === lastEventId);
+      // If the ID was found, replay everything after it; if not found (evicted),
+      // replay the entire buffer so the client gets the best possible catch-up.
+      const toReplay = resumeIdx >= 0 ? buffer.slice(resumeIdx + 1) : buffer;
+      if (toReplay.length > 0) {
+        log.info("agent stream: replaying buffered events for reconnect", {
+          taskId,
+          replayed: toReplay.length,
+          lastEventId,
+        });
+        for (const ev of toReplay) {
+          try {
+            res.write(formatSSE(ev));
+          } catch {
+            // Client disconnected during replay — cleanup will handle it
+          }
+        }
+      }
+    }
 
     // ── Subscribe to task events ─────────────────────────────────────────────
     const unsubscribe = agentEventBus.subscribe(taskId, (event) => {
