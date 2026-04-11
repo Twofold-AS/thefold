@@ -511,7 +511,7 @@ export const approveReview = api(
           linearTaskId: review.taskId,
           memoryType: "decision",
           sourceRepo: `thefold-dev/${targetRepo}`,
-        }).catch((e) => log.warn("memory.store failed (background)", { error: String(e) }))
+        }).catch((e: unknown) => log.warn("memory.store failed (background)", { error: String(e) }))
       ),
       // Destroy sandbox in background
       sandbox.destroy({ sandboxId }).catch(() => { /* Sandbox may already be destroyed */ }),
