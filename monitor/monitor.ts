@@ -1,12 +1,15 @@
 import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { CronJob } from "encore.dev/cron";
+import { Topic } from "encore.dev/pubsub";
 import { secret } from "encore.dev/config";
 import { sandbox } from "~encore/clients";
 import log from "encore.dev/log";
 
-// --- Feature flag ---
+// --- Feature flags ---
 const monitorEnabled = secret("MonitorEnabled");
+const repoWatchEnabled = secret("RepoWatchEnabled");
+const dailyDigestEnabled = secret("DailyDigestEnabled");
 
 // --- Database ---
 
@@ -433,4 +436,327 @@ const _cron = new CronJob("daily-health-check", {
   title: "Daily repository health check",
   schedule: "0 3 * * *",
   endpoint: runDailyChecks,
+});
+
+// ============================================================
+// 8.1: Repo-watch — proactive commit + CVE monitoring
+// ============================================================
+
+export interface RepoWatchFinding {
+  repo: string;
+  findingType: "breaking_change" | "cve" | "outdated_dep" | "new_commit";
+  severity: "info" | "warn" | "critical";
+  summary: string;
+  details: Record<string, unknown>;
+}
+
+export const repoWatchFindings = new Topic<RepoWatchFinding>("repo-watch-findings", {
+  deliveryGuarantee: "at-least-once",
+});
+
+interface RepoWatchRequest {
+  repo?: string; // If omitted, checks all known repos
+}
+
+interface RepoWatchResponse {
+  ran: boolean;
+  findings: number;
+  message: string;
+}
+
+export const runRepoWatch = api(
+  { method: "POST", path: "/monitor/repo-watch", expose: false },
+  async (req: RepoWatchRequest): Promise<RepoWatchResponse> => {
+    let enabled = false;
+    try { enabled = repoWatchEnabled() === "true"; } catch { /* not set */ }
+    if (!enabled) {
+      return { ran: false, findings: 0, message: "RepoWatchEnabled != 'true'" };
+    }
+
+    const { github: gh, memory: mem, ai: aiClient } = await import("~encore/clients");
+
+    // Determine repos to watch
+    let repos: string[] = [];
+    if (req.repo) {
+      repos = [req.repo];
+    } else {
+      const rows = db.query<{ repo: string }>`
+        SELECT DISTINCT repo FROM health_checks ORDER BY repo
+      `;
+      for await (const row of rows) repos.push(row.repo);
+    }
+
+    if (repos.length === 0) {
+      return { ran: true, findings: 0, message: "No repos registered — run a manual check first" };
+    }
+
+    let totalFindings = 0;
+
+    for (const repoFullName of repos) {
+      if (!repoFullName.includes("/")) continue;
+      const [owner, repoName] = repoFullName.split("/");
+
+      try {
+        // --- Check latest commits (last 6h) ---
+        let newCommits: Array<{ sha: string; message: string; author: string }> = [];
+        try {
+          const tree = await gh.getTree({ owner, repo: repoName });
+          // We use the tree as a proxy for "repo exists"; actual commit checking
+          // would require a /commits endpoint. For now store a "new_commit" finding
+          // if the tree changed vs last stored SHA (simplified).
+          const lastWatch = await db.queryRow<{ commit_sha: string }>`
+            SELECT commit_sha FROM repo_watch_results
+            WHERE repo = ${repoFullName} AND finding_type = 'new_commit'
+            ORDER BY created_at DESC LIMIT 1
+          `;
+          const treeSha = tree.treeString?.substring(0, 40) || "";
+          if (!lastWatch || lastWatch.commit_sha !== treeSha) {
+            newCommits = [{ sha: treeSha, message: `Tree updated (${tree.tree?.length ?? 0} files)`, author: "auto" }];
+          }
+        } catch {
+          // GitHub unavailable — skip
+        }
+
+        // --- Analyse breaking changes with AI (only if new commits) ---
+        if (newCommits.length > 0) {
+          try {
+            const pkgFile = await gh.getFile({ owner, repo: repoName, path: "package.json" });
+            if (pkgFile?.content) {
+              const analysis = await aiClient.chat({
+                messages: [{
+                  role: "user",
+                  content: `Quickly scan this package.json for breaking version bumps or known CVE-affected packages (e.g. lodash<4.17.21, express<4.18, minimist<1.2.6). Reply JSON only: {"breakingChanges": ["..."], "cveRisks": ["..."]}.\n\n${pkgFile.content.slice(0, 3000)}`,
+                }],
+                systemContext: "direct_chat",
+                model: "claude-haiku-4-5-20251001",
+              });
+
+              let parsed: { breakingChanges?: string[]; cveRisks?: string[] } = {};
+              try {
+                const clean = analysis.content.replace(/```json|```/g, "").trim();
+                parsed = JSON.parse(clean);
+              } catch { /* not valid JSON */ }
+
+              for (const change of (parsed.breakingChanges || [])) {
+                const finding: RepoWatchFinding = {
+                  repo: repoFullName,
+                  findingType: "breaking_change",
+                  severity: "warn",
+                  summary: change,
+                  details: { source: "package.json" },
+                };
+                await storeFinding(finding, newCommits[0].sha);
+                await repoWatchFindings.publish(finding);
+                await mem.store({
+                  content: `Breaking change detected in ${repoFullName}: ${change}`,
+                  category: "breaking_change",
+                  memoryType: "error_pattern",
+                  sourceRepo: repoFullName,
+                  tags: ["breaking_change", repoName, "auto-detected"],
+                });
+                totalFindings++;
+              }
+
+              for (const cve of (parsed.cveRisks || [])) {
+                const finding: RepoWatchFinding = {
+                  repo: repoFullName,
+                  findingType: "cve",
+                  severity: "critical",
+                  summary: cve,
+                  details: { source: "package.json" },
+                };
+                await storeFinding(finding, newCommits[0].sha);
+                await repoWatchFindings.publish(finding);
+                await mem.store({
+                  content: `CVE risk in ${repoFullName}: ${cve}`,
+                  category: "cve",
+                  memoryType: "error_pattern",
+                  sourceRepo: repoFullName,
+                  tags: ["cve", repoName, "security"],
+                  pinned: true,
+                });
+                totalFindings++;
+              }
+            }
+          } catch (err) {
+            log.warn("repo-watch AI analysis failed", { repo: repoFullName, error: String(err) });
+          }
+
+          // Record that we saw this commit tree
+          await storeFinding({
+            repo: repoFullName,
+            findingType: "new_commit",
+            severity: "info",
+            summary: newCommits[0].message,
+            details: { commitCount: newCommits.length },
+          }, newCommits[0].sha);
+        }
+      } catch (err) {
+        log.warn("repo-watch failed for repo", { repo: repoFullName, error: String(err) });
+      }
+    }
+
+    log.info("repo-watch complete", { repos: repos.length, findings: totalFindings });
+    return { ran: true, findings: totalFindings, message: `Checked ${repos.length} repos, ${totalFindings} findings` };
+  }
+);
+
+async function storeFinding(finding: RepoWatchFinding, commitSha?: string): Promise<void> {
+  await db.exec`
+    INSERT INTO repo_watch_results (repo, commit_sha, finding_type, severity, summary, details)
+    VALUES (
+      ${finding.repo},
+      ${commitSha || null},
+      ${finding.findingType},
+      ${finding.severity},
+      ${finding.summary},
+      ${JSON.stringify(finding.details)}::jsonb
+    )
+  `;
+}
+
+// GET /monitor/watch-findings — Latest findings per repo
+export const watchFindings = api(
+  { method: "GET", path: "/monitor/watch-findings", expose: true, auth: true },
+  async (): Promise<{ findings: Array<RepoWatchFinding & { id: string; createdAt: string }> }> => {
+    const rows = db.query<{
+      id: string; repo: string; finding_type: string; severity: string;
+      summary: string; details: Record<string, unknown>; created_at: string;
+    }>`
+      SELECT id, repo, finding_type, severity, summary, details, created_at
+      FROM repo_watch_results
+      WHERE created_at > NOW() - INTERVAL '7 days'
+        AND finding_type != 'new_commit'
+      ORDER BY created_at DESC
+      LIMIT 50
+    `;
+
+    const findings: Array<RepoWatchFinding & { id: string; createdAt: string }> = [];
+    for await (const row of rows) {
+      findings.push({
+        id: row.id,
+        repo: row.repo,
+        findingType: row.finding_type as RepoWatchFinding["findingType"],
+        severity: row.severity as RepoWatchFinding["severity"],
+        summary: row.summary,
+        details: row.details,
+        createdAt: String(row.created_at),
+      });
+    }
+    return { findings };
+  }
+);
+
+const _repoWatchCron = new CronJob("repo-watch", {
+  title: "Proactive repo watch — commits and CVE scanning",
+  every: "30m",
+  endpoint: runRepoWatch,
+});
+
+// ============================================================
+// 8.3: Daily digest — morning summary at 08:00
+// ============================================================
+
+export const runDailyDigest = api(
+  { method: "POST", path: "/monitor/daily-digest", expose: false },
+  async (): Promise<{ ran: boolean; message: string }> => {
+    let enabled = false;
+    try { enabled = dailyDigestEnabled() === "true"; } catch { /* not set */ }
+    if (!enabled) {
+      return { ran: false, message: "DailyDigestEnabled != 'true'" };
+    }
+
+    const { ai: aiClient, memory: mem } = await import("~encore/clients");
+
+    // Collect repo health metrics from last 24h
+    const healthRows = db.query<{
+      repo: string; check_type: string; status: string; details: Record<string, unknown>; created_at: string;
+    }>`
+      SELECT DISTINCT ON (repo, check_type) repo, check_type, status, details, created_at
+      FROM health_checks
+      WHERE created_at > NOW() - INTERVAL '24 hours'
+      ORDER BY repo, check_type, created_at DESC
+    `;
+
+    const healthSummary: string[] = [];
+    for await (const row of healthRows) {
+      const icon = row.status === "pass" ? "✅" : row.status === "warn" ? "⚠️" : "❌";
+      healthSummary.push(`${icon} ${row.repo} — ${row.check_type}: ${row.status}`);
+    }
+
+    // Collect recent watch findings
+    const findingRows = db.query<{ repo: string; severity: string; summary: string }>`
+      SELECT repo, severity, summary
+      FROM repo_watch_results
+      WHERE created_at > NOW() - INTERVAL '24 hours'
+        AND finding_type != 'new_commit'
+      ORDER BY created_at DESC
+      LIMIT 10
+    `;
+    const findingsSummary: string[] = [];
+    for await (const row of findingRows) {
+      findingsSummary.push(`[${row.severity.toUpperCase()}] ${row.repo}: ${row.summary}`);
+    }
+
+    if (healthSummary.length === 0 && findingsSummary.length === 0) {
+      log.info("daily-digest: no data to summarize");
+      return { ran: true, message: "No health data available for digest" };
+    }
+
+    // Generate digest via AI
+    const digestPrompt = `Generate a concise daily development digest (max 150 words) in Norwegian for a developer. Be direct and actionable.
+
+Health checks (last 24h):
+${healthSummary.length > 0 ? healthSummary.join("\n") : "No health checks ran"}
+
+Security/watch findings:
+${findingsSummary.length > 0 ? findingsSummary.join("\n") : "No new findings"}
+
+Format: Start with "📊 **Daglig oppsummering**", then bullet points with the most important items.`;
+
+    let digestContent = "";
+    try {
+      const resp = await aiClient.chat({
+        messages: [{ role: "user", content: digestPrompt }],
+        systemContext: "direct_chat",
+        model: "claude-haiku-4-5-20251001",
+      });
+      digestContent = resp.content;
+    } catch (err) {
+      log.warn("daily-digest AI generation failed", { error: String(err) });
+      digestContent = `📊 **Daglig oppsummering**\n\n${healthSummary.slice(0, 5).join("\n")}\n\n${findingsSummary.slice(0, 3).join("\n")}`;
+    }
+
+    // Store as memory for retrieval
+    await mem.store({
+      content: `Daily digest ${new Date().toISOString().slice(0, 10)}: ${digestContent}`,
+      category: "daily_digest",
+      memoryType: "session",
+      tags: ["daily_digest", "health_report"],
+      ttlDays: 30,
+    }).catch((e: unknown) => log.warn("digest memory store failed", { error: String(e) }));
+
+    // Publish to agent-reports so chat service stores it as a conversation message
+    try {
+      const { agentReports } = await import("../chat/chat");
+      await agentReports.publish({
+        conversationId: "daily-digest",
+        taskId: "system-digest",
+        content: digestContent,
+        status: "completed",
+        completionMessage: digestContent,
+      });
+    } catch (err) {
+      log.warn("digest publish to chat failed", { error: String(err) });
+    }
+
+    log.info("daily-digest complete", { checks: healthSummary.length, findings: findingsSummary.length });
+    return { ran: true, message: `Digest generated with ${healthSummary.length} checks + ${findingsSummary.length} findings` };
+  }
+);
+
+const _digestCron = new CronJob("daily-digest", {
+  title: "Daily morning development digest",
+  schedule: "0 8 * * *",
+  endpoint: runDailyDigest,
 });

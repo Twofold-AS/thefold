@@ -1058,6 +1058,8 @@ interface PlanTaskOrderRequest {
     dependsOn: string[];
   }>;
   repo: string;
+  /** Historical memory context — error patterns, strategies, complexity data (8.4) */
+  historicalContext?: string[];
 }
 
 interface PlanTaskOrderResponse {
@@ -1080,7 +1082,11 @@ export const planTaskOrder = api(
 
     const taskList = req.tasks.map((t, i) => `${i + 1}. [${t.id}] ${t.title}${t.description ? ` — ${t.description}` : ""}${t.labels.length > 0 ? ` (labels: ${t.labels.join(", ")})` : ""}${t.dependsOn.length > 0 ? ` (depends on: ${t.dependsOn.join(", ")})` : ""}`).join("\n");
 
-    const prompt = `## Tasks for repo: ${req.repo}\n\n${taskList}\n\nAnalyze these tasks and return an optimal execution order as JSON.`;
+    const historySection = req.historicalContext && req.historicalContext.length > 0
+      ? `\n\n## Historical context from past tasks:\n${req.historicalContext.map((h, i) => `${i + 1}. ${h}`).join("\n")}\n\nUse this history to: estimate complexity more accurately, deprioritize tasks similar to past failures, prioritize tasks where we have proven strategies.`
+      : "";
+
+    const prompt = `## Tasks for repo: ${req.repo}\n\n${taskList}${historySection}\n\nAnalyze these tasks and return an optimal execution order as JSON.`;
 
     const systemPrompt = `You are a project planner. Analyze the given tasks and suggest an optimal execution order.
 

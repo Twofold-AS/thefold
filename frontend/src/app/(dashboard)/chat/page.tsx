@@ -6,6 +6,7 @@ import { T } from "@/lib/tokens";
 import ChatComposer from "@/components/ChatComposer";
 import ChatContainer from "@/components/chat/ChatContainer";
 import ConversationSidebar, { extractRepoFromId } from "@/components/chat/ConversationSidebar";
+import ProactiveSuggestions from "@/components/ProactiveSuggestions";
 
 import { useApiData } from "@/lib/hooks";
 import {
@@ -476,6 +477,11 @@ function ChatPageInner() {
               </button>
             </div>
           )}
+          <ProactiveSuggestions
+            repo={curRepo ?? undefined}
+            compact
+            onStartTask={(desc) => handleSend(desc)}
+          />
           <ChatContainer
             title={cur ? cur.title || "Ny samtale" : "\u2014"}
             subtitle={curRepo ?? undefined}

@@ -402,3 +402,23 @@ export async function validateMCPServer(serverId: string) {
     body: { serverId },
   });
 }
+
+// --- Proactive Suggestions (8.2) ---
+
+export interface Suggestion {
+  id: string;
+  type: "test_coverage" | "outdated_dep" | "error_pattern" | "cve" | "similar_failure" | "health";
+  priority: "low" | "medium" | "high" | "critical";
+  title: string;
+  description: string;
+  repo?: string;
+  actionLabel?: string;
+  actionTaskDescription?: string;
+}
+
+export async function getSuggestions(repo?: string, limit?: number) {
+  return apiFetch<{ suggestions: Suggestion[]; generatedAt: string }>("/agent/suggestions", {
+    method: "POST",
+    body: { repo, limit },
+  });
+}

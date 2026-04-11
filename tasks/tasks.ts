@@ -739,6 +739,47 @@ export const planOrder = api(
       return { planned: 0, tasks: [] };
     }
 
+    // 8.4: Fetch historical context from memory for smarter prioritization
+    const historicalContext: string[] = [];
+    try {
+      const { memory } = await import("~encore/clients");
+      // Get error patterns (what has failed in this repo)
+      const errPatterns = await memory.search({
+        query: `error pattern ${req.repo.split("/")[1] || req.repo}`,
+        limit: 3,
+        memoryType: "error_pattern",
+        sourceRepo: req.repo,
+      });
+      for (const m of errPatterns.results || []) {
+        historicalContext.push(`PAST FAILURE: ${m.content.slice(0, 150)}`);
+      }
+      // Get successful strategies
+      const strategies = await memory.search({
+        query: `strategy first-attempt-success ${req.repo.split("/")[1] || req.repo}`,
+        limit: 3,
+        memoryType: "strategy",
+        sourceRepo: req.repo,
+      });
+      for (const m of strategies.results || []) {
+        historicalContext.push(`PROVEN STRATEGY: ${m.content.slice(0, 150)}`);
+      }
+      // Get historical complexity data from completed tasks
+      const complexityRows = db.query<{ title: string; estimated_complexity: number; status: string }>`
+        SELECT title, estimated_complexity, status
+        FROM tasks
+        WHERE repo = ${req.repo}
+          AND status IN ('done', 'blocked')
+          AND estimated_complexity IS NOT NULL
+        ORDER BY updated_at DESC
+        LIMIT 5
+      `;
+      for await (const row of complexityRows) {
+        historicalContext.push(`PAST TASK [complexity ${row.estimated_complexity}/5, ${row.status}]: ${row.title}`);
+      }
+    } catch {
+      // Memory unavailable — proceed without historical context
+    }
+
     // Call AI to plan task order
     const result = await ai.planTaskOrder({
       tasks: taskList.map(t => ({
@@ -749,6 +790,7 @@ export const planOrder = api(
         dependsOn: t.dependsOn,
       })),
       repo: req.repo,
+      historicalContext: historicalContext.length > 0 ? historicalContext : undefined,
     });
 
     // Update tasks with planned order and estimated complexity
