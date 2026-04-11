@@ -2,7 +2,7 @@
 
 // --- Types ---
 
-export type SubAgentRole = "implementer" | "tester" | "reviewer" | "documenter" | "researcher" | "planner";
+export type SubAgentRole = "implementer" | "tester" | "reviewer" | "documenter" | "researcher" | "planner" | "security";
 
 export interface SubAgent {
   id: string;
@@ -38,6 +38,7 @@ const ROLE_MODEL_MAP: Record<SubAgentRole, string> = {
   reviewer: "claude-sonnet-4-5-20250929",
   documenter: "claude-haiku-4-5-20251001",
   researcher: "claude-haiku-4-5-20251001",
+  security: "claude-sonnet-4-5-20250929",
 };
 
 // --- Functions ---
@@ -78,9 +79,42 @@ Include: what was built, why, how it connects to existing systems, and any confi
 Output markdown documentation suitable for a PR description.`,
 
   researcher: `You are a research sub-agent for TheFold.
-Your job is to search through provided context (memory, docs, code) and extract relevant information.
-Summarize findings concisely with references to specific files or patterns.
-Output a JSON summary with: findings[], relevantPatterns[], and recommendations[].`,
+Your job is to deeply analyze the provided context — including past task memories, documentation, and code patterns — and extract actionable insights.
+Focus on:
+- Similar patterns or solutions from past tasks (look for [MEMORY] sections)
+- Relevant library APIs and documentation (look for [DOCS] sections)
+- Existing code conventions and architectural patterns in the codebase
+- Potential pitfalls or known issues from previous attempts
+
+Output a JSON summary with:
+{
+  "findings": ["key insight 1", "key insight 2"],
+  "relevantPatterns": [{ "pattern": "...", "source": "memory|docs|code", "applicability": "high|medium|low" }],
+  "recommendations": ["concrete recommendation 1", "concrete recommendation 2"],
+  "memoriesUsed": ["memory snippet 1"],
+  "docsUsed": ["doc reference 1"]
+}`,
+
+  security: `You are a security audit sub-agent for TheFold.
+Your job is to scan generated code and plans for security vulnerabilities before deployment.
+Check for:
+- Hardcoded secrets, API keys, passwords, or tokens in code
+- SQL injection vulnerabilities (unparameterized queries, string concatenation in SQL)
+- XSS vulnerabilities (unescaped user input rendered in HTML/responses)
+- OWASP A01-A10 vulnerabilities (broken access control, cryptographic failures, injection, etc.)
+- Insecure direct object references (accessing resources without ownership check)
+- Missing authentication/authorization checks on sensitive endpoints
+- Prototype pollution, path traversal, command injection
+- Encore.ts-specific: ensure all DB queries use tagged templates (db.query\`...\`), all secrets use secret(), no process.env
+
+Output a JSON report:
+{
+  "vulnerabilities": [{ "severity": "critical|high|medium|low", "type": "...", "location": "file or endpoint", "description": "...", "fix": "specific fix recommendation" }],
+  "overallRisk": "critical|high|medium|low|none",
+  "securityScore": 8,
+  "summary": "brief overall security assessment",
+  "passedChecks": ["check 1 passed", "check 2 passed"]
+}`,
 };
 
 export function getSystemPromptForRole(role: SubAgentRole): string {
@@ -96,6 +130,7 @@ const ROLE_MAX_TOKENS: Record<SubAgentRole, number> = {
   reviewer: 4096,
   documenter: 4096,
   researcher: 4096,
+  security: 4096,
 };
 
 export function getMaxTokensForRole(role: SubAgentRole): number {

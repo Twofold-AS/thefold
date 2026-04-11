@@ -20,6 +20,46 @@ export interface SubAgentPlan {
   mergeStrategy: "concatenate" | "ai_merge";
 }
 
+// --- Agent-to-agent shared context (9.2) ---
+
+export interface AgentMessage {
+  fromRole: SubAgentRole;
+  toRole: SubAgentRole | "all";
+  content: string;
+  timestamp: number;
+  type: "finding" | "feedback" | "context";
+}
+
+export interface SharedAgentContext {
+  messages: AgentMessage[];
+  securityFindings?: string;
+  testFindings?: string;
+  write(from: SubAgentRole, to: SubAgentRole | "all", content: string, type?: AgentMessage["type"]): void;
+  read(role: SubAgentRole): AgentMessage[];
+}
+
+export function createSharedAgentContext(): SharedAgentContext {
+  const messages: AgentMessage[] = [];
+  return {
+    messages,
+    securityFindings: undefined,
+    testFindings: undefined,
+    write(from, to, content, type = "context") {
+      messages.push({ fromRole: from, toRole: to, content, timestamp: Date.now(), type });
+    },
+    read(role) {
+      return messages.filter((m) => m.toRole === "all" || m.toRole === role);
+    },
+  };
+}
+
+// --- Callbacks for real-time progress reporting (9.3) ---
+
+export interface SubAgentCallbacks {
+  onAgentStart?: (agent: SubAgent) => void | Promise<void>;
+  onAgentComplete?: (result: SubAgentResult) => void | Promise<void>;
+}
+
 // --- Planning ---
 
 /**
@@ -87,6 +127,18 @@ export function planSubAgents(
       inputContext: `Task: ${taskDescription}`,
       maxTokens: getMaxTokensForRole("reviewer"),
       dependsOn: [plannerId],
+    });
+
+    // Security agent depends on planner — always included at complexity >= 8
+    const implementerId = agents.find((a) => a.role === "implementer")?.id ?? plannerId;
+    agents.push({
+      id: nextId(),
+      role: "security",
+      model: getModelForRole("security", budgetMode),
+      systemPrompt: getSystemPromptForRole("security"),
+      inputContext: `Task: ${taskDescription}`,
+      maxTokens: getMaxTokensForRole("security"),
+      dependsOn: [implementerId],
     });
 
     // Documenter only at complexity 10
@@ -216,7 +268,7 @@ Respond with JSON only (no markdown fences):
     }
 
     // Validate and map roles — only accept known roles
-    const validRoles: Set<string> = new Set(["planner", "implementer", "tester", "reviewer", "documenter", "researcher"]);
+    const validRoles: Set<string> = new Set(["planner", "implementer", "tester", "reviewer", "documenter", "researcher", "security"]);
     const validAgents = decision.agents.filter((a) => validRoles.has(a.role));
 
     if (validAgents.length === 0) {
@@ -278,10 +330,17 @@ export function extractSubAgentHint(message: string): string | undefined {
  * Execute sub-agents respecting dependency ordering.
  * Agents with no unresolved deps run in parallel via Promise.allSettled.
  * Completed agents' output is fed as inputContext to dependents.
+ * SharedAgentContext enables agent-to-agent message passing (9.2).
+ * Callbacks enable real-time progress reporting (9.3).
  */
-export async function executeSubAgents(plan: SubAgentPlan): Promise<SubAgentResult[]> {
+export async function executeSubAgents(
+  plan: SubAgentPlan,
+  sharedCtx?: SharedAgentContext,
+  callbacks?: SubAgentCallbacks,
+): Promise<SubAgentResult[]> {
   if (plan.agents.length === 0) return [];
 
+  const ctx = sharedCtx ?? createSharedAgentContext();
   const results = new Map<string, SubAgentResult>();
   const pending = new Set(plan.agents.map((a) => a.id));
 
@@ -298,14 +357,39 @@ export async function executeSubAgents(plan: SubAgentPlan): Promise<SubAgentResu
       break;
     }
 
-    // Enrich input context with dependency outputs
+    // Enrich input context with dependency outputs + shared context messages
     for (const agent of ready) {
+      // Inject dependency outputs
       for (const depId of agent.dependsOn) {
         const depResult = results.get(depId);
         if (depResult?.success) {
           agent.inputContext += `\n\n## Output from ${depResult.role} (${depId}):\n${depResult.output}`;
         }
       }
+
+      // Inject relevant shared context messages (agent-to-agent communication)
+      const relevantMessages = ctx.read(agent.role);
+      if (relevantMessages.length > 0) {
+        const msgBlock = relevantMessages
+          .map((m) => `[${m.type.toUpperCase()} from ${m.fromRole}]: ${m.content}`)
+          .join("\n");
+        agent.inputContext += `\n\n## Messages from other agents:\n${msgBlock}`;
+      }
+
+      // Inject security findings for implementer if available
+      if (agent.role === "implementer" && ctx.securityFindings) {
+        agent.inputContext += `\n\n## Security findings to address:\n${ctx.securityFindings}`;
+      }
+
+      // Inject test findings for implementer if available
+      if (agent.role === "implementer" && ctx.testFindings) {
+        agent.inputContext += `\n\n## Test findings to address:\n${ctx.testFindings}`;
+      }
+    }
+
+    // Notify start callbacks
+    if (callbacks?.onAgentStart) {
+      await Promise.allSettled(ready.map((agent) => callbacks.onAgentStart!(agent)));
     }
 
     // Execute ready agents in parallel
@@ -316,10 +400,11 @@ export async function executeSubAgents(plan: SubAgentPlan): Promise<SubAgentResu
       const agent = ready[i];
       const outcome = settled[i];
 
+      let result: SubAgentResult;
       if (outcome.status === "fulfilled") {
-        results.set(agent.id, outcome.value);
+        result = outcome.value;
       } else {
-        results.set(agent.id, {
+        result = {
           id: agent.id,
           role: agent.role,
           model: agent.model,
@@ -329,9 +414,33 @@ export async function executeSubAgents(plan: SubAgentPlan): Promise<SubAgentResu
           durationMs: 0,
           success: false,
           error: outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason),
-        });
+        };
       }
+
+      results.set(agent.id, result);
       pending.delete(agent.id);
+
+      // Write findings to shared context based on role
+      if (result.success && result.output) {
+        if (result.role === "security") {
+          ctx.securityFindings = result.output.substring(0, 2000);
+          ctx.write("security", "implementer", `Security scan complete. Risk findings:\n${result.output.substring(0, 800)}`, "finding");
+          ctx.write("security", "reviewer", `Security scan result:\n${result.output.substring(0, 800)}`, "finding");
+        } else if (result.role === "tester") {
+          ctx.testFindings = result.output.substring(0, 2000);
+          ctx.write("tester", "implementer", `Test analysis complete:\n${result.output.substring(0, 600)}`, "feedback");
+        } else if (result.role === "planner") {
+          ctx.write("planner", "all", `Plan:\n${result.output.substring(0, 1000)}`, "context");
+        } else if (result.role === "researcher") {
+          ctx.write("researcher", "all", `Research findings:\n${result.output.substring(0, 800)}`, "context");
+        }
+      }
+
+      // Notify complete callback (non-blocking)
+      if (callbacks?.onAgentComplete) {
+        const p = callbacks.onAgentComplete(result);
+        if (p) p.catch(() => {/* ignore callback errors */});
+      }
     }
   }
 
@@ -462,6 +571,7 @@ export function estimateSubAgentCostPreview(
     reviewer: { input: 6000, output: 2000 },
     documenter: { input: 4000, output: 2000 },
     researcher: { input: 4000, output: 1500 },
+    security: { input: 6000, output: 2000 },
   };
 
   // Estimate without sub-agents (single model call)

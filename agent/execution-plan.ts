@@ -6,6 +6,7 @@ import {
   mergeResults,
   sumCosts,
   sumTokens,
+  createSharedAgentContext,
 } from "../ai/orchestrate-sub-agents";
 import { addStep, reportProgress, buildSteps } from "./helpers";
 import type { AgentExecutionContext } from "./types";
@@ -187,6 +188,19 @@ export async function runPlanPhase(
       const subPlanSummary = plan.plan.map((s: { description: string }, i: number) => `${i + 1}. ${s.description}`).join("\n");
       const subPlan = await planSubAgentsDynamic(ctx.taskDescription, subPlanSummary, estimatedComplexity, budgetMode);
 
+      // Enrich researcher agents with memory and docs context (9.1)
+      for (const agent of subPlan.agents) {
+        if (agent.role === "researcher") {
+          const memoryBlock = memoryStrings.length > 0
+            ? `\n\n[MEMORY]\n${memoryStrings.slice(0, 5).join("\n---\n")}`
+            : "";
+          const docsBlock = docsStrings.length > 0
+            ? `\n\n[DOCS]\n${docsStrings.slice(0, 3).join("\n---\n")}`
+            : "";
+          agent.inputContext += memoryBlock + docsBlock;
+        }
+      }
+
       if (subPlan.agents.length > 0) {
         addStep(ctx, {
           id: "sub-agents",
@@ -195,20 +209,21 @@ export async function runPlanPhase(
           done: false,
         });
 
-        const subAgentDisplay = subPlan.agents.map((a) => ({
+        // Live display state — updated per-agent for 9.3 real-time updates
+        const liveDisplay = new Map(subPlan.agents.map((a) => [a.id, {
           id: a.id,
           role: a.role,
           model: a.model ? a.model.split("-").slice(0, 2).join("-") : "auto",
-          status: "pending" as const,
-          label: (a.inputContext || "").substring(0, 60),
-        }));
+          status: "pending" as "pending" | "working" | "done" | "failed",
+          label: `${a.role} — klar`,
+        }]));
 
         await reportProgress(ctx, {
           status: "working",
           phase: "building",
           summary: `Bygger med ${subPlan.agents.length} agenter`,
           steps: buildSteps(ctx),
-          subAgents: subAgentDisplay,
+          subAgents: Array.from(liveDisplay.values()),
         });
 
         await audit({
@@ -226,7 +241,40 @@ export async function runPlanPhase(
           repoName: `${ctx.repoOwner}/${ctx.repoName}`,
         });
 
-        const subResults = await executeSubAgents(subPlan);
+        // Per-agent real-time callbacks (9.3)
+        const sharedCtx = createSharedAgentContext();
+        const subResults = await executeSubAgents(subPlan, sharedCtx, {
+          onAgentStart: async (agent) => {
+            const entry = liveDisplay.get(agent.id);
+            if (entry) {
+              entry.status = "working";
+              entry.label = `${agent.role} — kjører...`;
+            }
+            await reportProgress(ctx, {
+              status: "working",
+              phase: "building",
+              summary: `Sub-agent kjører: ${agent.role}`,
+              steps: buildSteps(ctx),
+              subAgents: Array.from(liveDisplay.values()),
+            });
+          },
+          onAgentComplete: async (result) => {
+            const entry = liveDisplay.get(result.id);
+            if (entry) {
+              entry.status = result.success ? "done" : "failed";
+              entry.label = result.success
+                ? `${result.role} — ferdig ($${result.costUsd.toFixed(4)})`
+                : `${result.role} — feil: ${(result.error ?? "").substring(0, 40)}`;
+            }
+            await reportProgress(ctx, {
+              status: "working",
+              phase: "building",
+              summary: `Sub-agent ferdig: ${result.role}`,
+              steps: buildSteps(ctx),
+              subAgents: Array.from(liveDisplay.values()),
+            });
+          },
+        });
         const merged = await mergeResults(subResults, subPlan.mergeStrategy);
 
         ctx.subAgentResults = subResults;
@@ -241,22 +289,6 @@ export async function runPlanPhase(
           label: `${subPlan.agents.length} sub-agenter`,
           detail: `${successCount}/${subResults.length} OK`,
           done: true,
-        });
-
-        const completedSubAgentDisplay = subResults.map((r) => ({
-          id: r.id,
-          role: r.role,
-          model: r.model ? r.model.split("-").slice(0, 2).join("-") : "auto",
-          status: (r.success ? "done" : "failed") as "done" | "failed",
-          label: `${r.role} (${r.durationMs}ms, $${r.costUsd.toFixed(4)})`,
-        }));
-
-        await reportProgress(ctx, {
-          status: "working",
-          phase: "building",
-          summary: `Sub-agenter ferdig: ${successCount}/${subResults.length} OK`,
-          steps: buildSteps(ctx),
-          subAgents: completedSubAgentDisplay,
         });
 
         await audit({
