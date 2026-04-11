@@ -193,6 +193,7 @@ export interface CodeReview {
   id: string;
   conversationId: string;
   taskId: string;
+  taskDescription?: string;
   projectTaskId?: string;
   sandboxId: string;
   repoName?: string;

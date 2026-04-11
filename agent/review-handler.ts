@@ -184,6 +184,7 @@ export async function handleReview(
   const reviewResult = await submitReviewInternal({
     conversationId: ctx.conversationId,
     taskId: ctx.taskId,
+    taskDescription: ctx.taskDescription,
     sandboxId,
     repoName: ctx.repoName,
     repoOwner: ctx.repoOwner,

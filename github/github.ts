@@ -111,6 +111,8 @@ interface CreatePRRequest {
   title: string;
   body: string;
   files: { path: string; content: string; action: "create" | "modify" | "delete" }[];
+  /** Optional conventional commit message. Falls back to title if not set. */
+  commitMessage?: string;
 }
 
 interface CreatePRResponse {
@@ -517,7 +519,7 @@ export const createPR = api(
     const commit = await ghApi(`/repos/${req.owner}/${req.repo}/git/commits`, {
       method: "POST",
       body: {
-        message: req.title,
+        message: req.commitMessage || req.title,
         tree: newTree.sha,
         parents: [baseSha],
       },
