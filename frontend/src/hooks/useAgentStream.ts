@@ -91,16 +91,17 @@ export function useAgentStream(
       // New streamed assistant message chunk
       es.addEventListener("agent.message", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
           setState((prev) => ({
             ...prev,
             thinkingText: null,
             messages: [
               ...prev.messages,
               {
-                id: data.id ?? crypto.randomUUID(),
+                id: crypto.randomUUID(),
                 role: "assistant",
-                content: data.content ?? "",
+                content: data.delta ?? data.content ?? "",
                 model: data.model,
               },
             ],
@@ -114,10 +115,11 @@ export function useAgentStream(
       // Agent called a tool
       es.addEventListener("agent.tool_use", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
           const toolCall: ToolCall = {
-            id: data.id ?? crypto.randomUUID(),
-            toolName: data.tool_name ?? data.toolName ?? "unknown",
+            id: data.toolUseId ?? crypto.randomUUID(),
+            toolName: data.toolName ?? "unknown",
             input: data.input ?? {},
             status: "running",
           };
@@ -133,16 +135,17 @@ export function useAgentStream(
       // Tool execution completed
       es.addEventListener("agent.tool_result", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
-          const isError = data.is_error ?? data.isError ?? false;
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
+          const isError = data.isError ?? false;
           setState((prev) => ({
             ...prev,
             toolCalls: prev.toolCalls.map((tc) =>
-              tc.id === data.id
+              tc.id === data.toolUseId
                 ? {
                     ...tc,
-                    result: data.result,
-                    durationMs: data.duration_ms ?? data.durationMs,
+                    result: data.content,
+                    durationMs: data.durationMs,
                     isError,
                     status: isError ? "error" : "done",
                   }
@@ -178,10 +181,11 @@ export function useAgentStream(
       // Extended thinking text
       es.addEventListener("agent.thinking", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
           setState((prev) => ({
             ...prev,
-            thinkingText: data.text ?? "Thinking...",
+            thinkingText: data.thought ?? data.text ?? "Thinking...",
           }));
         } catch {
           // ignore
@@ -191,8 +195,9 @@ export function useAgentStream(
       // Stream-level error reported by server
       es.addEventListener("agent.error", (e: MessageEvent) => {
         try {
-          const data = JSON.parse(e.data);
-          const errMsg = data.error ?? data.message ?? "Stream error";
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
+          const errMsg = data.message ?? data.error ?? "Stream error";
           setState((prev) => ({
             ...prev,
             isStreaming: false,
