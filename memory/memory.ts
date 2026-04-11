@@ -709,18 +709,6 @@ export const stats = api(
   }
 );
 
-// DELETE /memory/:id — Delete a specific memory by ID
-export const deleteMemory = api(
-  { method: "DELETE", path: "/memory/:id", expose: true, auth: true },
-  async ({ id }: { id: string }): Promise<{ success: boolean }> => {
-    const result = await db.queryRow<{ id: string }>`
-      DELETE FROM memories WHERE id = ${id}::uuid RETURNING id
-    `;
-    if (!result) throw APIError.notFound("memory not found");
-    return { success: true };
-  }
-);
-
 // --- Re-embed endpoint (ZI: after dimension migration, re-generate all embeddings) ---
 
 interface ReEmbedResponse {
