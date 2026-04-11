@@ -93,9 +93,9 @@ function ChatPageInner() {
     return c.id.startsWith("chat-");
   });
 
-  // SSE streaming for active agent tasks
-  const { messages: sseMessages, status: streamStatus } = useAgentStream(
-    sending && activeTaskId ? activeTaskId : null,
+  // SSE streaming: connect for agent tasks (activeTaskId) or direct chat (ac as key)
+  const { messages: sseMessages, status: streamStatus, agentStartedTaskId } = useAgentStream(
+    sending ? (activeTaskId || ac) : null,
     {
       onDone: () => {
         setSending(false);
@@ -110,6 +110,31 @@ function ChatPageInner() {
       },
     }
   );
+
+  // When AI tool-use starts an agent task mid-chat, switch SSE stream to agent's taskId.
+  // The backend emits agent.status { status: "agent_started", phase: taskId } which the
+  // SSE hook captures as agentStartedTaskId. Switching activeTaskId reconnects the SSE.
+  useEffect(() => {
+    if (agentStartedTaskId && agentStartedTaskId !== activeTaskId) {
+      setActiveTaskId(agentStartedTaskId);
+    }
+  }, [agentStartedTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll messages every 8s while watching an agent task — catches review messages that arrive
+  // via pub/sub after the agent completes its work (agent.done hasn't fired yet during review wait).
+  useEffect(() => {
+    if (!sending || !activeTaskId) return;
+    const iv = setInterval(() => { refreshMsgs(); }, 8000);
+    return () => clearInterval(iv);
+  }, [sending, activeTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Trailing refreshes after send stops — catches any late pub/sub messages (review, completion)
+  // that arrive after the SSE agent.done but before the DB is fully consistent.
+  useEffect(() => {
+    if (sending || !ac) return;
+    const timers = [2000, 8000, 20000].map(d => setTimeout(() => { refreshMsgs(); }, d));
+    return () => timers.forEach(clearTimeout);
+  }, [sending]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Convert SSE messages to Message shape for display while streaming
   const sseAsMsgs: Message[] = ac
@@ -144,15 +169,75 @@ function ChatPageInner() {
     return () => clearTimeout(max);
   }, [sending]);
 
-  // Handle send result: set SSE taskId or refresh immediately for direct replies
+  // Polling fallback for direct chat (no SSE task stream active).
+  // Starts 3 s after send (gives SSE a chance), then polls every 2 s for up to 90 s.
+  // Bug B fix: after finding the first non-empty response, keeps polling for another 20 s
+  // to catch self-review messages that arrive via pub/sub (async, up to ~15 s late).
+  useEffect(() => {
+    if (!sending || activeTaskId || !ac) return;
+
+    let stopped = false;
+    let firstContentAt: number | null = null;
+    const intervals: ReturnType<typeof setInterval>[] = [];
+    const timeouts: ReturnType<typeof setTimeout>[] = [];
+
+    const isReviewMsg = (content: string) => {
+      try { const p = JSON.parse(content); return p.type === "review" || (p.type === "progress" && p.status === "waiting"); }
+      catch { return false; }
+    };
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const result = await getChatHistory(ac, 50);
+        if (stopped) return;
+
+        const assistantMsgs = result.messages.filter(m => m.role === "assistant" && m.content?.trim());
+        const hasContent = assistantMsgs.length > 0;
+        const hasReview = assistantMsgs.some(m => isReviewMsg(m.content));
+
+        if (hasContent) {
+          setMsgData({ messages: result.messages, hasMore: result.hasMore });
+
+          if (firstContentAt === null) firstContentAt = Date.now();
+
+          // Stop now if review message found, or 20 s elapsed since first content
+          if (hasReview || Date.now() - firstContentAt > 20000) {
+            setSending(false);
+            stopped = true;
+          }
+        }
+      } catch {
+        // ignore transient errors during polling
+      }
+    };
+
+    const startDelay = setTimeout(() => {
+      if (stopped) return;
+      poll();
+      const iv = setInterval(() => { if (!stopped) poll(); }, 2000);
+      intervals.push(iv);
+      const maxTimeout = setTimeout(() => {
+        if (!stopped) { stopped = true; setSending(false); }
+      }, 87000); // 3 s start + 87 s = 90 s total
+      timeouts.push(maxTimeout);
+    }, 3000);
+    timeouts.push(startDelay);
+
+    return () => {
+      stopped = true;
+      timeouts.forEach(clearTimeout);
+      intervals.forEach(clearInterval);
+    };
+  }, [sending, activeTaskId, ac, setMsgData]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Handle send result: set SSE taskId if present; polling useEffect handles direct chat
   const handleSendResult = (result: { agentTriggered: boolean; taskId?: string } | null) => {
-    if (result?.agentTriggered && result.taskId) {
-      setActiveTaskId(result.taskId);
-      // onDone/onError callbacks on the hook handle setSending(false)
-    } else {
-      // Direct chat reply — no agent, response already persisted to DB
-      refreshMsgs().then(() => setSending(false));
+    if (result?.taskId) {
+      setActiveTaskId(result.taskId); // Always connect SSE when we have a taskId
     }
+    // For direct chat (no taskId): don't call refreshMsgs immediately — response
+    // isn't in DB yet. The polling useEffect below detects the reply and stops sending.
     refreshConvs();
   };
 
@@ -270,8 +355,18 @@ function ChatPageInner() {
     refreshConvs();
   };
 
-  // streamStatus drives UI implicitly via onDone/onError; referenced to satisfy lint
-  void streamStatus;
+  // Map SSE status to human-readable Norwegian text for the typing indicator
+  const streamStatusText = streamStatus && streamStatus !== "idle" && streamStatus !== "done"
+    ? (() => {
+        const s = streamStatus.toLowerCase();
+        if (s.includes("plan")) return "Planlegger...";
+        if (s.includes("build") || s.includes("generer")) return "Genererer kode...";
+        if (s.includes("context") || s.includes("github") || s.includes("memory")) return "Henter kontekst...";
+        if (s.includes("valid") || s.includes("test")) return "Validerer...";
+        if (s.includes("review")) return "Gjennomgår...";
+        return "Tenker...";
+      })()
+    : null;
 
   return (
     <div style={{
@@ -312,7 +407,9 @@ function ChatPageInner() {
           msgsLoading={msgsLoading}
           ac={ac}
           sending={sending}
+          activeTaskId={activeTaskId}
           thinkSeconds={thinkSeconds}
+          streamStatusText={streamStatusText}
           chatError={chatError}
           onClearError={() => setChatError(null)}
           onCancel={handleCancel}

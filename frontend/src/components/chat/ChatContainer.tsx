@@ -25,7 +25,9 @@ interface ChatContainerProps {
   msgsLoading: boolean;
   ac: string | null;
   sending: boolean;
+  activeTaskId?: string | null;
   thinkSeconds: number;
+  streamStatusText?: string | null;
   chatError: string | null;
   onClearError: () => void;
   onCancel: () => void;
@@ -51,7 +53,9 @@ export default function ChatContainer({
   msgsLoading,
   ac,
   sending,
+  activeTaskId,
   thinkSeconds,
+  streamStatusText,
   chatError,
   onClearError,
   onCancel,
@@ -96,7 +100,9 @@ export default function ChatContainer({
         loading={msgsLoading}
         ac={ac}
         sending={sending}
+        activeTaskId={activeTaskId}
         thinkSeconds={thinkSeconds}
+        streamStatusText={streamStatusText}
         chatError={chatError}
         onClearError={onClearError}
         onCancel={onCancel}

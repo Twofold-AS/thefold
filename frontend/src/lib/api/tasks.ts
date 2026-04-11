@@ -115,6 +115,27 @@ export async function permanentDeleteTask(taskId: string) {
   return apiFetch<void>("/tasks/permanent-delete", { method: "POST", body: { taskId } });
 }
 
+export async function updateTask(taskId: string, data: {
+  title?: string;
+  description?: string;
+  status?: string;
+  priority?: number;
+  labels?: string[];
+  repo?: string;
+}) {
+  return apiFetch<{ task: TheFoldTask }>("/tasks/update", {
+    method: "POST",
+    body: { taskId, ...data },
+  });
+}
+
+export async function syncTaskToLinear(taskId: string) {
+  return apiFetch<{ linearUrl: string | null; success: boolean }>("/tasks/sync-to-linear", {
+    method: "POST",
+    body: { taskId },
+  });
+}
+
 export async function cancelTask(taskId: string) {
   return apiFetch<{ cancelled: boolean }>("/tasks/cancel", { method: "POST", body: { taskId } });
 }

@@ -11,13 +11,38 @@
 import { api } from "encore.dev/api";
 import log from "encore.dev/log";
 import { agentEventBus } from "./event-bus";
-import { createAgentEvent, formatSSE } from "./events";
+import { createAgentEvent, formatSSE, type AgentEventType } from "./events";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal: emit an event to the bus (called by chat service for direct-chat SSE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface EmitChatEventRequest {
+  /** The stream key — conversationId for direct chat, taskId for agent tasks */
+  streamKey: string;
+  /** AgentEventType string, e.g. "agent.status", "agent.done" */
+  eventType: string;
+  /** Payload matching the event type's data shape */
+  data: Record<string, unknown>;
+}
+
+export const emitChatEvent = api(
+  { method: "POST", path: "/agent/emit-chat-event", expose: false },
+  async (req: EmitChatEventRequest): Promise<{ ok: boolean }> => {
+    const event = createAgentEvent(
+      req.eventType as AgentEventType,
+      req.data as any,
+    );
+    agentEventBus.emit(req.streamKey, event);
+    return { ok: true };
+  },
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Endpoint

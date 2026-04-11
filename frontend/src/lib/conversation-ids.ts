@@ -1,4 +1,4 @@
-import { repoConversationId } from "@/lib/api";
+import { repoConversationId } from "./api";
 
 export { repoConversationId };
 

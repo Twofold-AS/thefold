@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { T } from "@/lib/tokens";
 import CheckIcon from "@/components/icons/CheckIcon";
 import Btn from "@/components/Btn";
+import { getReview } from "@/lib/api";
 
 interface StepInfo {
   id: string;
@@ -12,7 +13,8 @@ interface StepInfo {
 }
 
 interface AgentReport {
-  filesChanged: string[];
+  // Backend sends Array<{path, action, diff?}>; legacy paths may send string[]
+  filesChanged: Array<{ path: string; action?: string; diff?: string } | string>;
   costUsd: number;
   duration: string;
   qualityScore?: number;
@@ -29,12 +31,18 @@ interface AgentProgress {
   report?: AgentReport;
 }
 
+interface ReviewFileInfo {
+  path: string;
+  action: "create" | "modify" | "delete";
+  content?: string;
+}
+
 interface AgentStreamProps {
   content?: string;
   onCancel?: () => void;
-  onApprove?: (reviewId: string) => void;
-  onReject?: (reviewId: string) => void;
-  onRequestChanges?: (reviewId: string, feedback: string) => void;
+  onApprove?: (reviewId: string) => void | Promise<void>;
+  onReject?: (reviewId: string) => void | Promise<void>;
+  onRequestChanges?: (reviewId: string, feedback: string) => void | Promise<void>;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -167,6 +175,47 @@ function parseProgress(content?: string): AgentProgress | null {
 
 export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges }: AgentStreamProps) {
   const progress = useMemo(() => parseProgress(content), [content]);
+
+  // Loading state for review action buttons (shows spinner while API call runs)
+  const [reviewAction, setReviewAction] = useState<"approve" | "reject" | "changes" | null>(null);
+
+  // Fetched file list for Bug C — loaded on demand when review message appears
+  const [reviewFiles, setReviewFiles] = useState<ReviewFileInfo[] | null>(null);
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+
+  const reviewId = progress?.report?.reviewId;
+  useEffect(() => {
+    if (!reviewId || reviewFiles !== null) return;
+    getReview(reviewId)
+      .then(({ review }) => {
+        const files = Array.isArray(review.filesChanged) ? review.filesChanged : [];
+        setReviewFiles(files as ReviewFileInfo[]);
+      })
+      .catch(() => setReviewFiles([])); // silently ignore — button still works without files
+  }, [reviewId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleApprove = async () => {
+    if (!reviewId || reviewAction) return;
+    setReviewAction("approve");
+    try { await onApprove?.(reviewId); } finally { setReviewAction(null); }
+  };
+  const handleReject = async () => {
+    if (!reviewId || reviewAction) return;
+    setReviewAction("reject");
+    try { await onReject?.(reviewId); } finally { setReviewAction(null); }
+  };
+  const handleRequestChanges = async () => {
+    if (!reviewId || reviewAction) return;
+    // requestChanges focuses the input — no async wait needed, no loading state
+    onRequestChanges?.(reviewId, "");
+  };
+
+  const toggleFile = (path: string) =>
+    setExpandedFiles(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
 
   // If we can't parse, show raw content
   if (!progress) {
@@ -337,7 +386,7 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
               FILER
             </div>
             <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>
-              {progress.report.filesChanged.length}
+              {reviewFiles != null ? reviewFiles.length : progress.report.filesChanged.length}
             </div>
           </div>
           <div>
@@ -380,22 +429,86 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
         </div>
       )}
 
-      {/* Review actions */}
-      {progress.status === "waiting" && progress.report?.reviewId && (
-        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+      {/* File list (Bug C) */}
+      {progress.status === "waiting" && reviewId && reviewFiles && reviewFiles.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", marginBottom: 6, letterSpacing: "0.05em" }}>
+            Endrede filer ({reviewFiles.length})
+          </div>
+          {reviewFiles.map(f => (
+            <div key={f.path} style={{ marginBottom: 4 }}>
+              <div
+                onClick={() => f.content ? toggleFile(f.path) : undefined}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  padding: "5px 8px",
+                  background: T.subtle,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 4,
+                  cursor: f.content ? "pointer" : "default",
+                  userSelect: "none",
+                }}
+              >
+                <span style={{
+                  fontSize: 10, fontWeight: 600, padding: "1px 5px", borderRadius: 3,
+                  color: f.action === "create" ? T.success : f.action === "delete" ? T.error : T.warning,
+                  background: f.action === "create" ? "rgba(34,197,94,0.1)" : f.action === "delete" ? "rgba(239,68,68,0.1)" : "rgba(234,179,8,0.1)",
+                }}>
+                  {f.action === "create" ? "+" : f.action === "delete" ? "−" : "~"}
+                </span>
+                <span style={{ fontSize: 12, fontFamily: T.mono, color: T.textSec, flex: 1 }}>{f.path}</span>
+                {f.content && (
+                  <span style={{ fontSize: 10, color: T.textFaint }}>{expandedFiles.has(f.path) ? "▲" : "▼"}</span>
+                )}
+              </div>
+              {f.content && expandedFiles.has(f.path) && (
+                <pre style={{
+                  margin: 0, padding: "10px 12px",
+                  background: "rgba(0,0,0,0.3)",
+                  border: `1px solid ${T.border}`, borderTop: "none",
+                  borderRadius: "0 0 4px 4px",
+                  fontSize: 11, fontFamily: T.mono, color: T.textSec,
+                  lineHeight: 1.5, overflowX: "auto", maxHeight: 300, overflowY: "auto",
+                  whiteSpace: "pre-wrap", wordBreak: "break-all",
+                }}>
+                  {f.content}
+                </pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Review action buttons (Bug A — with loading states) */}
+      {progress.status === "waiting" && reviewId && (
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           {onApprove && (
-            <Btn primary sm onClick={() => onApprove(progress.report!.reviewId!)}>
-              Godkjenn
+            <Btn
+              primary
+              sm
+              onClick={handleApprove}
+              disabled={reviewAction !== null}
+            >
+              {reviewAction === "approve" ? "Godkjenner..." : "Godkjenn ✓"}
             </Btn>
           )}
           {onRequestChanges && (
-            <Btn sm onClick={() => onRequestChanges(progress.report!.reviewId!, "")}>
+            <Btn
+              sm
+              onClick={handleRequestChanges}
+              disabled={reviewAction !== null}
+            >
               Be om endringer
             </Btn>
           )}
           {onReject && (
-            <Btn sm onClick={() => onReject(progress.report!.reviewId!)} style={{ color: T.error }}>
-              Avvis
+            <Btn
+              sm
+              onClick={handleReject}
+              disabled={reviewAction !== null}
+              style={{ color: reviewAction === "reject" ? T.textFaint : T.error }}
+            >
+              {reviewAction === "reject" ? "Avviser..." : "Avvis"}
             </Btn>
           )}
         </div>

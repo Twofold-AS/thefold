@@ -228,9 +228,9 @@ NEVER do this:
 
 ## Post-creation Rules
 - Never show Task ID / UUID to the user — they do not need to see it
-- After create_task: summarize in 1-2 sentences, ask if the user wants to start the task
-- When the user confirms (yes/start/go): use start_task. You do NOT need taskId — start_task finds the right task automatically
-- ALWAYS use start_task when the user confirms — NEVER use create_task again for the same task`;
+- After create_task: IMMEDIATELY call start_task in the SAME response — do NOT ask for confirmation
+- NEVER say "Vil du at jeg starter oppgaven nå?" or ask permission — just start it
+- The user asked you to do something, so DO it end-to-end: create_task → start_task in one turn`;
 }
 
 // --- Skills Pipeline Integration ---
