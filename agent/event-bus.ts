@@ -1,42 +1,6 @@
 import { EventEmitter } from "events";
 import type { AgentEvent } from "./events";
 import { Topic } from "encore.dev/pubsub";
-import type { AgentEvent } from "./events";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// In-memory event bus for SSE streaming
-// ─────────────────────────────────────────────────────────────────────────────
-
-type EventHandler = (event: AgentEvent) => void;
-
-class AgentEventBus {
-  private listeners: Map<string, Set<EventHandler>> = new Map();
-
-  emit(key: string, event: AgentEvent): void {
-    const handlers = this.listeners.get(key);
-    if (handlers) {
-      for (const handler of handlers) {
-        try { handler(event); } catch { /* ignore listener errors */ }
-      }
-    }
-  }
-
-  subscribe(key: string, handler: EventHandler): () => void {
-    if (!this.listeners.has(key)) {
-      this.listeners.set(key, new Set());
-    }
-    this.listeners.get(key)!.add(handler);
-    return () => {
-      const set = this.listeners.get(key);
-      if (set) {
-        set.delete(handler);
-        if (set.size === 0) this.listeners.delete(key);
-      }
-    };
-  }
-}
-
-export const agentEventBus = new AgentEventBus();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-process event bus for SSE streaming
