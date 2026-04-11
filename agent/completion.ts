@@ -248,7 +248,7 @@ export async function completeTask(
       linearTaskId: ctx.taskId,
       memoryType: "decision",
       sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
-    }).catch((e) => log.warn("memory.store decision failed", { error: String(e) }));
+    }).catch((e: unknown) => log.warn("memory.store decision failed", { error: String(e) }));
   }
 
   // Store error patterns from attemptHistory
@@ -260,7 +260,7 @@ export async function completeTask(
         linearTaskId: ctx.taskId,
         memoryType: "error_pattern",
         sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
-      }).catch((e) => log.warn("memory.store error_pattern failed", { error: String(e) }));
+      }).catch((e: unknown) => log.warn("memory.store error_pattern failed", { error: String(e) }));
     }
   }
 
@@ -296,7 +296,7 @@ export async function completeTask(
         memoryType: "strategy",
         sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
         tags: [taskPattern, "first-attempt-success", "high-quality"],
-      }).catch((e) => log.warn("memory.store strategy failed", { error: String(e) }));
+      }).catch((e: unknown) => log.warn("memory.store strategy failed", { error: String(e) }));
 
       log.info("strategy memory stored", { pattern: taskPattern, steps: successfulSteps.length });
     }
@@ -480,7 +480,7 @@ export async function completeTask(
       sourceRepo: `${ctx.repoOwner}/${ctx.repoName}`,
       relatedTaskIds: [ctx.thefoldTaskId],
       tags: ["task-completion", ctx.repoName],
-    }).catch((err) => log.warn("storeEpisode failed", { error: String(err) }));
+    }).catch((err: unknown) => log.warn("storeEpisode failed", { error: String(err) }));
   }
 
   return {
@@ -687,7 +687,7 @@ async function extractAndRegisterComponents(params: {
 
     try {
       // Berik med full filinnhold
-      const enrichedFiles = comp.files.map((cf) => {
+      const enrichedFiles = (comp.files as Array<{ path: string; content: string }>).map((cf) => {
         const original = params.files.find((f) => f.path === cf.path);
         return {
           path: cf.path,
