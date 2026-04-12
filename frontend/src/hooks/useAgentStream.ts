@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { getToken } from "../lib/auth";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
 const MAX_RETRIES = 3;
 const BACKOFF_BASE_MS = 1000;
 const STALL_TIMEOUT_MS = 60_000; // 60 s without events → stalled

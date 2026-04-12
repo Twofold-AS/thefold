@@ -13,3 +13,5 @@ encore.gen.cue
 /encore.gen
 thefold-github-app.pem
 
+.claude/worktrees/
+.claude/worktrees/

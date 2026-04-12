@@ -1,7 +1,7 @@
 {
 	"id":   "thefold-aoti",
 	"lang": "typescript",
-	"ignore": ["frontend"],
+	"ignore": ["frontend", ".claude"],
 	"global_cors": {
 		"allow_origins_with_credentials": [
 			"http://localhost:3000",

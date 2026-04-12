@@ -1,7 +1,7 @@
 import { getToken } from "../auth";
 import { debugToast } from "../debug";
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 export interface FetchOptions {
   method?: string;

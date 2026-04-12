@@ -30,7 +30,7 @@ const securityHeaders = [
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob: https:",
       "font-src 'self'",
-      "connect-src 'self' http://localhost:* https://*.encoreapi.com https://*.twofold.no",
+      "connect-src 'self' http://localhost:* http://127.0.0.1:* https://*.encoreapi.com https://*.twofold.no",
       "frame-ancestors 'none'",
     ].join("; "),
   },
@@ -51,7 +51,7 @@ const nextConfig: NextConfig = {
     return [
       {
         source: "/api/:path*",
-        destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"}/:path*`,
+        destination: `${process.env.BACKEND_URL || "http://localhost:4000"}/:path*`,
       },
     ];
   },
