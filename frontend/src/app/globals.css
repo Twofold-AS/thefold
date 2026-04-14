@@ -1,149 +1,136 @@
 @import "tailwindcss";
 
-/* ─── Geist Mono (CDN) ─── */
-@import url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-mono/style.css');
+/* Material Symbols loaded via <link> in layout.tsx */
+.material-symbols-outlined {
+  font-family: 'Material Symbols Outlined';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 20px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'liga';
+}
 
-/* ─── Inter 24pt (self-hosted) ─── */
+/* ─── Google Sans (local) ─── */
 @font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-Regular.woff2') format('woff2');
+  font-family: 'Google Sans';
+  src: url('/fonts/Google_Sans/static/GoogleSans-Regular.ttf') format('truetype');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
-
 @font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-Medium.woff2') format('woff2');
+  font-family: 'Google Sans';
+  src: url('/fonts/Google_Sans/static/GoogleSans-Medium.ttf') format('truetype');
   font-weight: 500;
   font-style: normal;
   font-display: swap;
 }
-
 @font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-SemiBold.woff2') format('woff2');
+  font-family: 'Google Sans';
+  src: url('/fonts/Google_Sans/static/GoogleSans-SemiBold.ttf') format('truetype');
   font-weight: 600;
   font-style: normal;
   font-display: swap;
 }
-
 @font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-Bold.woff2') format('woff2');
+  font-family: 'Google Sans';
+  src: url('/fonts/Google_Sans/static/GoogleSans-Bold.ttf') format('truetype');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
 }
-
 @font-face {
-  font-family: 'Inter';
-  src: url('/fonts/Inter_24pt-ExtraBold.woff2') format('woff2');
-  font-weight: 800;
-  font-style: normal;
-  font-display: swap;
-}
-
-/* ─── TheFold Brand font (kun for "TheFold" logotekst) ─── */
-@font-face {
-  font-family: 'TheFold Brand';
-  src: url('/fonts/thefold.woff2') format('woff2');
+  font-family: 'Google Sans';
+  src: url('/fonts/Google_Sans/static/GoogleSans-Italic.ttf') format('truetype');
   font-weight: 400;
-  font-style: normal;
+  font-style: italic;
   font-display: swap;
 }
 
-/* ─── TheFold dark palette (alltid mørkt, ingen light mode) ─── */
+/* ─── Stitch-inspired dark palette ─── */
 :root {
-  /* Surfaces */
-  --background: #000000;
-  --foreground: #F5F5F5;
-  --card: #141414;
-  --card-foreground: #F5F5F5;
-  --popover: #1A1A1A;
-  --popover-foreground: #F5F5F5;
+  --background: #202124;
+  --foreground: #f1f3f4;
+  --card: #373840;
+  --card-foreground: #f1f3f4;
+  --popover: #373840;
+  --popover-foreground: #f1f3f4;
 
-  /* Brand */
-  --primary: #6366F1;
-  --primary-foreground: #F5F5F5;
-  --secondary: #1A1A1A;
-  --secondary-foreground: rgba(255,255,255,0.68);
+  --primary: #8ab4f8;
+  --primary-foreground: #202124;
+  --secondary: #2d3032;
+  --secondary-foreground: #9aa0a6;
 
-  /* Muted / subtle */
-  --muted: #141414;
-  --muted-foreground: rgba(255,255,255,0.44);
-  --accent: #6366F1;
-  --accent-foreground: #F5F5F5;
+  --muted: #2d3032;
+  --muted-foreground: #8e9298;
+  --accent: #8ab4f8;
+  --accent-foreground: #202124;
 
-  /* Semantic */
-  --destructive: #EF4444;
-  --destructive-foreground: #F5F5F5;
-  --success: #34D399;
-  --warning: #FBBF24;
+  --destructive: #f28b82;
+  --destructive-foreground: #202124;
+  --success: #81c995;
+  --warning: #fdd663;
 
-  /* Borders & inputs */
-  --border: #2A2A2A;
-  --input: #1A1A1A;
-  --ring: #6366F1;
+  --border: #3c4043;
+  --input: #2a2c2d;
+  --ring: #8ab4f8;
 
-  /* Chart */
-  --chart-1: #6366F1;
-  --chart-2: #A5B4FC;
-  --chart-3: #34D399;
-  --chart-4: #FBBF24;
-  --chart-5: #EF4444;
+  --chart-1: #8ab4f8;
+  --chart-2: #81c995;
+  --chart-3: #f28b82;
+  --chart-4: #fdd663;
+  --chart-5: #c58af9;
 
-  /* Sidebar */
-  --sidebar: #000000;
-  --sidebar-foreground: #F5F5F5;
-  --sidebar-primary: #6366F1;
-  --sidebar-primary-foreground: #F5F5F5;
-  --sidebar-accent: #1A1A1A;
-  --sidebar-accent-foreground: #F5F5F5;
-  --sidebar-border: #2A2A2A;
-  --sidebar-ring: #6366F1;
+  --sidebar: #1b1c1e;
+  --sidebar-foreground: #f1f3f4;
+  --sidebar-primary: #8ab4f8;
+  --sidebar-primary-foreground: #202124;
+  --sidebar-accent: #3c4043;
+  --sidebar-accent-foreground: #f1f3f4;
+  --sidebar-border: transparent;
+  --sidebar-ring: #8ab4f8;
 
-  /* Fonts */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  --font-serif: 'Inter', -apple-system, system-ui, sans-serif;
-  --font-mono: 'Geist Mono', ui-monospace, monospace;
-  --font-brand: 'TheFold Brand', 'Inter', -apple-system, system-ui, sans-serif;
+  --font-sans: 'Google Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'Google Sans', ui-monospace, monospace;
+  --font-brand: 'Google Sans', -apple-system, sans-serif;
 
-  /* Radius */
-  --radius: 0.5rem;
+  --radius: 0.75rem;
 
-  /* TheFold custom tokens (brukes av T-objekt via inline styles) */
-  --tf-bg: #000000;
-  --tf-raised: #0D0D0D;
-  --tf-surface: #141414;
-  --tf-subtle: #1A1A1A;
-  --tf-border: #2A2A2A;
-  --tf-border-hover: #3D3D3D;
-  --tf-border-faint: #2A2A2A;
-  --tf-text: #F5F5F5;
-  --tf-text-sec: rgba(255,255,255,0.68);
-  --tf-text-muted: rgba(255,255,255,0.44);
-  --tf-text-faint: rgba(255,255,255,0.24);
-  --tf-accent: #6366F1;
-  --tf-accent-dim: rgba(99,102,241,0.12);
-  --tf-brand: #6366F1;
-  --tf-brand-light: #A5B4FC;
-  --tf-success: #34D399;
-  --tf-warning: #FBBF24;
-  --tf-error: #EF4444;
+  --tf-bg: #202124;
+  --tf-sidebar: #1b1c1e;
+  --tf-raised: transparent;
+  --tf-surface: #373840;
+  --tf-subtle: rgba(255,255,255,0.04);
+  --tf-border: #3c4043;
+  --tf-border-hover: #5f6368;
+  --tf-text: #f1f3f4;
+  --tf-text-sec: #9aa0a6;
+  --tf-text-muted: #8e9298;
+  --tf-text-faint: #5f6368;
+  --tf-accent: #8ab4f8;
+  --tf-accent-dim: rgba(138,180,248,0.08);
+  --tf-success: #81c995;
+  --tf-warning: #fdd663;
+  --tf-error: #f28b82;
 
-  /* Shadows */
-  --shadow-2xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.15);
-  --shadow-xs: 0px 1px 2px 0px hsl(0 0% 0% / 0.15);
-  --shadow-sm: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 1px 2px -1px hsl(0 0% 0% / 0.25);
-  --shadow: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 1px 2px -1px hsl(0 0% 0% / 0.25);
-  --shadow-md: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 2px 4px -1px hsl(0 0% 0% / 0.25);
-  --shadow-lg: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 4px 6px -1px hsl(0 0% 0% / 0.25);
-  --shadow-xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.25), 0px 8px 10px -1px hsl(0 0% 0% / 0.25);
-  --shadow-2xl: 0px 1px 2px 0px hsl(0 0% 0% / 0.55);
+  --shadow-2xs: 0px 1px 2px 0px rgba(0,0,0,0.3);
+  --shadow-xs: 0px 1px 3px 0px rgba(0,0,0,0.3);
+  --shadow-sm: 0px 2px 6px 0px rgba(0,0,0,0.3);
+  --shadow: 0px 2px 8px 0px rgba(0,0,0,0.3);
+  --shadow-md: 0px 4px 12px 0px rgba(0,0,0,0.4);
+  --shadow-lg: 0px 8px 24px 0px rgba(0,0,0,0.4);
+  --shadow-xl: 0px 16px 32px 0px rgba(0,0,0,0.5);
+  --shadow-2xl: 0px 24px 48px 0px rgba(0,0,0,0.6);
 }
-
-/* Ingen .dark {} blokk — TheFold er alltid mørkt */
 
 @theme inline {
   --color-background: var(--background);
@@ -181,7 +168,6 @@
 
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
-  --font-serif: var(--font-serif);
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -199,45 +185,41 @@
 }
 
 @layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
+  * { @apply border-border outline-ring/50; }
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground;
     font-family: var(--font-sans);
+    background: #202124;
+    min-height: 100vh;
   }
 }
 
-/* ─── TheFold animasjoner ─── */
 @keyframes spin { to { transform: rotate(360deg) } }
 @keyframes blink { 50% { opacity: 0 } }
 @keyframes shimmerMove { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
 
-/* ─── Scrollbar ─── */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--tf-border); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #3c4043; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #5f6368; }
 
-/* ─── Selection ─── */
-::selection { background: var(--tf-accent-dim); color: var(--tf-accent); }
+::selection { background: rgba(138,180,248,0.15); color: #8ab4f8; }
 
-/* ─── Brand shimmer (agent working) ─── */
 .brand-shimmer {
-  background: linear-gradient(90deg, rgba(255,255,255,0.35) 0%, rgba(255,255,255,0.6) 50%, rgba(255,255,255,0.35) 100%);
+  background: linear-gradient(90deg, #80868b 0%, #8ab4f8 50%, #80868b 100%);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   animation: shimmerMove 2s ease-in-out infinite;
 }
 
-/* ─── Brand shimmer for icons ─── */
 .brand-shimmer-icon {
-  color: rgba(255,255,255,0.7);
-  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.15));
+  color: #80868b;
+  filter: drop-shadow(0 0 3px rgba(138,180,248,0.15));
   animation: shimmerIcon 2s ease-in-out infinite;
 }
 
 @keyframes shimmerIcon {
-  0%, 100% { opacity: 0.7; filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.15)); }
-  50% { opacity: 1; filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.25)); }
+  0%, 100% { opacity: 0.7; filter: drop-shadow(0 0 3px rgba(138,180,248,0.10)); }
+  50% { opacity: 1; filter: drop-shadow(0 0 6px rgba(138,180,248,0.25)); }
 }

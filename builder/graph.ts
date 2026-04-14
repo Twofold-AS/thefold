@@ -126,7 +126,8 @@ export function resolveImport(fromFile: string, importPath: string, knownFiles: 
 /**
  * Topological sort using Kahn's algorithm.
  * Returns files in dependency order (dependencies first).
- * Throws if a cycle is detected.
+ * If a cycle is detected, breaks it gracefully by appending cyclic nodes
+ * at the end instead of crashing the build.
  */
 export function topologicalSort(graph: DependencyGraph): string[] {
   const inDegree: Map<string, number> = new Map();
@@ -169,10 +170,15 @@ export function topologicalSort(graph: DependencyGraph): string[] {
   }
 
   if (sorted.length !== inDegree.size) {
+    // Cycle detected — break it gracefully instead of crashing.
+    // Append remaining nodes sorted by in-degree (least dependencies first)
+    // so the build can still proceed with a best-effort order.
     const remaining = [...inDegree.entries()]
       .filter(([, d]) => d > 0)
+      .sort((a, b) => a[1] - b[1])
       .map(([n]) => n);
-    throw new Error(`Cycle detected in dependency graph: ${remaining.join(", ")}`);
+    console.warn(`[builder/graph] Cycle detected, breaking gracefully. Cyclic nodes: ${remaining.join(", ")}`);
+    sorted.push(...remaining);
   }
 
   return sorted;

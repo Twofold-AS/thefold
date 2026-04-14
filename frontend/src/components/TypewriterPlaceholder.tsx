@@ -24,7 +24,7 @@ export default function TypewriterPlaceholder({ active }: TypewriterPlaceholderP
     const p = phrases[pi];
     if (!d) {
       if (ci < p.length) {
-        t = setTimeout(() => setCi((c) => c + 1), 40 + Math.random() * 40);
+        t = setTimeout(() => setCi((c) => c + 1), 70 + Math.random() * 60);
       } else {
         t = setTimeout(() => setD(true), 2000);
       }

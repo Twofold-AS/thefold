@@ -1,77 +1,136 @@
 "use client";
 
-import { useUser } from "@/contexts/UserPreferencesContext";
-import { useRouter } from "next/navigation";
-import { ChevronDown, LogOut, Settings, User } from "lucide-react";
-import { clearToken } from "@/lib/auth";
-import { logout } from "@/lib/api";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { T, Layout } from "@/lib/tokens";
+import { useRouter, usePathname } from "next/navigation";
+import "material-symbols/outlined.css";
 
-export function Topbar() {
-  const { user, initial, avatarColor } = useUser();
+/** Google Material Symbol — renders via CSS font */
+function MIcon({ name, size = 20 }: { name: string; size?: number }) {
+  return (
+    <span
+      className="material-symbols-outlined"
+      style={{ fontSize: size, lineHeight: 1 }}
+    >
+      {name}
+    </span>
+  );
+}
+
+interface TopBarProps {
+  notifCount?: number;
+  onNotifClick?: () => void;
+}
+
+export default function TopBar({ notifCount = 0, onNotifClick }: TopBarProps) {
   const router = useRouter();
-
-  async function handleLogout() {
-    try {
-      await logout();
-    } catch {}
-    clearToken();
-    router.push("/login");
-  }
+  const pathname = usePathname();
 
   return (
-    <header
-      className="h-topbar flex items-center justify-between px-6 border-b flex-shrink-0"
+    <div
       style={{
-        backgroundColor: "var(--tf-bg-base)",
-        borderColor: "var(--tf-border-faint)",
+        height: Layout.topbarHeight,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        padding: "0 24px",
+        flexShrink: 0,
       }}
     >
-      {/* Left: spacer for mobile hamburger */}
-      <div className="flex items-center gap-3">
-        <div className="w-8 sm:hidden" />
+      {/* Left: TheFold + BETA */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span
+          style={{
+            fontSize: 20,
+            fontWeight: 700,
+            color: T.text,
+            fontFamily: T.brandFont,
+            letterSpacing: "-0.01em",
+            cursor: "pointer",
+          }}
+          onClick={() => router.push("/cowork")}
+        >
+          TheFold
+        </span>
+        <span
+          style={{
+            fontSize: 10,
+            fontWeight: 500,
+            color: T.textMuted,
+            border: `1px solid ${T.border}`,
+            borderRadius: 6,
+            padding: "2px 8px",
+            lineHeight: "16px",
+            fontFamily: T.sans,
+          }}
+        >
+          BETA
+        </span>
       </div>
 
-      {/* Right: User avatar with dropdown */}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--tf-surface-raised)]">
-            <div
-              className="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-medium text-white"
-              style={{ background: avatarColor }}
-            >
-              {initial}
+      {/* Right: nav + utility icons */}
+      <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+        <IconBtn title="Oppgaver" active={pathname === "/tasks"} onClick={() => router.push("/tasks")}>
+          <MIcon name="task_alt" />
+        </IconBtn>
+        <IconBtn title="Drømmer" active={pathname === "/dreams"} onClick={() => router.push("/dreams")}>
+          <MIcon name="bedtime" />
+        </IconBtn>
+        <IconBtn title="Hukommelse" active={pathname === "/memory"} onClick={() => router.push("/memory")}>
+          <MIcon name="psychology" />
+        </IconBtn>
+
+        <div style={{ width: 1, height: 20, background: T.border, margin: "0 8px" }} />
+
+        <IconBtn title="Kostnadsoversikt" onClick={() => router.push("/cost")}>
+          <MIcon name="payments" />
+        </IconBtn>
+        <div style={{ position: "relative" }}>
+          <IconBtn title="Varsler" onClick={onNotifClick}>
+            <MIcon name="notifications" />
+          </IconBtn>
+          {notifCount > 0 && (
+            <div style={{
+              position: "absolute", top: 4, right: 4,
+              minWidth: 16, height: 16, borderRadius: 8,
+              background: T.error,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 9, fontWeight: 700, color: "#fff",
+              padding: "0 3px", pointerEvents: "none",
+            }}>
+              {notifCount > 9 ? "9+" : notifCount}
             </div>
-            {user?.email && (
-              <span className="text-xs hidden lg:block" style={{ color: "var(--tf-text-muted)" }}>
-                {user.email}
-              </span>
-            )}
-            <ChevronDown className="w-3 h-3" style={{ color: "var(--tf-text-faint)" }} />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48">
-          <DropdownMenuItem onClick={() => router.push("/settings")} className="flex items-center gap-2">
-            <User className="w-3.5 h-3.5" />
-            <span>Profile</span>
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => router.push("/settings")} className="flex items-center gap-2">
-            <Settings className="w-3.5 h-3.5" />
-            <span>Settings</span>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={handleLogout} className="flex items-center gap-2 text-red-400">
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Sign out</span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </header>
+          )}
+        </div>
+        <IconBtn title="Audit logg" onClick={() => router.push("/audit")}>
+          <MIcon name="shield" />
+        </IconBtn>
+        <IconBtn title="Innstillinger" active={pathname.startsWith("/innstillinger")} onClick={() => router.push("/innstillinger")}>
+          <MIcon name="settings" />
+        </IconBtn>
+      </div>
+    </div>
+  );
+}
+
+function IconBtn({ children, onClick, title, active }: {
+  children: React.ReactNode; onClick?: () => void; title?: string; active?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        background: active ? T.tabActive : "transparent",
+        border: "none", cursor: "pointer",
+        color: active ? T.text : T.textMuted,
+        padding: 10, borderRadius: 20,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        transition: "background 0.15s, color 0.15s",
+      }}
+      onMouseEnter={(e) => { if (!active) { e.currentTarget.style.background = T.subtle; e.currentTarget.style.color = T.text; } }}
+      onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = T.textMuted; } }}
+    >
+      {children}
+    </button>
   );
 }

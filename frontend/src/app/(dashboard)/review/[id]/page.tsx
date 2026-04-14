@@ -166,7 +166,7 @@ export default function ReviewDetailPage({ params }: { params: Promise<{ id: str
 
   return (
     <>
-      <div style={{ paddingTop: 32, paddingBottom: 20 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 20 }}>
         {/* Breadcrumb */}
         <Link href="/tasks" style={{ textDecoration: "none" }}>
           <div style={{
@@ -296,7 +296,7 @@ export default function ReviewDetailPage({ params }: { params: Promise<{ id: str
                   <Btn
                     primary sm
                     onClick={handleApprove}
-                    style={{ opacity: action !== null ? 0.5 : 1, pointerEvents: action !== null ? "none" : "auto" }}
+                    disabled={action !== null}
                   >
                     {action === "approve" ? "Godkjenner..." : (
                       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -308,14 +308,16 @@ export default function ReviewDetailPage({ params }: { params: Promise<{ id: str
                     <Btn
                       sm
                       onClick={() => setShowFeedback((p) => !p)}
-                      style={{ flex: 1, opacity: action !== null ? 0.5 : 1, pointerEvents: action !== null ? "none" : "auto" }}
+                      disabled={action !== null}
+                      style={{ flex: 1 }}
                     >
                       Be om endringer
                     </Btn>
                     <Btn
                       sm
                       onClick={handleReject}
-                      style={{ color: T.error, opacity: action !== null ? 0.5 : 1, pointerEvents: action !== null ? "none" : "auto" }}
+                      disabled={action !== null}
+                      style={{ color: T.error }}
                     >
                       {action === "reject" ? "..." : <X size={13} />}
                     </Btn>
@@ -455,7 +457,7 @@ export default function ReviewDetailPage({ params }: { params: Promise<{ id: str
               </Link>
               {review.taskId && (
                 <Link
-                  href={`/chat?task=${review.taskId}`}
+                  href={`/cowork?task=${review.taskId}`}
                   style={{ fontSize: 12, color: T.accent, textDecoration: "none", display: "flex", alignItems: "center", gap: 4 }}
                 >
                   <FileCode size={12} /> Åpne i Chat

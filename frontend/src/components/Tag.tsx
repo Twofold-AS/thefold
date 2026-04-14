@@ -2,7 +2,7 @@ import { T } from "@/lib/tokens";
 
 interface TagProps {
   children: React.ReactNode;
-  variant?: "default" | "accent" | "success" | "error" | "brand" | "info";
+  variant?: "default" | "accent" | "success" | "error" | "brand" | "info" | "warning";
 }
 
 const variantMap = {
@@ -12,6 +12,7 @@ const variantMap = {
   error: { bg: "rgba(239,68,68,0.1)", c: T.error, bc: "rgba(239,68,68,0.25)" },
   brand: { bg: "rgba(99,102,241,0.12)", c: T.brandLight, bc: "rgba(165,180,252,0.25)" },
   info: { bg: "rgba(99,102,241,0.1)", c: "#A5B4FC", bc: "rgba(99,102,241,0.25)" },
+  warning: { bg: "rgba(251,191,36,0.1)", c: T.warning, bc: "rgba(251,191,36,0.25)" },
 };
 
 export default function Tag({ children, variant = "default" }: TagProps) {

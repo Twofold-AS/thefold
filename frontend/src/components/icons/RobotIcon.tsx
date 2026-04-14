@@ -5,6 +5,10 @@ interface RobotIconProps {
   color?: string;
 }
 
+/**
+ * AI avatar icon — crystal ball with inner glow.
+ * Magical oracle representing AI responses.
+ */
 export default function RobotIcon({ size = 16, color }: RobotIconProps) {
   const c = color || T.textSec;
   return (
@@ -14,16 +18,20 @@ export default function RobotIcon({ size = 16, color }: RobotIconProps) {
       viewBox="0 0 24 24"
       fill="none"
       stroke={c}
-      strokeWidth="1.8"
+      strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <line x1="12" y1="2" x2="12" y2="6" />
-      <circle cx="12" cy="2" r="1" fill={c} stroke="none" />
-      <rect x="4" y="6" width="16" height="12" rx="2" />
-      <circle cx="9" cy="12" r="1.5" fill={c} stroke="none" />
-      <circle cx="15" cy="12" r="1.5" fill={c} stroke="none" />
-      <line x1="9" y1="16" x2="15" y2="16" />
+      {/* Crystal ball */}
+      <circle cx="12" cy="11" r="7" />
+      {/* Inner shimmer */}
+      <path d="M9 8.5c1-1.5 3-2 4.5-1" strokeWidth="1.2" opacity="0.5" />
+      {/* Stand base */}
+      <path d="M8 18h8" strokeWidth="1.8" />
+      {/* Stand neck */}
+      <path d="M10 18v-1.5c0-.8.9-1.5 2-1.5s2 .7 2 1.5V18" />
+      {/* Tiny sparkle on top */}
+      <circle cx="15" cy="6" r="0.7" fill={c} stroke="none" opacity="0.6" />
     </svg>
   );
 }

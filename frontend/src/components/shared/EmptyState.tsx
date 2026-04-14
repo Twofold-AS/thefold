@@ -1,23 +1,42 @@
 "use client";
 
-import { T } from "@/lib/tokens";
+import { T, S } from "@/lib/tokens";
+import Btn from "@/components/Btn";
 
 interface EmptyStateProps {
-  message: string;
+  /** @deprecated Use title instead */
+  message?: string;
+  title?: string;
+  description?: string;
+  /** @deprecated Use description instead */
   hint?: string;
   icon?: React.ReactNode;
-  action?: React.ReactNode;
+  /** New: object-form action */
+  action?: { label: string; onClick: () => void } | React.ReactNode;
 }
 
-export default function EmptyState({ message, hint, icon, action }: EmptyStateProps) {
+export default function EmptyState({ message, title, description, hint, icon, action }: EmptyStateProps) {
+  const displayTitle = title ?? message ?? "Ingen data";
+  const displayDesc = description ?? hint;
+
   return (
-    <div style={{ padding: "40px 20px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+    <div style={{ padding: `${S.xxl}px ${S.lg}px`, textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: S.sm }}>
       {icon && (
-        <div style={{ color: T.textFaint, marginBottom: 4 }}>{icon}</div>
+        <div style={{ color: T.textFaint, marginBottom: S.xs }}>{icon}</div>
       )}
-      <span style={{ fontSize: 13, color: T.textFaint }}>{message}</span>
-      {hint && <span style={{ fontSize: 12, color: T.textFaint, opacity: 0.7 }}>{hint}</span>}
-      {action && <div style={{ marginTop: 8 }}>{action}</div>}
+      <span style={{ fontSize: 14, fontWeight: 500, color: T.textMuted }}>{displayTitle}</span>
+      {displayDesc && <span style={{ fontSize: 12, color: T.textFaint }}>{displayDesc}</span>}
+      {action && (
+        <div style={{ marginTop: S.sm }}>
+          {typeof action === "object" && action !== null && "label" in action ? (
+            <Btn variant="primary" size="sm" onClick={(action as { label: string; onClick: () => void }).onClick}>
+              {(action as { label: string; onClick: () => void }).label}
+            </Btn>
+          ) : (
+            action
+          )}
+        </div>
+      )}
     </div>
   );
 }

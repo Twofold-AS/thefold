@@ -5,7 +5,7 @@ import { Subscription } from "encore.dev/pubsub";
 
 // Re-export from isolated events file for backward compatibility
 export { agentReports, chatResponses, type AgentReport, type ChatResponse } from "./events";
-import { agentReports, chatResponses } from "./events";
+import { agentReports, chatResponses, type AgentReport } from "./events";
 
 // --- Database ---
 
@@ -659,6 +659,17 @@ export const send = api(
         } catch (e) {
           console.warn("getTree failed for project decomposition (likely empty repo):", e);
         }
+
+        // Send immediate status so frontend shows spinner
+        await db.exec`
+          INSERT INTO messages (conversation_id, role, content, message_type)
+          VALUES (${req.conversationId}, 'assistant', ${JSON.stringify({
+            type: "progress",
+            status: "working",
+            phase: "planning",
+            summary: "Planlegger prosjekt — analyserer oppgaven og deler den opp i faser..."
+          })}, 'agent_status')
+        `;
 
         // Decompose project
         const decomposition = await aiClient.decomposeProject({

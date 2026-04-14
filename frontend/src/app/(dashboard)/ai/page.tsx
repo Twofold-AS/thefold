@@ -265,7 +265,7 @@ export default function AIPage() {
 
   if (loading) {
     return (
-      <div style={{ paddingTop: 40 }}>
+      <div style={{ paddingTop: 0 }}>
         <Skeleton rows={4} />
       </div>
     );
@@ -284,7 +284,7 @@ export default function AIPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
         <h2
           style={{
             fontSize: 28,
@@ -591,7 +591,7 @@ export default function AIPage() {
                         zIndex: 50,
                         maxHeight: 240,
                         overflowY: "auto",
-                        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                        boxShadow: "0 4px 12px rgba(0,0,0,0.06)",
                       }}
                     >
                       {/* Auto option */}
@@ -767,7 +767,7 @@ export default function AIPage() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.6)",
+            background: "rgba(0,0,0,0.15)",
             zIndex: 100,
             display: "flex",
             alignItems: "center",

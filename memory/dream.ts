@@ -314,7 +314,7 @@ async function runDream(): Promise<DreamResult> {
 // --- API endpoint (required by CronJob) ---
 
 export const runDreamEngine = api(
-  { method: "POST", path: "/memory/dream", expose: false },
+  { method: "POST", path: "/memory/dream", expose: true, auth: true },
   async (): Promise<DreamResult> => {
     return runDream();
   }

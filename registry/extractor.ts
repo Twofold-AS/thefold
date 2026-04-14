@@ -16,8 +16,7 @@ interface ExtractedComponent {
 
 /**
  * Extract gjenbrukbare komponenter fra built files using AI.
- * Feature-flagged via RegistryExtractionEnabled secret.
- * Gracefully degrades on errors — never blocks build flow.
+ * Always active — gracefully degrades on errors, never blocks build flow.
  */
 export async function extractComponents(params: {
   repo: string;

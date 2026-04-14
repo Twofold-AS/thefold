@@ -119,7 +119,7 @@ export default function IntegrasjonerPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
         <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>Integrasjoner</h2>
         <p style={{ fontSize: 13, color: T.textMuted }}>Eksterne tjenester og tilkoblinger.</p>
       </div>
@@ -183,7 +183,7 @@ export default function IntegrasjonerPage() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.6)",
+            background: "rgba(0,0,0,0.15)",
             zIndex: 100,
             display: "flex",
             alignItems: "center",

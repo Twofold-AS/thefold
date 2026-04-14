@@ -9,7 +9,8 @@ import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import Skeleton from "@/components/Skeleton";
 import { useApiData } from "@/lib/hooks";
-import { listSkills, toggleSkill, createSkill, Skill } from "@/lib/api";
+import { listSkills, toggleSkill, createSkill, updateSkill, deleteSkill, Skill } from "@/lib/api";
+import ConfirmDialog from "@/components/shared/ConfirmDialog";
 
 const inputStyle: React.CSSProperties = {
   background: T.subtle,
@@ -40,10 +41,32 @@ export default function SkillsPage() {
   const [newDesc, setNewDesc] = useState("");
   const [newPrompt, setNewPrompt] = useState("");
   const [newPhase, setNewPhase] = useState<"pre_run" | "inject" | "post_run">("inject");
+  const [newScope, setNewScope] = useState<"global" | "repo" | "task">("global");
+  const [newAppliesTo, setNewAppliesTo] = useState("");
+  const [newCategory, setNewCategory] = useState<"framework" | "language" | "security" | "style" | "quality" | "general">("general");
   const [creating, setCreating] = useState(false);
 
-  const skills: Skill[] = data?.skills ?? [];
-  const sk = sel !== null ? skills.find((s) => s.id === sel) ?? null : null;
+  // Edit dialog state
+  const [showEdit, setShowEdit] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editDesc, setEditDesc] = useState("");
+  const [editPrompt, setEditPrompt] = useState("");
+  const [editPhase, setEditPhase] = useState<"pre_run" | "inject" | "post_run">("inject");
+  const [editScope, setEditScope] = useState<"global" | "repo" | "task">("global");
+  const [editAppliesTo, setEditAppliesTo] = useState("");
+  const [editCategory, setEditCategory] = useState<"framework" | "language" | "security" | "style" | "quality" | "general">("general");
+  const [saving, setSaving] = useState(false);
+
+  // Delete dialog state
+  const [showDelete, setShowDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // Category filter
+  const [filterCategory, setFilterCategory] = useState<string>("all");
+
+  const allSkills: Skill[] = data?.skills ?? [];
+  const skills = filterCategory === "all" ? allSkills : allSkills.filter((s) => s.category === filterCategory);
+  const sk = sel !== null ? allSkills.find((s) => s.id === sel) ?? null : null;
 
   const handleCreateSkill = async () => {
     if (!newName.trim()) return;
@@ -53,8 +76,9 @@ export default function SkillsPage() {
         name: newName,
         description: newDesc,
         promptFragment: newPrompt,
-        appliesTo: [],
-        scope: "global",
+        appliesTo: newAppliesTo.trim() ? newAppliesTo.split(",").map((s) => s.trim()).filter(Boolean) : [],
+        scope: newScope,
+        category: newCategory,
         taskPhase: newPhase,
       });
       setShowCreate(false);
@@ -62,6 +86,9 @@ export default function SkillsPage() {
       setNewDesc("");
       setNewPrompt("");
       setNewPhase("inject");
+      setNewScope("global");
+      setNewAppliesTo("");
+      setNewCategory("general");
       refresh();
     } catch (e) {
       alert(`Feil ved opprettelse: ${e instanceof Error ? e.message : String(e)}`);
@@ -70,9 +97,57 @@ export default function SkillsPage() {
     }
   };
 
+  const openEditModal = (s: Skill) => {
+    setEditName(s.name);
+    setEditDesc(s.description);
+    setEditPrompt(s.promptFragment);
+    setEditPhase((s.executionPhase ?? s.taskPhase ?? "inject") as "pre_run" | "inject" | "post_run");
+    setEditScope((s.scope ?? "global") as "global" | "repo" | "task");
+    setEditAppliesTo((s.appliesTo ?? []).join(", "));
+    setEditCategory((s.category ?? "general") as "framework" | "language" | "security" | "style" | "quality" | "general");
+    setShowEdit(true);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!sk) return;
+    setSaving(true);
+    try {
+      await updateSkill({
+        id: sk.id,
+        name: editName,
+        description: editDesc,
+        promptFragment: editPrompt,
+        appliesTo: editAppliesTo.trim() ? editAppliesTo.split(",").map((s) => s.trim()).filter(Boolean) : [],
+        scope: editScope,
+        taskPhase: editPhase,
+      });
+      setShowEdit(false);
+      refresh();
+    } catch (e) {
+      alert(`Feil ved lagring: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!sk) return;
+    setDeleting(true);
+    try {
+      await deleteSkill(sk.id);
+      setShowDelete(false);
+      setSel(null);
+      refresh();
+    } catch (e) {
+      alert(`Feil ved sletting: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (loading) {
     return (
-      <div style={{ paddingTop: 40 }}>
+      <div style={{ paddingTop: 0 }}>
         <Skeleton rows={4} />
       </div>
     );
@@ -80,7 +155,7 @@ export default function SkillsPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
         <div
           style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
         >
@@ -97,13 +172,51 @@ export default function SkillsPage() {
               Skills
             </h2>
             <p style={{ fontSize: 13, color: T.textMuted }}>
-              Modulært prompt-system med pipeline, routing og scoring.
+              Skills er prompt-fragmenter som beriker TheFolds kontekst. Legg til skills for å forbedre kodegenereringen.
             </p>
           </div>
-          <Btn primary sm onClick={() => setShowCreate(true)}>
+          <Btn primary onClick={() => setShowCreate(true)} style={{ padding: "10px 20px", fontSize: 14 }}>
             + Ny skill
           </Btn>
         </div>
+      </div>
+
+      {/* Tip box */}
+      <div style={{
+        padding: "12px 16px",
+        border: `1px solid ${T.border}`,
+        borderRadius: T.r,
+        marginBottom: 16,
+        fontSize: 12,
+        color: T.textSec,
+        lineHeight: 1.6,
+      }}>
+        <strong style={{ color: T.accent }}>Tips:</strong> Skills injiseres automatisk i AI-prompten basert på routing-regler.
+        Opprett skills for frameworks, kodestil, eller sikkerhetsregler som TheFold skal følge.
+        Aktive skills: <strong style={{ color: T.text }}>{allSkills.filter(s => s.enabled).length}</strong> av {allSkills.length}.
+      </div>
+
+      {/* Category filter */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+        {["all", "general", "framework", "language", "security", "style", "quality"].map((cat) => (
+          <div
+            key={cat}
+            onClick={() => setFilterCategory(cat)}
+            style={{
+              padding: "5px 12px",
+              borderRadius: 6,
+              fontSize: 11,
+              fontFamily: T.mono,
+              cursor: "pointer",
+              background: filterCategory === cat ? T.accentDim : "transparent",
+              border: `1px solid ${filterCategory === cat ? T.accent : T.border}`,
+              color: filterCategory === cat ? T.accent : T.textMuted,
+              transition: "all 0.15s",
+            }}
+          >
+            {cat === "all" ? `Alle (${allSkills.length})` : cat}
+          </div>
+        ))}
       </div>
 
       {/* Stats bar */}
@@ -326,7 +439,7 @@ export default function SkillsPage() {
                 </div>
               ) : <div style={{ marginBottom: 16 }} />}
 
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <Toggle
                   checked={sk.enabled}
                   onChange={async () => {
@@ -335,7 +448,8 @@ export default function SkillsPage() {
                   }}
                   label={sk.enabled ? "Deaktiver" : "Aktiver"}
                 />
-                <Btn sm>Rediger</Btn>
+                <Btn size="sm" onClick={() => openEditModal(sk)}>Rediger</Btn>
+                <Btn size="sm" variant="danger" onClick={() => setShowDelete(true)}>Slett</Btn>
               </div>
             </div>
           )}
@@ -348,7 +462,7 @@ export default function SkillsPage() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.6)",
+            background: "rgba(0,0,0,0.15)",
             zIndex: 100,
             display: "flex",
             alignItems: "center",
@@ -401,6 +515,66 @@ export default function SkillsPage() {
               />
             </div>
 
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Kategori</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {(["general", "framework", "language", "security", "style", "quality"] as const).map((cat) => (
+                  <div
+                    key={cat}
+                    onClick={() => setNewCategory(cat)}
+                    style={{
+                      padding: "6px 12px",
+                      background: newCategory === cat ? T.accentDim : "transparent",
+                      border: `1px solid ${newCategory === cat ? T.accent : T.border}`,
+                      borderRadius: 6,
+                      fontSize: 11,
+                      fontFamily: T.mono,
+                      color: newCategory === cat ? T.accent : T.textSec,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {cat}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Scope</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {(["global", "repo", "task"] as const).map((sc) => (
+                  <div
+                    key={sc}
+                    onClick={() => setNewScope(sc)}
+                    style={{
+                      flex: 1,
+                      padding: "10px 14px",
+                      background: newScope === sc ? T.accentDim : "transparent",
+                      border: `1px solid ${newScope === sc ? T.accent : T.border}`,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontFamily: T.mono,
+                      color: newScope === sc ? T.accent : T.textSec,
+                      cursor: "pointer",
+                      textAlign: "center",
+                    }}
+                  >
+                    {sc}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Gjelder for (komma-separert)</div>
+              <input
+                value={newAppliesTo}
+                onChange={(e) => setNewAppliesTo(e.target.value)}
+                placeholder="f.eks. typescript, react, next.js"
+                style={inputStyle}
+              />
+            </div>
+
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Fase</div>
               <div style={{ display: "flex", gap: 8 }}>
@@ -435,7 +609,7 @@ export default function SkillsPage() {
                 primary
                 sm
                 onClick={handleCreateSkill}
-                style={{ opacity: creating || !newName.trim() ? 0.5 : 1, pointerEvents: creating ? "none" : "auto" }}
+                disabled={creating || !newName.trim()}
               >
                 {creating ? "Oppretter..." : "Opprett"}
               </Btn>
@@ -443,6 +617,120 @@ export default function SkillsPage() {
           </div>
         </div>
       )}
+
+      {/* Edit skill dialog */}
+      {showEdit && sk && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.15)",
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowEdit(false); }}
+        >
+          <div
+            style={{
+              background: T.surface,
+              border: `1px solid ${T.border}`,
+              borderRadius: T.r,
+              padding: 24,
+              width: 480,
+              maxHeight: "80vh",
+              overflow: "auto",
+            }}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600, color: T.text, marginBottom: 20 }}>
+              Rediger skill
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Navn</div>
+              <input value={editName} onChange={(e) => setEditName(e.target.value)} style={inputStyle} />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Beskrivelse</div>
+              <textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} style={textareaStyle} />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Prompt-fragment</div>
+              <textarea value={editPrompt} onChange={(e) => setEditPrompt(e.target.value)} style={textareaStyle} />
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Scope</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {(["global", "repo", "task"] as const).map((sc) => (
+                  <div
+                    key={sc}
+                    onClick={() => setEditScope(sc)}
+                    style={{
+                      flex: 1, padding: "10px 14px",
+                      background: editScope === sc ? T.accentDim : "transparent",
+                      border: `1px solid ${editScope === sc ? T.accent : T.border}`,
+                      borderRadius: 6, fontSize: 12, fontFamily: T.mono,
+                      color: editScope === sc ? T.accent : T.textSec,
+                      cursor: "pointer", textAlign: "center",
+                    }}
+                  >
+                    {sc}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Gjelder for (komma-separert)</div>
+              <input value={editAppliesTo} onChange={(e) => setEditAppliesTo(e.target.value)} placeholder="f.eks. typescript, react" style={inputStyle} />
+            </div>
+
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>Fase</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {(["pre_run", "inject", "post_run"] as const).map((ph) => (
+                  <div
+                    key={ph}
+                    onClick={() => setEditPhase(ph)}
+                    style={{
+                      flex: 1, padding: "10px 14px",
+                      background: editPhase === ph ? T.accentDim : "transparent",
+                      border: `1px solid ${editPhase === ph ? T.accent : T.border}`,
+                      borderRadius: 6, fontSize: 12, fontFamily: T.mono,
+                      color: editPhase === ph ? T.accent : T.textSec,
+                      cursor: "pointer", textAlign: "center",
+                    }}
+                  >
+                    {ph}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <Btn size="sm" onClick={() => setShowEdit(false)}>Avbryt</Btn>
+              <Btn variant="primary" size="sm" onClick={handleSaveEdit} disabled={saving || !editName.trim()}>
+                {saving ? "Lagrer..." : "Lagre"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirmation */}
+      <ConfirmDialog
+        open={showDelete}
+        title="Slett skill"
+        message={`Er du sikker på at du vil slette "${sk?.name ?? ""}"? Denne handlingen kan ikke angres.`}
+        confirmLabel="Slett"
+        variant="danger"
+        onConfirm={handleDelete}
+        onCancel={() => setShowDelete(false)}
+      />
     </>
   );
 }

@@ -11,9 +11,9 @@ interface BudgetBarProps {
 }
 
 function barColor(pct: number): string {
-  if (pct >= 100) return "#EF4444"; // red-500
-  if (pct >= 80) return "#F59E0B";  // amber-500
-  return "#22C55E";                  // green-500
+  if (pct >= 100) return T.error; // red-500 (lightened)
+  if (pct >= 80) return T.warning;  // amber-500 (lightened)
+  return T.success;                  // green-500
 }
 
 export default function BudgetBar({ used, max, onPause }: BudgetBarProps) {
@@ -114,17 +114,17 @@ export default function BudgetBar({ used, max, onPause }: BudgetBarProps) {
             right: 24,
             zIndex: 1000,
             background: T.surface,
-            border: `1px solid #F59E0B`,
+            border: `1px solid ${T.warning}`,
             borderRadius: 10,
             padding: "14px 18px",
             maxWidth: 300,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
           }}
         >
           <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
             <span style={{ fontSize: 18, lineHeight: 1 }}>⚠️</span>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: "#F59E0B", marginBottom: 4 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: T.warning, marginBottom: 4 }}>
                 80% of token budget used
               </div>
               <div style={{ fontSize: 12, color: T.textSec, lineHeight: 1.5 }}>
@@ -161,7 +161,7 @@ export default function BudgetBar({ used, max, onPause }: BudgetBarProps) {
             style={{
               position: "fixed",
               inset: 0,
-              background: "rgba(0,0,0,0.5)",
+              background: "rgba(0,0,0,0.12)",
               zIndex: 1001,
             }}
           />
@@ -177,10 +177,10 @@ export default function BudgetBar({ used, max, onPause }: BudgetBarProps) {
               borderRadius: 12,
               padding: 24,
               width: 360,
-              boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+              boxShadow: "0 16px 48px rgba(0,0,0,0.12)",
             }}
           >
-            <div style={{ fontSize: 16, fontWeight: 600, color: "#EF4444", marginBottom: 8 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: T.error, marginBottom: 8 }}>
               Token budget reached
             </div>
             <div style={{ fontSize: 13, color: T.textSec, lineHeight: 1.6, marginBottom: 20 }}>
@@ -212,7 +212,7 @@ export default function BudgetBar({ used, max, onPause }: BudgetBarProps) {
                   padding: "8px 16px",
                   borderRadius: 6,
                   border: "none",
-                  background: "#EF4444",
+                  background: T.error,
                   color: "#fff",
                   fontSize: 13,
                   fontWeight: 600,

@@ -186,9 +186,7 @@ export function planSubAgents(
 /**
  * AI-driven sub-agent planning. Uses an AI call to decide which sub-agents
  * to dispatch based on the actual task content, not just a complexity number.
- *
- * Feature-flagged via DynamicSubAgentsEnabled secret. Falls back to planSubAgents()
- * when disabled or on any error.
+ * Always active — falls back to planSubAgents() on any error.
  */
 export async function planSubAgentsDynamic(
   taskDescription: string,

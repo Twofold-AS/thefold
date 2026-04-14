@@ -224,7 +224,7 @@ export default function ModelsPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>
@@ -681,7 +681,7 @@ function Modal({
   return (
     <div
       style={{
-        position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+        position: "fixed", inset: 0, background: "rgba(0,0,0,0.15)",
         zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center",
       }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
@@ -691,7 +691,7 @@ function Modal({
           background: T.surface, border: `1px solid ${T.border}`,
           borderRadius: T.r, padding: 24, width: 520,
           maxHeight: "85vh", overflow: "auto",
-          boxShadow: "0 24px 64px rgba(0,0,0,0.5)",
+          boxShadow: "0 24px 64px rgba(0,0,0,0.12)",
         }}
       >
         <div style={{ fontSize: 16, fontWeight: 600, color: T.text, marginBottom: 20 }}>

@@ -419,6 +419,34 @@ const _cron = new CronJob("daily-health-check", {
   endpoint: runDailyChecks,
 });
 
+// POST /monitor/trigger — Manual trigger for full monitoring suite (health + repo-watch)
+export const trigger = api(
+  { method: "POST", path: "/monitor/trigger", expose: true, auth: true },
+  async (): Promise<{ ran: boolean; healthMessage: string; watchMessage: string }> => {
+    log.info("Monitor trigger: manual run started");
+    let healthMessage = "skipped";
+    let watchMessage = "skipped";
+
+    try {
+      const healthResult = await runDailyChecks();
+      healthMessage = healthResult.message;
+    } catch (err) {
+      log.error(err as Error, "Monitor trigger: daily checks failed");
+      healthMessage = `failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    try {
+      await runRepoWatchCron();
+      watchMessage = "completed";
+    } catch (err) {
+      log.error(err as Error, "Monitor trigger: repo watch failed");
+      watchMessage = `failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    return { ran: true, healthMessage, watchMessage };
+  }
+);
+
 // ============================================================
 // 8.1: Repo-watch — proactive commit + CVE monitoring
 // ============================================================

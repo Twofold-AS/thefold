@@ -203,8 +203,8 @@ export default function ProactiveSuggestions({ repo, onStartTask, compact }: Pro
           ))}
         </div>
       ) : (
-        suggestions.map((s) => (
-          <SuggestionCard key={s.id} s={s} onStartTask={onStartTask} />
+        suggestions.map((s, idx) => (
+          <SuggestionCard key={s.id ?? `suggestion-${idx}`} s={s} onStartTask={onStartTask} />
         ))
       )}
     </div>

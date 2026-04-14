@@ -3,7 +3,9 @@
 import { T } from "@/lib/tokens";
 import MessageList from "@/components/chat/MessageList";
 import MessageInput from "@/components/chat/MessageInput";
+import { Clock, Plus } from "lucide-react";
 import type { Message } from "@/lib/api";
+import type { ReviewActionType } from "@/hooks/useReviewFlow";
 
 interface Skill {
   id: string;
@@ -36,6 +38,7 @@ interface ChatContainerProps {
   onRequestChanges: (reviewId: string, feedback?: string) => void;
   onSend: (value: string) => void;
   pendingReviewId: string | null;
+  reviewInProgress?: ReviewActionType;
   skills: Skill[];
   selectedSkillIds: string[];
   onSkillsChange: (ids: string[]) => void;
@@ -44,6 +47,8 @@ interface ChatContainerProps {
   models: ModelOption[];
   selectedModel: string | null;
   onModelChange: (id: string | null) => void;
+  onHistoryToggle?: () => void;
+  onNewChat?: () => void;
 }
 
 export default function ChatContainer({
@@ -64,6 +69,7 @@ export default function ChatContainer({
   onRequestChanges,
   onSend,
   pendingReviewId,
+  reviewInProgress,
   skills,
   selectedSkillIds,
   onSkillsChange,
@@ -72,6 +78,8 @@ export default function ChatContainer({
   models,
   selectedModel,
   onModelChange,
+  onHistoryToggle,
+  onNewChat,
 }: ChatContainerProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -91,7 +99,34 @@ export default function ChatContainer({
             </div>
           )}
         </div>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }} />
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {onNewChat && (
+            <button
+              onClick={onNewChat}
+              title="Ny samtale"
+              style={{
+                background: "transparent", border: `1px solid ${T.border}`, borderRadius: 8,
+                padding: "6px 10px", cursor: "pointer", color: T.textMuted,
+                display: "flex", alignItems: "center", gap: 4, fontSize: 12,
+              }}
+            >
+              <Plus size={14} /> Ny
+            </button>
+          )}
+          {onHistoryToggle && (
+            <button
+              onClick={onHistoryToggle}
+              title="Samtalehistorikk"
+              style={{
+                background: "transparent", border: `1px solid ${T.border}`, borderRadius: 8,
+                padding: "6px 10px", cursor: "pointer", color: T.textMuted,
+                display: "flex", alignItems: "center", gap: 4, fontSize: 12,
+              }}
+            >
+              <Clock size={14} /> Historikk
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Messages */}
@@ -109,6 +144,7 @@ export default function ChatContainer({
         onApprove={onApprove}
         onReject={onReject}
         onRequestChanges={onRequestChanges}
+        reviewInProgress={reviewInProgress}
       />
 
       {/* Input */}

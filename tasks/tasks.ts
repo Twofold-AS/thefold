@@ -7,7 +7,7 @@ import type { Task, TaskStatus, TaskSource } from "./types";
 
 // Re-export from isolated events file for backward compatibility
 export { taskEvents, type TaskEvent } from "./events";
-import { taskEvents } from "./events";
+import { taskEvents, type TaskEvent } from "./events";
 
 // --- Database ---
 

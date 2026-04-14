@@ -1,595 +1,417 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
-import { T, Layout } from "@/lib/tokens";
-import Btn from "@/components/Btn";
+import { T, S, Layout } from "@/lib/tokens";
+import TopBar from "@/components/TopBar";
 import NotifBell from "@/components/NotifBell";
-import {
-  Eye, BotMessageSquare, CheckSquare, Box,
-  Wand2, Brain, Plug, Server, Database, Activity, Terminal,
-  Cog, ChevronDown, FolderOpen, BookOpen, Menu, X,
-  type LucideIcon,
-} from "lucide-react";
-import { RepoProvider, useRepoContext } from "@/lib/repo-context";
+import { Search, ChevronRight, Menu, X } from "lucide-react";
+import { RepoProvider } from "@/lib/repo-context";
 import { ErrorBoundary } from "@/components/shared/ErrorBoundary";
+import { getConversations, listTheFoldTasks, getNotifications } from "@/lib/api";
 
-const { sidebarWidth: SW, sidebarCollapsed: SWC, contentWidth: CW, innerWidth: IW, headerHeight: HH } = Layout;
-
-interface NavItem {
-  icon: LucideIcon;
-  label: string;
-  href: string;
-  badge?: string;
+interface Conversation {
+  id: string;
+  title?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  activeTask?: boolean;
 }
 
-interface NavGroup {
-  cat?: string;
-  items: NavItem[];
-}
-
-const navGroups: NavGroup[] = [
-  {
-    items: [
-      { icon: Eye, label: "Overview", href: "/" },
-    ],
-  },
-  {
-    cat: "WORKSPACE",
-    items: [
-      { icon: BotMessageSquare, label: "Chat", href: "/chat" },
-      { icon: CheckSquare, label: "Tasks", href: "/tasks" },
-      { icon: FolderOpen, label: "Projects", href: "/projects" },
-      { icon: Box, label: "Komponenter", href: "/komponenter" },
-      { icon: Wand2, label: "Skills", href: "/skills" },
-      { icon: BookOpen, label: "Knowledge", href: "/knowledge" },
-    ],
-  },
-  {
-    cat: "SYSTEM",
-    items: [
-      { icon: Brain, label: "AI", href: "/ai" },
-      { icon: Plug, label: "Integrasjoner", href: "/integrasjoner" },
-      { icon: Server, label: "MCP", href: "/innstillinger/mcp" },
-      { icon: Database, label: "Memory", href: "/memory" },
-      { icon: Activity, label: "Monitor", href: "/monitor" },
-      { icon: Terminal, label: "Sandbox", href: "/sandbox" },
-    ],
-  },
-];
-
-const ROUTE_LABELS: Record<string, string> = {
-  "/": "Overview",
-  "/chat": "Chat",
-  "/tasks": "Tasks",
-  "/projects": "Projects",
-  "/komponenter": "Komponenter",
-  "/skills": "Skills",
-  "/knowledge": "Knowledge",
-  "/ai": "AI",
-  "/integrasjoner": "Integrasjoner",
-  "/innstillinger/mcp": "MCP",
-  "/memory": "Memory",
-  "/monitor": "Monitor",
-  "/sandbox": "Sandbox",
-  "/innstillinger": "Innstillinger",
-  "/docs": "Docs",
-};
-
-function getBreadcrumbs(pathname: string): { label: string; href: string }[] {
-  const segments = pathname.split("/").filter(Boolean);
-  if (segments.length === 0) return [{ label: "Overview", href: "/" }];
-  const crumbs: { label: string; href: string }[] = [];
-  let path = "";
-  for (const seg of segments) {
-    path += `/${seg}`;
-    const label = ROUTE_LABELS[path] || seg.charAt(0).toUpperCase() + seg.slice(1);
-    crumbs.push({ label, href: path });
+function extractRepoFromConvId(id: string): string | null {
+  if (id.startsWith("repo-")) {
+    const parts = id.replace("repo-", "").split("-");
+    return parts[0] || null;
   }
-  return crumbs;
-}
-
-function isActiveRoute(pathname: string, href: string): boolean {
-  if (href === "/") return pathname === "/";
-  return pathname === href || pathname.startsWith(href + "/");
+  return null;
 }
 
 function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { repos, selectedRepo, selectRepo, clearRepo } = useRepoContext();
-  const [collapsed, setCollapsed] = useState(false);
-  const [repoDropdownOpen, setRepoDropdownOpen] = useState(false);
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
-  const breadcrumbs = getBreadcrumbs(pathname);
-  const sw = collapsed ? SWC : SW;
-  const useFullWidth = pathname === "/chat" || pathname.startsWith("/chat/");
-  const isSettings = pathname === "/innstillinger" || pathname.startsWith("/innstillinger/");
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [activeMode, setActiveMode] = useState<"cowork" | "auto">("cowork");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifCount, setNotifCount] = useState(0);
+  const [showAllConvs, setShowAllConvs] = useState(false);
+  const [backlogTasks, setBacklogTasks] = useState<any[]>([]);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
+
+  // Detect mode from path
+  useEffect(() => {
+    if (pathname.startsWith("/auto")) setActiveMode("auto");
+    else setActiveMode("cowork");
+  }, [pathname]);
+
+  // Fetch conversations
+  const fetchConversations = useCallback(async () => {
+    try {
+      const data = await getConversations();
+      setConversations(data.conversations ?? []);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    fetchConversations();
+    const iv = setInterval(fetchConversations, 15000);
+    return () => clearInterval(iv);
+  }, [fetchConversations]);
+
+  // Fetch backlog tasks for Auto mode
+  useEffect(() => {
+    if (activeMode !== "auto") return;
+    listTheFoldTasks({ status: "backlog", limit: 20 })
+      .then((data) => setBacklogTasks(data.tasks ?? []))
+      .catch(() => {});
+  }, [activeMode]);
+
+  // Fetch notif count
+  useEffect(() => {
+    const fetchCount = async () => {
+      try {
+        const data = await getNotifications();
+        const lastSeen = localStorage.getItem("tf_notif_last_seen") || "";
+        const count = lastSeen
+          ? (data.notifications ?? []).filter((n: any) => new Date(n.createdAt) > new Date(lastSeen)).length
+          : (data.notifications ?? []).length;
+        setNotifCount(count);
+      } catch {}
+    };
+    fetchCount();
+    const iv = setInterval(fetchCount, 30000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Filter conversations
+  const filtered = conversations
+    .filter((c) => !c.id.startsWith("inkognito-"))
+    .filter((c) => {
+      if (!searchQuery) return true;
+      const title = c.title || c.id;
+      return title.toLowerCase().includes(searchQuery.toLowerCase());
+    })
+    .sort((a, b) => {
+      const da = new Date(b.updatedAt || b.createdAt || 0).getTime();
+      const db = new Date(a.updatedAt || a.createdAt || 0).getTime();
+      return da - db;
+    })
+    .filter((c, i, arr) => arr.findIndex((x) => x.id === c.id) === i);
+
+  const isFullHeight = pathname === "/cowork" || pathname.startsWith("/cowork/") || pathname === "/auto" || pathname.startsWith("/auto/");
 
   return (
     <>
-    <style>{`@media (max-width: 640px) { .mobile-nav-toggle { display: flex !important; } }`}</style>
-    <div
-      style={{
-        minHeight: "100vh",
-        background: T.bg,
-        color: T.text,
-        fontFamily: T.sans,
-        display: "flex",
-        justifyContent: "center",
-      }}
-    >
-      <div
-        style={{
-          width: "100%",
-          maxWidth: SW + CW,
-          minHeight: "100vh",
-          position: "relative",
-        }}
-      >
-        {/* HEADER */}
-        <div style={{ display: "flex", height: HH, position: "sticky", top: 0, zIndex: 10, background: T.bg }}>
-          {/* Header — sidebar area */}
-          <div
-            style={{
-              width: sw,
-              height: HH,
-              display: "flex",
-              alignItems: "center",
-              gap: collapsed ? 0 : 4,
-              padding: collapsed ? "0" : "0 20px",
-              justifyContent: collapsed ? "center" : "flex-start",
-              background: T.bg,
-              zIndex: 3,
-              transition: "all 0.25s ease",
-              overflow: "hidden",
-              flexShrink: 0,
-            }}
-          >
-            {/* Mobile hamburger */}
-            <div
-              className="mobile-nav-toggle"
-              onClick={() => setMobileNavOpen(p => !p)}
-              style={{ display: "none", cursor: "pointer", color: T.textMuted, padding: 4, flexShrink: 0 }}
-            >
-              {mobileNavOpen ? <X size={18} /> : <Menu size={18} />}
-            </div>
-            {/* Logo */}
-            <img
-              src="/logo/logo.svg"
-              alt="TheFold"
-              style={{
-                width: 36,
-                height: 36,
-                flexShrink: 0,
-              }}
+      <style>{`
+        @media (max-width: 768px) {
+          .sidebar-desktop { display: none !important; }
+          .mobile-toggle { display: flex !important; }
+          .main-area { margin-left: 0 !important; }
+        }
+        .conv-item { transition: background 0.1s; }
+        .conv-item:hover { background: ${T.subtle} !important; }
+      `}</style>
+
+      <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: T.sans, color: T.text }}>
+        {/* TOPBAR */}
+        <TopBar notifCount={notifCount} onNotifClick={() => setNotifOpen((p) => !p)} />
+
+        {/* Notification popup (rendered at topbar level) */}
+        {notifOpen && (
+          <div style={{ position: "fixed", top: Layout.topbarHeight, right: 24, zIndex: 200 }}>
+            <NotifBell
+              onGoTask={(id) => { setNotifOpen(false); router.push("/tasks"); }}
+              forceOpen
+              onClose={() => setNotifOpen(false)}
             />
-            {!collapsed && (
-              <span
-                style={{
-                  fontSize: 22,
-                  fontWeight: 400,
-                  color: T.text,
-                  letterSpacing: "0",
-                  fontFamily: T.brandFont,
-                  whiteSpace: "nowrap",
-                  visibility: "hidden"
-                }}
-              >
-                TheFold
-              </span>
-            )}
           </div>
+        )}
 
-          {/* Header — right area */}
-          <div
+        <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+          {/* SIDEBAR */}
+          <aside
+            className="sidebar-desktop"
             style={{
-              flex: 1,
-              height: HH,
+              width: Layout.sidebarWidth,
+              background: T.sidebar,
               display: "flex",
-              alignItems: "center",
-              justifyContent: "flex-end",
-              padding: "0 24px",
-              gap: 10,
-              background: T.bg,
-              zIndex: 2,
+              flexDirection: "column",
+              flexShrink: 0,
+              padding: "12px 0",
+              margin: "0 24px 24px 24px",
+              gap: 12,
+              overflow: "hidden",
+              borderRadius: 16,
+              border: "none",
+              height: "calc(100vh - 56px - 24px)",
             }}
           >
-            {/* Repo Selector */}
-            <div style={{ position: "relative" }}>
-              <div
-                onClick={() => setRepoDropdownOpen((p) => !p)}
+            {/* CoWork / Auto tabs */}
+            <div
+              style={{
+                display: "flex",
+                background: T.tabWrapper,
+                borderRadius: 12,
+                padding: 4,
+                gap: 4,
+                margin: "0 12px",
+              }}
+            >
+              <button
+                onClick={() => { setActiveMode("cowork"); router.push("/cowork"); }}
                 style={{
-                  padding: "6px 14px",
-                  border: `1px solid ${T.border}`,
-                  borderRadius: 999,
-                  fontSize: 12,
-                  fontFamily: T.mono,
-                  color: T.textMuted,
+                  flex: 1,
+                  padding: "8px 0",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  fontFamily: T.sans,
+                  color: activeMode === "cowork" ? T.text : T.textMuted,
+                  background: activeMode === "cowork" ? T.tabActive : "transparent",
+                  border: "none",
+                  borderRadius: 10,
                   cursor: "pointer",
-                  background: "transparent",
-                  maxWidth: 140,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
+                  transition: "background 0.15s, color 0.15s",
                 }}
               >
-                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  {selectedRepo ? selectedRepo.name : "Global"}
-                  <ChevronDown size={12} strokeWidth={2} />
-                </span>
-              </div>
+                CoWork
+              </button>
+              <button
+                onClick={() => { setActiveMode("auto"); router.push("/auto"); }}
+                style={{
+                  flex: 1,
+                  padding: "8px 0",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  fontFamily: T.sans,
+                  color: activeMode === "auto" ? T.text : T.textMuted,
+                  background: activeMode === "auto" ? T.tabActive : "transparent",
+                  border: "none",
+                  borderRadius: 10,
+                  cursor: "pointer",
+                  transition: "background 0.15s, color 0.15s",
+                }}
+              >
+                Auto
+              </button>
+            </div>
 
-              {repoDropdownOpen && (
+            {/* Search / task selection wrapper */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                background: T.search,
+                borderRadius: 20,
+                padding: "8px 12px",
+                margin: "0 12px",
+              }}
+            >
+              <Search size={14} color={T.textMuted} />
+              {activeMode === "cowork" ? (
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Søk etter samtale..."
+                style={{
+                  flex: 1,
+                  background: "transparent",
+                  border: "none",
+                  outline: "none",
+                  color: T.text,
+                  fontSize: 13,
+                  fontFamily: T.sans,
+                }}
+              />
+              ) : (
                 <>
-                  <div
-                    style={{ position: "fixed", inset: 0, zIndex: 98 }}
-                    onClick={() => setRepoDropdownOpen(false)}
-                  />
-                  <div
-                    style={{
-                      position: "absolute",
-                      top: "calc(100% + 6px)",
-                      right: 0,
-                      background: T.surface,
-                      border: `1px solid ${T.border}`,
-                      borderRadius: 12,
-                      minWidth: 200,
-                      maxHeight: 300,
-                      overflowY: "auto",
-                      zIndex: 99,
-                      overflow: "hidden",
-                      boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-                    }}
-                  >
-                    {/* Global option */}
-                    <div
-                      onClick={() => {
-                        clearRepo();
-                        setRepoDropdownOpen(false);
-                      }}
-                      onMouseEnter={(e) => { if (selectedRepo) e.currentTarget.style.background = T.subtle; }}
-                      onMouseLeave={(e) => { if (selectedRepo) e.currentTarget.style.background = "transparent"; }}
+                  <span style={{ flex: 1, fontSize: 13, color: T.textMuted }}>
+                    Velg oppgaver
+                  </span>
+                  {selectedTaskIds.size > 0 && (
+                    <button
+                      onClick={() => router.push(`/auto?start=${Array.from(selectedTaskIds).join(",")}`)}
                       style={{
-                        padding: "10px 16px",
-                        fontSize: 12,
-                        fontFamily: T.mono,
-                        color: !selectedRepo ? T.text : T.textMuted,
-                        background: !selectedRepo ? T.subtle : "transparent",
-                        cursor: "pointer",
-                        borderBottom: `1px solid ${T.border}`,
-                        transition: "background 0.1s",
+                        fontSize: 11, fontWeight: 600, color: T.accent,
+                        background: T.accentDim, border: `1px solid ${T.accent}40`,
+                        borderRadius: 12, padding: "4px 12px", cursor: "pointer",
+                        fontFamily: T.sans, whiteSpace: "nowrap",
                       }}
                     >
-                      Global
-                    </div>
-
-                    {/* Repo list */}
-                    {repos.map((repo) => (
-                      <div
-                        key={repo.fullName}
-                        onClick={() => {
-                          selectRepo(repo.fullName);
-                          setRepoDropdownOpen(false);
-                        }}
-                        onMouseEnter={(e) => { if (selectedRepo?.fullName !== repo.fullName) e.currentTarget.style.background = T.subtle; }}
-                        onMouseLeave={(e) => { if (selectedRepo?.fullName !== repo.fullName) e.currentTarget.style.background = "transparent"; }}
-                        style={{
-                          padding: "10px 16px",
-                          fontSize: 12,
-                          fontFamily: T.mono,
-                          color: selectedRepo?.fullName === repo.fullName ? T.text : T.textMuted,
-                          background: selectedRepo?.fullName === repo.fullName ? T.subtle : "transparent",
-                          cursor: "pointer",
-                          transition: "background 0.1s",
-                        }}
-                      >
-                        {repo.name}
-                      </div>
-                    ))}
-
-                    {repos.length === 0 && (
-                      <div style={{ padding: "12px", fontSize: 11, color: T.textFaint, textAlign: "center" }}>
-                        Ingen repos funnet
-                      </div>
-                    )}
-                  </div>
+                      Start ({selectedTaskIds.size})
+                    </button>
+                  )}
                 </>
               )}
             </div>
 
-            <Link
-              href="/docs"
-              style={{
-                padding: "6px 14px",
-                border: `1px solid ${T.border}`,
-                borderRadius: 999,
-                fontSize: 12,
-                fontFamily: T.mono,
-                color: T.textMuted,
-                cursor: "pointer",
-                background: "transparent",
-                textDecoration: "none",
-              }}
-            >
-              Docs
-            </Link>
-            <NotifBell onGoTask={() => router.push("/tasks")} />
-            <Link
-              href="/innstillinger"
-              style={{
-                cursor: "pointer",
-                color: isSettings ? T.accent : T.textMuted,
-                display: "flex",
-                alignItems: "center",
-                padding: 6,
-                transition: "color 0.15s",
-                textDecoration: "none",
-              }}
-            >
-              <Cog size={16} strokeWidth={1.3} />
-            </Link>
-          </div>
-        </div>
-
-        {/* Mobile nav overlay */}
-        {mobileNavOpen && (
-          <>
-            <div
-              style={{ position: "fixed", inset: 0, zIndex: 40, background: "rgba(0,0,0,0.5)" }}
-              onClick={() => setMobileNavOpen(false)}
-            />
-            <div style={{
-              position: "fixed", top: HH, left: 0, bottom: 0, width: SW, zIndex: 50,
-              background: T.bg, overflowY: "auto", padding: "16px 8px",
-              display: "flex", flexDirection: "column", gap: 2,
-            }}>
-              {navGroups.map((g, gi) => (
-                <div key={gi}>
-                  {g.cat && (
-                    <div style={{ fontSize: 9, fontWeight: 600, color: T.textFaint, textTransform: "uppercase", letterSpacing: "0.1em", padding: "12px 14px 4px", fontFamily: T.mono }}>
-                      {g.cat}
+            {/* Sidebar content — switches between CoWork (conversations) and Auto (backlog tasks) */}
+            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2, padding: "0 8px" }}>
+              {activeMode === "cowork" ? (
+                <>
+                  {filtered.length === 0 ? (
+                    <div style={{ padding: "20px 12px", textAlign: "center", fontSize: 12, color: T.textMuted }}>
+                      {searchQuery ? "Ingen resultater" : "Ingen samtaler ennå"}
                     </div>
-                  )}
-                  {g.items.map((it) => {
-                    const active = isActiveRoute(pathname, it.href);
-                    return (
-                      <Link
-                        key={it.href}
-                        href={it.href}
-                        onClick={() => setMobileNavOpen(false)}
-                        style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", textDecoration: "none", minHeight: 36 }}
-                      >
-                        <it.icon size={16} strokeWidth={1.5} style={{ color: active ? T.text : T.textMuted, flexShrink: 0 }} />
-                        <span style={{ fontSize: 13, fontWeight: active ? 500 : 400, color: active ? T.text : T.textSec }}>
-                          {it.label}
-                        </span>
-                      </Link>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* BODY */}
-        <div style={{ display: "flex", position: "relative" }}>
-          {/* SIDEBAR */}
-          <div
-            style={{
-              width: sw,
-              height: `calc(100vh - ${HH}px)`,
-              position: "sticky",
-              top: HH,
-              overflowY: "auto",
-              overflowX: "hidden",
-              flexShrink: 0,
-              transition: "width 0.25s ease",
-              display: "flex",
-              flexDirection: "column",
-              background: T.bg,
-              zIndex: 3,
-            }}
-          >
-            {/* Nav items */}
-            <div
-              style={{
-                flex: 1,
-                padding: collapsed ? "16px 4px" : "16px 8px",
-                display: "flex",
-                flexDirection: "column",
-                gap: 2,
-              }}
-            >
-              {navGroups.map((g, gi) => (
-                <div key={gi}>
-                  {/* Category label */}
-                  {g.cat && !collapsed && (
-                    <div
-                      style={{
-                        fontSize: 9,
-                        fontWeight: 600,
-                        color: T.textFaint,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.1em",
-                        padding: "12px 14px 4px",
-                        fontFamily: T.mono,
-                      }}
-                    >
-                      {g.cat}
-                    </div>
-                  )}
-                  {/* Category separator when collapsed */}
-                  {g.cat && collapsed && (
-                    <div style={{ height: 1, background: T.border, margin: "8px 8px" }} />
-                  )}
-
-                  {/* Nav items */}
-                  {g.items.map((it) => {
-                    const active = isActiveRoute(pathname, it.href);
-                    return (
-                      <Link
-                        key={it.href}
-                        href={it.href}
-                        title={collapsed ? it.label : undefined}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 10,
-                          padding: collapsed ? "9px 0" : "9px 14px",
-                          justifyContent: collapsed ? "center" : "flex-start",
-                          background: "transparent",
-                          cursor: "pointer",
-                          transition: "background 0.12s",
-                          position: "relative",
-                          minHeight: 36,
-                          textDecoration: "none",
-                        }}
-                      >
-                        {/* Active indicator removed (G2) */}
-                        {/* Icon */}
-                        <it.icon
-                          size={16}
-                          strokeWidth={1.5}
-                          className={active ? "brand-shimmer-icon" : ""}
-                          style={{ color: active ? T.text : T.textMuted, flexShrink: 0 }}
-                        />
-                        {/* Label */}
-                        {!collapsed && (
-                          <span
-                            className={active ? "brand-shimmer" : ""}
-                            style={{
-                              fontSize: 13,
-                              fontWeight: active ? 500 : 400,
-                              color: active ? undefined : T.textSec,
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {it.label}
-                          </span>
-                        )}
-                        {/* Badge */}
-                        {!collapsed && it.badge && (
-                          <span
-                            style={{
-                              marginLeft: "auto",
-                              fontSize: 10,
-                              fontFamily: T.mono,
-                              fontWeight: 600,
-                              background: T.accentDim,
-                              color: T.accent,
-                              padding: "1px 6px",
-                            }}
-                          >
-                            {it.badge}
-                          </span>
-                        )}
-                      </Link>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
-
-            {/* Collapse button */}
-            <div
-              style={{
-                padding: collapsed ? "12px 8px" : "12px 16px",
-                position: "relative",
-              }}
-            >
-              <div
-                onClick={() => setCollapsed((c) => !c)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  cursor: "pointer",
-                  justifyContent: collapsed ? "center" : "flex-start",
-                  color: T.textMuted,
-                }}
-              >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.3"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  style={{
-                    transform: collapsed ? "rotate(180deg)" : "rotate(0deg)",
-                    transition: "transform 0.25s",
-                  }}
-                >
-                  <path d="M11 2L5 8l6 6" />
-                </svg>
-                {!collapsed && (
-                  <span style={{ fontSize: 12, color: T.textFaint }}>Kollaps</span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* CONTENT — visnings-boks */}
-          <div
-            style={{
-              flex: 1,
-              minWidth: 0,
-              display: "flex",
-              flexDirection: "column",
-            }}
-          >
-            <div
-              style={{
-                flex: 1,
-                background: T.surface,
-                borderRadius: "30px 0 0 0",
-                overflow: useFullWidth ? "hidden" : "auto",
-                height: useFullWidth ? `calc(100vh - ${HH}px)` : undefined,
-              }}
-            >
-              <div
-                style={{
-                  maxWidth: useFullWidth ? "100%" : IW,
-                  margin: useFullWidth ? 0 : "0 auto",
-                  padding: useFullWidth ? 0 : "0 48px",
-                  width: "100%",
-                }}
-              >
-                {!useFullWidth && breadcrumbs.length > 0 && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, paddingTop: 20, paddingBottom: 0 }}>
-                    {breadcrumbs.map((crumb, i) => (
-                      <span key={crumb.href} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        {i > 0 && <span style={{ fontSize: 11, color: T.textFaint }}>/</span>}
+                  ) : (
+                    (showAllConvs ? filtered : filtered.slice(0, 15)).map((conv) => {
+                      const repo = extractRepoFromConvId(conv.id);
+                      const title = conv.title || (repo ? `${repo} samtale` : "Ny samtale");
+                      return (
                         <Link
-                          href={crumb.href}
+                          key={conv.id}
+                          href={`/cowork?conv=${encodeURIComponent(conv.id)}`}
+                          className="conv-item"
                           style={{
-                            fontSize: 11,
-                            fontFamily: T.mono,
-                            color: i === breadcrumbs.length - 1 ? T.textMuted : T.textFaint,
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            padding: "10px 12px",
+                            borderRadius: 10,
                             textDecoration: "none",
-                            fontWeight: i === breadcrumbs.length - 1 ? 500 : 400,
                           }}
                         >
-                          {crumb.label}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              fontSize: 13, fontWeight: 400, color: T.text,
+                              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                            }}>
+                              {title}
+                            </div>
+                            {repo && (
+                              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{repo}</div>
+                            )}
+                          </div>
+                          <ChevronRight size={14} color={T.textFaint} style={{ flexShrink: 0 }} />
                         </Link>
-                      </span>
-                    ))}
-                  </div>
-                )}
-                <ErrorBoundary>
-                  {children}
-                </ErrorBoundary>
-              </div>
+                      );
+                    })
+                  )}
+                  {!showAllConvs && filtered.length > 15 && (
+                    <button
+                      onClick={() => setShowAllConvs(true)}
+                      style={{
+                        padding: "10px 12px", fontSize: 12, color: T.accent,
+                        background: "transparent", border: "none", cursor: "pointer",
+                        fontFamily: T.sans, textAlign: "center",
+                      }}
+                    >
+                      Last inn alle samtaler ({filtered.length - 15} til)
+                    </button>
+                  )}
+                </>
+              ) : (
+                /* Auto mode — checkboxes for task selection */
+                <>
+                  {backlogTasks.length === 0 ? (
+                    <div style={{ padding: "20px 12px", textAlign: "center", fontSize: 12, color: T.textMuted }}>
+                      Ingen oppgaver i backlog
+                    </div>
+                  ) : (
+                    backlogTasks.map((task: any) => {
+                      const isSelected = selectedTaskIds.has(task.id);
+                      return (
+                        <div
+                          key={task.id}
+                          onClick={() => setSelectedTaskIds(prev => {
+                            const next = new Set(prev);
+                            if (next.has(task.id)) next.delete(task.id); else next.add(task.id);
+                            return next;
+                          })}
+                          className="conv-item"
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            padding: "10px 12px",
+                            borderRadius: 10,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {/* Round checkbox */}
+                          <div style={{
+                            width: 18, height: 18, borderRadius: "50%",
+                            border: `2px solid ${isSelected ? T.accent : T.border}`,
+                            background: isSelected ? T.accent : "transparent",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            flexShrink: 0, transition: "all 0.15s",
+                          }}>
+                            {isSelected && (
+                              <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                                <path d="M2 5l2.5 2.5L8 3" stroke="#202124" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>
+                            )}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              fontSize: 13, fontWeight: 400, color: T.text,
+                              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                            }}>
+                              {task.title}
+                            </div>
+                            {task.repo && (
+                              <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1 }}>{task.repo}</div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </>
+              )}
             </div>
-          </div>
+          </aside>
+
+          {/* MOBILE HEADER */}
+          <header
+            className="mobile-toggle"
+            style={{
+              display: "none",
+              height: 48,
+              alignItems: "center",
+              padding: "0 16px",
+              position: "sticky",
+              top: 0,
+              zIndex: 50,
+              background: T.bg,
+              justifyContent: "space-between",
+            }}
+          >
+            <div
+              onClick={() => setMobileOpen((p) => !p)}
+              style={{ cursor: "pointer", color: T.textMuted, padding: 4 }}
+            >
+              {mobileOpen ? <X size={20} /> : <Menu size={20} />}
+            </div>
+          </header>
+
+          {/* MAIN CONTENT */}
+          <main
+            className="main-area"
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+              overflow: isFullHeight ? "hidden" : "auto",
+            }}
+          >
+            <ErrorBoundary>
+              <div
+                style={{
+                  ...(isFullHeight
+                    ? { flex: 1, display: "flex", flexDirection: "column" as const, minHeight: 0, overflow: "hidden" }
+                    : { flex: 1, maxWidth: 1280, width: "100%", margin: "0 auto", padding: `${S.xl}px ${S.xxl}px` }),
+                }}
+              >
+                {children}
+              </div>
+            </ErrorBoundary>
+          </main>
         </div>
       </div>
-    </div>
     </>
   );
 }

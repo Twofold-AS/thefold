@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@tanstack/react-table": "^8.21.3",
     "encore.dev": "^1.54.0",
     "openai": "^6.19.0",
     "pg": "^8.13.0",

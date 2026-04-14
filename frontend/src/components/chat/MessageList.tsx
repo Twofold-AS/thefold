@@ -2,12 +2,13 @@
 
 import { useRef, useEffect } from "react";
 import { T } from "@/lib/tokens";
-import RobotIcon from "@/components/icons/RobotIcon";
+import HuginnIcon from "@/components/icons/HuginnIcon";
 import AgentStream from "@/components/AgentStream";
 import AgentStatusBar from "@/components/chat/AgentStatusBar";
 import TypingIndicator from "@/components/chat/TypingIndicator";
 import MemoryInsight from "@/components/chat/MemoryInsight";
 import type { Message } from "@/lib/api";
+import type { ReviewActionType } from "@/hooks/useReviewFlow";
 
 export function isAgentMessage(m: Message): boolean {
   if (m.messageType === "memory_insight") return false;
@@ -27,7 +28,7 @@ function BotAvatar() {
       background: T.surface, border: `1px solid ${T.border}`,
       display: "flex", alignItems: "center", justifyContent: "center",
     }}>
-      <RobotIcon size={16} />
+      <HuginnIcon size={16} color={T.textSec} />
     </div>
   );
 }
@@ -70,6 +71,7 @@ interface MessageListProps {
   onApprove: (reviewId: string) => Promise<void>;
   onReject: (reviewId: string) => Promise<void>;
   onRequestChanges: (reviewId: string, feedback?: string) => void;
+  reviewInProgress?: ReviewActionType;
 }
 
 export default function MessageList({
@@ -86,6 +88,7 @@ export default function MessageList({
   onApprove,
   onReject,
   onRequestChanges,
+  reviewInProgress,
 }: MessageListProps) {
   const msgEndRef = useRef<HTMLDivElement>(null);
 
@@ -209,6 +212,7 @@ export default function MessageList({
                       onApprove={onApprove}
                       onReject={onReject}
                       onRequestChanges={onRequestChanges}
+                      reviewInProgress={reviewInProgress}
                     />
                     <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
                   </div>
@@ -248,15 +252,20 @@ export default function MessageList({
       )}
 
       {/* Typing indicator for direct chat; AgentStatusBar handles agent tasks */}
-      {sending && !activeTaskId && (
-        <TypingIndicator statusText={streamStatusText ?? "Tenker..."} />
-      )}
+      {sending && !activeTaskId && (() => {
+        // Hide typing indicator if the last visible message is already from the assistant
+        const lastMsg = visibleMsgs[visibleMsgs.length - 1];
+        const assistantAlreadyReplied = lastMsg?.role === "assistant" && lastMsg.content?.trim();
+        if (assistantAlreadyReplied) return null;
+        return <TypingIndicator statusText={streamStatusText ?? "Tenker..."} />;
+      })()}
       {sending && activeTaskId && (
         <AgentStatusBar
           sending={sending}
           thinkSeconds={thinkSeconds}
           hasAgentMessages={hasAgentMessages}
           agentIsDone={agentIsDone}
+          streamStatusText={streamStatusText}
         />
       )}
 

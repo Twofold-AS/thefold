@@ -85,7 +85,7 @@ export default function SandboxPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
         <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>Sandbox</h2>
         <p style={{ fontSize: 13, color: T.textMuted }}>Isolert kodevalidering — typecheck, lint, test, snapshot, performance.</p>
       </div>

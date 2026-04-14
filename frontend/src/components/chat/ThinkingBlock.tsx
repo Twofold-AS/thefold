@@ -125,7 +125,7 @@ export default function ThinkingBlock({ thought, active = false }: ThinkingBlock
               lineHeight: 1.7,
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
-              background: T.bg,
+              background: T.subtle,
               border: `1px solid ${T.border}`,
               borderRadius: 6,
               padding: "10px 12px",

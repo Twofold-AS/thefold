@@ -93,10 +93,10 @@ function DefaultErrorUI({
         fill="none"
         style={{ marginBottom: 16, opacity: 0.6 }}
       >
-        <circle cx="20" cy="20" r="18" stroke="#EF4444" strokeWidth="2" />
+        <circle cx="20" cy="20" r="18" stroke="rgb(208, 59, 43)" strokeWidth="2" />
         <path
           d="M20 12v10M20 27v1"
-          stroke="#EF4444"
+          stroke="rgb(208, 59, 43)"
           strokeWidth="2.5"
           strokeLinecap="round"
         />
@@ -106,7 +106,7 @@ function DefaultErrorUI({
         style={{
           fontSize: 15,
           fontWeight: 600,
-          color: "#EF4444",
+          color: "rgb(208, 59, 43)",
           marginBottom: 6,
         }}
       >
@@ -132,9 +132,9 @@ function DefaultErrorUI({
         style={{
           padding: "8px 20px",
           borderRadius: 6,
-          border: "1px solid #334155",
-          background: "#1E293B",
-          color: "#E2E8F0",
+          border: "1px solid #D9D9D2",
+          background: "rgb(255, 90, 54)",
+          color: "#FFFFFF",
           fontSize: 13,
           cursor: "pointer",
           fontFamily: "inherit",

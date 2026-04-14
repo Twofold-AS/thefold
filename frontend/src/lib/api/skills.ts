@@ -59,6 +59,7 @@ export async function createSkill(data: {
   promptFragment: string;
   appliesTo: string[];
   scope?: string;
+  category?: string;
   taskPhase?: string;
 }) {
   return apiFetch<{ skill: Skill }>("/skills/create", { method: "POST", body: data });

@@ -91,7 +91,7 @@ export default function TaskFilters({ syncing, onSync, onCreateTask, repos, skil
 
       {showCreate && (
         <div
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.15)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }}
           onClick={(e) => { if (e.target === e.currentTarget) setShowCreate(false); }}
         >
           <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: T.r, padding: 24, width: 480, maxHeight: "80vh", overflow: "auto" }}>
@@ -120,7 +120,7 @@ export default function TaskFilters({ syncing, onSync, onCreateTask, repos, skil
                 {repoDropOpen && (
                   <>
                     <div style={{ position: "fixed", inset: 0, zIndex: 98 }} onClick={() => setRepoDropOpen(false)} />
-                    <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, zIndex: 99, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+                    <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, zIndex: 99, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.08)" }}>
                       {repos.map((r) => (
                         <div
                           key={r}

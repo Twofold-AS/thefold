@@ -8,9 +8,13 @@ import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import { useApiData } from "@/lib/hooks";
 import Skeleton from "@/components/Skeleton";
+import TabBar from "@/components/shared/TabBar";
 import { RefreshCw, Trash2, ChevronDown, Pencil } from "lucide-react";
 import TaskEditor from "@/components/tasks/TaskEditor";
 import LinearSync from "@/components/tasks/LinearSync";
+import ExpandableTaskCard from "@/components/tasks/ExpandableTaskCard";
+import TabWrapper from "@/components/TabWrapper";
+import { S } from "@/lib/tokens";
 import {
   listTheFoldTasks,
   listReviews,
@@ -87,6 +91,7 @@ const textareaStyle: React.CSSProperties = {
 };
 
 export default function TasksPage() {
+  const [taskTab, setTaskTab] = useState<"tasks" | "reviews" | "linear">("tasks");
   const [sel, setSel] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -216,7 +221,11 @@ export default function TasksPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <style>{`
+        .task-row .task-id, .task-row .task-delete { opacity: 0; transition: opacity 0.15s; }
+        .task-row:hover .task-id, .task-row:hover .task-delete { opacity: 1; }
+      `}</style>
+      <div style={{ paddingTop: 0, paddingBottom: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <h2
@@ -228,10 +237,10 @@ export default function TasksPage() {
                 marginBottom: 8,
               }}
             >
-              Tasks
+              Oppgaver
             </h2>
             <p style={{ fontSize: 13, color: T.textMuted }}>
-              Oppgaver utfort av agenten med kvalitetsrapport.
+              Oppgaver utført av agenten med kvalitetsrapport.
             </p>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -252,7 +261,7 @@ export default function TasksPage() {
               </svg>
               Ny task
             </Btn>
-            <Btn primary sm onClick={handleSync}>
+            <Btn sm onClick={handleSync}>
               <RefreshCw size={14} style={{ marginRight: 4 }} />
               {syncing ? "Synkroniserer..." : "Importer fra Linear"}
             </Btn>
@@ -260,395 +269,140 @@ export default function TasksPage() {
         </div>
       </div>
 
-      <GR>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: t ? "1fr 1fr" : "1fr",
-            borderRadius: 12,
-            border: `1px solid ${T.border}`,
-            minHeight: 400,
-            position: "relative",
-            overflow: "hidden",
-          }}
-        >
-          {/* Task list */}
-          <div style={{ borderRight: t ? `1px solid ${T.border}` : "none" }}>
+      <div style={{ marginBottom: S.lg }}>
+        <TabWrapper
+          tabs={[
+            { id: "tasks", label: "Oppgaver", count: tasks.length },
+            { id: "reviews", label: "Reviews", count: reviews.filter(r => r.status === "pending" || r.status === "pending_review").length },
+            { id: "linear", label: "Linear" },
+          ]}
+          active={taskTab}
+          onChange={(id) => setTaskTab(id as "tasks" | "reviews" | "linear")}
+        />
+      </div>
+
+      {taskTab === "linear" && (
+        <GR mb={40}>
+          <div style={{ borderRadius: 12, border: `1px solid ${T.border}`, padding: 20 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: 12 }}>Linear Sync</div>
+            <p style={{ fontSize: 12, color: T.textMuted, marginBottom: 16 }}>
+              Synkroniser oppgaver fra Linear. Bruk &quot;Importer fra Linear&quot;-knappen ovenfor.
+            </p>
+            <Btn primary sm onClick={handleSync}>
+              <RefreshCw size={14} style={{ marginRight: 4 }} />
+              {syncing ? "Synkroniserer..." : "Synkroniser nå"}
+            </Btn>
+          </div>
+        </GR>
+      )}
+
+      {taskTab === "reviews" && (
+        <GR mb={40}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {reviews.length === 0 ? (
+              <div style={{ padding: 32, textAlign: "center", color: T.textMuted, fontSize: 13, border: `1px solid ${T.border}`, borderRadius: T.r }}>
+                Ingen reviews ennå
+              </div>
+            ) : (
+              reviews.map((r) => {
+                const task = tasks.find(tk => tk.id === r.taskId);
+                return (
+                  <ExpandableTaskCard
+                    key={r.id}
+                    task={{
+                      id: r.id,
+                      title: task?.title || r.taskId,
+                      description: task?.description || `Review — ${r.fileCount} filer, kvalitet: ${r.qualityScore ?? "—"}/10`,
+                      status: r.status === "pending" || r.status === "pending_review" ? "in_review" : r.status === "approved" ? "done" : r.status,
+                      source: "review",
+                      repo: task?.repo,
+                      reviewId: r.id,
+                      createdAt: task?.createdAt,
+                    }}
+                    showReviewActions={r.status === "pending" || r.status === "pending_review"}
+                    onApprove={async (revId) => {
+                      setActionLoading(`approve-${revId}`);
+                      try { await approveReview(revId); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                    }}
+                    onReject={async (revId) => {
+                      const reason = prompt("Begrunnelse for avvisning:");
+                      if (!reason) return;
+                      setActionLoading(`reject-${revId}`);
+                      try { await rejectReview(revId, reason); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                    }}
+                    onRequestChanges={async (revId) => {
+                      const feedback = prompt("Hva skal endres?");
+                      if (!feedback) return;
+                      setActionLoading(`changes-${revId}`);
+                      try { await requestReviewChanges(revId, feedback); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                    }}
+                  />
+                );
+              })
+            )}
+          </div>
+        </GR>
+      )}
+
+      {taskTab === "tasks" && (
+        <GR mb={40}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {tasksLoading ? (
               <div style={{ padding: "40px 20px" }}>
                 <Skeleton rows={5} />
               </div>
             ) : tasks.length === 0 ? (
-              <div style={{ padding: "40px 20px", textAlign: "center" }}>
-                <span style={{ fontSize: 13, color: T.textFaint }}>Ingen oppgaver enna</span>
+              <div style={{ padding: 32, textAlign: "center", color: T.textMuted, fontSize: 13, border: `1px solid ${T.border}`, borderRadius: T.r }}>
+                Ingen oppgaver ennå
               </div>
             ) : (
-              tasks.map((tk, i) => {
-                const st = mapStatus(tk.status);
-                const review = reviews.find((r) => r.taskId === tk.id);
-                return (
-                  <div
-                    key={tk.id}
-                    onClick={() => setSel(tk.id === sel ? null : tk.id)}
-                    style={{
-                      padding: "14px 20px",
-                      cursor: "pointer",
-                      background: sel === tk.id ? T.subtle : "transparent",
-                      borderBottom: i < tasks.length - 1 ? `1px solid ${T.border}` : "none",
-                      borderLeft: "none",
-                      transition: "all 0.1s",
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 10,
-                        marginBottom: 4,
-                      }}
-                    >
-                      <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                        {tk.id.substring(0, 8)}
-                      </span>
-                      <span style={{ fontSize: 13, fontWeight: 500, color: T.text, flex: 1 }}>
-                        {tk.title}
-                      </span>
-                      <div
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          try {
-                            await softDeleteTask(tk.id);
-                            refreshTasks();
-                          } catch {
-                            // Stille feil — brukeren ser at task ikke forsvant
-                          }
-                        }}
-                        title="Slett oppgave"
-                        style={{
-                          padding: 4,
-                          cursor: "pointer",
-                          color: T.textFaint,
-                          flexShrink: 0,
-                        }}
-                      >
-                        <Trash2 size={14} strokeWidth={1.5} />
-                      </div>
-                      <Tag
-                        variant={
-                          st === "done"
-                            ? "success"
-                            : st === "active"
-                              ? "accent"
-                              : "default"
-                        }
-                      >
-                        {statusLabel(tk.status)}
-                      </Tag>
-                    </div>
-                    <div style={{ display: "flex", gap: 12 }}>
-                      <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                        {tk.repo}
-                      </span>
-                      {tk.source === "linear" && (
-                        <span style={{ fontSize: 10, fontFamily: T.mono, color: "#A5B4FC" }}>
-                          linear
-                        </span>
-                      )}
-                      {review && review.qualityScore !== null && (
-                        <span
-                          style={{
-                            fontSize: 10,
-                            fontFamily: T.mono,
-                            color:
-                              review.qualityScore >= 8
-                                ? T.success
-                                : review.qualityScore >= 6
-                                  ? T.warning
-                                  : T.error,
-                          }}
-                        >
-                          kvalitet: {review.qualityScore}/10
-                        </span>
-                      )}
-                      <span style={{ fontSize: 10, color: T.textFaint, marginLeft: "auto" }}>
-                        {timeAgo(tk.createdAt)}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })
+              tasks.map((tk) => (
+                <ExpandableTaskCard
+                  key={tk.id}
+                  task={{
+                    id: tk.id,
+                    title: tk.title,
+                    description: tk.description,
+                    status: tk.status,
+                    source: tk.source,
+                    repo: tk.repo,
+                    complexity: tk.complexity,
+                    estimatedTokens: tk.estimatedTokens,
+                    createdAt: tk.createdAt,
+                    updatedAt: tk.updatedAt,
+                    reviewId: tk.reviewId || reviews.find(r => r.taskId === tk.id)?.id,
+                    prUrl: tk.prUrl,
+                    errorMessage: tk.errorMessage,
+                  }}
+                  review={(() => {
+                    const rev = reviews.find(r => r.taskId === tk.id);
+                    return rev ? { qualityScore: rev.qualityScore, fileCount: rev.fileCount, status: rev.status } : undefined;
+                  })()}
+                  showReviewActions={tk.status === "in_review"}
+                  onApprove={handleApprove ? async (revId) => {
+                    setActionLoading("approve");
+                    try { await approveReview(revId); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                  } : undefined}
+                  onReject={handleReject ? async (revId) => {
+                    const reason = prompt("Grunn for avvisning:");
+                    setActionLoading("reject");
+                    try { await rejectReview(revId, reason || undefined); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                  } : undefined}
+                  onRequestChanges={handleRequestChanges ? async (revId) => {
+                    const feedback = prompt("Hva skal endres?");
+                    if (!feedback) return;
+                    setActionLoading("changes");
+                    try { await requestReviewChanges(revId, feedback); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                  } : undefined}
+                  onDelete={async (taskId) => {
+                    try { await softDeleteTask(taskId); refreshTasks(); } catch {}
+                  }}
+                />
+              ))
             )}
           </div>
-
-          {/* Detail panel */}
-          {t && (
-            <div style={{ padding: 24, overflow: "auto" }}>
-              {editing ? (
-                <TaskEditor
-                  task={t}
-                  onSaved={(updated) => {
-                    refreshTasks();
-                    setEditing(false);
-                  }}
-                  onCancel={() => setEditing(false)}
-                />
-              ) : (
-              <>
-              <div style={{ marginBottom: 20 }}>
-                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
-                  <div
-                    style={{
-                      fontSize: 18,
-                      fontWeight: 600,
-                      color: T.text,
-                    }}
-                  >
-                    {t.title}
-                  </div>
-                  <Btn sm onClick={() => setEditing(true)}>
-                    <Pencil size={12} /> Rediger
-                  </Btn>
-                </div>
-                <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-                  <Tag variant={tStatus === "done" ? "success" : "accent"}>{statusLabel(t.status)}</Tag>
-                  <Tag>{t.repo}</Tag>
-                  {t.source === "linear" && <Tag variant="info">linear</Tag>}
-                  {t.source === "manual" && <Tag>manuell</Tag>}
-                  {t.source === "chat" && <Tag variant="brand">chat</Tag>}
-                </div>
-                {t.description && (
-                  <p style={{ fontSize: 12, color: T.textSec, lineHeight: 1.5, marginBottom: 12 }}>
-                    {t.description}
-                  </p>
-                )}
-              </div>
-
-              {tReview && tReview.qualityScore !== null ? (
-                <>
-                  <SectionLabel>KVALITETSRAPPORT</SectionLabel>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr 1fr",
-                      gap: 1,
-                      marginBottom: 20,
-                    }}
-                  >
-                    {[
-                      {
-                        l: "KVALITET",
-                        v: `${tReview.qualityScore}/10`,
-                        c:
-                          tReview.qualityScore >= 8
-                            ? T.success
-                            : tReview.qualityScore >= 6
-                              ? T.warning
-                              : T.error,
-                      },
-                      { l: "FILER", v: `${tReview.fileCount}` },
-                      { l: "STATUS", v: tReview.status },
-                    ].map((m, i) => (
-                      <div
-                        key={i}
-                        style={{
-                          background: T.subtle,
-                          padding: "12px 16px",
-                          borderRadius: 6,
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontSize: 10,
-                            color: T.textMuted,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.06em",
-                            marginBottom: 4,
-                          }}
-                        >
-                          {m.l}
-                        </div>
-                        <div style={{ fontSize: 20, fontWeight: 600, color: m.c || T.text }}>
-                          {m.v}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div style={{ marginBottom: 20 }}>
-                    <div
-                      style={{
-                        height: 8,
-                        background: T.subtle,
-                        borderRadius: 4,
-                        overflow: "hidden",
-                        marginBottom: 4,
-                      }}
-                    >
-                      <div
-                        style={{
-                          width: `${tReview.qualityScore * 10}%`,
-                          height: "100%",
-                          background:
-                            tReview.qualityScore >= 8
-                              ? T.success
-                              : tReview.qualityScore >= 6
-                                ? T.warning
-                                : T.error,
-                        }}
-                      />
-                    </div>
-                    <div style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                      Score: {tReview.qualityScore * 10}%
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <SectionLabel>KVALITETSRAPPORT</SectionLabel>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr 1fr",
-                      gap: 1,
-                      marginBottom: 20,
-                    }}
-                  >
-                    {[
-                      { l: "KVALITET", v: "—" },
-                      { l: "FILER", v: "—" },
-                      { l: "STATUS", v: "—" },
-                    ].map((m, i) => (
-                      <div
-                        key={i}
-                        style={{
-                          background: T.subtle,
-                          padding: "12px 16px",
-                          borderRadius: 6,
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontSize: 10,
-                            color: T.textMuted,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.06em",
-                            marginBottom: 4,
-                          }}
-                        >
-                          {m.l}
-                        </div>
-                        <div style={{ fontSize: 20, fontWeight: 600, color: T.textFaint }}>
-                          {m.v}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {t.labels && t.labels.length > 0 && (
-                <div style={{ marginBottom: 20 }}>
-                  <div style={{
-                    fontSize: 10,
-                    fontWeight: 600,
-                    color: T.textMuted,
-                    textTransform: "uppercase" as const,
-                    letterSpacing: "0.06em",
-                    marginBottom: 8,
-                    fontFamily: T.mono,
-                  }}>
-                    SUB-TASKS
-                  </div>
-                  {t.labels.map((label, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        padding: "6px 0",
-                        borderBottom: i < t.labels.length - 1 ? `1px solid ${T.border}` : "none",
-                      }}
-                    >
-                      <div style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: "50%",
-                        background: t.status === "done" ? T.success : T.textFaint,
-                        flexShrink: 0,
-                      }} />
-                      <span style={{ fontSize: 12, color: T.textSec, fontFamily: T.mono }}>
-                        {label}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {t.errorMessage && (
-                <>
-                  <SectionLabel>FEILMELDING</SectionLabel>
-                  <div
-                    style={{
-                      padding: "10px 14px",
-                      background: "rgba(239,68,68,0.08)",
-                      border: "1px solid rgba(239,68,68,0.2)",
-                      borderRadius: 6,
-                      fontSize: 12,
-                      fontFamily: T.mono,
-                      color: T.error,
-                      marginBottom: 20,
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    {t.errorMessage}
-                  </div>
-                </>
-              )}
-
-              {t.prUrl && (
-                <>
-                  <SectionLabel>PR</SectionLabel>
-                  <div style={{ marginBottom: 20 }}>
-                    <a
-                      href={t.prUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{ fontSize: 12, fontFamily: T.mono, color: T.accent }}
-                    >
-                      {t.prUrl}
-                    </a>
-                  </div>
-                </>
-              )}
-
-              {t.status === "in_review" && tReview && tReview.status === "pending" && (
-                <div style={{ marginTop: 20, display: "flex", gap: 8 }}>
-                  <Btn primary sm onClick={handleApprove}>
-                    {actionLoading === "approve" ? "..." : "Godkjenn"}
-                  </Btn>
-                  <Btn sm onClick={handleRequestChanges}>
-                    {actionLoading === "changes" ? "..." : "Be om endringer"}
-                  </Btn>
-                  <Btn sm onClick={handleReject} style={{ color: T.error, borderColor: "rgba(99,102,241,0.3)" }}>
-                    {actionLoading === "reject" ? "..." : "Avvis"}
-                  </Btn>
-                </div>
-              )}
-
-              <div style={{ marginTop: 20 }}>
-                <SectionLabel>LINEAR</SectionLabel>
-                <LinearSync taskId={t.id} />
-              </div>
-              </>
-              )}
-            </div>
-          )}
-        </div>
-      </GR>
-      <GR mb={40}>
-        <div style={{ height: 1 }} />
-      </GR>
+        </GR>
+      )}
 
       {/* Create task dialog */}
       {showCreate && (
@@ -656,7 +410,7 @@ export default function TasksPage() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.6)",
+            background: "rgba(0,0,0,0.15)",
             zIndex: 100,
             display: "flex",
             alignItems: "center",
@@ -729,7 +483,7 @@ export default function TasksPage() {
                       borderRadius: 12,
                       zIndex: 99,
                       overflow: "hidden",
-                      boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                      boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
                     }}>
                       {dynamicRepos.map((r) => (
                         <div

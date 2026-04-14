@@ -1,17 +1,37 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, lazy, Suspense } from "react";
 import { useRouter } from "next/navigation";
-import { T } from "@/lib/tokens";
+import { T, S } from "@/lib/tokens";
 import { useApiData } from "@/lib/hooks";
-import { getMe, logout, updateProfile, updatePreferences, listIntegrations } from "@/lib/api";
+import {
+  getMe,
+  logout,
+  updateProfile,
+  updatePreferences,
+  listIntegrations,
+  getMonitorHealth,
+  runMonitorCheck,
+  getCacheStats,
+  getSecretsStatus,
+  listAuditLog,
+  getCircuitState,
+} from "@/lib/api";
 import { clearToken } from "@/lib/auth";
 import Tag from "@/components/Tag";
 import Btn from "@/components/Btn";
 import Toggle from "@/components/Toggle";
 import SectionLabel from "@/components/SectionLabel";
 import Skeleton from "@/components/Skeleton";
+import StatCard from "@/components/shared/StatCard";
 import { GR } from "@/components/GridRow";
+import TabWrapper from "@/components/TabWrapper";
+import Link from "next/link";
+
+// Lazy-load tab content so it renders inline inside the TabBar
+const ModelsTab = lazy(() => import("@/app/(dashboard)/settings/models/page"));
+const IntegrationsTab = lazy(() => import("@/app/(dashboard)/integrasjoner/page"));
+const MCPTab = lazy(() => import("@/app/(dashboard)/innstillinger/mcp/page"));
 
 function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "\u2014";
@@ -36,6 +56,253 @@ const inputStyle: React.CSSProperties = {
   outline: "none",
   boxSizing: "border-box",
 };
+
+const sysCardStyle: React.CSSProperties = {
+  background: T.raised,
+  border: `1px solid ${T.border}`,
+  borderRadius: T.r,
+  padding: S.lg,
+};
+
+function SystemTab() {
+  const [monitorRunning, setMonitorRunning] = useState(false);
+  const [monitorRepo, setMonitorRepo] = useState("webapp");
+
+  const { data: monitorData, refresh: refreshMonitor } = useApiData(() => getMonitorHealth(), []);
+  const { data: cacheData } = useApiData(() => getCacheStats(), []);
+  const { data: secretsData } = useApiData(() => getSecretsStatus(), []);
+  const { data: auditData } = useApiData(() => listAuditLog({ limit: 10 }), []);
+
+  const circuitState = getCircuitState();
+
+  const handleRunCheck = useCallback(async () => {
+    setMonitorRunning(true);
+    try {
+      await runMonitorCheck(monitorRepo);
+      refreshMonitor();
+    } catch { /* ignore */ }
+    finally { setMonitorRunning(false); }
+  }, [monitorRepo, refreshMonitor]);
+
+  // Flatten monitor results
+  const monitorResults: Array<{ repo: string; checkType: string; status: string }> = [];
+  if (monitorData?.repos) {
+    for (const [repo, checks] of Object.entries(monitorData.repos)) {
+      for (const check of checks as Array<{ checkType: string; status: string }>) {
+        monitorResults.push({ repo, checkType: check.checkType, status: check.status });
+      }
+    }
+  }
+
+  const statusIcon = (s: string) => s === "pass" ? "🟢" : s === "warn" ? "🟡" : "🔴";
+
+  const auditEntries = (auditData as any)?.entries ?? (auditData as any)?.logs ?? [];
+
+  return (
+    <div style={{ paddingTop: 0, display: "flex", flexDirection: "column", gap: S.lg }}>
+      {/* Circuit breaker status */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: S.md }}>
+        <StatCard
+          label="Circuit breaker"
+          value={circuitState === "open" ? "Åpen" : circuitState === "half_open" ? "Halvåpen" : "Lukket"}
+          color={circuitState === "open" ? "error" : circuitState === "half_open" ? "warning" : "success"}
+        />
+        <StatCard
+          label="Cache hit rate"
+          value={cacheData ? `${Math.min((cacheData.hitRate ?? 0) > 1 ? (cacheData.hitRate ?? 0) : (cacheData.hitRate ?? 0) * 100, 100).toFixed(0)}%` : "—"}
+        />
+        <StatCard
+          label="Cache entries"
+          value={cacheData?.totalEntries ?? "—"}
+        />
+        <StatCard
+          label="Secrets"
+          value={secretsData ? `${Object.values(secretsData).filter(Boolean).length} konfigurert` : "—"}
+          color="success"
+        />
+      </div>
+
+      {/* Monitor */}
+      <div style={sysCardStyle}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: S.md }}>Monitor</div>
+        <div style={{ display: "flex", gap: S.sm, alignItems: "center", marginBottom: S.md }}>
+          <select
+            value={monitorRepo}
+            onChange={(e) => setMonitorRepo(e.target.value)}
+            style={{ ...inputStyle, width: 200 }}
+          >
+            {["webapp", "api-server", "mobile"].map((r) => (
+              <option key={r} value={r}>{r}</option>
+            ))}
+          </select>
+          <Btn size="sm" variant="primary" loading={monitorRunning} onClick={handleRunCheck}>
+            Kjør nå
+          </Btn>
+        </div>
+        {monitorResults.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            {monitorResults.map((r, i) => (
+              <div
+                key={i}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "8px 0",
+                  borderBottom: `1px solid ${T.border}`,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: S.sm }}>
+                  <span style={{ fontSize: 12, fontFamily: T.mono, color: T.text }}>{r.repo}</span>
+                  <Tag>{r.checkType}</Tag>
+                </div>
+                <span style={{ fontSize: 12 }}>{statusIcon(r.status)} {r.status}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p style={{ fontSize: 12, color: T.textFaint }}>Ingen resultater ennå. Kjør en sjekk for å se status.</p>
+        )}
+      </div>
+
+      {/* Cache stats */}
+      <div style={sysCardStyle}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: S.md }}>Cache</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: S.md }}>
+          {[
+            { label: "Embeddings", hits: cacheData?.embeddingHits ?? 0, misses: cacheData?.embeddingMisses ?? 0, ttl: "90d" },
+            { label: "Repo-struktur", hits: cacheData?.repoHits ?? 0, misses: cacheData?.repoMisses ?? 0, ttl: "1h" },
+            { label: "AI-planer", hits: cacheData?.aiPlanHits ?? 0, misses: cacheData?.aiPlanMisses ?? 0, ttl: "24h" },
+          ].map((c) => {
+            const total = c.hits + c.misses;
+            const rate = total > 0 ? ((c.hits / total) * 100).toFixed(0) : "—";
+            return (
+              <div key={c.label} style={{ background: T.subtle, padding: S.md, borderRadius: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: T.text, marginBottom: S.xs }}>{c.label}</div>
+                <div style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted }}>
+                  {total} entries · {rate}% hit rate · {c.ttl} TTL
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Cron jobs */}
+      <div style={sysCardStyle}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: S.md }}>Cron-jobber</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          {[
+            { name: "daily-health-check", schedule: "03:00 daglig", service: "monitor" },
+            { name: "repo-watch-cron", schedule: "*/30 * * * *", service: "monitor" },
+            { name: "daily-digest", schedule: "08:00 daglig", service: "monitor" },
+            { name: "agent-jobs-cleanup", schedule: "hver 6. time", service: "agent" },
+            { name: "rate-limit-cleanup", schedule: "03:00 daglig", service: "agent" },
+            { name: "dream-engine", schedule: "søndag 03:00", service: "memory" },
+            { name: "memory-consolidation", schedule: "daglig 04:00", service: "memory" },
+            { name: "healing-quality-check", schedule: "daglig 05:00", service: "registry" },
+            { name: "linear-sync", schedule: "*/15 * * * *", service: "linear" },
+            { name: "docker-cleanup", schedule: "*/30 * * * *", service: "sandbox" },
+            { name: "token-revocation-cleanup", schedule: "daglig 02:00", service: "gateway" },
+          ].map((cron, i) => (
+            <div
+              key={i}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "8px 0",
+                borderBottom: `1px solid ${T.border}`,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: S.sm }}>
+                <span style={{ fontSize: 12, fontFamily: T.mono, color: T.text }}>{cron.name}</span>
+                <Tag variant="default">{cron.service}</Tag>
+              </div>
+              <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textFaint }}>{cron.schedule}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Security */}
+      <div style={sysCardStyle}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: S.md }}>Sikkerhet</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: S.md }}>
+          <div style={{ background: T.subtle, padding: S.md, borderRadius: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: T.text, marginBottom: S.xs }}>Autentisering</div>
+            <div style={{ fontSize: 11, color: T.textMuted }}>OTP via Resend</div>
+            <div style={{ fontSize: 11, color: T.textMuted }}>Token-utløp: 30 dager</div>
+            <div style={{ fontSize: 11, color: T.textMuted }}>HMAC SHA-256 signering</div>
+          </div>
+          <div style={{ background: T.subtle, padding: S.md, borderRadius: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: T.text, marginBottom: S.xs }}>Beskyttelse</div>
+            <div style={{ fontSize: 11, color: T.textMuted }}>Rate-limit: 20/t, 100/d</div>
+            <div style={{ fontSize: 11, color: T.textMuted }}>Agent scope-validering</div>
+            <div style={{ fontSize: 11, color: T.textMuted }}>Circuit breaker (3 tjenester)</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Audit log */}
+      <div style={sysCardStyle}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: S.md }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>Audit-logg</div>
+          <Link href="/audit" style={{ textDecoration: "none" }}>
+            <Btn size="sm">Se alle</Btn>
+          </Link>
+        </div>
+        {auditEntries.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            {auditEntries.slice(0, 8).map((entry: any, i: number) => (
+              <div
+                key={entry.id ?? i}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "8px 0",
+                  borderBottom: `1px solid ${T.border}`,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: S.sm }}>
+                  <Tag variant={entry.action?.includes("error") || entry.action?.includes("fail") ? "error" : "default"}>
+                    {entry.action ?? entry.eventType ?? "—"}
+                  </Tag>
+                  <span style={{ fontSize: 12, color: T.textSec }}>{entry.details ?? entry.description ?? "—"}</span>
+                </div>
+                <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                  {entry.createdAt ? formatDate(entry.createdAt) : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p style={{ fontSize: 12, color: T.textFaint }}>Ingen audit-hendelser registrert.</p>
+        )}
+      </div>
+
+      {/* Feature flags */}
+      <div style={sysCardStyle}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: S.md }}>Feature Flags</div>
+        {[
+          { f: "ProgressMessageEnabled", v: true },
+          { f: "GitHubAppEnabled", v: true },
+          { f: "DynamicSubAgentsEnabled", v: true },
+          { f: "HealingPipelineEnabled", v: true },
+          { f: "MonitorEnabled", v: true },
+          { f: "SandboxAdvancedPipeline", v: true },
+          { f: "RegistryExtractionEnabled", v: true },
+        ].map((ff, i) => (
+          <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < 6 ? `1px solid ${T.border}` : "none" }}>
+            <span style={{ fontSize: 12, fontFamily: T.mono, color: T.textSec }}>{ff.f}</span>
+            <Tag variant="success">aktiv</Tag>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function InnstillingerPage() {
   const router = useRouter();
@@ -99,6 +366,7 @@ export default function InnstillingerPage() {
   };
 
   const [revoking, setRevoking] = useState(false);
+  const [settingsTab, setSettingsTab] = useState("profil");
 
   const handleRevoke = async () => {
     setRevoking(true);
@@ -113,12 +381,70 @@ export default function InnstillingerPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
-        <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>Innstillinger</h2>
-        <p style={{ fontSize: 13, color: T.textMuted }}>Konfigurer profil, varsler og preferanser.</p>
+      <div style={{ paddingTop: 0, paddingBottom: 16 }}>
+        <h2 style={{ fontSize: 24, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>Innstillinger</h2>
+        <p style={{ fontSize: 13, color: T.textMuted, marginBottom: S.md }}>Konfigurer profil, varsler og preferanser.</p>
+
+        <TabWrapper
+          tabs={[
+            { id: "profil", label: "Profil" },
+            { id: "ai", label: "AI-modeller" },
+            { id: "integrasjoner", label: "Integrasjoner" },
+            { id: "mcp", label: "MCP" },
+            { id: "maler", label: "Maler" },
+            { id: "system", label: "System" },
+          ]}
+          active={settingsTab}
+          onChange={(id) => setSettingsTab(id)}
+        />
       </div>
 
-      <GR>
+
+      {settingsTab === "ai" && (
+        <Suspense fallback={<Skeleton rows={6} />}>
+          <ModelsTab />
+        </Suspense>
+      )}
+
+      {settingsTab === "integrasjoner" && (
+        <Suspense fallback={<Skeleton rows={6} />}>
+          <IntegrationsTab />
+        </Suspense>
+      )}
+
+      {settingsTab === "mcp" && (
+        <Suspense fallback={<Skeleton rows={6} />}>
+          <MCPTab />
+        </Suspense>
+      )}
+
+      {settingsTab === "maler" && (
+        <div style={{ paddingTop: 0 }}>
+          <p style={{ fontSize: 13, color: T.textMuted, marginBottom: S.md }}>
+            Pre-bygde maler for vanlige mønstre — auth, API, forms, betalinger.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: S.md }}>
+            {["auth", "api", "ui", "database", "payment", "form"].map((cat) => (
+              <div
+                key={cat}
+                style={{
+                  background: T.raised,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: T.r,
+                  padding: S.md,
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 500, color: T.text, textTransform: "capitalize" }}>{cat}</div>
+                <div style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono, marginTop: 4 }}>Kategori</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {settingsTab === "system" && <SystemTab />}
+
+      {settingsTab === "profil" && <><GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
 
           {/* Left column: PROFIL + AUTENTISERING + Revoke */}
@@ -260,30 +586,13 @@ export default function InnstillingerPage() {
               ))}
             </div>
 
-            <div style={{ marginTop: 20 }}>
-              <SectionLabel>FEATURE FLAGS</SectionLabel>
-              {[
-                { f: "ProgressMessageEnabled", v: true },
-                { f: "GitHubAppEnabled", v: true },
-                { f: "DynamicSubAgentsEnabled", v: false },
-                { f: "HealingPipelineEnabled", v: false },
-                { f: "MonitorEnabled", v: true },
-                { f: "SandboxAdvancedPipeline", v: true },
-                { f: "RegistryExtractionEnabled", v: false },
-              ].map((ff, i) => (
-                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < 6 ? `1px solid ${T.border}` : "none" }}>
-                  <span style={{ fontSize: 12, fontFamily: T.mono, color: T.textSec }}>{ff.f}</span>
-                  <Tag variant={ff.v ? "success" : "default"}>{ff.v ? "true" : "false"}</Tag>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       </GR>
 
       <GR mb={40}>
         <div style={{ height: 1 }} />
-      </GR>
+      </GR></>}
     </>
   );
 }

@@ -156,7 +156,7 @@ export const notifications = api(
       FROM messages m
       JOIN conversations c ON m.conversation_id = c.id
       WHERE c.owner_email = ${authData.email}
-        AND m.message_type IN ('agent_report', 'agent_status', 'task_start')
+        AND m.message_type IN ('agent_report', 'task_start')
         AND m.created_at > NOW() - INTERVAL '24 hours'
       ORDER BY m.created_at DESC
       LIMIT 20
@@ -165,7 +165,7 @@ export const notifications = api(
     for await (const row of rows) {
       result.push({
         id: row.id,
-        content: String(row.content).substring(0, 100),
+        content: String(row.content).substring(0, 500),
         type: row.message_type,
         createdAt: String(row.created_at),
       });

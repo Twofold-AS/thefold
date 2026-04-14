@@ -10,8 +10,8 @@ interface ContextUsageProps {
 }
 
 function usageColor(pct: number): string {
-  if (pct >= 80) return "#EF4444";
-  if (pct >= 60) return "#F59E0B";
+  if (pct >= 80) return T.error;
+  if (pct >= 60) return T.warning;
   return T.textMuted;
 }
 
@@ -94,7 +94,7 @@ export default function ContextUsage({ messageCount, estimatedTokens, maxTokens 
             padding: "10px 14px",
             minWidth: 200,
             zIndex: 100,
-            boxShadow: "0 4px 16px rgba(0,0,0,0.3)",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.06)",
             pointerEvents: "none",
           }}
         >

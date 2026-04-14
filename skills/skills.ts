@@ -109,6 +109,7 @@ interface CreateSkillRequest {
   promptFragment: string;
   appliesTo: string[];
   scope?: string;
+  category?: string;
   taskPhase?: string;
 }
 
@@ -123,23 +124,23 @@ export const createSkill = api(
       throw APIError.invalidArgument("name, description, and promptFragment are required");
     }
 
-    if (!req.appliesTo || req.appliesTo.length === 0) {
-      throw APIError.invalidArgument("appliesTo must contain at least one context");
-    }
-
+    // Validate appliesTo contexts if provided
     const validContexts = ["planning", "coding", "review", "chat"];
-    for (const ctx of req.appliesTo) {
-      if (!validContexts.includes(ctx)) {
-        throw APIError.invalidArgument(`invalid context: ${ctx}. Must be one of: ${validContexts.join(", ")}`);
+    if (req.appliesTo && req.appliesTo.length > 0) {
+      for (const ctx of req.appliesTo) {
+        if (!validContexts.includes(ctx)) {
+          throw APIError.invalidArgument(`invalid context: ${ctx}. Must be one of: ${validContexts.join(", ")}`);
+        }
       }
     }
 
     const scope = req.scope || "global";
     const taskPhase = req.taskPhase || "all";
+    const category = req.category || "general";
 
     const row = await db.queryRow<SkillRow>`
-      INSERT INTO skills (name, description, prompt_fragment, applies_to, scope, task_phase)
-      VALUES (${req.name}, ${req.description}, ${req.promptFragment}, ${req.appliesTo}, ${scope}, ${taskPhase})
+      INSERT INTO skills (name, description, prompt_fragment, applies_to, scope, task_phase, category)
+      VALUES (${req.name}, ${req.description}, ${req.promptFragment}, ${req.appliesTo}, ${scope}, ${taskPhase}, ${category})
       RETURNING id, name, description, prompt_fragment, applies_to, scope, enabled,
                 task_phase, category, tags, created_by, created_at, updated_at
     `;

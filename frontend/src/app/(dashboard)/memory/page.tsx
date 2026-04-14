@@ -1,42 +1,65 @@
 "use client";
 
-import { useState } from "react";
-import { T } from "@/lib/tokens";
+import { useState, useCallback } from "react";
+import { T, S } from "@/lib/tokens";
+import { apiFetch } from "@/lib/api/client";
 import Tag from "@/components/Tag";
 import SectionLabel from "@/components/SectionLabel";
-import { GR } from "@/components/GridRow";
 import Skeleton from "@/components/Skeleton";
 import Btn from "@/components/Btn";
+import TabWrapper from "@/components/TabWrapper";
+import StatCard from "@/components/shared/StatCard";
+import EmptyState from "@/components/shared/EmptyState";
 import { useApiData } from "@/lib/hooks";
-import { getMemoryStats, searchMemories, MemorySearchResult } from "@/lib/api";
+import {
+  getMemoryStats,
+  searchMemories,
+  deleteMemory,
+  listSkills,
+  toggleSkill,
+  deleteSkill,
+  resolveSkills,
+  previewPrompt,
+  listComponents,
+  searchComponents,
+  getHealingStatus,
+  healComponent,
+  type MemorySearchResult,
+  type Skill,
+  type Component,
+  type HealingEvent,
+} from "@/lib/api";
 
-type TabId = "conversations" | "knowledge" | "dreams";
+// ─── Tab types ───────────────────────────────────────────────
+
+type TabId = "memories" | "patterns" | "components" | "skills" | "knowledge" | "codeindex" | "manifests";
 
 const TABS: { id: TabId; label: string }[] = [
-  { id: "conversations", label: "Siste samtaler" },
-  { id: "knowledge", label: "Destillert kunnskap" },
-  { id: "dreams", label: "Drøm-historikk" },
+  { id: "memories", label: "Minner" },
+  { id: "patterns", label: "Mønstre" },
+  { id: "components", label: "Komponenter" },
+  { id: "skills", label: "Skills" },
+  { id: "knowledge", label: "Kunnskap" },
+  { id: "codeindex", label: "Kodeindeks" },
+  { id: "manifests", label: "Manifester" },
 ];
 
-const TAB_TYPES: Record<TabId, string[]> = {
-  conversations: ["session", "general"],
-  knowledge: ["decision", "skill", "error_pattern", "task"],
-  dreams: ["consolidation", "distilled"],
+const TAB_MEMORY_TYPES: Record<string, string | undefined> = {
+  memories: undefined,
+  patterns: "code_pattern",
+  knowledge: "decision",
 };
 
-// Primary type for API filtering (API supports single type only)
-const TAB_PRIMARY_TYPE: Record<TabId, string | undefined> = {
-  conversations: "session",
-  knowledge: "decision",
-  dreams: "consolidation",
-};
+// ─── Helpers ─────────────────────────────────────────────────
 
 function formatAge(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
-  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
-  if (days === 0) return "i dag";
-  if (days === 1) return "1d";
-  return `${days}d`;
+  const m = Math.floor(diff / 60_000);
+  if (m < 1) return "nå";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}t`;
+  return `${Math.floor(h / 24)}d`;
 }
 
 function typeVariant(t: string): "error" | "accent" | "default" {
@@ -45,350 +68,605 @@ function typeVariant(t: string): "error" | "accent" | "default" {
   return "default";
 }
 
-function MemoryList({ memories, loading }: { memories: MemorySearchResult[]; loading: boolean }) {
-  if (loading) return <div style={{ padding: "20px 0" }}><Skeleton rows={4} /></div>;
-  if (memories.length === 0) {
-    return (
-      <div style={{ padding: "32px 0", textAlign: "center" }}>
-        <span style={{ fontSize: 13, color: T.textMuted }}>Ingen minner funnet.</span>
-      </div>
-    );
-  }
+const cardStyle: React.CSSProperties = {
+  background: T.raised,
+  border: `1px solid ${T.border}`,
+  borderRadius: T.r,
+  padding: S.lg,
+};
+
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  padding: "8px 12px",
+  fontSize: 13,
+  fontFamily: T.sans,
+  background: T.subtle,
+  color: T.text,
+  border: `1px solid ${T.border}`,
+  borderRadius: 8,
+  outline: "none",
+};
+
+// ─── Memory List ─────────────────────────────────────────────
+
+function MemoryList({
+  memories,
+  loading,
+  onDelete,
+}: {
+  memories: MemorySearchResult[];
+  loading: boolean;
+  onDelete?: (id: string) => void;
+}) {
+  if (loading) return <Skeleton rows={4} />;
+  if (memories.length === 0)
+    return <EmptyState title="Ingen minner funnet" description="Fullfør en oppgave for å bygge hukommelse." />;
+
   return (
-    <>
-      {memories.map((m, i) => (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {memories.map((m) => (
         <div
           key={m.id}
           style={{
-            padding: "10px 0",
-            borderBottom: i < memories.length - 1 ? `1px solid ${T.border}` : "none",
+            padding: `${S.sm}px ${S.md}px`,
+            borderBottom: `1px solid ${T.border}`,
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
             <Tag variant={typeVariant(m.memoryType)}>{m.memoryType}</Tag>
             <Tag>{m.category}</Tag>
             {m.sourceRepo && (
-              <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                {m.sourceRepo}
-              </span>
+              <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>{m.sourceRepo}</span>
             )}
-            <span style={{ fontSize: 10, color: T.textFaint, marginLeft: "auto" }}>
-              {formatAge(m.createdAt)}
-            </span>
+            <span style={{ fontSize: 10, color: T.textFaint, marginLeft: "auto" }}>{formatAge(m.createdAt)}</span>
+            {onDelete && (
+              <button
+                onClick={() => onDelete(m.id)}
+                style={{
+                  fontSize: 10,
+                  color: T.error,
+                  background: `${T.dangerA0}40`,
+                  border: `1px solid ${T.dangerA0}`,
+                  cursor: "pointer",
+                  padding: "2px 8px",
+                  borderRadius: 4,
+                  fontFamily: T.mono,
+                }}
+              >
+                slett
+              </button>
+            )}
           </div>
-          <div style={{ fontSize: 12, color: T.textSec, lineHeight: 1.5 }}>{m.content}</div>
+          <div style={{ fontSize: 12, color: T.textSec, lineHeight: 1.5 }}>
+            {m.content.length > 200 ? m.content.slice(0, 200) + "…" : m.content}
+          </div>
           <div style={{ display: "flex", gap: 12, marginTop: 4 }}>
             <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
               relevans: {((Number(m.relevanceScore) || 0) * 100).toFixed(0)}%
             </span>
-            <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-              oppslag: {m.accessCount}
-            </span>
+            <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>oppslag: {m.accessCount}</span>
+            {m.tags && m.tags.length > 0 && (
+              <span style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
+                tags: {m.tags.slice(0, 3).join(", ")}
+              </span>
+            )}
           </div>
         </div>
       ))}
-    </>
+    </div>
   );
 }
 
-export default function MemoryPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("conversations");
-  const [pruning, setPruning] = useState(false);
+// ─── Skills List ─────────────────────────────────────────────
 
-  const { data: statsData, loading: statsLoading } = useApiData(() => getMemoryStats(), []);
-  const { data: memoriesData, loading: memsLoading } = useApiData(
-    () => searchMemories("", { limit: 30, memoryType: TAB_PRIMARY_TYPE[activeTab] }),
-    [activeTab],
-  );
+function SkillsList({
+  skills,
+  loading,
+  onToggle,
+  onDelete,
+}: {
+  skills: Skill[];
+  loading: boolean;
+  onToggle: (id: string, enabled: boolean) => void;
+  onDelete: (id: string) => void;
+}) {
+  if (loading) return <Skeleton rows={4} />;
+  if (skills.length === 0)
+    return <EmptyState title="Ingen skills registrert" description="Skills opprettes automatisk av agenten." />;
 
-  const stats = statsData as (typeof statsData & {
-    lastConsolidatedAt?: string | null;
-    storageBytes?: number;
-  }) | null;
-
-  // Client-side filter to include all types for the active tab
-  const allMems = memoriesData?.results ?? [];
-  const tabTypes = TAB_TYPES[activeTab];
-  const mems = allMems.filter((m) => tabTypes.includes(m.memoryType));
-
-  const totalMemories = stats?.total ?? 0;
-  const codePatternCount = stats?.byType?.["code_pattern"] ?? 0;
-  const lastConsolidated = (stats as any)?.lastConsolidatedAt;
-  const storageBytes = (stats as any)?.storageBytes;
-
-  const formatStorage = (bytes?: number) => {
-    if (!bytes) return "—";
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
-
-  const formatLastConsolidated = (dateStr?: string | null) => {
-    if (!dateStr) return "aldri";
-    return formatAge(dateStr);
-  };
-
-  // Derive code pattern stats from memories
-  const patternTypes: Record<string, { count: number; reused: number }> = {};
-  mems.forEach((m) => {
-    if (!patternTypes[m.memoryType]) patternTypes[m.memoryType] = { count: 0, reused: 0 };
-    patternTypes[m.memoryType].count += 1;
-    patternTypes[m.memoryType].reused += m.accessCount;
-  });
-  const pats = Object.entries(patternTypes).map(([type, data]) => ({
-    type,
-    count: data.count,
-    reused: data.reused,
-  }));
-
-  const handlePrune = async () => {
-    if (!confirm("Er du sikker? Dette sletter minner med lav relevans permanent.")) return;
-    setPruning(true);
-    // Prune is not yet a dedicated API call — placeholder for future endpoint
-    await new Promise((r) => setTimeout(r, 1200));
-    setPruning(false);
-    alert("Prune fullført (ikke-implementert ennå — grunnmur klar).");
-  };
+  const activeCount = skills.filter((s) => s.enabled).length;
 
   return (
-    <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div>
-            <h2
+    <div>
+      {/* Pipeline status bar */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: S.md,
+          padding: `${S.sm}px ${S.md}px`,
+          background: T.subtle,
+          borderRadius: 8,
+          marginBottom: S.md,
+          fontSize: 12,
+          fontFamily: T.mono,
+        }}
+      >
+        <span style={{ color: T.accent, fontWeight: 600 }}>
+          AKTIVE: {activeCount} av {skills.length}
+        </span>
+        <span style={{ color: T.textFaint }}>|</span>
+        <span style={{ color: T.textMuted }}>PIPELINE: pre_run → inject → post_run</span>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: S.sm }}>
+        {skills.map((skill) => {
+          const confidence = skill.confidenceScore != null ? (skill.confidenceScore * 100).toFixed(0) : "—";
+          return (
+            <div
+              key={skill.id}
               style={{
-                fontSize: 28,
-                fontWeight: 600,
-                color: T.text,
-                letterSpacing: "-0.03em",
-                marginBottom: 8,
+                ...cardStyle,
+                padding: S.md,
+                opacity: skill.enabled ? 1 : 0.6,
+                borderLeft: `3px solid ${skill.enabled ? T.accent : T.border}`,
               }}
             >
-              Memory
-            </h2>
-            <p style={{ fontSize: 13, color: T.textMuted }}>
-              Semantisk minne med pgvector, temporal decay og kode-mønstre.
-            </p>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: S.sm }}>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{skill.name}</span>
+                  <Tag variant={skill.enabled ? "accent" : "default"}>
+                    {skill.executionPhase ?? "inject"}
+                  </Tag>
+                  {skill.category && <Tag>{skill.category}</Tag>}
+                </div>
+                <div style={{ display: "flex", gap: S.xs }}>
+                  <button
+                    onClick={() => onToggle(skill.id, !skill.enabled)}
+                    style={{
+                      fontSize: 11,
+                      color: skill.enabled ? T.warning : T.success,
+                      background: "transparent",
+                      border: `1px solid ${T.border}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {skill.enabled ? "Deaktiver" : "Aktiver"}
+                  </button>
+                  <button
+                    onClick={() => onDelete(skill.id)}
+                    style={{
+                      fontSize: 11,
+                      color: T.error,
+                      background: "transparent",
+                      border: `1px solid ${T.border}`,
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Slett
+                  </button>
+                </div>
+              </div>
+              <p style={{ fontSize: 12, color: T.textMuted, margin: `${S.xs}px 0`, lineHeight: 1.5 }}>
+                {skill.description}
+              </p>
+              <div style={{ display: "flex", gap: S.md, fontSize: 11, fontFamily: T.mono, color: T.textFaint }}>
+                <span>prioritet: {skill.priority ?? "—"}</span>
+                <span>
+                  suksess: {confidence}%
+                </span>
+                <span>brukt: {skill.totalUses ?? 0}x</span>
+                <span>tokens: ~{skill.tokenEstimate ?? "—"}</span>
+                {skill.routingRules?.keywords && skill.routingRules.keywords.length > 0 && (
+                  <span>keywords: {(skill.routingRules.keywords as string[]).slice(0, 3).join(", ")}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Components List ─────────────────────────────────────────
+
+function ComponentsList({
+  components,
+  healingEvents,
+  loading,
+  onHeal,
+}: {
+  components: Component[];
+  healingEvents: HealingEvent[];
+  loading: boolean;
+  onHeal: (id: string) => void;
+}) {
+  if (loading) return <Skeleton rows={4} />;
+  if (components.length === 0)
+    return (
+      <EmptyState
+        title="Ingen komponenter registrert"
+        description="Komponenter oppdages automatisk fra fullførte builds."
+      />
+    );
+
+  const totalQuality =
+    components.filter((c) => c.qualityScore != null).reduce((sum, c) => sum + Number(c.qualityScore ?? 0), 0) /
+    (components.filter((c) => c.qualityScore != null).length || 1);
+  const activeHealing = healingEvents.filter((e) => e.status === "in_progress" || e.status === "pending");
+
+  return (
+    <div>
+      {/* Stats bar */}
+      <div
+        style={{
+          display: "flex",
+          gap: S.lg,
+          padding: `${S.sm}px ${S.md}px`,
+          background: T.subtle,
+          borderRadius: 8,
+          marginBottom: S.md,
+          fontSize: 12,
+          fontFamily: T.mono,
+        }}
+      >
+        <span style={{ color: T.text }}>Totalt: {components.length}</span>
+        <span style={{ color: T.textFaint }}>|</span>
+        <span style={{ color: T.accent }}>Snitt kvalitet: {totalQuality.toFixed(0)}%</span>
+        <span style={{ color: T.textFaint }}>|</span>
+        <span style={{ color: activeHealing.length > 0 ? T.warning : T.textMuted }}>
+          Healing aktiv: {activeHealing.length}
+        </span>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: S.sm }}>
+        {components.map((comp) => (
+          <div key={comp.id} style={{ ...cardStyle, padding: S.md }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: S.xs }}>
+              <div style={{ display: "flex", alignItems: "center", gap: S.sm }}>
+                <span style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{comp.name}</span>
+                <span style={{ fontSize: 11, fontFamily: T.mono, color: T.accent }}>
+                  {comp.qualityScore != null ? `${comp.qualityScore}/100` : "—"}
+                </span>
+                <Tag>{comp.version}</Tag>
+              </div>
+              <Btn size="sm" onClick={() => onHeal(comp.id)}>
+                Oppdater alle
+              </Btn>
+            </div>
+            {comp.description && (
+              <p style={{ fontSize: 12, color: T.textMuted, margin: `${S.xs}px 0` }}>{comp.description}</p>
+            )}
+            <div style={{ display: "flex", gap: S.md, fontSize: 11, fontFamily: T.mono, color: T.textFaint }}>
+              <span>
+                Filer: {comp.files?.length ?? 0} · {comp.files?.reduce((s, f) => s + f.content.split("\n").length, 0) ?? 0}{" "}
+                linjer
+              </span>
+              {comp.tags.length > 0 && <span>Tags: {comp.tags.join(", ")}</span>}
+              <span>Brukt i: {comp.usedByRepos?.join(", ") || "—"} ({comp.timesUsed}x)</span>
+            </div>
           </div>
-          <Btn
-            sm
-            onClick={handlePrune}
-            style={{ opacity: pruning ? 0.5 : 1, pointerEvents: pruning ? "none" : "auto" }}
-          >
-            {pruning ? "Pruner…" : "Prune minner"}
+        ))}
+      </div>
+
+      {/* Active healing events */}
+      {activeHealing.length > 0 && (
+        <div style={{ marginTop: S.lg }}>
+          <SectionLabel>HEALING-PIPELINE (AKTIVE)</SectionLabel>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {activeHealing.map((ev) => (
+              <div
+                key={ev.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: `${S.xs}px ${S.sm}px`,
+                  fontSize: 12,
+                }}
+              >
+                <span style={{ color: T.text }}>
+                  {ev.componentId} → {ev.affectedRepos?.join(", ") || "—"}
+                </span>
+                <Tag variant={ev.status === "in_progress" ? "accent" : "default"}>{ev.status}</Tag>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Page ───────────────────────────────────────────────
+
+export default function MemoryPage() {
+  const [activeTab, setActiveTab] = useState<TabId>("memories");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [pruning, setPruning] = useState(false);
+  const [promptPreview, setPromptPreview] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Data fetching
+  const { data: statsData, loading: statsLoading } = useApiData(() => getMemoryStats(), []);
+  const { data: memoriesData, loading: memsLoading, refresh: refreshMemories } = useApiData(
+    () => searchMemories(searchQuery, { limit: 30, memoryType: TAB_MEMORY_TYPES[activeTab] }),
+    [activeTab, searchQuery],
+  );
+  const { data: skillsData, loading: skillsLoading, refresh: refreshSkills } = useApiData(
+    () => listSkills(undefined, false),
+    [],
+  );
+  const { data: componentsData, loading: compLoading, refresh: refreshComponents } = useApiData(
+    () => listComponents({ limit: 20 }),
+    [],
+  );
+  const { data: healingData } = useApiData(() => getHealingStatus({ limit: 10 }), []);
+
+  const stats = statsData;
+  const memories: MemorySearchResult[] = memoriesData?.results ?? [];
+  const skills: Skill[] = skillsData?.skills ?? [];
+  const components: Component[] = componentsData?.components ?? [];
+  const healingEvents: HealingEvent[] = healingData?.events ?? [];
+
+  const totalMemories = stats?.total ?? 0;
+  const codePatternCount = (stats as any)?.byType?.["code_pattern"] ?? 0;
+  const decisionCount = (stats as any)?.byType?.["decision"] ?? 0;
+  const skillMemCount = (stats as any)?.byType?.["skill"] ?? 0;
+
+  // Handlers
+  const handleDelete = useCallback(
+    async (id: string) => {
+      if (!confirm("Slett dette minnet permanent?")) return;
+      await deleteMemory(id);
+      refreshMemories();
+    },
+    [refreshMemories],
+  );
+
+  const handleToggleSkill = useCallback(
+    async (id: string, enabled: boolean) => {
+      await toggleSkill(id, enabled);
+      refreshSkills();
+    },
+    [refreshSkills],
+  );
+
+  const handleDeleteSkill = useCallback(
+    async (id: string) => {
+      if (!confirm("Slett denne skillen permanent?")) return;
+      await deleteSkill(id);
+      refreshSkills();
+    },
+    [refreshSkills],
+  );
+
+  const handleHealComponent = useCallback(
+    async (id: string) => {
+      await healComponent(id);
+      refreshComponents();
+    },
+    [refreshComponents],
+  );
+
+  const handlePreviewPrompt = useCallback(async () => {
+    setPreviewLoading(true);
+    try {
+      const res = await previewPrompt("general task");
+      setPromptPreview(
+        `Aktive skills: ${res.activeSkillNames.join(", ") || "ingen"}\n\n${res.systemPrompt.slice(0, 2000)}${res.systemPrompt.length > 2000 ? "\n\n…(trunkert)" : ""}`,
+      );
+    } catch {
+      setPromptPreview("Feil ved forhåndsvisning");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, []);
+
+  const handlePrune = useCallback(async () => {
+    if (!confirm("Er du sikker? Dette kjører opprydding (sletter utløpte minner) og decay (reduserer score på gamle minner).")) return;
+    setPruning(true);
+    try {
+      // Step 1: Cleanup expired TTL memories
+      const cleanup = await apiFetch<{ deleted: number }>("/memory/cleanup", { method: "POST" });
+      // Step 2: Run decay scoring (may delete very low-score memories)
+      const decay = await apiFetch<{ updated: number; deleted: number; total: number }>("/memory/decay", { method: "POST" });
+      const totalDeleted = (cleanup.deleted ?? 0) + (decay.deleted ?? 0);
+      alert(`Opprydding ferdig: ${totalDeleted} minner slettet (${cleanup.deleted ?? 0} utløpte + ${decay.deleted ?? 0} lav score). ${decay.updated ?? 0} minner oppdatert. ${decay.total ?? "?"} minner gjenstår.`);
+      refreshMemories();
+    } catch (err) {
+      alert(`Opprydding feilet: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPruning(false);
+    }
+  }, [refreshMemories]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: S.xl, paddingTop: 0, paddingBottom: S.xxl }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <h1 style={{ fontSize: 24, fontWeight: 700, color: T.text, margin: 0 }}>Hukommelse</h1>
+          <p style={{ fontSize: 13, color: T.textMuted, marginTop: S.xs }}>
+            Minner, mønstre, komponenter, skills, kunnskap, kodeindeks og manifester
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: S.sm }}>
+          <Btn size="sm" loading={pruning} onClick={handlePrune}>
+            Prune minner
           </Btn>
         </div>
       </div>
 
-      {/* Stats bar — 6 columns */}
-      <GR>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr",
-            borderRadius: 12,
-            border: `1px solid ${T.border}`,
-            overflow: "hidden",
-          }}
-        >
-          {[
-            { l: "MINNER", v: statsLoading ? "–" : String(totalMemories) },
-            { l: "KODE-MØNSTRE", v: statsLoading ? "–" : String(codePatternCount) },
-            { l: "HYBRID-SØK", v: "60/40", sub: "semantic/keyword" },
-            { l: "DECAY", v: "30d", sub: "halvtid" },
-            {
-              l: "SISTE KONSOLIDERING",
-              v: statsLoading ? "–" : formatLastConsolidated(lastConsolidated),
-            },
-            {
-              l: "LAGRING",
-              v: statsLoading ? "–" : formatStorage(storageBytes),
-            },
-          ].map((s, i) => (
-            <div
-              key={i}
-              style={{
-                padding: "18px 20px",
-                borderRight: i < 5 ? `1px solid ${T.border}` : "none",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 10,
-                  fontWeight: 500,
-                  color: T.textMuted,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  marginBottom: 6,
-                }}
-              >
-                {s.l}
-              </div>
-              <div
-                style={{
-                  fontSize: s.l === "SISTE KONSOLIDERING" || s.l === "LAGRING" ? 16 : 28,
-                  fontWeight: 600,
-                  color: T.text,
-                  letterSpacing: "-0.03em",
-                  lineHeight: 1,
-                }}
-              >
-                {s.v}
-              </div>
-              {(s as any).sub && (
-                <div style={{ marginTop: 4, fontSize: 10, fontFamily: T.mono, color: T.textFaint }}>
-                  {(s as any).sub}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      </GR>
+      {/* Stats */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: S.md }}>
+        <StatCard label="Minner totalt" value={statsLoading ? "—" : totalMemories} />
+        <StatCard label="Kode-mønstre" value={statsLoading ? "—" : codePatternCount} />
+        <StatCard label="Beslutninger" value={statsLoading ? "—" : decisionCount} color="success" />
+        <StatCard label="Skills" value={skills.filter((s) => s.enabled).length} color="success" />
+        <StatCard label="Komponenter" value={components.length} />
+        <StatCard label="Hybrid-søk" value="60/40" />
+      </div>
+
+      {/* Search */}
+      {(activeTab === "memories" || activeTab === "patterns" || activeTab === "knowledge") && (
+        <input
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Søk i minner..."
+          style={inputStyle}
+        />
+      )}
 
       {/* Tabs */}
-      <GR>
-        <div
-          style={{
-            display: "flex",
-            gap: 0,
-            borderBottom: `1px solid ${T.border}`,
-            marginTop: 20,
-          }}
-        >
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              style={{
-                padding: "10px 20px",
-                background: "none",
-                border: "none",
-                borderBottom: activeTab === tab.id ? `2px solid ${T.accent}` : "2px solid transparent",
-                cursor: "pointer",
-                fontSize: 13,
-                fontFamily: T.sans,
-                fontWeight: activeTab === tab.id ? 600 : 400,
-                color: activeTab === tab.id ? T.text : T.textMuted,
-                marginBottom: -1,
-                transition: "color 0.15s, border-color 0.15s",
-              }}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      </GR>
+      <TabWrapper tabs={TABS.map((t) => ({ id: t.id, label: t.label }))} active={activeTab} onChange={(id) => setActiveTab(id as TabId)} />
 
       {/* Tab content */}
-      <GR mb={40}>
-        {activeTab === "knowledge" ? (
-          /* Knowledge tab — two-panel layout with pattern breakdown */
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              borderRadius: 12,
-              border: `1px solid ${T.border}`,
-              marginTop: 0,
-              overflow: "hidden",
-            }}
-          >
-            <div style={{ padding: 20, borderRight: `1px solid ${T.border}` }}>
-              <SectionLabel>DESTILLERT KUNNSKAP</SectionLabel>
-              <MemoryList memories={mems} loading={memsLoading} />
-            </div>
-            <div style={{ padding: 20 }}>
-              <SectionLabel>KODE-MØNSTRE</SectionLabel>
-              {memsLoading ? (
-                <div style={{ padding: "20px 0" }}><Skeleton rows={4} /></div>
-              ) : pats.length === 0 ? (
-                <div style={{ padding: "20px 0", textAlign: "center" }}>
-                  <span style={{ fontSize: 13, color: T.textMuted }}>Ingen mønstre funnet.</span>
-                </div>
-              ) : (
-                pats.map((p, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      padding: "10px 0",
-                      borderBottom: i < pats.length - 1 ? `1px solid ${T.border}` : "none",
-                    }}
-                  >
-                    <span style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>{p.type}</span>
-                    <div style={{ display: "flex", gap: 16 }}>
-                      <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted }}>
-                        {p.count} mønstre
-                      </span>
-                      <span style={{ fontSize: 11, fontFamily: T.mono, color: T.success }}>
-                        {p.reused}x gjenbrukt
-                      </span>
-                    </div>
-                  </div>
-                ))
-              )}
-              <div style={{ marginTop: 16, borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>
-                <SectionLabel>INTEGRITETSKONTROLL</SectionLabel>
-                <div style={{ display: "flex", gap: 12 }}>
-                  <div
-                    style={{
-                      flex: 1,
-                      background: T.subtle,
-                      padding: "10px 14px",
-                      borderRadius: 6,
-                    }}
-                  >
-                    <div style={{ fontSize: 10, color: T.textMuted }}>SHA-256 HASH</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: T.success }}>OK</div>
-                  </div>
-                  <div
-                    style={{
-                      flex: 1,
-                      background: T.subtle,
-                      padding: "10px 14px",
-                      borderRadius: 6,
-                    }}
-                  >
-                    <div style={{ fontSize: 10, color: T.textMuted }}>SANITERING</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: T.success }}>ASI06</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          /* Conversations and Dreams tabs — single column list */
-          <div
-            style={{
-              borderRadius: 12,
-              border: `1px solid ${T.border}`,
-              marginTop: 0,
-              overflow: "hidden",
-              padding: "0 20px",
-            }}
-          >
-            {activeTab === "dreams" && (
-              <div
-                style={{
-                  padding: "12px 0",
-                  borderBottom: `1px solid ${T.border}`,
-                  fontSize: 12,
-                  color: T.textFaint,
-                  fontFamily: T.mono,
+      {activeTab === "memories" && (
+        <div style={cardStyle}>
+          <MemoryList memories={memories} loading={memsLoading} onDelete={handleDelete} />
+        </div>
+      )}
+
+      {activeTab === "patterns" && (
+        <div style={cardStyle}>
+          <SectionLabel>KODE-MØNSTRE</SectionLabel>
+          <p style={{ fontSize: 12, color: T.textMuted, marginBottom: S.md }}>
+            Kode-mønstre med suksessrate, bruks-statistikk og relaterte minner.
+          </p>
+          <MemoryList
+            memories={memories.filter((m) => m.memoryType === "code_pattern")}
+            loading={memsLoading}
+          />
+        </div>
+      )}
+
+      {activeTab === "components" && (
+        <ComponentsList
+          components={components}
+          healingEvents={healingEvents}
+          loading={compLoading}
+          onHeal={handleHealComponent}
+        />
+      )}
+
+      {activeTab === "skills" && (
+        <div>
+          <SkillsList
+            skills={skills}
+            loading={skillsLoading}
+            onToggle={handleToggleSkill}
+            onDelete={handleDeleteSkill}
+          />
+          {/* Debug tools */}
+          <div style={{ ...cardStyle, marginTop: S.lg }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: S.md }}>Debug-verktøy</div>
+            <div style={{ display: "flex", gap: S.sm, marginBottom: S.md }}>
+              <Btn size="sm" loading={previewLoading} onClick={handlePreviewPrompt}>
+                Forhåndsvis prompt
+              </Btn>
+              <Btn
+                size="sm"
+                onClick={async () => {
+                  try {
+                    const res = await resolveSkills({ task: "test matching" });
+                    alert(
+                      `Resolved: ${res.result.injectedSkillIds.length} skills, ${res.result.tokensUsed} tokens\nSkills: ${res.result.injectedSkillIds.join(", ") || "ingen"}`,
+                    );
+                  } catch {
+                    alert("Feil ved test matching");
+                  }
                 }}
               >
-                Drøm-konsolidering kjøres automatisk når nye mønstre oppdages. Viser destillerte
-                innsikter fra tvers av oppgaver.
-              </div>
+                Test matching
+              </Btn>
+            </div>
+            {promptPreview && (
+              <pre
+                style={{
+                  fontSize: 11,
+                  fontFamily: T.mono,
+                  color: T.textSec,
+                  background: T.subtle,
+                  padding: S.md,
+                  borderRadius: 8,
+                  overflow: "auto",
+                  maxHeight: 300,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                }}
+              >
+                {promptPreview}
+              </pre>
             )}
-            <div style={{ paddingTop: 4 }}>
-              <MemoryList memories={mems} loading={memsLoading} />
+          </div>
+        </div>
+      )}
+
+      {activeTab === "knowledge" && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: S.lg }}>
+          <div style={cardStyle}>
+            <SectionLabel>DESTILLERT KUNNSKAP</SectionLabel>
+            <p style={{ fontSize: 12, color: T.textMuted, marginBottom: S.md }}>
+              Beslutninger, ferdigheter og viktige observasjoner fra oppgaver.
+            </p>
+            <MemoryList
+              memories={memories.filter((m) => ["decision", "skill", "task"].includes(m.memoryType))}
+              loading={memsLoading}
+            />
+          </div>
+          <div style={cardStyle}>
+            <SectionLabel>FEILMØNSTRE</SectionLabel>
+            <p style={{ fontSize: 12, color: T.textMuted, marginBottom: S.md }}>
+              Kjente feil og deres løsninger — brukes for cross-task læring.
+            </p>
+            <MemoryList
+              memories={memories.filter((m) => m.memoryType === "error_pattern")}
+              loading={memsLoading}
+            />
+            <div style={{ marginTop: S.lg, borderTop: `1px solid ${T.border}`, paddingTop: S.md }}>
+              <SectionLabel>INTEGRITETSKONTROLL</SectionLabel>
+              <div style={{ display: "flex", gap: S.sm }}>
+                <div style={{ flex: 1, background: T.subtle, padding: "10px 14px", borderRadius: 6 }}>
+                  <div style={{ fontSize: 10, color: T.textMuted }}>SHA-256 HASH</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: T.success }}>OK</div>
+                </div>
+                <div style={{ flex: 1, background: T.subtle, padding: "10px 14px", borderRadius: 6 }}>
+                  <div style={{ fontSize: 10, color: T.textMuted }}>SANITERING</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: T.success }}>ASI06</div>
+                </div>
+                <div style={{ flex: 1, background: T.subtle, padding: "10px 14px", borderRadius: 6 }}>
+                  <div style={{ fontSize: 10, color: T.textMuted }}>TRUST-LEVEL</div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: T.accent }}>user</div>
+                </div>
+              </div>
             </div>
           </div>
-        )}
-      </GR>
-    </>
+        </div>
+      )}
+
+      {activeTab === "codeindex" && (
+        <div style={cardStyle}>
+          <EmptyState
+            title="Kodeindeks"
+            description="Kodeindeksering genereres automatisk fra bygg og PR-godkjenninger. Data vises her når repos er indeksert."
+          />
+        </div>
+      )}
+
+      {activeTab === "manifests" && (
+        <div style={cardStyle}>
+          <EmptyState
+            title="Prosjekt-manifester"
+            description="Manifester med tech stack, konvensjoner og avhengigheter genereres automatisk fra repo-analyse."
+          />
+        </div>
+      )}
+    </div>
   );
 }

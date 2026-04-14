@@ -46,7 +46,7 @@ export default function MessageInput({
 }: MessageInputProps) {
   return (
     <div style={{
-      padding: "8px 24px 0",
+      padding: "8px 24px 16px",
       display: "flex",
       justifyContent: "center",
       flexShrink: 0,

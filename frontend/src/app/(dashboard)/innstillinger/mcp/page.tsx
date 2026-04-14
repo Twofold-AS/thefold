@@ -21,10 +21,10 @@ import { CheckCircle2, XCircle, Circle, RefreshCw, Key, Trash2 } from "lucide-re
 
 function StatusDot({ status }: { status: MCPServer["status"] }) {
   if (status === "installed") {
-    return <CheckCircle2 size={14} style={{ color: "#22C55E", flexShrink: 0 }} />;
+    return <CheckCircle2 size={14} style={{ color: T.success, flexShrink: 0 }} />;
   }
   if (status === "error" || status === "not_configured") {
-    return <XCircle size={14} style={{ color: "#EF4444", flexShrink: 0 }} />;
+    return <XCircle size={14} style={{ color: T.error, flexShrink: 0 }} />;
   }
   return <Circle size={14} style={{ color: T.textFaint, flexShrink: 0 }} />;
 }
@@ -39,8 +39,8 @@ function statusLabel(status: MCPServer["status"]): string {
 }
 
 function statusColor(status: MCPServer["status"]): string {
-  if (status === "installed") return "#22C55E";
-  if (status === "error" || status === "not_configured") return "#EF4444";
+  if (status === "installed") return T.success;
+  if (status === "error" || status === "not_configured") return T.error;
   return T.textFaint;
 }
 
@@ -230,7 +230,7 @@ function ServerRow({
               style={{
                 fontSize: 11,
                 fontFamily: T.mono,
-                color: healthResult.ok ? "#22C55E" : "#EF4444",
+                color: healthResult.ok ? T.success : T.error,
                 marginBottom: 6,
               }}
             >
@@ -320,7 +320,7 @@ export default function MCPSetupPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
         <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>
           MCP Servers
         </h2>

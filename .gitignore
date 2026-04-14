@@ -14,4 +14,6 @@ encore.gen.cue
 thefold-github-app.pem
 
 .claude/worktrees/
-.claude/worktrees/
+
+# Arkiverte planer og gamle docs (fullført arbeid)
+.archive/

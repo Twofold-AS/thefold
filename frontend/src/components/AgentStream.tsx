@@ -5,6 +5,7 @@ import { T } from "@/lib/tokens";
 import CheckIcon from "@/components/icons/CheckIcon";
 import Btn from "@/components/Btn";
 import { getReview } from "@/lib/api";
+import AgentReasoningCard from "@/components/chat/AgentReasoningCard";
 
 interface StepInfo {
   id: string;
@@ -37,12 +38,16 @@ interface ReviewFileInfo {
   content?: string;
 }
 
+type ReviewActionType = "approve" | "reject" | "changes" | null;
+
 interface AgentStreamProps {
   content?: string;
   onCancel?: () => void;
   onApprove?: (reviewId: string) => void | Promise<void>;
   onReject?: (reviewId: string) => void | Promise<void>;
   onRequestChanges?: (reviewId: string, feedback: string) => void | Promise<void>;
+  /** Page-level review action state — persists across re-renders */
+  reviewInProgress?: ReviewActionType;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -173,11 +178,11 @@ function parseProgress(content?: string): AgentProgress | null {
   }
 }
 
-export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges }: AgentStreamProps) {
+export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges, reviewInProgress }: AgentStreamProps) {
   const progress = useMemo(() => parseProgress(content), [content]);
 
-  // Loading state for review action buttons (shows spinner while API call runs)
-  const [reviewAction, setReviewAction] = useState<"approve" | "reject" | "changes" | null>(null);
+  // Use page-level reviewInProgress (survives re-renders) with local fallback
+  const reviewAction = reviewInProgress ?? null;
 
   // Fetched file list for Bug C — loaded on demand when review message appears
   const [reviewFiles, setReviewFiles] = useState<ReviewFileInfo[] | null>(null);
@@ -210,17 +215,14 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
 
   const handleApprove = async () => {
     if (!reviewId || reviewAction) return;
-    setReviewAction("approve");
-    try { await onApprove?.(reviewId); } finally { setReviewAction(null); }
+    await onApprove?.(reviewId);
   };
   const handleReject = async () => {
     if (!reviewId || reviewAction) return;
-    setReviewAction("reject");
-    try { await onReject?.(reviewId); } finally { setReviewAction(null); }
+    await onReject?.(reviewId);
   };
   const handleRequestChanges = async () => {
     if (!reviewId || reviewAction) return;
-    // requestChanges focuses the input — no async wait needed, no loading state
     onRequestChanges?.(reviewId, "");
   };
 
@@ -478,7 +480,7 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
               {f.content && expandedFiles.has(f.path) && (
                 <pre style={{
                   margin: 0, padding: "10px 12px",
-                  background: "rgba(0,0,0,0.3)",
+                  background: T.subtle,
                   border: `1px solid ${T.border}`, borderTop: "none",
                   borderRadius: "0 0 4px 4px",
                   fontSize: 11, fontFamily: T.mono, color: T.textSec,
@@ -539,6 +541,20 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
           ))}
         </div>
       )}
+
+      {/* Agent reasoning transparency — shows memories, skills, context, decisions */}
+      <AgentReasoningCard
+        reasoning={{
+          memoriesUsed: (progress as any)?.reasoning?.memoriesUsed,
+          skillsUsed: (progress as any)?.reasoning?.skillsUsed,
+          contextFiles: (progress as any)?.reasoning?.contextFiles,
+          decisions: (progress as any)?.reasoning?.decisions,
+          modelUsed: (progress as any)?.reasoning?.modelUsed,
+          confidenceScore: (progress as any)?.reasoning?.confidenceScore,
+          complexityScore: (progress as any)?.reasoning?.complexityScore,
+        }}
+        thinkingText={(progress as any)?.reasoning?.thinkingText || (progress as any)?.thinking}
+      />
     </div>
   );
 }

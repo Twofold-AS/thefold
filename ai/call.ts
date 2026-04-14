@@ -75,10 +75,43 @@ export function wrapProviderError(provider: string, model: string, error: unknow
 
 export function stripMarkdownJson(text: string): string {
   let jsonText = text.trim();
+
+  // Try code block extraction first (```json ... ``` or ``` ... ```)
   const codeBlockMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   if (codeBlockMatch) {
     jsonText = codeBlockMatch[1].trim();
   }
+
+  // If still not valid JSON, extract the first balanced { ... } or [ ... ]
+  if (!jsonText.startsWith("{") && !jsonText.startsWith("[")) {
+    const objStart = jsonText.indexOf("{");
+    const arrStart = jsonText.indexOf("[");
+    const start = objStart >= 0 && arrStart >= 0
+      ? Math.min(objStart, arrStart)
+      : objStart >= 0 ? objStart : arrStart;
+
+    if (start >= 0) {
+      const open = jsonText[start];
+      const close = open === "{" ? "}" : "]";
+      let depth = 0;
+      let end = -1;
+      let inString = false;
+      let escaped = false;
+      for (let i = start; i < jsonText.length; i++) {
+        const ch = jsonText[i];
+        if (escaped) { escaped = false; continue; }
+        if (ch === "\\") { escaped = true; continue; }
+        if (ch === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        if (ch === open) depth++;
+        else if (ch === close) { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end > start) {
+        jsonText = jsonText.substring(start, end + 1);
+      }
+    }
+  }
+
   return jsonText;
 }
 
@@ -217,30 +250,75 @@ async function callAnthropicStreaming(options: AICallOptions): Promise<AICallRes
   };
 }
 
+// --- Retry helpers ---
+
+const MAX_TRANSIENT_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 2000;
+
+function isTransientError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("overloaded") ||
+    lower.includes("529") ||
+    lower.includes("503") ||
+    lower.includes("server error") ||
+    lower.includes("unavailable") ||
+    lower.includes("econnreset") ||
+    lower.includes("socket hang up") ||
+    lower.includes("timeout")
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /**
- * Call AI with automatic fallback — if the model fails, upgrade to next tier.
- * Retries up to MAX_FALLBACK_UPGRADES times with progressively better models.
+ * Call AI with retry + fallback.
+ *
+ * 1. Transient errors (overloaded, 503, timeout): retry same model up to 3 times
+ *    with exponential backoff (2s, 4s, 8s).
+ * 2. Non-transient errors: upgrade to next-tier model (up to MAX_FALLBACK_UPGRADES).
  */
 export async function callAIWithFallback(options: AICallOptions): Promise<AICallResponse> {
   let currentModel = options.model;
-  let attempts = 0;
+  let upgradeAttempts = 0;
 
-  while (attempts <= MAX_FALLBACK_UPGRADES) {
-    try {
-      return await callAI({ ...options, model: currentModel });
-    } catch (error) {
-      attempts++;
-      const upgrade = getUpgradeModel(currentModel);
+  while (upgradeAttempts <= MAX_FALLBACK_UPGRADES) {
+    // Try current model with transient-error retries
+    let lastError: unknown;
+    for (let retry = 0; retry <= MAX_TRANSIENT_RETRIES; retry++) {
+      try {
+        return await callAI({ ...options, model: currentModel });
+      } catch (error) {
+        lastError = error;
 
-      if (!upgrade || attempts > MAX_FALLBACK_UPGRADES) {
-        throw error; // No upgrade path or max attempts reached
+        if (isTransientError(error) && retry < MAX_TRANSIENT_RETRIES) {
+          const delay = RETRY_BASE_DELAY_MS * Math.pow(2, retry);
+          log.warn(`[AI] Transient error on ${currentModel}, retry ${retry + 1}/${MAX_TRANSIENT_RETRIES} in ${delay}ms`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await sleep(delay);
+          continue;
+        }
+
+        // Non-transient or retries exhausted — break to fallback
+        break;
       }
-
-      // Upgrade to next tier and retry
-      currentModel = upgrade;
     }
+
+    // Try upgrading model
+    upgradeAttempts++;
+    const upgrade = getUpgradeModel(currentModel);
+
+    if (!upgrade || upgradeAttempts > MAX_FALLBACK_UPGRADES) {
+      throw lastError;
+    }
+
+    log.info(`[AI] Upgrading from ${currentModel} to ${upgrade} after error`);
+    currentModel = upgrade;
   }
 
-  // Should not reach here, but TypeScript needs it
   throw APIError.internal("model fallback exhausted");
 }

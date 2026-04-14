@@ -122,9 +122,8 @@ function convertLegacy(parsed: any): AgentProgress | null {
 }
 
 // ============================================================
-// LEGACY EXPORTS — kept for backward compat when feature flag is false
-// These are the OLD types. When ProgressMessageEnabled is "true",
-// callers should use serializeProgress/deserializeProgress instead.
+// LEGACY EXPORTS — kept for backward compatibility.
+// New code should use serializeProgress/deserializeProgress.
 // ============================================================
 
 export interface StepInfo {

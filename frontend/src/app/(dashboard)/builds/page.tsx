@@ -170,7 +170,7 @@ export default function BuildsPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
         <h2
           style={{
             fontSize: 28,

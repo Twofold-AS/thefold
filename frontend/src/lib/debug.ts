@@ -24,7 +24,7 @@ export function debugToast(method: string, path: string, body?: string, response
     max-width: 400px; padding: 10px 14px; border-radius: 6px;
     font-family: monospace; font-size: 11px; line-height: 1.4;
     background: #1a1a2e; color: #e0e0e0; border: 1px solid #333;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
     opacity: 1; transition: opacity 0.3s;
     pointer-events: none; word-break: break-all;
   `;

@@ -905,7 +905,7 @@ export const forceContinue = api(
 // --- Agent Job Endpoints ---
 
 export const cleanupExpiredJobs = api(
-  { method: "POST", path: "/agent/jobs/cleanup", expose: false },
+  { method: "POST", path: "/agent/jobs/cleanup", expose: true, auth: true },
   async (): Promise<{ expired: number }> => {
     const count = await expireOldJobs();
     return { expired: count };

@@ -39,7 +39,7 @@ export default function KomponenterPage() {
 
   if (loading) {
     return (
-      <div style={{ paddingTop: 40 }}>
+      <div style={{ paddingTop: 0 }}>
         <Skeleton rows={4} />
       </div>
     );
@@ -47,7 +47,7 @@ export default function KomponenterPage() {
 
   return (
     <>
-      <div style={{ paddingTop: 40, paddingBottom: 24 }}>
+      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
         <h2
           style={{
             fontSize: 28,

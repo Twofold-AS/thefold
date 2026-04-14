@@ -4,7 +4,8 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { T } from "@/lib/tokens";
 import PillIcon from "@/components/PillIcon";
 import TypewriterPlaceholder from "@/components/TypewriterPlaceholder";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, GitBranch } from "lucide-react";
+import { useRepoContext } from "@/lib/repo-context";
 
 interface ChatInputProps {
   compact?: boolean;
@@ -41,7 +42,9 @@ export default function ChatInput({
   const ty = v.length > 0;
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [repoOpen, setRepoOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { repos, selectedRepo, selectRepo, clearRepo } = useRepoContext();
 
   const MAX_INPUT_HEIGHT = 200;
 
@@ -69,33 +72,29 @@ export default function ChatInput({
     <div
       style={{
         width: "100%",
-        maxWidth: compact ? undefined : 800,
-        background: T.bg,
+        maxWidth: compact ? undefined : 700,
+        background: "#1b1c1e",
         border: "none",
-        borderRadius: T.r * 1.5,
+        borderRadius: "1.5rem",
         position: "relative",
       }}
     >
       <div
         style={{
-          minHeight: compact ? 48 : 56,
-          padding: "0 20px",
-          display: "flex",
-          alignItems: "center",
+          minHeight: compact ? 48 : 100,
+          padding: "16px 20px 0",
           position: "relative",
         }}
       >
         {!ty && (
-          <div
-            style={{
-              position: "absolute",
-              left: 20,
-              top: compact ? 14 : 18,
-              fontSize: 13,
-              fontFamily: T.sans,
-              pointerEvents: "none",
-            }}
-          >
+          <div style={{
+            position: "absolute",
+            top: 16,
+            left: 20,
+            pointerEvents: "none",
+            fontSize: 13,
+            fontFamily: T.sans,
+          }}>
             <TypewriterPlaceholder active={ty} />
           </div>
         )}
@@ -124,7 +123,7 @@ export default function ChatInput({
               setModelOpen(false);
             }
           }}
-          placeholder={placeholder}
+          placeholder=""
           style={{
             width: "100%",
             minHeight: compact ? 24 : 28,
@@ -146,26 +145,85 @@ export default function ChatInput({
       </div>
       <div
         style={{
-          height: compact ? 44 : 57,
-          borderTop: `1px solid ${T.border}`,
-          padding: "0 14px",
+          padding: compact ? "8px 14px 10px" : "0 20px 14px",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {/* File attach */}
-          <PillIcon tooltip="Filer">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-              <path
-                d="M7 3v8M3 7h8"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-              />
-            </svg>
-          </PillIcon>
+          {/* Repo selector */}
+          <div style={{ position: "relative" }}>
+            <div
+              onClick={() => setRepoOpen(p => !p)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "4px 10px",
+                border: `1px solid ${selectedRepo ? T.accent + "40" : T.border}`,
+                borderRadius: 999,
+                fontSize: 11,
+                fontFamily: T.mono,
+                color: selectedRepo ? T.accent : T.textMuted,
+                cursor: "pointer",
+                background: selectedRepo ? T.accentDim : "transparent",
+              }}
+            >
+              <GitBranch size={11} strokeWidth={2} />
+              <span style={{ maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {selectedRepo ? selectedRepo.name : "Velg repo"}
+              </span>
+              <ChevronDown size={10} strokeWidth={2} />
+            </div>
+            {repoOpen && (
+              <>
+                <div style={{ position: "fixed", inset: 0, zIndex: 98 }} onClick={() => setRepoOpen(false)} />
+                <div style={{
+                  position: "absolute",
+                  bottom: "calc(100% + 8px)",
+                  left: 0,
+                  background: T.popup,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 12,
+                  minWidth: 280,
+                  maxHeight: 360,
+                  overflowY: "auto",
+                  zIndex: 99,
+                  boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+                  padding: "6px 0",
+                }}>
+                  <div style={{ padding: "8px 16px 6px", fontSize: 11, fontWeight: 500, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                    Velg repo
+                  </div>
+                  {repos.map(repo => (
+                    <div
+                      key={repo.fullName}
+                      onClick={() => { selectRepo(repo.fullName); setRepoOpen(false); }}
+                      style={{
+                        padding: "12px 16px", fontSize: 13,
+                        color: T.text,
+                        background: selectedRepo?.fullName === repo.fullName ? T.tabActive : "transparent",
+                        cursor: "pointer",
+                        transition: "background 0.1s",
+                      }}
+                      onMouseEnter={(e) => { if (selectedRepo?.fullName !== repo.fullName) e.currentTarget.style.background = T.subtle; }}
+                      onMouseLeave={(e) => { if (selectedRepo?.fullName !== repo.fullName) e.currentTarget.style.background = "transparent"; }}
+                    >
+                      <div style={{ fontWeight: 500 }}>{repo.name}</div>
+                      <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{repo.fullName}</div>
+                    </div>
+                  ))}
+                  {repos.length === 0 && (
+                    <div style={{ padding: "16px", fontSize: 12, color: T.textMuted, textAlign: "center" }}>
+                      Ingen repos funnet
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
           {/* Sub-agents */}
           <PillIcon
             tooltip="Sub-agenter"
@@ -214,7 +272,7 @@ export default function ChatInput({
                   maxHeight: 240,
                   overflow: "auto",
                   zIndex: 100,
-                  boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
                 }}
               >
                 {skills

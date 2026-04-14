@@ -436,6 +436,8 @@ export async function runBuildLoop(
             planSummary = plan.plan.map((s: { description: string }, i: number) => `${i + 1}. ${s.description}`).join("\n");
             allFiles.length = 0;
             tracker.start("building");
+            // Exponential backoff: 1s, 2s, 4s...
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * Math.pow(2, ctx.totalAttempts - 1), 16_000)));
             continue;
 
           } else if (diagnosis.rootCause === "implementation_error" || diagnosis.suggestedAction === "fix_code") {
@@ -469,6 +471,8 @@ export async function runBuildLoop(
               modelUsed: (plan as { modelUsed?: string }).modelUsed || ctx.selectedModel,
             });
             planSummary = plan.plan.map((s: { description: string }, i: number) => `${i + 1}. ${s.description}`).join("\n");
+            // Exponential backoff
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * Math.pow(2, ctx.totalAttempts - 1), 16_000)));
             continue;
 
           } else if (diagnosis.rootCause === "missing_context") {
@@ -506,6 +510,8 @@ export async function runBuildLoop(
             });
             planSummary = plan.plan.map((s: { description: string }, i: number) => `${i + 1}. ${s.description}`).join("\n");
             tracker.start("building");
+            // Exponential backoff
+            await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * Math.pow(2, ctx.totalAttempts - 1), 16_000)));
             continue;
 
           } else if (diagnosis.rootCause === "impossible_task") {
@@ -565,6 +571,11 @@ export async function runBuildLoop(
           });
           planSummary = plan.plan.map((s: { description: string }, i: number) => `${i + 1}. ${s.description}`).join("\n");
           tracker.start("building");
+
+          // Exponential backoff: 1s, 2s, 4s, 8s...
+          const backoffMs = Math.min(1000 * Math.pow(2, ctx.totalAttempts - 1), 16_000);
+          log.info("retry backoff", { attempt: ctx.totalAttempts, backoffMs, taskId: ctx.taskId });
+          await new Promise((resolve) => setTimeout(resolve, backoffMs));
           continue;
         }
 
