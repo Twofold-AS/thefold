@@ -6,6 +6,7 @@ import PillIcon from "@/components/PillIcon";
 import TypewriterPlaceholder from "@/components/TypewriterPlaceholder";
 import { ChevronDown, GitBranch } from "lucide-react";
 import { useRepoContext } from "@/lib/repo-context";
+import { scrapeUrl } from "@/lib/api/tools";
 
 interface ChatInputProps {
   compact?: boolean;
@@ -46,6 +47,16 @@ export default function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { repos, selectedRepo, selectRepo, clearRepo } = useRepoContext();
 
+  // --- Firecrawl state ---
+  const [firecrawlOpen, setFirecrawlOpen] = useState(false);
+  const [firecrawlUrl, setFirecrawlUrl] = useState("");
+  const [firecrawlLoading, setFirecrawlLoading] = useState(false);
+  const [firecrawlError, setFirecrawlError] = useState<string | null>(null);
+
+  // --- File upload state ---
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+
   const MAX_INPUT_HEIGHT = 200;
 
   const autoResize = useCallback(() => {
@@ -66,6 +77,48 @@ export default function ChatInput({
       onSubmit(v);
       setV("");
     }
+  };
+
+  // --- Firecrawl handler ---
+  const handleFirecrawlScrape = async () => {
+    if (!firecrawlUrl.trim()) return;
+    setFirecrawlLoading(true);
+    setFirecrawlError(null);
+    try {
+      const result = await scrapeUrl(firecrawlUrl.trim());
+      const header = result.title
+        ? `📄 Innhold fra: ${result.title}\nURL: ${firecrawlUrl.trim()}\n\n`
+        : `📄 Innhold fra: ${firecrawlUrl.trim()}\n\n`;
+      setV(prev => (prev ? `${prev}\n\n${header}${result.content}` : `${header}${result.content}`));
+      setFirecrawlUrl("");
+      setFirecrawlOpen(false);
+    } catch (err) {
+      setFirecrawlError(err instanceof Error ? err.message : "Noe gikk galt");
+    } finally {
+      setFirecrawlLoading(false);
+    }
+  };
+
+  // --- .md file upload handler ---
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileError(null);
+
+    if (!file.name.endsWith(".md")) {
+      setFileError("Kun .md-filer støttes");
+      e.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const text = evt.target?.result as string;
+      const header = `📎 Fil: ${file.name}\n\n${text}`;
+      setV(prev => (prev ? `${header}\n\n${prev}` : header));
+    };
+    reader.readAsText(file);
+    e.target.value = "";
   };
 
   return (
@@ -315,6 +368,129 @@ export default function ChatInput({
                       </div>
                     );
                   })}
+              </div>
+            )}
+          </div>
+
+          {/* Firecrawl: scrape URL */}
+          <div style={{ position: "relative" }}>
+            <PillIcon
+              tooltip="Skrap URL med Firecrawl"
+              active={firecrawlOpen}
+              onClick={() => { setFirecrawlOpen(p => !p); setFirecrawlError(null); }}
+            >
+              {/* Globe icon */}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="2" y1="12" x2="22" y2="12" />
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              </svg>
+            </PillIcon>
+            {firecrawlOpen && (
+              <>
+                <div style={{ position: "fixed", inset: 0, zIndex: 98 }} onClick={() => setFirecrawlOpen(false)} />
+                <div style={{
+                  position: "absolute",
+                  bottom: "calc(100% + 8px)",
+                  left: 0,
+                  background: T.popup ?? T.surface,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 12,
+                  padding: 12,
+                  minWidth: 320,
+                  zIndex: 99,
+                  boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+                }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 8 }}>
+                    Skrap URL
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      autoFocus
+                      type="url"
+                      value={firecrawlUrl}
+                      onChange={e => setFirecrawlUrl(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") handleFirecrawlScrape(); if (e.key === "Escape") setFirecrawlOpen(false); }}
+                      placeholder="https://..."
+                      style={{
+                        flex: 1,
+                        background: T.raised,
+                        border: `1px solid ${T.border}`,
+                        borderRadius: 8,
+                        padding: "6px 10px",
+                        fontSize: 12,
+                        fontFamily: T.mono,
+                        color: T.text,
+                        outline: "none",
+                      }}
+                    />
+                    <button
+                      onClick={handleFirecrawlScrape}
+                      disabled={firecrawlLoading || !firecrawlUrl.trim()}
+                      style={{
+                        background: T.accent,
+                        color: "#fff",
+                        border: "none",
+                        borderRadius: 8,
+                        padding: "6px 12px",
+                        fontSize: 12,
+                        cursor: firecrawlLoading || !firecrawlUrl.trim() ? "not-allowed" : "pointer",
+                        opacity: firecrawlLoading || !firecrawlUrl.trim() ? 0.6 : 1,
+                        fontFamily: T.sans,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {firecrawlLoading ? "Henter..." : "Hent"}
+                    </button>
+                  </div>
+                  {firecrawlError && (
+                    <div style={{ marginTop: 6, fontSize: 11, color: T.error ?? "#f87171" }}>
+                      {firecrawlError}
+                    </div>
+                  )}
+                  <div style={{ marginTop: 6, fontSize: 11, color: T.textFaint ?? T.textMuted }}>
+                    Innholdet legges inn i meldingsfeltet som Markdown
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* .md file upload */}
+          <div style={{ position: "relative" }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".md"
+              style={{ display: "none" }}
+              onChange={handleFileChange}
+            />
+            <PillIcon
+              tooltip="Last opp .md-fil"
+              active={false}
+              onClick={() => { setFileError(null); fileInputRef.current?.click(); }}
+            >
+              {/* Paperclip icon */}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
+            </PillIcon>
+            {fileError && (
+              <div style={{
+                position: "absolute",
+                bottom: "calc(100% + 6px)",
+                left: 0,
+                background: T.popup ?? T.surface,
+                border: `1px solid ${T.border}`,
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontSize: 11,
+                color: T.error ?? "#f87171",
+                whiteSpace: "nowrap",
+                zIndex: 99,
+                boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+              }}>
+                {fileError}
               </div>
             )}
           </div>

@@ -14,6 +14,8 @@ import {
   toggleModel,
   deleteModel,
   saveProvider,
+  setProviderApiKey,
+  clearProviderApiKey,
   type AIProvider,
   type AIModelRow,
 } from "@/lib/api";
@@ -63,6 +65,7 @@ type ProviderForm = {
   slug: string;
   baseUrl: string;
   enabled: boolean;
+  apiKey: string; // blank = keep existing, value = set new key
 };
 
 const emptyModelForm = (providerId: string): ModelForm => ({
@@ -85,6 +88,7 @@ const emptyProviderForm = (): ProviderForm => ({
   slug: "",
   baseUrl: "",
   enabled: true,
+  apiKey: "",
 });
 
 export default function ModelsPage() {
@@ -137,6 +141,7 @@ export default function ModelsPage() {
       slug: p.slug,
       baseUrl: p.baseUrl ?? "",
       enabled: p.enabled,
+      apiKey: "", // never pre-fill — blank means "keep existing"
     });
     setError(null);
   };
@@ -178,7 +183,7 @@ export default function ModelsPage() {
 
   const handleSaveProvider = async () => {
     if (!providerModal) return;
-    const { id, name, slug, baseUrl, enabled } = providerModal;
+    const { id, name, slug, baseUrl, enabled, apiKey } = providerModal;
     if (!name.trim() || !slug.trim()) {
       setError("Navn og slug er påkrevd.");
       return;
@@ -186,19 +191,33 @@ export default function ModelsPage() {
     setSaving(true);
     setError(null);
     try {
-      await saveProvider({
+      const result = await saveProvider({
         id,
         name: name.trim(),
         slug: slug.trim(),
         baseUrl: baseUrl.trim() || undefined,
         enabled,
       });
+      // If a new API key was entered, store it encrypted in the DB
+      if (apiKey.trim()) {
+        const targetId = id ?? result.id;
+        await setProviderApiKey(targetId, apiKey.trim());
+      }
       setProviderModal(null);
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Lagring feilet");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleClearApiKey = async (providerId: string) => {
+    try {
+      await clearProviderApiKey(providerId);
+      refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Fjerning av nøkkel feilet");
     }
   };
 
@@ -527,6 +546,51 @@ export default function ModelsPage() {
                 placeholder="https://api.anthropic.com"
               />
             </FormRow>
+
+            {/* API key field */}
+            <FormRow
+              label="API-nøkkel"
+              hint={providerModal.id
+                ? "La stå tom for å beholde eksisterende nøkkel"
+                : "Lim inn nøkkel fra leverandørens dashboard"}
+            >
+              <input
+                style={{ ...inputStyle, fontFamily: T.mono, letterSpacing: "0.04em" }}
+                type="password"
+                autoComplete="new-password"
+                value={providerModal.apiKey}
+                onChange={(e) => setProviderModal((p) => p && ({ ...p, apiKey: e.target.value }))}
+                placeholder={providerModal.id ? "••••••••••••••••  (uendret)" : "sk-ant-..."}
+              />
+            </FormRow>
+
+            {/* Show "Fjern nøkkel" only when editing an existing provider that has a key */}
+            {providerModal.id && (() => {
+              const provider = providers.find(p => p.id === providerModal.id);
+              return provider?.apiKeySet ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.success, flexShrink: 0 }} />
+                  <span style={{ fontSize: 12, color: T.textMuted }}>API-nøkkel er konfigurert</span>
+                  <div style={{ flex: 1 }} />
+                  <Btn
+                    sm
+                    onClick={() => {
+                      handleClearApiKey(providerModal.id!);
+                      setProviderModal(p => p && ({ ...p, apiKey: "" }));
+                    }}
+                    style={{ color: T.error, borderColor: T.error }}
+                  >
+                    Fjern nøkkel
+                  </Btn>
+                </div>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: T.error, flexShrink: 0 }} />
+                  <span style={{ fontSize: 12, color: T.textMuted }}>Ingen API-nøkkel — leverandøren er inaktiv</span>
+                </div>
+              );
+            })()}
+
             <CheckField
               label="Aktivert"
               checked={providerModal.enabled}

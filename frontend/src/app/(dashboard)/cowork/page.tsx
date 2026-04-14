@@ -79,6 +79,7 @@ function ChatPageInner() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const autoMsgSent = useRef(false);
+  const hasSent = useRef(false);
 
   const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
     () => getConversations(),
@@ -161,10 +162,10 @@ function ChatPageInner() {
     return () => clearInterval(iv);
   }, [sending, activeTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Trailing refreshes after send stops (skip if review action in progress)
+  // Trailing refreshes after send stops (skip if review action in progress, or if never sent)
   useEffect(() => {
-    if (sending || !ac || reviewInProgress) return;
-    const timers = [2000, 8000, 20000, 60000].map(d => setTimeout(() => { refreshMsgs(); }, d));
+    if (sending || !ac || reviewInProgress || !hasSent.current) return;
+    const timers = [3000, 10000, 25000, 60000].map(d => setTimeout(() => { refreshMsgs(); }, d));
     return () => timers.forEach(clearTimeout);
   }, [sending, reviewInProgress]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -272,6 +273,7 @@ function ChatPageInner() {
       setActiveTaskId(result.taskId);
     }
     refreshConvs();
+    refreshMsgs();
   };
 
   // Auto-send msg from search params
@@ -322,6 +324,7 @@ function ChatPageInner() {
       messages: [...(prev?.messages ?? []), makeOptimisticMsg(convId, msg)],
       hasMore: prev?.hasMore ?? false,
     }));
+    hasSent.current = true;
     setSending(true);
     sendMessage(convId, msg, {
       ...(repoName ? { repoName, repoOwner: selectedRepo?.owner } : {}),
@@ -346,6 +349,7 @@ function ChatPageInner() {
       messages: [...(prev?.messages ?? []), makeOptimisticMsg(ac, value)],
       hasMore: prev?.hasMore ?? false,
     }));
+    hasSent.current = true;
     setSending(true);
     sendMessage(ac, value, {
       repoName: selectedRepo?.name || curRepo || undefined,

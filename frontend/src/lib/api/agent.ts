@@ -345,6 +345,20 @@ export async function deleteModel(id: string) {
   return apiFetch<void>("/ai/models/delete", { method: "POST", body: { id } });
 }
 
+export async function setProviderApiKey(providerId: string, apiKey: string) {
+  return apiFetch<{ ok: boolean }>("/ai/providers/set-key", {
+    method: "POST",
+    body: { providerId, apiKey },
+  });
+}
+
+export async function clearProviderApiKey(providerId: string) {
+  return apiFetch<{ ok: boolean }>("/ai/providers/clear-key", {
+    method: "POST",
+    body: { providerId },
+  });
+}
+
 export async function estimateCost(inputTokens: number, outputTokens: number, modelId: string) {
   return apiFetch<{
     estimate: {
