@@ -73,7 +73,7 @@ export default function ConversationSidebar({
         </div>
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+      <div style={{ height: 220, overflowY: "scroll", scrollbarWidth: "none", minHeight: 0 }}>
         {loading ? (
           <div style={{ padding: "20px 16px", textAlign: "center" }}>
             <span style={{ fontSize: 12, color: T.textMuted }}>Laster...</span>
@@ -92,6 +92,7 @@ export default function ConversationSidebar({
                 onClick={() => onSelect(c.id)}
                 style={{
                   padding: "12px 16px",
+                  paddingLeft: 12,
                   cursor: "pointer",
                   background: selectedId === c.id ? T.subtle : "transparent",
                   borderBottom: `1px solid ${T.border}`,

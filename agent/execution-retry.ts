@@ -45,6 +45,8 @@ export interface ExecutionResult {
   costUsd: number;
   tokensUsed: number;
   errorMessage?: string;
+  /** Set when planOnly mode is active — agent should stop after planning, skip build/review/PR */
+  planOnlyDone?: boolean;
   earlyReturn?: {
     success: boolean;
     filesChanged: string[];

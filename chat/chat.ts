@@ -494,6 +494,8 @@ interface SendRequest {
   repoOwner?: string;
   // Where the message originated
   source?: "web" | "slack" | "discord" | "api";
+  // If true, agent only plans and creates tasks — skips code-gen and building
+  planMode?: boolean;
 }
 
 interface SendResponse {
@@ -690,20 +692,20 @@ export const send = api(
           },
         });
 
-        let summary = `📋 **Prosjektplan** (${decomposition.estimatedTotalTasks} oppgaver i ${decomposition.phases.length} faser):\n\n`;
-        for (const phase of decomposition.phases) {
-          summary += `**Fase: ${phase.name}** — ${phase.description}\n`;
-          for (const task of phase.tasks) {
-            summary += `  - ${task.title}\n`;
-          }
-          summary += "\n";
-        }
-        summary += `\n_${decomposition.reasoning}_\n\nSkal jeg starte? (Du kan også justere planen)`;
+        // Store structured project plan as JSON content
+        const projectPlanContent = JSON.stringify({
+          type: "project_plan",
+          title: `Prosjektplan`,
+          phases: decomposition.phases,
+          totalTasks: decomposition.estimatedTotalTasks,
+          estimatedComplexity: decomposition.estimatedComplexity ?? "medium",
+          reasoning: decomposition.reasoning,
+        });
 
-        // Store plan summary as assistant message
+        // Store plan as assistant message with structured JSON content
         await db.exec`
           INSERT INTO messages (conversation_id, role, content, message_type, metadata)
-          VALUES (${req.conversationId}, 'assistant', ${summary}, 'agent_report',
+          VALUES (${req.conversationId}, 'assistant', ${projectPlanContent}, 'agent_report',
                   ${JSON.stringify({
                     type: "project_plan",
                     projectId: planResult.projectId,
@@ -738,6 +740,7 @@ export const send = api(
         modelOverride: req.modelOverride ?? undefined,
         repoName: req.repoName,
         repoOwner: req.repoOwner,
+        planOnly: req.planMode,
       });
 
       // Store a "task started" message
@@ -1116,19 +1119,11 @@ async function processAIResponse(
 
     if (isCancelled(conversationId)) return;
 
-    // Step 5: Determine model — manual override or auto-routing (C1/C2)
-    let selectedModel: string | undefined;
-    if (modelOverride) {
-      selectedModel = modelOverride;
-      console.log("[DEBUG-AF] Using manual model override:", selectedModel);
-    } else {
-      // C2: Auto-routing based on message complexity
-      const complexity = quickComplexity(userContent);
-      if (complexity <= 3) selectedModel = "claude-haiku-4-5-20251001";
-      else if (complexity <= 7) selectedModel = undefined; // Sonnet default
-      else selectedModel = "claude-opus-4-5-20251101";
-      console.log("[DEBUG-AF] Auto-routed, complexity:", complexity, "model:", selectedModel || "(default sonnet)");
-    }
+    // Step 5: Determine model — manual override uses model directly; auto-routing via complexity
+    // AI service's selectOptimalModel (DB-backed cache) handles actual model selection
+    const complexity = quickComplexity(userContent);
+    const selectedModel: string | undefined = modelOverride || undefined;
+    console.log("[DEBUG-AF] model:", selectedModel || "(auto via complexity)", "complexity:", complexity);
 
     agentEvt.emitChatEvent({
       streamKey: conversationId,
@@ -1144,7 +1139,8 @@ async function processAIResponse(
         messages: history.map((m) => ({ role: m.role, content: m.content })),
         memoryContext: (memories.results || []).map((r) => r.content),
         systemContext: "direct_chat",
-        model: selectedModel,
+        model: selectedModel,        // explicit override or undefined (let AI service auto-route)
+        complexity,                  // hint for selectOptimalModel in ai-endpoints.ts
         repoName,
         repoOwner,
         repoContext: repoContext || undefined,
@@ -1203,6 +1199,20 @@ async function processAIResponse(
     console.log(`AI Response: ${aiResponse.usage.totalTokens} tokens (${aiResponse.usage.inputTokens} inn, ${aiResponse.usage.outputTokens} ut), kostnad: $${aiResponse.costUsd.toFixed(4)}, stop: ${aiResponse.stopReason}`);
 
     if (isCancelled(conversationId)) return;
+
+    // Fase 2: Emit full response immediately via SSE — frontend renders right away
+    // messageId = placeholderId so the frontend dedup system can match SSE msg with DB msg.
+    // The DB write (Step 6) follows synchronously; by then the user already sees the content.
+    agentEvt.emitChatEvent({
+      streamKey: conversationId,
+      eventType: "agent.message",
+      data: {
+        role: "assistant",
+        content: aiResponse.content,
+        model: aiResponse.modelUsed,
+        messageId: placeholderId,
+      },
+    }).catch(() => {});
 
     // Step 6: Save AI response to DB
     await updateMessageContent(placeholderId, aiResponse.content);
@@ -1400,7 +1410,7 @@ export const conversations = api(
       ) latest ON m.conversation_id = latest.conversation_id
                 AND m.created_at = latest.max_created
       INNER JOIN conversations c ON c.id = m.conversation_id
-      WHERE c.owner_email = ${auth.email}
+      WHERE c.owner_email = ${auth.email} AND c.archived = false
       ORDER BY m.created_at DESC
       LIMIT 50
     `;
@@ -1414,6 +1424,101 @@ export const conversations = api(
         title: titleSource.substring(0, 80) + (titleSource.length > 80 ? "..." : ""),
         lastMessage: lastMsg,
         lastActivity: row.lastActivity as string,
+      });
+    }
+
+    return { conversations: convList };
+  }
+);
+
+// --- Conversation archive/restore/delete endpoints ---
+
+interface ArchiveConversationRequest { conversationId: string; }
+interface ArchiveConversationResponse { success: boolean; }
+
+export const archiveConversation = api(
+  { method: "POST", path: "/chat/conversations/archive", expose: true, auth: true },
+  async (req: ArchiveConversationRequest): Promise<ArchiveConversationResponse> => {
+    const auth = getAuthData();
+    if (!auth) throw APIError.unauthenticated("not authenticated");
+    await db.exec`
+      UPDATE conversations
+      SET archived = true, archived_at = NOW()
+      WHERE id = ${req.conversationId} AND owner_email = ${auth.email}
+    `;
+    return { success: true };
+  }
+);
+
+export const restoreConversation = api(
+  { method: "POST", path: "/chat/conversations/restore", expose: true, auth: true },
+  async (req: ArchiveConversationRequest): Promise<ArchiveConversationResponse> => {
+    const auth = getAuthData();
+    if (!auth) throw APIError.unauthenticated("not authenticated");
+    await db.exec`
+      UPDATE conversations
+      SET archived = false, archived_at = NULL
+      WHERE id = ${req.conversationId} AND owner_email = ${auth.email}
+    `;
+    return { success: true };
+  }
+);
+
+export const deleteConversationPermanent = api(
+  { method: "POST", path: "/chat/conversations/delete", expose: true, auth: true },
+  async (req: ArchiveConversationRequest): Promise<ArchiveConversationResponse> => {
+    const auth = getAuthData();
+    if (!auth) throw APIError.unauthenticated("not authenticated");
+    // Only allow permanent delete of archived conversations (safety gate)
+    await db.exec`
+      DELETE FROM messages WHERE conversation_id = ${req.conversationId}
+      AND EXISTS (
+        SELECT 1 FROM conversations
+        WHERE id = ${req.conversationId} AND owner_email = ${auth.email} AND archived = true
+      )
+    `;
+    await db.exec`
+      DELETE FROM conversations
+      WHERE id = ${req.conversationId} AND owner_email = ${auth.email} AND archived = true
+    `;
+    return { success: true };
+  }
+);
+
+interface ArchivedConversationsResponse {
+  conversations: ConversationSummary[];
+}
+
+export const archivedConversations = api(
+  { method: "GET", path: "/chat/conversations/archived", expose: true, auth: true },
+  async (): Promise<ArchivedConversationsResponse> => {
+    const auth = getAuthData();
+    if (!auth) throw APIError.unauthenticated("not authenticated");
+
+    const rows = await db.query`
+      SELECT
+        c.id,
+        c.archived_at,
+        (SELECT content FROM messages
+         WHERE conversation_id = c.id AND role = 'user'
+         ORDER BY created_at ASC LIMIT 1) as "firstUserMessage",
+        (SELECT created_at FROM messages
+         WHERE conversation_id = c.id
+         ORDER BY created_at DESC LIMIT 1) as "lastActivity"
+      FROM conversations c
+      WHERE c.owner_email = ${auth.email} AND c.archived = true
+      ORDER BY c.archived_at DESC
+      LIMIT 100
+    `;
+
+    const convList: ConversationSummary[] = [];
+    for await (const row of rows) {
+      const title = (row.firstUserMessage as string) || "(Ingen meldinger)";
+      convList.push({
+        id: row.id as string,
+        title: title.substring(0, 80) + (title.length > 80 ? "..." : ""),
+        lastMessage: row.firstUserMessage as string || "",
+        lastActivity: (row.lastActivity || row.archived_at) as string,
       });
     }
 

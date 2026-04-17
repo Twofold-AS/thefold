@@ -1,0 +1,4 @@
+  const filtered = conversations.filter((c) => {
+    if (c.id.startsWith("inkognito-")) return false;
+    return true;
+  });

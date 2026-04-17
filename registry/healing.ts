@@ -51,24 +51,32 @@ export async function healComponent(componentId: string): Promise<HealingReport>
         : component.files;
 
     // Ask AI to improve the component
-    const improved = await ai.chat({
+    const response = await ai.chat({
       messages: [
         {
           role: "user",
           content: `Component "${component.name}" has quality score ${component.quality_score}/100. Improve its code quality.\n\nFiles:\n${JSON.stringify(files, null, 2)}\n\nReturn ONLY a JSON object with: { "files": [{"path": "...", "content": "...", "language": "..."}], "score": <number 0-100>, "changes": ["description of change 1", ...] }`,
         },
       ],
-      memoryContext: [],
-      systemContext: "agent_coding",
-      model: "auto",
+      systemContext: "You are an expert code quality reviewer. Analyze the provided component and suggest improvements to increase its quality score.",
     });
 
-    const jsonMatch = improved.content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return { action: "failed", reason: "AI did not return valid JSON" };
+    let result;
+    try {
+      // Extract JSON from response content (response.content contains the AI response string)
+      const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        log.warn("healing: AI did not return valid JSON", { componentId, name: component.name });
+        return { action: "failed", reason: "AI did not return valid JSON" };
+      }
+      result = JSON.parse(jsonMatch[0]);
+    } catch (parseErr) {
+      log.warn("healing: JSON parsing failed", {
+        componentId,
+        error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+      });
+      return { action: "failed", reason: "Failed to parse AI response as JSON" };
     }
-
-    const result = JSON.parse(jsonMatch[0]);
 
     // Parse version as number for incrementing, fallback to 1
     const currentVersion = parseInt(component.version, 10) || 1;

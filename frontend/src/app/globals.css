@@ -58,7 +58,7 @@
 
 /* ─── Stitch-inspired dark palette ─── */
 :root {
-  --background: #202124;
+  --background: transparent;
   --foreground: #f1f3f4;
   --card: #373840;
   --card-foreground: #f1f3f4;
@@ -189,7 +189,7 @@
   body {
     @apply text-foreground;
     font-family: var(--font-sans);
-    background: #202124;
+    background: transparent;
     min-height: 100vh;
   }
 }

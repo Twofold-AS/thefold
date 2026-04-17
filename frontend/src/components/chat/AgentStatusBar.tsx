@@ -32,15 +32,27 @@ export default function AgentStatusBar({
   const label = streamStatusText || "Tenker...";
 
   return (
-    <div style={{ display: "flex", gap: 10, alignItems: "center", padding: "8px 0" }}>
-      <MagicSpinner size={24} variant={variant} />
-      <span style={{
-        fontSize: 13, fontWeight: 500, fontFamily: T.mono,
-        color: T.textMuted,
+    <div style={{ padding: "4px 0" }}>
+      <div style={{
+        display: "inline-flex",
+        gap: 10,
+        alignItems: "center",
+        padding: "10px 14px",
+        background: "rgba(20,20,24,0.82)",
+        backdropFilter: "blur(14px)",
+        WebkitBackdropFilter: "blur(14px)",
+        border: `1px solid ${T.border}`,
+        borderRadius: 10,
       }}>
-        {label}
-      </span>
-      <span style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono }}>{thinkSeconds}s</span>
+        <MagicSpinner size={22} variant={variant} />
+        <span style={{
+          fontSize: 13, fontWeight: 500, fontFamily: T.mono,
+          color: T.textMuted,
+        }}>
+          {label}
+        </span>
+        <span style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono }}>{thinkSeconds}s</span>
+      </div>
     </div>
   );
 }

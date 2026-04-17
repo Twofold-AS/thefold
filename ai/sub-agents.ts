@@ -1,8 +1,10 @@
 // Sub-agent types and role-to-model mapping for multi-agent orchestration
 
+import { selectOptimalModel } from "./router";
+
 // --- Types ---
 
-export type SubAgentRole = "implementer" | "tester" | "reviewer" | "documenter" | "researcher" | "planner" | "security";
+export type SubAgentRole = "implementer" | "tester" | "reviewer" | "documenter" | "researcher" | "planner" | "security" | "brain";
 
 export interface SubAgent {
   id: string;
@@ -39,11 +41,33 @@ const ROLE_MODEL_MAP: Record<SubAgentRole, string> = {
   documenter: "claude-haiku-4-5-20251001",
   researcher: "claude-haiku-4-5-20251001",
   security: "claude-sonnet-4-5-20250929",
+  brain: "claude-sonnet-4-5-20250929",
 };
 
 // --- Functions ---
 
 export function getModelForRole(role: SubAgentRole, _budgetMode?: BudgetMode): string {
+  // Map roles to context tags for selectOptimalModel
+  const contextMap: Record<SubAgentRole, string> = {
+    planner: "planning",
+    implementer: "coding",
+    tester: "fast",
+    reviewer: "review",
+    documenter: "fast",
+    researcher: "analysis",
+    security: "review",
+    brain: "review",
+  };
+
+  try {
+    const context = contextMap[role];
+    const model = selectOptimalModel(5, "auto", undefined, context);
+    if (model) return model;
+  } catch {
+    // Fall through to hardcoded fallback
+  }
+
+  // Fallback to ROLE_MODEL_MAP if selectOptimalModel fails or returns null
   return ROLE_MODEL_MAP[role];
 }
 
@@ -115,6 +139,8 @@ Output a JSON report:
   "summary": "brief overall security assessment",
   "passedChecks": ["check 1 passed", "check 2 passed"]
 }`,
+
+  brain: `You are TheFold's long-term memory curator. Your job is to analyze memories, identify patterns, remove noise, compress redundancy, and ensure the system's knowledge base stays clean, relevant, and accurate. Think like a careful librarian who only keeps what is truly useful for future work.`,
 };
 
 export function getSystemPromptForRole(role: SubAgentRole): string {
@@ -131,6 +157,7 @@ const ROLE_MAX_TOKENS: Record<SubAgentRole, number> = {
   documenter: 4096,
   researcher: 4096,
   security: 4096,
+  brain: 8192,
 };
 
 export function getMaxTokensForRole(role: SubAgentRole): number {

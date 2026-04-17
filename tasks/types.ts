@@ -22,6 +22,7 @@ export interface Task {
   errorMessage?: string;
   externalId: string | null;
   externalSource: string | null;
+  parentId: string | null;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;

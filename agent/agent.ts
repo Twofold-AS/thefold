@@ -1,6 +1,7 @@
 import { api, APIError } from "encore.dev/api";
 import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
+import { getAuthData } from "~encore/auth";
 import { github, linear, sandbox, users, tasks, mcp } from "~encore/clients";
 import { agentReports } from "../chat/events";
 import { type ModelMode } from "../ai/router";
@@ -33,6 +34,23 @@ import { db, acquireRepoLock, releaseRepoLock, createJob, startJob, updateJobChe
 
 // All features active by default — no feature flags
 
+// --- Initialization: Log resumable jobs on startup ---
+(async () => {
+  try {
+    const resumable = await findResumableJobs();
+    if (resumable.length > 0) {
+      log.info("found resumable jobs from previous crash/restart", {
+        count: resumable.length,
+        jobs: resumable.map(j => ({ jobId: j.id, taskId: j.taskId, phase: j.currentPhase })),
+      });
+    }
+  } catch (err) {
+    log.warn("failed to check for resumable jobs on startup", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+})();
+
 // --- Types ---
 
 export interface StartTaskRequest {
@@ -44,6 +62,8 @@ export interface StartTaskRequest {
   thefoldTaskId?: string;
   repoName?: string;
   repoOwner?: string;
+  /** When true, agent only plans and creates tasks — skips build/code-gen */
+  planOnly?: boolean;
 }
 
 export interface StartTaskResponse {
@@ -63,6 +83,10 @@ export interface ExecuteTaskOptions {
   forceContinue?: boolean;
   userClarification?: string;
   skipReview?: boolean;
+  /** When true, agent only runs planning phase — skips build and review */
+  planOnly?: boolean;
+  /** When true, agent runs in autonomous mode with all tools enabled */
+  autoMode?: boolean;
 }
 
 export interface ExecuteTaskResult {
@@ -282,7 +306,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           planningCtx,
           tracker,
           { report, think, reportSteps, auditedStep, audit, shouldStopTask, updateLinearIfExists, aiBreaker, sandboxBreaker },
-          { sandboxId: options?.sandboxId },
+          { sandboxId: options?.sandboxId, planOnly: options?.planOnly },
         );
 
         if (!fastExecResult.success || fastExecResult.earlyReturn) {
@@ -294,6 +318,16 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         } else {
           const fastAllFiles = fastExecResult.filesChanged;
           const fastSandboxId = fastExecResult.sandboxId;
+
+          // planOnly: planning done, stop here — no build, no review, no PR
+          if (fastExecResult.planOnlyDone) {
+            await report(ctx, `✅ Planlegging fullført (${fastExecResult.planSummary ? fastExecResult.planSummary.split("\n").length + " steg" : ""}). Kode er ikke generert — bruk vanlig modus for å kjøre planen.`);
+            tracker.end();
+            if (ctx.jobId) {
+              await savePhaseMetrics(ctx.jobId, ctx.taskId, tracker.getAll()).catch(() => {});
+            }
+            return { success: true, filesChanged: [], filesContent: [], costUsd: 0 };
+          }
 
           // collectOnly: return early with files — skip review/PR/cleanup
           if (options?.collectOnly) {
@@ -601,6 +635,7 @@ export const startTask = api(
   async (req: StartTaskRequest): Promise<StartTaskResponse> => {
     let modelMode: ModelMode = "auto";
     let subAgentsEnabled = false;
+    let userPreferredModel: string | undefined;
     if (req.userId) {
       try {
         const userInfo = await users.getUser({ userId: req.userId });
@@ -610,6 +645,10 @@ export const startTask = api(
         }
         if (prefs.subAgentsEnabled === true) {
           subAgentsEnabled = true;
+        }
+        // When user has manually selected a preferred model, honour it
+        if (typeof prefs.preferredModel === "string" && prefs.preferredModel.trim()) {
+          userPreferredModel = prefs.preferredModel.trim();
         }
       } catch { /* default to auto */ }
     }
@@ -670,8 +709,9 @@ export const startTask = api(
       branch: "main",
       thefoldTaskId: req.thefoldTaskId || req.taskId,
       modelMode,
-      modelOverride: req.modelOverride,
-      selectedModel: "claude-sonnet-4-5-20250929",
+      // req.modelOverride takes precedence, then user's saved preferred model
+      modelOverride: req.modelOverride || userPreferredModel,
+      selectedModel: req.modelOverride || userPreferredModel || "claude-sonnet-4-5-20250929",
       totalCostUsd: 0,
       totalTokensUsed: 0,
       attemptHistory: [],
@@ -748,7 +788,7 @@ export const startTask = api(
     }
 
     // Fire and forget
-    executeTask(ctx)
+    executeTask(ctx, { planOnly: req.planOnly })
       .catch(() => {})
       .finally(() => releaseRepoLock(ctx.repoOwner, ctx.repoName));
 
@@ -1247,5 +1287,71 @@ export const getAuditStats = api(
       actionTypeCounts,
       recentFailures,
     };
+  }
+);
+
+// --- Auto Agent Endpoint (for /auto page) ---
+
+interface StartAutoRequest {
+  prompt: string;
+  repoName?: string;
+  repoOwner?: string;
+}
+
+interface StartAutoResponse {
+  jobId: string;
+}
+
+export const startAutoAgent = api(
+  { method: "POST", path: "/agent/auto/start", expose: true, auth: true },
+  async (req: StartAutoRequest): Promise<StartAutoResponse> => {
+    const ctx = getAuthData()!;
+    const userId = ctx.userId || "";
+
+    // Sanitize repo name
+    let resolvedRepoName = (req.repoName || "")
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/[^a-zA-Z0-9._-]/g, "");
+    if (!resolvedRepoName.trim()) {
+      resolvedRepoName = "default";
+    }
+
+    // Resolve repo owner from GitHub App if not provided
+    let resolvedOwner = req.repoOwner || "";
+    if (!resolvedOwner.trim()) {
+      try {
+        const { owner } = await github.getGitHubOwner();
+        resolvedOwner = owner;
+      } catch {
+        resolvedOwner = "default";
+      }
+    }
+
+    // Create a task ID for the auto job
+    const taskId = `auto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const conversationId = `auto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // Start the task asynchronously with autoMode enabled
+    setImmediate(async () => {
+      try {
+        const reqBody: StartTaskRequest = {
+          conversationId,
+          taskId,
+          userMessage: req.prompt,
+          userId,
+          repoName: resolvedRepoName,
+          repoOwner: resolvedOwner,
+        };
+        await startTask(reqBody);
+      } catch (err) {
+        log.error("Auto agent task failed to start", {
+          taskId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    return { jobId: taskId };
   }
 );

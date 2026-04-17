@@ -145,28 +145,69 @@ export const getCostSummary = api(
 
 // --- Notifications ---
 
+export interface NotificationItem {
+  id: string;
+  type: "review_ready" | "task_done" | "task_failed";
+  title: string;
+  conversationId: string;
+  taskId?: string;
+  prUrl?: string;
+  reviewId?: string;
+  createdAt: string;
+}
+
 export const notifications = api(
   { method: "GET", path: "/chat/notifications", expose: true, auth: true },
-  async (): Promise<{ notifications: Array<{ id: string; content: string; type: string; createdAt: string }> }> => {
+  async (): Promise<{ notifications: NotificationItem[] }> => {
     const authData = getAuthData();
     if (!authData) throw APIError.unauthenticated("Not authenticated");
 
-    const rows = db.query<{ id: string; content: string; message_type: string; created_at: Date }>`
-      SELECT m.id, m.content, m.message_type, m.created_at
+    const rows = db.query<{
+      id: string;
+      content: string;
+      conversation_id: string;
+      created_at: Date;
+    }>`
+      SELECT m.id, m.content, m.conversation_id, m.created_at
       FROM messages m
       JOIN conversations c ON m.conversation_id = c.id
       WHERE c.owner_email = ${authData.email}
-        AND m.message_type IN ('agent_report', 'task_start')
+        AND m.message_type = 'agent_progress'
+        AND m.content::jsonb->>'status' IN ('waiting', 'done', 'failed')
         AND m.created_at > NOW() - INTERVAL '24 hours'
       ORDER BY m.created_at DESC
-      LIMIT 20
+      LIMIT 30
     `;
-    const result: Array<{ id: string; content: string; type: string; createdAt: string }> = [];
+
+    const result: NotificationItem[] = [];
     for await (const row of rows) {
+      let parsed: Record<string, unknown> = {};
+      try { parsed = JSON.parse(String(row.content)); } catch {}
+
+      const status = String(parsed.status ?? "");
+      const report = (parsed.report ?? {}) as Record<string, unknown>;
+
+      let type: NotificationItem["type"];
+      let title: string;
+      if (status === "waiting") {
+        type = "review_ready";
+        title = "Kode klar for gjennomgang";
+      } else if (status === "done") {
+        type = "task_done";
+        title = report.prUrl ? "Oppgave fullført — PR opprettet" : "Oppgave fullført";
+      } else {
+        type = "task_failed";
+        title = "Oppgave feilet";
+      }
+
       result.push({
         id: row.id,
-        content: String(row.content).substring(0, 500),
-        type: row.message_type,
+        type,
+        title,
+        conversationId: row.conversation_id,
+        taskId: report.taskId ? String(report.taskId) : undefined,
+        prUrl: report.prUrl ? String(report.prUrl) : undefined,
+        reviewId: report.reviewId ? String(report.reviewId) : undefined,
         createdAt: String(row.created_at),
       });
     }

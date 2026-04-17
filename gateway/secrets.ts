@@ -1,12 +1,11 @@
 import { api } from "encore.dev/api";
 import { secret } from "encore.dev/config";
 
-// Declare all project secrets for status checking
-// These are globally unique — same values as used by other services
-const anthropicAPIKey = secret("AnthropicAPIKey");
+// Infrastructure secrets — these remain as Encore secrets.
+// AI provider keys are now stored encrypted in the DB (ai_providers.encrypted_api_key)
+// and managed from the UI at /settings/models.
 const gitHubToken = secret("GitHubToken");
 const linearAPIKey = secret("LinearAPIKey");
-const voyageAPIKey = secret("VoyageAPIKey");
 const resendAPIKey = secret("ResendAPIKey");
 const authSecret = secret("AuthSecret");
 
@@ -33,12 +32,13 @@ export const secretsStatus = api(
   async (): Promise<SecretsStatusResponse> => {
     return {
       secrets: [
-        { name: "AnthropicAPIKey", configured: isConfigured(anthropicAPIKey) },
         { name: "GitHubToken", configured: isConfigured(gitHubToken) },
         { name: "LinearAPIKey", configured: isConfigured(linearAPIKey) },
-        { name: "VoyageAPIKey", configured: isConfigured(voyageAPIKey) },
         { name: "ResendAPIKey", configured: isConfigured(resendAPIKey) },
         { name: "AuthSecret", configured: isConfigured(authSecret) },
+        // Note: ProviderKeyEncryptionSecret is intentionally not checked here —
+        // if it is missing, api calls will fail with a clear error message.
+        // AI provider keys are shown in Settings → AI-modeller (api_key_set field).
       ],
     };
   }

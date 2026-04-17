@@ -345,19 +345,17 @@ Controlled by `SandboxMode` secret (`"docker"` or `"filesystem"`). Default: `"fi
 
 All sandbox endpoints (`create`, `writeFile`, `deleteFile`, `runCommand`, `validate`, `validateIncremental`, `destroy`) support both modes transparently.
 
-**Advanced Pipeline Feature Flag:** `SandboxAdvancedPipeline` secret controls snapshot and performance pipeline steps:
-- `"true"` → Snapshot comparison and performance benchmarks enabled
-- `"false"` or unset → Steps return "disabled by feature flag" warning (non-blocking)
+**Advanced Pipeline:** Snapshot and performance pipeline steps are always enabled.
 
 Key files: `sandbox/sandbox.ts` (mode switching, pipeline), `sandbox/snapshot.ts` (snapshot logic), `sandbox/docker.ts` (Docker operations)
 
 ## Validation Pipeline
-The sandbox runs a 5-step pipeline (5 enabled, feature-flagged):
+The sandbox runs a 5-step pipeline (all steps always enabled):
 1. **typecheck** ✅ — `npx tsc --noEmit`
 2. **lint** ✅ — `npx eslint . --no-error-on-unmatched-pattern`
 3. **test** ✅ — `npm test --if-present`
-4. **snapshot** ✅ — Snapshot comparison: før/etter file diff via SHA-256 hash + size (SandboxAdvancedPipeline flag)
-5. **performance** ✅ — Performance benchmarks: build time, bundle size, source file count (SandboxAdvancedPipeline flag)
+4. **snapshot** ✅ — Snapshot comparison: før/etter file diff via SHA-256 hash + size
+5. **performance** ✅ — Performance benchmarks: build time, bundle size, source file count
 
 ## Skills Pipeline
 Skills are active components in a three-phase pipeline:
@@ -374,7 +372,7 @@ Categories: `framework`, `language`, `security`, `style`, `quality`, `general`.
 
 ## Monitor Service
 Health checks for repos: dependency_audit, test_coverage, code_quality, doc_freshness.
-Daily cron at 03:00, **feature-flagged via MonitorEnabled secret**.
+Daily cron at 03:00.
 
 ## Registry Service (Component Marketplace Grunnmur)
 Component registry with healing pipeline. Foundation for Fase 5 marketplace.
@@ -450,18 +448,21 @@ encore run              # all services + local infra
 - FireworksApiKey — Fireworks inference
 - TheFoldEmail — Avsenderadresse for notifikasjoner
 
-### Feature flags (alle default false)
-- ProgressMessageEnabled — Ny meldingskontrakt
-- GitHubAppEnabled — GitHub App auth
-- DynamicSubAgentsEnabled — Dynamisk sub-agent oppsett
-- HealingPipelineEnabled — Healing pipeline
+## Aktive funksjoner (alltid på)
+Alle funksjoner er aktivert permanent — ingen feature flags. Dette inkluderer:
+- Sandbox snapshot + performance pipeline
+- Monitor health checks og repo-watch
+- Registry component extraction
+- Healing pipeline
+- Agent state machine (strict logging)
+- Persistent job queue
 
 ## Key Files
 - `agent/agent.ts` — Thin orchestrator (174 lines): executeTask() calls buildContext → assessAndRoute → executePlan → handleReview → completeTask. API endpoints: startTask, respondToClarification, forceContinue, job management, metrics, audit log queries
 - `agent/helpers.ts` — All shared helper functions: report(), think(), reportSteps(), auditedStep(), audit(), shouldStopTask(), checkCancelled(), updateLinearIfExists(), autoInitRepo(), validateAgentScope(). Re-exports circuit breakers. Constants: REPO_OWNER, REPO_NAME, MAX_RETRIES, MAX_PLAN_REVISIONS
 - `agent/rate-limiter.ts` — Rate limiting: checkRateLimit(), recordTaskStart(), cleanupRateLimits cron. 20/h + 100/day per userId
 - `agent/token-policy.ts` — Per-phase token budget limits (confidence 2K, planning 8K, building 50K, diagnosis 4K, review 8K). isOverTokenBudget(), warnIfOverBudget(). Logging only, no hard enforcement
-- `agent/state-machine.ts` — Explicit state machine for agent lifecycle: 14 phases, VALID_TRANSITIONS, createStateMachine(), validateSequence(), feature-flagged strict mode (AgentStateMachineStrict secret)
+- `agent/state-machine.ts` — Explicit state machine for agent lifecycle: 14 phases, VALID_TRANSITIONS, createStateMachine(), validateSequence(), strict logging of illegal transitions
 - `agent/messages.ts` — Typed Pub/Sub message contract: AgentMessage union (6 types: status/thought/report/clarification/review/completion), serializeMessage/deserializeMessage with legacy fallback, builder functions
 - `agent/orchestrator.ts` — Project orchestrator: curateContext, executeProject, project endpoints
 - `agent/review.ts` — Code review system: submit, get, list, approve, request-changes, reject
@@ -493,7 +494,7 @@ encore run              # all services + local infra
 - `chat/chat.ts` — Chat service with project detection integration, file uploads, source tracking
 - `chat/agent-message-parser.ts` — Duplicated agent message types for cross-service boundary (Encore prohibition), deserializeMessage + buildStatusContent
 - `chat/detection.ts` — detectProjectRequest heuristics
-- `sandbox/sandbox.ts` — Validation pipeline, dual-mode (filesystem/Docker) switching, snapshot cache, SandboxAdvancedPipeline flag
+- `sandbox/sandbox.ts` — Validation pipeline, dual-mode (filesystem/Docker) switching, snapshot cache
 - `sandbox/snapshot.ts` — File snapshots: takeSnapshot, takeDockerSnapshot, compareSnapshots
 - `sandbox/docker.ts` — Docker container sandbox: create, exec, write, delete, destroy, cleanup
 - `memory/memory.ts` — Hybrid search (YC): 60% semantic (pgvector) + 40% keyword (BM25/tsvector) with decay scoring, code patterns, consolidation. HYBRID_ALPHA=0.6 constant. search_vector auto-generated by trigger (content weight A, category B, tags C). BM25-only results added when vector search misses. ASI06: sanitizeForMemory() on all writes, SHA-256 content_hash integrity check in search(), trust_level segmentation (user/agent/system)
@@ -503,7 +504,7 @@ encore run              # all services + local infra
 - `github/github.ts` — Repository operations with context windowing
 - `registry/registry.ts` — Component marketplace: CRUD, use-tracking, useComponent (exposed), healing pipeline, Pub/Sub
 - `registry/types.ts` — Component, HealingEvent, request/response types
-- `registry/extractor.ts` — AI-based component auto-extraction with extractComponents(), extractAndRegister(), callForExtraction endpoint, feature-flagged via RegistryExtractionEnabled
+- `registry/extractor.ts` — AI-based component auto-extraction with extractComponents(), extractAndRegister(), callForExtraction endpoint
 - `templates/templates.ts` — Template library: list, get, useTemplate, categories
 - `templates/types.ts` — Template, TemplateFile, TemplateVariable types
 - `mcp/mcp.ts` — MCP server registry: list, get, install, uninstall, configure, installed

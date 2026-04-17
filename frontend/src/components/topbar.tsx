@@ -19,9 +19,10 @@ function MIcon({ name, size = 20 }: { name: string; size?: number }) {
 interface TopBarProps {
   notifCount?: number;
   onNotifClick?: () => void;
+  onNewChat?: () => void;
 }
 
-export default function TopBar({ notifCount = 0, onNotifClick }: TopBarProps) {
+export default function TopBar({ notifCount = 0, onNotifClick, onNewChat }: TopBarProps) {
   const router = useRouter();
   const pathname = usePathname();
 
@@ -34,30 +35,36 @@ export default function TopBar({ notifCount = 0, onNotifClick }: TopBarProps) {
         justifyContent: "space-between",
         padding: "0 24px",
         flexShrink: 0,
+        position: "relative",
+        zIndex: 10,
       }}
     >
-      {/* Left: TheFold + BETA */}
+      {/* Left: logo + TheFold + BETA */}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <span
-          style={{
-            fontSize: 20,
-            fontWeight: 700,
-            color: T.text,
-            fontFamily: T.brandFont,
-            letterSpacing: "-0.01em",
-            cursor: "pointer",
-          }}
+        <div
+          style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
           onClick={() => router.push("/cowork")}
         >
-          TheFold
-        </span>
+          <img src="/logo/logo.svg" alt="TheFold" style={{ height: 27, width: "auto", display: "block" }} />
+          <span
+            style={{
+              fontSize: 20,
+              fontWeight: 700,
+              color: T.text,
+              fontFamily: T.brandFont,
+              letterSpacing: "-0.01em",
+            }}
+          >
+            TheFold
+          </span>
+        </div>
         <span
           style={{
             fontSize: 10,
             fontWeight: 500,
-            color: T.textMuted,
-            border: `1px solid ${T.border}`,
-            borderRadius: 6,
+            color: T.text,
+            border: `1px solid rgba(255,255,255,0.35)`,
+            borderRadius: 20,
             padding: "2px 8px",
             lineHeight: "16px",
             fontFamily: T.sans,
@@ -69,6 +76,10 @@ export default function TopBar({ notifCount = 0, onNotifClick }: TopBarProps) {
 
       {/* Right: nav + utility icons */}
       <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+        <IconBtn title="Ny samtale" onClick={() => onNewChat ? onNewChat() : router.push("/cowork")}>
+          <MIcon name="add" />
+        </IconBtn>
+        <div style={{ width: 1, height: 20, background: T.border, margin: "0 4px" }} />
         <IconBtn title="Oppgaver" active={pathname === "/tasks"} onClick={() => router.push("/tasks")}>
           <MIcon name="task_alt" />
         </IconBtn>

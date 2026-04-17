@@ -27,6 +27,8 @@ export interface TheFoldTask {
   prUrl: string | null;
   reviewId: string | null;
   errorMessage: string | null;
+  parentId?: string | null;
+  subTasks?: TheFoldTask[];
   createdBy: string;
   createdAt: string;
   updatedAt: string;

@@ -42,6 +42,8 @@ export interface Component {
   type: ComponentType;
   variables: ComponentVariable[];
   source: ComponentSource;
+  dependencySnapshot?: Record<string, string>; // { "encore.dev": "1.x", "react": "18.x" }
+  generatedAt?: Date;
   createdAt: string;
   updatedAt: string;
 }

@@ -1,23 +1,38 @@
 import { api, APIError } from "encore.dev/api";
-import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
+import { Topic } from "encore.dev/pubsub";
 import log from "encore.dev/log";
-import { cache } from "~encore/clients";
+import { cache, ai } from "~encore/clients";
 import { calculateImportanceScore, calculateDecayedRelevance } from "./decay";
 import type { MemoryType } from "./decay";
 import { sanitizeForMemory } from "../ai/sanitize";
 import { createHash } from "node:crypto";
 import { db } from "./db";
 
+// --- Brain Activity Topic ---
+
+export interface BrainEvent {
+  type: "dream" | "prune" | "healing";
+  phase: string;
+  message: string;
+  progress?: number; // 0-100
+  userId: string;
+}
+
+export const brainEvents = new Topic<BrainEvent>("brain-events", {
+  deliveryGuarantee: "at-least-once",
+});
+
+// In-memory cache of latest brain event per userId (for polling)
+export const brainStatusCache = new Map<string, BrainEvent>();
+
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
 // ZI: Switched from Voyage AI to OpenAI text-embedding-3-small (1536 dimensions)
-// Previous provider kept commented out for rollback capability:
-// const voyageKey = secret("VoyageAPIKey");
-// NOTE: OpenAIAPIKey secret must be configured in Encore secrets for this to work.
-const OpenAIApiKey = secret("OpenAIAPIKey");
+// API key is now read from the ai_providers DB via the ai service internal endpoint.
+// Configure the OpenAI key in Settings → AI-modeller.
 
 /** Hybrid search weighting: 60% semantic (vector), 40% keyword (BM25) */
 export const HYBRID_ALPHA = 0.6;
@@ -40,6 +55,7 @@ async function embed(text: string): Promise<number[]> {
 
   // Cache miss — call OpenAI API with retry for 429
   const maxRetries = 3;
+  const { apiKey: openAIApiKey } = await ai.getProviderKeyInternal({ slug: "openai" });
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -47,7 +63,7 @@ async function embed(text: string): Promise<number[]> {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${OpenAIApiKey()}`,
+          Authorization: `Bearer ${openAIApiKey}`,
         },
         body: JSON.stringify({
           input: truncated,
@@ -559,7 +575,7 @@ export const deleteMemory = api(
 );
 
 export const cleanup = api(
-  { method: "POST", path: "/memory/cleanup", expose: false },
+  { method: "POST", path: "/memory/cleanup", expose: true, auth: true },
   async (): Promise<CleanupResponse> => {
     const result = await db.queryRow<{ count: number }>`
       WITH deleted AS (
@@ -660,6 +676,17 @@ export const decay = api(
 export const decayCron = api(
   { method: "POST", path: "/memory/decay-cron", expose: false },
   async (): Promise<DecayResponse> => runDecayLogic()
+);
+
+// GET /memory/brain-status — Get latest brain activity event for current user
+export const brainStatus = api(
+  { method: "GET", path: "/memory/brain-status", expose: true, auth: true },
+  async (): Promise<{ active: boolean; event?: BrainEvent }> => {
+    // In a multi-user system, we would fetch from context, but for now use a placeholder
+    const userId = "current-user";
+    const event = brainStatusCache.get(userId);
+    return { active: !!event, event };
+  }
 );
 
 // GET /memory/stats — Memory statistics

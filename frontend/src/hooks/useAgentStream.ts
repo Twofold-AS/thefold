@@ -119,8 +119,10 @@ export function useAgentStream(
             messages: [
               ...prev.messages,
               {
-                // SSE id: field is the canonical event ID for dedup
-                id: e.lastEventId || crypto.randomUUID(),
+                // data.messageId (DB placeholder UUID) takes priority — enables dedup when
+                // refreshMsgs() fetches the same message from DB after agent.done fires.
+                // Falls back to SSE id: field, then a random UUID for true streaming deltas.
+                id: (data.messageId as string) || e.lastEventId || crypto.randomUUID(),
                 role: "assistant",
                 // During streaming, content="" and delta has the chunk
                 content: data.content || data.delta || "",

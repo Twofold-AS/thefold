@@ -21,6 +21,7 @@ export interface ChatRequest {
   repoContext?: string; // Actual file content from the repo (tree + relevant files)
   conversationId?: string; // For tool-use (e.g. start_task needs conversation reference)
   aiName?: string; // User-configurable AI assistant name (default: "Jorgen Andre")
+  complexity?: number; // 1-10 — used for auto model routing when model is not set
 }
 
 export interface ChatResponse {

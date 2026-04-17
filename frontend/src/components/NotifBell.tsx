@@ -4,15 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { T } from "@/lib/tokens";
 import BellIcon from "@/components/icons/BellIcon";
-import Tag from "@/components/Tag";
-import { getNotifications } from "@/lib/api";
-
-interface Notification {
-  id: string;
-  content: string;
-  type: string;
-  createdAt: string;
-}
+import { getNotifications, type NotificationItem } from "@/lib/api";
 
 interface NotifBellProps {
   onGoTask?: (id: string) => void;
@@ -21,10 +13,22 @@ interface NotifBellProps {
   onClose?: () => void;
 }
 
+const TYPE_LABEL: Record<NotificationItem["type"], string> = {
+  review_ready: "gjennomgang",
+  task_done: "fullført",
+  task_failed: "feilet",
+};
+
+const TYPE_COLOR: Record<NotificationItem["type"], string> = {
+  review_ready: "#f59e0b",
+  task_done: "#22c55e",
+  task_failed: "#ef4444",
+};
+
 export default function NotifBell({ onGoTask, forceOpen, onClose }: NotifBellProps) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [notifs, setNotifs] = useState<Notification[]>([]);
+  const [notifs, setNotifs] = useState<NotificationItem[]>([]);
   const [lastSeen, setLastSeen] = useState<string>("");
 
   useEffect(() => {
@@ -43,7 +47,7 @@ export default function NotifBell({ onGoTask, forceOpen, onClose }: NotifBellPro
 
   useEffect(() => {
     fetchNotifs();
-    const interval = setInterval(fetchNotifs, 30000);
+    const interval = setInterval(fetchNotifs, 60000);
     return () => clearInterval(interval);
   }, [fetchNotifs]);
 
@@ -62,124 +66,70 @@ export default function NotifBell({ onGoTask, forceOpen, onClose }: NotifBellPro
     }
   };
 
-  const typeLabel = (type: string) => {
-    const map: Record<string, string> = {
-      agent_report: "rapport",
-      agent_status: "status",
-      task_start: "oppgave",
-      healing_notification: "healing",
-      system: "system",
-    };
-    return map[type] || type;
-  };
-
-  // Parse notification content — extract human-readable text from any JSON structure
-  const parseContent = (content: string): string => {
-    if (!content) return "Ny hendelse";
-
-    // Deep extract: recursively find the first meaningful string in any object
-    const extractText = (obj: any, depth = 0): string | null => {
-      if (depth > 5) return null;
-      if (typeof obj === "string" && obj.length > 3 && obj.length < 300 && !obj.startsWith("{") && !obj.startsWith("[")) return obj;
-      if (typeof obj !== "object" || obj === null) return null;
-      // Priority keys
-      for (const key of ["message", "summary", "title", "text", "description", "question", "label"]) {
-        if (typeof obj[key] === "string" && obj[key].length > 2) return obj[key];
-      }
-      // Check payload
-      if (obj.payload) {
-        const fromPayload = extractText(obj.payload, depth + 1);
-        if (fromPayload) return fromPayload;
-      }
-      // Check nested objects
-      for (const val of Object.values(obj)) {
-        const found = extractText(val, depth + 1);
-        if (found) return found;
-      }
-      return null;
-    };
-
-    try {
-      let parsed = JSON.parse(content);
-
-      // Handle double-encoded JSON (string inside string)
-      if (typeof parsed === "string") {
-        try { parsed = JSON.parse(parsed); } catch {}
-      }
-
-      // If it's still a plain string after parsing, return it
-      if (typeof parsed === "string") return parsed.length > 120 ? parsed.slice(0, 117) + "..." : parsed;
-
-      // Known types
-      if (parsed.type === "completion") return `Oppgave fullført${parsed.payload?.prUrl ? " — PR opprettet" : ""}`;
-      if (parsed.type === "review") return "Kode-review klar for gjennomgang";
-      if (parsed.type === "status" && parsed.phase) return `${parsed.phase}: ${extractText(parsed) || "oppdatering"}`;
-      if (parsed.type === "progress" && parsed.summary) return parsed.summary;
-      if (parsed.type === "progress" && parsed.phase) return `${parsed.phase}: ${extractText(parsed) || "jobber"}`;
-
-      // Deep extract
-      const text = extractText(parsed);
-      if (text) return text.length > 120 ? text.slice(0, 117) + "..." : text;
-
-      // Absolute last resort — show type if available
-      if (parsed.type) return `${parsed.type}${parsed.phase ? ` (${parsed.phase})` : ""}`;
-
-      return "Ny hendelse";
-    } catch {
-      // JSON parse failed — content is either plain text or truncated JSON
-      // If it looks like truncated JSON, show a friendly fallback
-      if (content.startsWith("{") || content.startsWith("[")) {
-        return "TheFold jobber...";
-      }
-      return content.length > 120 ? content.slice(0, 117) + "..." : content;
-    }
-  };
-
-  // Route to relevant page based on notification type
-  const handleNotifClick = (n: Notification) => {
+  const handleNotifClick = (n: NotificationItem) => {
     setOpen(false);
+    onClose?.();
 
-    // Try to extract conversationId from content for direct routing
-    let conversationId: string | null = null;
-    let taskId: string | null = null;
-    try {
-      const parsed = JSON.parse(n.content);
-      conversationId = parsed.conversationId || parsed.payload?.conversationId || null;
-      taskId = parsed.taskId || parsed.payload?.taskId || null;
-    } catch {}
-
-    switch (n.type) {
-      case "task_start":
-        router.push("/tasks");
-        break;
-      case "healing_notification":
-        router.push("/memory");
-        break;
-      case "agent_report":
-      case "agent_status":
-        if (taskId) {
-          router.push("/tasks");
-          return;
-        }
-        if (conversationId) {
-          router.push(`/cowork?conv=${encodeURIComponent(conversationId)}`);
-          return;
-        }
-        router.push("/cowork");
-        break;
-      default:
-        if (conversationId) {
-          router.push(`/cowork?conv=${encodeURIComponent(conversationId)}`);
-          return;
-        }
-        router.push("/cowork");
+    if (n.type === "review_ready") {
+      router.push(`/cowork?conv=${encodeURIComponent(n.conversationId)}`);
+    } else if (n.type === "task_done" && n.prUrl) {
+      window.open(n.prUrl, "_blank", "noopener,noreferrer");
+    } else {
+      // task_done without PR, task_failed → go to conversation
+      router.push(`/cowork?conv=${encodeURIComponent(n.conversationId)}`);
     }
   };
 
-  const isOpen = forceOpen || open;
   const closePopup = () => { setOpen(false); onClose?.(); };
 
-  // In forceOpen mode, render just the popup (no bell icon)
+  const renderItem = (n: NotificationItem, i: number, total: number) => (
+    <div
+      key={n.id}
+      onClick={() => handleNotifClick(n)}
+      style={{
+        padding: "12px 16px",
+        cursor: "pointer",
+        borderBottom: i < total - 1 ? `1px solid ${T.border}` : "none",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        transition: "background 0.1s",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = T.subtle)}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 13,
+          fontWeight: 500,
+          color: T.text,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}>
+          {n.title}
+        </div>
+        <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>
+          {new Date(n.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" })}
+        </div>
+      </div>
+      <span style={{
+        fontSize: 10,
+        fontWeight: 600,
+        padding: "2px 7px",
+        borderRadius: 6,
+        background: `${TYPE_COLOR[n.type]}22`,
+        color: TYPE_COLOR[n.type],
+        border: `1px solid ${TYPE_COLOR[n.type]}55`,
+        whiteSpace: "nowrap",
+        flexShrink: 0,
+      }}>
+        {TYPE_LABEL[n.type]}
+      </span>
+    </div>
+  );
+
+  // forceOpen mode — popup only, no bell
   if (forceOpen) {
     return (
       <>
@@ -209,38 +159,38 @@ export default function NotifBell({ onGoTask, forceOpen, onClose }: NotifBellPro
               Ingen varsler siste 24 timer
             </div>
           ) : (
-            notifs.map((n, i) => (
-              <div
-                key={n.id}
-                onClick={() => { handleNotifClick(n); closePopup(); }}
-                style={{
-                  padding: "12px 16px",
-                  cursor: "pointer",
-                  borderBottom: i < notifs.length - 1 ? `1px solid ${T.border}` : "none",
-                  transition: "background 0.1s",
-                }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = T.subtle)}
-                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-              >
-                <div style={{ fontSize: 13, fontWeight: 500, color: T.text }}>{parseContent(n.content)}</div>
-                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>
-                  {new Date(n.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" })}
-                  {" — "}
-                  {typeLabel(n.type)}
-                </div>
-              </div>
-            ))
+            notifs.map((n, i) => renderItem(n, i, notifs.length))
           )}
         </div>
       </>
     );
   }
 
+  // Bell icon mode
   return (
     <div style={{ position: "relative", zIndex: 60 }}>
-      {/* Legacy bell icon mode — kept for backwards compat */}
-      <div onClick={handleOpen} style={{ cursor: "pointer", color: T.textMuted, padding: 6 }}>
+      <div onClick={handleOpen} style={{ cursor: "pointer", color: T.textMuted, padding: 6, position: "relative" }}>
         <BellIcon />
+        {unreadCount > 0 && (
+          <span style={{
+            position: "absolute",
+            top: 2,
+            right: 2,
+            minWidth: 14,
+            height: 14,
+            background: "#ef4444",
+            borderRadius: 7,
+            fontSize: 9,
+            fontWeight: 700,
+            color: "#fff",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "0 3px",
+          }}>
+            {unreadCount > 9 ? "9+" : unreadCount}
+          </span>
+        )}
       </div>
       {open && (
         <>
@@ -277,47 +227,7 @@ export default function NotifBell({ onGoTask, forceOpen, onClose }: NotifBellPro
                 Ingen varsler siste 24 timer
               </div>
             ) : (
-              notifs.map((n, i) => (
-                <div
-                  key={n.id}
-                  onClick={() => handleNotifClick(n)}
-                  style={{
-                    padding: "10px 16px",
-                    cursor: "pointer",
-                    borderBottom: i < notifs.length - 1 ? `1px solid ${T.border}` : "none",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    transition: "background 0.1s",
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = T.subtle)}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                      fontSize: 12,
-                      color: T.text,
-                      fontWeight: 500,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}>
-                      {parseContent(n.content)}
-                    </div>
-                    <div style={{
-                      fontSize: 10,
-                      fontFamily: T.mono,
-                      color: T.textFaint,
-                      marginTop: 1,
-                    }}>
-                      {new Date(n.createdAt).toLocaleTimeString("nb-NO", { hour: "2-digit", minute: "2-digit" })}
-                    </div>
-                  </div>
-                  <Tag variant="default">
-                    {typeLabel(n.type)}
-                  </Tag>
-                </div>
-              ))
+              notifs.map((n, i) => renderItem(n, i, notifs.length))
             )}
           </div>
         </>

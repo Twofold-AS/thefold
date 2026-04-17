@@ -82,6 +82,8 @@ export async function sendMessage(conversationId: string, message: string, optio
   skillIds?: string[];
   repoName?: string;
   repoOwner?: string;
+  planMode?: boolean;
+  firecrawlEnabled?: boolean;
 }) {
   return apiFetch<{
     message: Message;
@@ -109,9 +111,20 @@ export async function getConversations() {
   }>("/chat/conversations", { method: "GET" });
 }
 
+export interface NotificationItem {
+  id: string;
+  type: "review_ready" | "task_done" | "task_failed";
+  title: string;
+  conversationId: string;
+  taskId?: string;
+  prUrl?: string;
+  reviewId?: string;
+  createdAt: string;
+}
+
 export async function getNotifications() {
   return apiFetch<{
-    notifications: Array<{ id: string; content: string; type: string; createdAt: string }>;
+    notifications: NotificationItem[];
   }>("/chat/notifications", { method: "GET" });
 }
 
@@ -158,6 +171,37 @@ export async function deleteConversation(conversationId: string) {
   return apiFetch<{ success: boolean }>("/chat/delete", {
     method: "POST",
     body: { conversationId },
+  });
+}
+
+/** Archive a conversation (hides from history, retrievable from settings) */
+export async function archiveConversation(conversationId: string) {
+  return apiFetch<{ success: boolean }>("/chat/conversations/archive", {
+    method: "POST",
+    body: { conversationId },
+  });
+}
+
+/** Restore an archived conversation back to history */
+export async function restoreConversation(conversationId: string) {
+  return apiFetch<{ success: boolean }>("/chat/conversations/restore", {
+    method: "POST",
+    body: { conversationId },
+  });
+}
+
+/** Permanently delete an archived conversation (cannot be undone) */
+export async function deleteConversationPermanent(conversationId: string) {
+  return apiFetch<{ success: boolean }>("/chat/conversations/delete", {
+    method: "POST",
+    body: { conversationId },
+  });
+}
+
+/** List archived conversations */
+export async function listArchivedConversations() {
+  return apiFetch<{ conversations: ConversationSummary[] }>("/chat/conversations/archived", {
+    method: "GET",
   });
 }
 

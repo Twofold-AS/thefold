@@ -537,7 +537,12 @@ async function runSnapshotComparison(
     // Stor diff = advarsel (men ikke feil)
     const errors: string[] = [];
     if (diff.created.length + diff.modified.length > 50) {
-      warnings.push("⚠️ Large change set (>50 files) — review carefully");
+      warnings.push("Large change set (>50 files) — review carefully");
+    }
+
+    // Stor byte-diff = advarsel om plan var for bred
+    if (diff.totalDiffBytes > 500_000) {
+      warnings.push("large_diff: Mer enn 500KB kode endret — vurder om planen var for bred");
     }
 
     log.info("snapshot comparison complete", {
@@ -546,6 +551,7 @@ async function runSnapshotComparison(
       modified: diff.modified.length,
       deleted: diff.deleted.length,
       unchanged: diff.unchanged,
+      totalDiffBytes: diff.totalDiffBytes,
     });
 
     return {

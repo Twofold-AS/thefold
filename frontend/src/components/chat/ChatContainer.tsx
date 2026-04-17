@@ -3,9 +3,10 @@
 import { T } from "@/lib/tokens";
 import MessageList from "@/components/chat/MessageList";
 import MessageInput from "@/components/chat/MessageInput";
-import { Clock, Plus } from "lucide-react";
+import { Clock } from "lucide-react";
 import type { Message } from "@/lib/api";
 import type { ReviewActionType } from "@/hooks/useReviewFlow";
+import type { ReactNode } from "react";
 
 interface Skill {
   id: string;
@@ -36,7 +37,7 @@ interface ChatContainerProps {
   onApprove: (reviewId: string) => Promise<void>;
   onReject: (reviewId: string) => Promise<void>;
   onRequestChanges: (reviewId: string, feedback?: string) => void;
-  onSend: (value: string) => void;
+  onSend: (value: string, options?: { firecrawlEnabled?: boolean }) => void;
   pendingReviewId: string | null;
   reviewInProgress?: ReviewActionType;
   skills: Skill[];
@@ -49,6 +50,12 @@ interface ChatContainerProps {
   onModelChange: (id: string | null) => void;
   onHistoryToggle?: () => void;
   onNewChat?: () => void;
+  /** Rendered above the chat input — for ModeIndicators (sub-agents, plan mode, inkognito) */
+  modeIndicatorSlot?: ReactNode;
+  isIncognito?: boolean;
+  onIncognitoToggle?: () => void;
+  planMode?: boolean;
+  onPlanModeToggle?: () => void;
 }
 
 export default function ChatContainer({
@@ -80,13 +87,17 @@ export default function ChatContainer({
   onModelChange,
   onHistoryToggle,
   onNewChat,
+  modeIndicatorSlot,
+  isIncognito,
+  onIncognitoToggle,
+  planMode,
+  onPlanModeToggle,
 }: ChatContainerProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       {/* Header */}
       <div style={{
         padding: "14px 20px",
-        borderBottom: `1px solid ${T.border}`,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
@@ -100,19 +111,6 @@ export default function ChatContainer({
           )}
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          {onNewChat && (
-            <button
-              onClick={onNewChat}
-              title="Ny samtale"
-              style={{
-                background: "transparent", border: `1px solid ${T.border}`, borderRadius: 8,
-                padding: "6px 10px", cursor: "pointer", color: T.textMuted,
-                display: "flex", alignItems: "center", gap: 4, fontSize: 12,
-              }}
-            >
-              <Plus size={14} /> Ny
-            </button>
-          )}
           {onHistoryToggle && (
             <button
               onClick={onHistoryToggle}
@@ -147,6 +145,15 @@ export default function ChatContainer({
         reviewInProgress={reviewInProgress}
       />
 
+      {/* Mode indicators — rendered above the input, aligned to chat input width */}
+      {modeIndicatorSlot && (
+        <div style={{ display: "flex", justifyContent: "center", padding: "0 20px 4px", flexShrink: 0 }}>
+          <div style={{ width: "100%", maxWidth: 700 }}>
+            {modeIndicatorSlot}
+          </div>
+        </div>
+      )}
+
       {/* Input */}
       <MessageInput
         onSubmit={onSend}
@@ -161,6 +168,10 @@ export default function ChatContainer({
         models={models}
         selectedModel={selectedModel}
         onModelChange={onModelChange}
+        isIncognito={isIncognito}
+        onIncognitoToggle={onIncognitoToggle}
+        planMode={planMode}
+        onPlanModeToggle={onPlanModeToggle}
       />
     </div>
   );

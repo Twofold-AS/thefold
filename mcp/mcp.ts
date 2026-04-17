@@ -311,3 +311,70 @@ export const validateServer = api(
     }
   }
 );
+
+// --- Register Custom MCP Server ---
+
+interface RegisterCustomMCPRequest {
+  name: string;
+  command: string;
+  args?: string[];
+  description?: string;
+}
+
+interface RegisterCustomMCPResponse {
+  id: string;
+  server: MCPServer;
+}
+
+export const registerCustomMCP = api(
+  { method: "POST", path: "/mcp/register-custom", expose: true, auth: true },
+  async (req: RegisterCustomMCPRequest): Promise<RegisterCustomMCPResponse> => {
+    if (!req.name?.trim()) throw APIError.invalidArgument("name is required");
+    if (!req.command?.trim()) throw APIError.invalidArgument("command is required");
+
+    // Generate UUID for new server
+    const { randomUUID } = await import("crypto");
+    const serverId = randomUUID();
+
+    const args = req.args && req.args.length > 0 ? JSON.stringify(req.args) : null;
+
+    const row = await db.queryRow<MCPServerRow>`
+      INSERT INTO mcp_servers (
+        id,
+        name,
+        description,
+        command,
+        args,
+        status,
+        category,
+        config_required,
+        created_at,
+        updated_at
+      ) VALUES (
+        ${serverId}::uuid,
+        ${req.name.trim()},
+        ${req.description || null},
+        ${req.command.trim()},
+        ${args}::jsonb,
+        'available',
+        'general',
+        false,
+        NOW(),
+        NOW()
+      )
+      RETURNING *
+    `;
+
+    if (!row) {
+      throw APIError.internal("Failed to insert MCP server");
+    }
+
+    log.info("Custom MCP server registered", {
+      serverId,
+      name: req.name.trim(),
+      command: req.command.trim(),
+    });
+
+    return { id: serverId, server: parseRow(row) };
+  }
+);

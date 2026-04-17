@@ -26,6 +26,8 @@ export interface TheFoldTask {
   prUrl: string | null;
   reviewId: string | null;
   errorMessage: string | null;
+  parentId?: string | null;
+  subTasks?: TheFoldTask[];
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -57,12 +59,34 @@ export async function listTheFoldTasks(options?: {
   status?: string;
   source?: string;
   labels?: string[];
+  parentId?: string;
+  rootOnly?: boolean;
   limit?: number;
   offset?: number;
 }) {
   return apiFetch<{ tasks: TheFoldTask[]; total: number }>("/tasks/list", {
     method: "POST",
     body: options || {},
+  });
+}
+
+export async function listSubTasks(parentId: string) {
+  return apiFetch<{ tasks: TheFoldTask[] }>("/tasks/list-subtasks", {
+    method: "POST",
+    body: { parentId },
+  });
+}
+
+export async function createSubTask(parentId: string, data: {
+  title: string;
+  description?: string;
+  repo?: string;
+  priority?: number;
+  labels?: string[];
+}) {
+  return apiFetch<{ task: TheFoldTask }>("/tasks/create-subtask", {
+    method: "POST",
+    body: { parentId, ...data },
   });
 }
 
@@ -90,6 +114,10 @@ export async function getTaskStats() {
     bySource: Record<string, number>;
     byRepo: Record<string, number>;
   }>("/tasks/stats", { method: "GET" });
+}
+
+export async function cleanupOrphanedSubTasks() {
+  return apiFetch<{ deleted: number }>("/tasks/cleanup-orphans", { method: "POST", body: {} });
 }
 
 export async function syncLinearTasks() {

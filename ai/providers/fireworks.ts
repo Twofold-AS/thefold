@@ -4,6 +4,7 @@ import type {
   StandardResponse,
   ProviderRequest,
 } from "../provider-interface";
+import log from "encore.dev/log";
 
 /**
  * Fireworks AI API provider (OpenAI-compatible).
@@ -34,9 +35,17 @@ export const fireworksProvider: AIProviderAdapter = {
       })),
     ];
 
+    const cappedMaxTokens = Math.min(req.maxTokens ?? 2048, 4096);
+    if (req.maxTokens && req.maxTokens > 4096) {
+      log.warn("Fireworks max_tokens capped", {
+        requested: req.maxTokens,
+        capped: cappedMaxTokens,
+      });
+    }
+
     const body: Record<string, any> = {
       model: req.model,
-      max_tokens: req.maxTokens,
+      max_tokens: cappedMaxTokens,
       messages,
     };
 

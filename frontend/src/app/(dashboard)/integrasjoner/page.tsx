@@ -19,18 +19,62 @@ interface StaticIntegration {
 }
 
 const staticIntegrations: StaticIntegration[] = [
-  { n: "Slack", cat: "Kommunikasjon", platform: "slack", desc: "Webhook-varsler til Slack-kanaler", ev: ["task.completed", "review.pending", "health.alert"] },
-  { n: "Discord", cat: "Kommunikasjon", platform: "discord", desc: "Varsler til Discord-server", ev: ["task.completed", "review.pending"] },
-  { n: "Linear", cat: "Prosjektstyring", platform: "linear", desc: "Synkroniserer oppgaver med Linear", ev: ["task.created", "task.updated", "task.completed"] },
-  { n: "GitHub", cat: "Kode", platform: "github", desc: "Repo-tilgang, PR-oppretting, webhooks", ev: ["push", "pull_request", "review"] },
-  { n: "Sentry", cat: "Observability", platform: "sentry", desc: "Feilsporing og ytelsesovervåking" },
-  { n: "Vercel", cat: "Deploy", platform: "vercel", desc: "Automatisk deployment ved PR-merge" },
-  { n: "Resend", cat: "E-post", platform: "resend", desc: "OTP og transaksjonell e-post", ev: ["auth.otp"] },
-  { n: "Brave Search", cat: "MCP", platform: "brave-search", desc: "Web-søk for agent via MCP", ev: ["agent.search"] },
-  { n: "Firecrawl", cat: "Web", platform: "firecrawl", desc: "Web-scraping — agenten kan lese nettsider som kontekst", ev: ["agent.browse_url"] },
+  {
+    n: "Slack",
+    cat: "kommunikasjon",
+    platform: "slack",
+    desc: "Motta varsler om oppgavestatus, builds og reviews direkte i Slack.",
+    ev: ["task.completed", "build.failed", "review.ready"],
+  },
+  {
+    n: "Discord",
+    cat: "kommunikasjon",
+    platform: "discord",
+    desc: "Send agent-hendelser og statusoppdateringer til Discord-kanaler.",
+    ev: ["task.completed", "build.failed", "review.ready"],
+  },
+  {
+    n: "Linear",
+    cat: "prosjektstyring",
+    platform: "linear",
+    desc: "To-veis synkronisering av oppgaver og statuser med Linear.",
+  },
+  {
+    n: "GitHub",
+    cat: "kode",
+    platform: "github",
+    desc: "Les og skriv kode, opprett PRer og håndter repos via GitHub App.",
+  },
+  {
+    n: "Firecrawl",
+    cat: "web",
+    platform: "firecrawl",
+    desc: "Web-skraping og innhenting av kontekst fra nettsider.",
+  },
+  {
+    n: "Sentry",
+    cat: "feilsporing",
+    platform: "sentry",
+    desc: "Koble TheFold til Sentry for automatisk feilanalyse og oppgaveopprettelse.",
+  },
+  {
+    n: "Vercel",
+    cat: "deploy",
+    platform: "vercel",
+    desc: "Integrasjon med Vercel for automatisk deployment etter godkjente PRer.",
+  },
+  {
+    n: "Resend",
+    cat: "e-post",
+    platform: "resend",
+    desc: "E-postvarsler for jobb-fullføring, healing-hendelser og kritiske feil.",
+  },
 ];
 
-const SERVER_SIDE_PLATFORMS = ["linear", "github", "resend", "brave-search", "firecrawl"];
+// Platforms configured server-side via secrets — user cannot add/remove these
+const SERVER_SIDE_PLATFORMS = ["linear", "resend", "brave-search", "firecrawl"];
+// GitHub is server-side but also shown as "tilkoblet" since it's the core integration
+const GITHUB_PLATFORM = "github";
 
 const INTEGRATION_FIELDS: Record<string, { label: string; field: string; placeholder: string }[]> = {
   slack:    [{ label: "Webhook URL", field: "webhookUrl", placeholder: "https://hooks.slack.com/..." }],
@@ -40,10 +84,15 @@ const INTEGRATION_FIELDS: Record<string, { label: string; field: string; placeho
   firecrawl: [{ label: "API Key", field: "botToken", placeholder: "fc-..." }],
 };
 
+/** True only if user has saved a config for this platform */
+function isUserConnected(platform: string, configs: IntegrationConfig[]): boolean {
+  return configs.some(c => c.platform === platform && c.enabled);
+}
+
+/** True if platform is github (always shown as active) or user has configured it */
 function isConnected(platform: string, configs: IntegrationConfig[]): boolean {
-  const cfg = configs.find(c => c.platform === platform);
-  if (cfg && cfg.enabled) return true;
-  return false;
+  if (platform === GITHUB_PLATFORM) return true;
+  return isUserConnected(platform, configs);
 }
 
 function isServerSide(platform: string): boolean {
@@ -73,13 +122,15 @@ export default function IntegrasjonerPage() {
 
   const merged = staticIntegrations.map(si => ({
     ...si,
-    connected: isConnected(si.platform, configs) || isServerSide(si.platform),
+    connected: isConnected(si.platform, configs),
     serverSide: isServerSide(si.platform),
-    userConfigured: isConnected(si.platform, configs),
+    isGitHub: si.platform === GITHUB_PLATFORM,
+    userConfigured: isUserConnected(si.platform, configs),
   }));
 
+  // Only count platforms that are truly connected (github + user-configured)
   const connectedCount = merged.filter(i => i.connected).length;
-  const disconnectedCount = merged.filter(i => !i.connected).length;
+  const disconnectedCount = merged.filter(i => !i.connected && !i.serverSide).length;
 
   const handleOpenConfig = (platform: string) => {
     setConfigPlatform(platform);
@@ -154,7 +205,9 @@ export default function IntegrasjonerPage() {
                 <div key={i} style={{ padding: 20, borderRight: ir ? "none" : `1px solid ${T.border}`, borderBottom: nl ? `1px solid ${T.border}` : "none" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
                     <span style={{ fontSize: 15, fontWeight: 600, color: T.text }}>{ig.n}</span>
-                    <Tag variant={ig.connected ? "success" : "default"}>{ig.connected ? "tilkoblet" : "frakoblet"}</Tag>
+                    {ig.connected && <Tag variant="success">tilkoblet</Tag>}
+                    {!ig.connected && ig.serverSide && <Tag>via server</Tag>}
+                    {!ig.connected && !ig.serverSide && <Tag variant="default">frakoblet</Tag>}
                   </div>
                   <div style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint, marginBottom: 6 }}>{ig.cat}</div>
                   <p style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5, marginBottom: 10 }}>{ig.desc}</p>
@@ -163,7 +216,9 @@ export default function IntegrasjonerPage() {
                       {ig.ev.map(e => (<Tag key={e}>{e}</Tag>))}
                     </div>
                   )}
-                  {ig.serverSide ? (
+                  {ig.isGitHub ? (
+                    <Tag variant="success">Aktiv — GitHub App</Tag>
+                  ) : ig.serverSide ? (
                     <Tag>Konfigurert via server</Tag>
                   ) : ig.userConfigured ? (
                     <Btn sm onClick={() => handleDisconnect(ig.platform)}>Koble fra</Btn>

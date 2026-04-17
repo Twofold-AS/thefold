@@ -101,6 +101,23 @@ function detectLanguage(path: string): string {
 }
 
 /**
+ * Extract dependency snapshot from files (looks for package.json).
+ * Returns object like { "encore.dev": "1.x", "react": "18.x" }
+ */
+function extractDependencySnapshot(files: Array<{ path: string; content: string }>): Record<string, string> {
+  const pkgFile = files.find((f) => f.path === "package.json" || f.path.endsWith("/package.json"));
+  if (!pkgFile) return {};
+
+  try {
+    const pkg = JSON.parse(pkgFile.content);
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    return deps;
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Extract and register components in one fire-and-forget call.
  * Used by agent/completion.ts STEP 9.5.
  */
@@ -112,6 +129,8 @@ export async function extractAndRegister(params: {
   const components = await extractComponents(params);
 
   let registered = 0;
+  const dependencySnapshot = extractDependencySnapshot(params.files);
+
   for (const comp of components) {
     try {
       await registry.register({
@@ -124,6 +143,7 @@ export async function extractAndRegister(params: {
         sourceRepo: params.repo,
         tags: comp.tags,
         version: "1.0.0",
+        dependencySnapshot,
       });
       registered++;
       log.info("auto-registered component", { name: comp.name, repo: params.repo });

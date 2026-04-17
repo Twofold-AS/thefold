@@ -682,7 +682,7 @@ export const listRepos = api(
 
     const token = await resolveToken(targetOwner);
     const data = await ghApi(
-      `/orgs/${targetOwner}/repos?sort=pushed&per_page=30&type=all`,
+      `/orgs/${targetOwner}/repos?sort=pushed&direction=desc&per_page=30&type=all`,
       { token }
     );
 

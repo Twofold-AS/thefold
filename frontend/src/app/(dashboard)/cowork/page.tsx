@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, Suspense } from "react";
+import { useState, useEffect, useRef, Suspense, useCallback } from "react";
 import { useSearchParams } from "next/navigation";
 import { T } from "@/lib/tokens";
 import ChatComposer from "@/components/ChatComposer";
@@ -21,10 +21,12 @@ import {
   forceContinueTask,
   type Message,
 } from "@/lib/api";
+import type { ReactNode } from "react";
 import { apiFetch } from "@/lib/api/client";
 import { useRepoContext } from "@/lib/repo-context";
 import { useAgentStream } from "@/hooks/useAgentStream";
 import { useReviewFlow } from "@/hooks/useReviewFlow";
+import ModeIndicator from "@/components/ModeIndicator";
 
 function classifyError(e: unknown): string {
   const msg = e instanceof Error ? e.message : "Noe gikk galt";
@@ -63,23 +65,55 @@ function ChatPageInner() {
   const [ac, setAc] = useState<string | null>(convParam || null);
   const [newChat, setNewChat] = useState(!convParam);
 
-  // React to URL conversation changes (sidebar clicks)
+  // React to URL conversation changes (sidebar clicks + logo click reset)
   useEffect(() => {
     if (convParam && convParam !== ac) {
       setAc(convParam);
       setNewChat(false);
+    } else if (!convParam && ac !== null) {
+      // No conv param (logo click or "Ny samtale") → reset to new chat view
+      setAc(null);
+      setNewChat(true);
     }
   }, [convParam]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fix #1: Reset sending/task state when switching conversations (prevents SSE bleed)
   const [sending, setSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
+  const [planMode, setPlanMode] = useState(false);
   const [thinkSeconds, setThinkSeconds] = useState(0);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
+  const [isIncognito, setIsIncognito] = useState(false);
   const autoMsgSent = useRef(false);
   const hasSent = useRef(false);
+  const wasSendingRef = useRef(false);
+  const acPrevRef = useRef<string | null>(null);
+  const prevIncognitoRef = useRef(false);
+
+  useEffect(() => {
+    if (ac === acPrevRef.current) return;
+    if (acPrevRef.current !== null) {
+      // Actual conversation switch — clear in-flight state
+      setSending(false);
+      setActiveTaskId(null);
+      setChatError(null);
+      setPendingMessages([]);
+    }
+    acPrevRef.current = ac;
+  }, [ac]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-reset to new chat when inkognito is turned off
+  useEffect(() => {
+    if (prevIncognitoRef.current && !isIncognito) {
+      setAc(null);
+      setNewChat(true);
+    }
+    prevIncognitoRef.current = isIncognito;
+  }, [isIncognito]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
     () => getConversations(),
@@ -93,12 +127,15 @@ function ChatPageInner() {
   );
   const msgs: Message[] = msgData?.messages ?? [];
 
+  // Pending messages that haven't been confirmed by the server yet
+  const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
+
   const { data: skillsData } = useApiData(() => listSkills(), []);
   const availableSkills = skillsData?.skills ?? [];
 
   const { data: providerData } = useApiData(() => listProviders(), []);
   const allModels = (providerData?.providers ?? []).flatMap(p =>
-    p.models.filter(m => m.enabled).map(m => ({ id: m.id, displayName: m.displayName, provider: p.name }))
+    p.models.filter(m => m.enabled).map(m => ({ id: m.modelId, displayName: m.displayName, provider: p.name }))
   );
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
@@ -113,8 +150,7 @@ function ChatPageInner() {
 
   const filtered = conversations.filter((c) => {
     if (c.id.startsWith("inkognito-")) return false;
-    if (selectedRepo) return c.id.startsWith(`repo-${selectedRepo.name}-`);
-    return c.id.startsWith("chat-");
+    return true;
   });
 
   // SSE streaming
@@ -124,12 +160,18 @@ function ChatPageInner() {
       onDone: () => {
         setSending(false);
         setActiveTaskId(null);
+        // Clear pending messages once server confirms them
+        setPendingMessages([]);
         refreshMsgs();
+        // Refresh sidebar when AI response finishes (title now available from first message)
+        refreshConvs();
       },
       onError: (err) => {
         setSending(false);
         setActiveTaskId(null);
         setChatError(classifyError(new Error(err)));
+        // Keep pending messages visible on error (don't wipe them)
+        // They will stay in pendingMessages until user manually clears or new message overwrites
         refreshMsgs();
       },
     }
@@ -162,12 +204,8 @@ function ChatPageInner() {
     return () => clearInterval(iv);
   }, [sending, activeTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Trailing refreshes after send stops (skip if review action in progress, or if never sent)
-  useEffect(() => {
-    if (sending || !ac || reviewInProgress || !hasSent.current) return;
-    const timers = [3000, 10000, 25000, 60000].map(d => setTimeout(() => { refreshMsgs(); }, d));
-    return () => timers.forEach(clearTimeout);
-  }, [sending, reviewInProgress]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Note: trailing refresh timers removed — SSE delivers content immediately (agent.message)
+  // and agent.done already calls refreshMsgs() once to sync DB state. No extra polling needed.
 
   // Convert SSE messages to Message shape
   const sseAsMsgs: Message[] = ac
@@ -184,9 +222,13 @@ function ChatPageInner() {
 
   const dbIds = new Set(msgs.map((m) => m.id));
   const filteredSseMsgs = sseAsMsgs.filter((m) => !dbIds.has(m.id));
-  const merged = [...msgs, ...filteredSseMsgs];
 
-  // Deduplicate user messages with same content (optimistic + DB can produce dupes)
+  // Merge DB messages + SSE messages + pending messages
+  // Pending messages are shown first (in order), then DB/SSE messages
+  const merged = [...pendingMessages, ...msgs, ...filteredSseMsgs];
+
+  // Deduplicate: user messages with same content (optimistic + DB can produce dupes)
+  // Also remove pending messages if they're confirmed in DB
   const seen = new Set<string>();
   const displayMsgs = merged.filter((m) => {
     if (m.role === "user") {
@@ -212,68 +254,17 @@ function ChatPageInner() {
     return () => clearTimeout(max);
   }, [sending]);
 
-  // Polling fallback for direct chat
-  useEffect(() => {
-    if (!sending || activeTaskId || !ac) return;
-
-    let stopped = false;
-    let firstContentAt: number | null = null;
-    const intervals: ReturnType<typeof setInterval>[] = [];
-    const timeouts: ReturnType<typeof setTimeout>[] = [];
-
-    const isReviewMsg = (content: string) => {
-      try { const p = JSON.parse(content); return p.type === "review" || (p.type === "progress" && p.status === "waiting"); }
-      catch { return false; }
-    };
-
-    const poll = async () => {
-      if (stopped) return;
-      try {
-        const result = await getChatHistory(ac, 50);
-        if (stopped) return;
-
-        const assistantMsgs = result.messages.filter(m => m.role === "assistant" && m.content?.trim());
-        const hasContent = assistantMsgs.length > 0;
-        const hasReview = assistantMsgs.some(m => isReviewMsg(m.content));
-
-        if (hasContent) {
-          setMsgData({ messages: result.messages, hasMore: result.hasMore });
-          if (firstContentAt === null) firstContentAt = Date.now();
-          if (hasReview || Date.now() - firstContentAt > 20000) {
-            setSending(false);
-            stopped = true;
-          }
-        }
-      } catch {
-        // ignore transient errors
-      }
-    };
-
-    const startDelay = setTimeout(() => {
-      if (stopped) return;
-      poll();
-      const iv = setInterval(() => { if (!stopped) poll(); }, 2000);
-      intervals.push(iv);
-      const maxTimeout = setTimeout(() => {
-        if (!stopped) { stopped = true; setSending(false); }
-      }, 87000);
-      timeouts.push(maxTimeout);
-    }, 3000);
-    timeouts.push(startDelay);
-
-    return () => {
-      stopped = true;
-      timeouts.forEach(clearTimeout);
-      intervals.forEach(clearInterval);
-    };
-  }, [sending, activeTaskId, ac, setMsgData]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Direct-chat polling fallback removed — SSE delivers content immediately (agent.message, Fase 2)
+  // and agent.done fires reliably to call refreshMsgs(). No polling loop needed for direct chat.
 
   const handleSendResult = (result: { agentTriggered: boolean; taskId?: string } | null) => {
     if (result?.taskId) {
       setActiveTaskId(result.taskId);
     }
+    // Only refresh conversations list — do NOT call refreshMsgs() here.
+    // Calling refreshMsgs() immediately overwrites the optimistic message with empty DB state
+    // (the message hasn't been written yet). SSE streaming and the polling fallback handle updates.
     refreshConvs();
-    refreshMsgs();
   };
 
   // Auto-send msg from search params
@@ -295,10 +286,9 @@ function ChatPageInner() {
         : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
       setAc(convId);
-      setMsgData(prev => ({
-        messages: [...(prev?.messages ?? []), makeOptimisticMsg(convId, autoMsg)],
-        hasMore: prev?.hasMore ?? false,
-      }));
+      const optimisticMsg = makeOptimisticMsg(convId, autoMsg);
+      // Add to pendingMessages so it survives refreshMsgs() calls
+      setPendingMessages([optimisticMsg]);
 
       setSending(true);
       sendMessage(convId, autoMsg, {
@@ -313,29 +303,60 @@ function ChatPageInner() {
 
   const curRepo = ac ? extractRepoFromId(ac) : null;
 
-  const startNewChat = (msg: string) => {
+  // Build mode indicators slot (shown above chatbox in both new-chat and existing-chat views)
+  const hasModeIndicators = subAgentsEnabled || isIncognito || planMode;
+  const modeIndicatorSlot: ReactNode = hasModeIndicators ? (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {planMode && (
+        <ModeIndicator
+          icon="edit_note"
+          color={T.accent}
+          label="Planleggingsmodus aktiv — sender en strukturert plan i stedet for å kjøre direkte"
+        />
+      )}
+      {subAgentsEnabled && (
+        <ModeIndicator
+          icon="hub"
+          color={T.warning ?? "#f59e0b"}
+          label="Sub-agenter er aktive — dette medfører ekstra kostnad"
+        />
+      )}
+      {isIncognito && (
+        <ModeIndicator
+          icon="visibility_off"
+          color={T.textMuted}
+          label="Inkognito — samtalen lagres ikke i historikken"
+        />
+      )}
+    </div>
+  ) : null;
+
+  const startNewChat = useCallback((msg: string) => {
     const repoName = selectedRepo?.name || null;
-    const convId = repoName
-      ? repoConversationId(repoName)
-      : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const convId = isIncognito
+      ? `inkognito-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      : repoName
+        ? repoConversationId(repoName)
+        : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setAc(convId);
     setNewChat(false);
-    setMsgData(prev => ({
-      messages: [...(prev?.messages ?? []), makeOptimisticMsg(convId, msg)],
-      hasMore: prev?.hasMore ?? false,
-    }));
+    // Refresh sidebar immediately when new conversation is created
+    refreshConvs();
+    const optimisticMsg = makeOptimisticMsg(convId, msg);
+    // Add to pendingMessages so it survives refreshMsgs() calls
+    setPendingMessages([optimisticMsg]);
     hasSent.current = true;
     setSending(true);
     sendMessage(convId, msg, {
-      ...(repoName ? { repoName, repoOwner: selectedRepo?.owner } : {}),
+      ...(repoName && !isIncognito ? { repoName, repoOwner: selectedRepo?.owner } : {}),
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
     })
       .then(handleSendResult)
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
-  };
+  }, [selectedRepo, isIncognito, selectedSkillIds, selectedModel, refreshConvs, handleSendResult]);
 
-  const handleSend = async (value: string) => {
+  const handleSend = useCallback(async (value: string, options?: { firecrawlEnabled?: boolean }) => {
     if (!ac || !value) return;
     setChatError(null);
 
@@ -345,10 +366,9 @@ function ChatPageInner() {
       return;
     }
 
-    setMsgData(prev => ({
-      messages: [...(prev?.messages ?? []), makeOptimisticMsg(ac, value)],
-      hasMore: prev?.hasMore ?? false,
-    }));
+    const optimisticMsg = makeOptimisticMsg(ac, value);
+    // Add to pendingMessages so it survives refreshMsgs() calls
+    setPendingMessages(prev => [...prev, optimisticMsg]);
     hasSent.current = true;
     setSending(true);
     sendMessage(ac, value, {
@@ -356,25 +376,26 @@ function ChatPageInner() {
       repoOwner: selectedRepo?.owner || undefined,
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
+      firecrawlEnabled: options?.firecrawlEnabled,
     })
       .then(handleSendResult)
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
-  };
+  }, [ac, pendingReviewId, selectedRepo, curRepo, selectedSkillIds, selectedModel, handleRequestChanges, handleSendResult]);
 
-  const handleCancel = () => {
+  const handleCancel = useCallback(() => {
     if (ac) cancelChatGeneration(ac).catch(() => {});
     setSending(false);
     setActiveTaskId(null);
-  };
+  }, [ac]);
 
-  const handleForceContinue = async () => {
+  const handleForceContinue = useCallback(async () => {
     if (!activeTaskId || !ac) return;
     try {
       await forceContinueTask(activeTaskId, ac);
     } catch {
       // Non-critical
     }
-  };
+  }, [activeTaskId, ac]);
 
   const handleDelete = async (id: string) => {
     await deleteConversation(id);
@@ -406,38 +427,6 @@ function ChatPageInner() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative", overflow: "hidden" }}>
 
-      {/* Sub-agent cost banner */}
-      {subAgentsEnabled && !newChat && (
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "8px 20px",
-          background: T.surface,
-          borderBottom: `1px solid ${T.border}`,
-          fontSize: 12,
-          color: T.warning,
-          flexShrink: 0,
-        }}>
-          <span>Sub-agenter er aktive — dette medfører ekstra kostnad</span>
-          <button
-            onClick={() => setSubAgentsEnabled(false)}
-            style={{
-              background: "transparent",
-              border: `1px solid ${T.border}`,
-              borderRadius: 6,
-              padding: "3px 10px",
-              fontSize: 11,
-              color: T.textMuted,
-              cursor: "pointer",
-              fontFamily: T.sans,
-            }}
-          >
-            Deaktiver
-          </button>
-        </div>
-      )}
-
       {/* Main content */}
       {newChat ? (
         <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
@@ -451,6 +440,11 @@ function ChatPageInner() {
             models={allModels}
             selectedModel={selectedModel}
             onModelChange={setSelectedModel}
+            modeIndicatorSlot={modeIndicatorSlot}
+            isIncognito={isIncognito}
+            onIncognitoToggle={() => setIsIncognito(p => !p)}
+            planMode={planMode}
+            onPlanModeToggle={() => setPlanMode(p => !p)}
           />
         </div>
       ) : (
@@ -509,7 +503,7 @@ function ChatPageInner() {
           )}
 
           <ChatContainer
-            title={ac ? (conversations.find(c => c.id === ac)?.title || "Ny samtale") : "—"}
+            title={ac ? (conversations.find(c => c.id === ac)?.title || (ac.startsWith("inkognito-") ? "Inkognito" : "Ny samtale")) : "—"}
             subtitle={curRepo ?? undefined}
             msgs={displayMsgs}
             msgsLoading={msgsLoading}
@@ -536,6 +530,11 @@ function ChatPageInner() {
             selectedModel={selectedModel}
             onModelChange={setSelectedModel}
             onNewChat={() => { setNewChat(true); setAc(null); }}
+            modeIndicatorSlot={modeIndicatorSlot}
+            isIncognito={isIncognito}
+            onIncognitoToggle={() => setIsIncognito(p => !p)}
+            planMode={planMode}
+            onPlanModeToggle={() => setPlanMode(p => !p)}
           />
         </div>
       )}

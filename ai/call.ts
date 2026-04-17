@@ -2,15 +2,11 @@
 // Provider-registry based AI calls. Anthropic uses SDK streaming, others use fetch.
 
 import { APIError } from "encore.dev/api";
-import { secret } from "encore.dev/config";
 import Anthropic from "@anthropic-ai/sdk";
 import log from "encore.dev/log";
 import { estimateCost, getUpgradeModel } from "./router";
-import { resolveProviderFromModel, buildProviderRequest, transformProviderResponse } from "./provider-registry";
+import { resolveProviderFromModel, buildProviderRequest, transformProviderResponse, getProviderApiKey } from "./provider-registry";
 import type { AICallOptions, AICallResponse } from "./types";
-
-// --- Secrets ---
-const anthropicKey = secret("AnthropicAPIKey");
 
 // --- Constants ---
 export const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
@@ -137,17 +133,18 @@ export function logTokenUsage(usage: TokenUsage): void {
 
 /**
  * Call AI using provider-registry. Anthropic uses SDK streaming, others use fetch.
+ * API key is read from DB (encrypted_api_key in ai_providers).
  */
 async function callAI(options: AICallOptions): Promise<AICallResponse> {
   const providerId = resolveProviderFromModel(options.model);
 
-  // Anthropic: use SDK with streaming (Sprint 6.24 requirement)
+  // Anthropic: use SDK with streaming (required for long-running calls)
   if (providerId === "anthropic") {
     return callAnthropicStreaming(options);
   }
 
   // All other providers: use provider-registry with fetch()
-  const providerReq = buildProviderRequest(providerId, {
+  const providerReq = await buildProviderRequest(providerId, {
     model: options.model,
     system: options.system,
     messages: options.messages.map(m => ({ role: m.role, content: m.content })),
@@ -162,6 +159,19 @@ async function callAI(options: AICallOptions): Promise<AICallResponse> {
 
   if (!response.ok) {
     const errorText = await response.text();
+
+    // 429 rate-limit: preserve Retry-After header so callAIWithFallback can sleep exactly long enough
+    if (response.status === 429) {
+      const retryAfterSec = response.headers.get("Retry-After") ?? response.headers.get("x-ratelimit-reset-requests");
+      const retryAfterMs = retryAfterSec
+        ? Math.min(parseFloat(retryAfterSec) * 1000, 30_000) // cap at 30 s
+        : RATE_LIMIT_DEFAULT_DELAY_MS;
+      throw new RateLimitError(
+        `${providerId} rate limit nadd (modell: ${options.model}). Vent ${Math.round(retryAfterMs / 1000)}s og prov igjen.`,
+        retryAfterMs
+      );
+    }
+
     throw wrapProviderError(providerId, options.model, new Error(`${response.status}: ${errorText}`));
   }
 
@@ -191,10 +201,12 @@ async function callAI(options: AICallOptions): Promise<AICallResponse> {
 }
 
 /**
- * Anthropic: SDK with streaming (Sprint 6.24 fix — required for long-running calls)
+ * Anthropic: SDK with streaming (required for long-running calls).
+ * API key is read from DB via getProviderApiKey("anthropic").
  */
-async function callAnthropicStreaming(options: AICallOptions): Promise<AICallResponse> {
-  const client = new Anthropic({ apiKey: anthropicKey() });
+export async function callAnthropicStreaming(options: AICallOptions): Promise<AICallResponse> {
+  const apiKey = await getProviderApiKey("anthropic");
+  const client = new Anthropic({ apiKey });
 
   // Use cache_control for system prompts (stable per conversation)
   const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
@@ -254,8 +266,31 @@ async function callAnthropicStreaming(options: AICallOptions): Promise<AICallRes
 
 const MAX_TRANSIENT_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 2000;
+const RATE_LIMIT_DEFAULT_DELAY_MS = 5000; // fallback when Retry-After header is absent
+
+/**
+ * Tagged error for HTTP 429 rate-limit responses.
+ * Preserves the Retry-After delay from the provider's response headers.
+ */
+export class RateLimitError extends Error {
+  isRateLimit = true as const;
+  retryAfterMs: number;
+
+  constructor(message: string, retryAfterMs: number) {
+    super(message);
+    this.name = "RateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+function isRateLimitError(error: unknown): error is RateLimitError {
+  return error instanceof RateLimitError;
+}
 
 function isTransientError(error: unknown): boolean {
+  // Rate-limit errors are transient — wait for Retry-After then retry same model
+  if (isRateLimitError(error)) return true;
+
   const msg = error instanceof Error ? error.message : String(error);
   const lower = msg.toLowerCase();
   return (
@@ -277,9 +312,10 @@ function sleep(ms: number): Promise<void> {
 /**
  * Call AI with retry + fallback.
  *
- * 1. Transient errors (overloaded, 503, timeout): retry same model up to 3 times
- *    with exponential backoff (2s, 4s, 8s).
- * 2. Non-transient errors: upgrade to next-tier model (up to MAX_FALLBACK_UPGRADES).
+ * 1. Rate-limit (429): retry same model up to 3 times, honouring Retry-After header.
+ * 2. Other transient errors (overloaded, 503, timeout): exponential backoff (2s, 4s, 8s).
+ * 3. Non-transient errors (credits, auth, bad model): upgrade to next-tier model
+ *    (up to MAX_FALLBACK_UPGRADES).
  */
 export async function callAIWithFallback(options: AICallOptions): Promise<AICallResponse> {
   let currentModel = options.model;
@@ -295,20 +331,26 @@ export async function callAIWithFallback(options: AICallOptions): Promise<AICall
         lastError = error;
 
         if (isTransientError(error) && retry < MAX_TRANSIENT_RETRIES) {
-          const delay = RETRY_BASE_DELAY_MS * Math.pow(2, retry);
+          // For rate limits, respect the provider's Retry-After; otherwise exponential backoff
+          const delay = isRateLimitError(error)
+            ? error.retryAfterMs
+            : RETRY_BASE_DELAY_MS * Math.pow(2, retry);
+
           log.warn(`[AI] Transient error on ${currentModel}, retry ${retry + 1}/${MAX_TRANSIENT_RETRIES} in ${delay}ms`, {
             error: error instanceof Error ? error.message : String(error),
+            isRateLimit: isRateLimitError(error),
+            retryAfterMs: isRateLimitError(error) ? error.retryAfterMs : undefined,
           });
           await sleep(delay);
           continue;
         }
 
-        // Non-transient or retries exhausted — break to fallback
+        // Non-transient or retries exhausted — break to model-upgrade path
         break;
       }
     }
 
-    // Try upgrading model
+    // Try upgrading to a higher-tier model
     upgradeAttempts++;
     const upgrade = getUpgradeModel(currentModel);
 
@@ -316,7 +358,7 @@ export async function callAIWithFallback(options: AICallOptions): Promise<AICall
       throw lastError;
     }
 
-    log.info(`[AI] Upgrading from ${currentModel} to ${upgrade} after error`);
+    log.info(`[AI] Upgrading from ${currentModel} to ${upgrade} after exhausted retries`);
     currentModel = upgrade;
   }
 

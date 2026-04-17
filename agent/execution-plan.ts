@@ -15,6 +15,20 @@ import type { PhaseTracker } from "./metrics";
 import type { BudgetMode } from "../ai/sub-agents";
 import type { ExecutionHelpers } from "./execution-retry";
 
+/**
+ * Smart model routing: when the user selects a specific model (modelOverride),
+ * use a high-quality model for planning (small tokens, needs reasoning)
+ * and the selected model for building (large context, more tokens).
+ * If no override: use selectedModel for all phases.
+ */
+function getPlanningModel(ctx: AgentExecutionContext): string {
+  if (ctx.modelOverride) {
+    // User selected a specific model → use opus for planning, their model for building
+    return "claude-opus-4-5-20251101";
+  }
+  return ctx.selectedModel;
+}
+
 export interface PlanPhaseResult {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   plan: any;
@@ -80,16 +94,17 @@ export async function runPlanPhase(
     { label: "Planlegger arbeidet", status: "active" },
   ]);
 
+  const planningModel = getPlanningModel(ctx);
   let plan = await auditedStep(ctx, "plan_created", {
     taskDescription: ctx.taskDescription.substring(0, 200),
-    model: ctx.selectedModel,
+    model: planningModel,
   }, () => aiBreaker.call(() => ai.planTask({
     task: `${ctx.taskDescription}\n\nUser context: ${ctx.userMessage}${strategyHint}`,
     projectStructure: treeString,
     relevantFiles,
     memoryContext: memoryStrings,
     docsContext: docsStrings,
-    model: ctx.selectedModel,
+    model: planningModel,
   })));
 
   ctx.totalCostUsd += plan.costUsd;
@@ -120,7 +135,7 @@ export async function runPlanPhase(
         relevantFiles,
         memoryContext: memoryStrings,
         docsContext: docsStrings,
-        model: ctx.selectedModel,
+        model: planningModel,
       }));
 
       ctx.totalCostUsd += altPlan.costUsd;

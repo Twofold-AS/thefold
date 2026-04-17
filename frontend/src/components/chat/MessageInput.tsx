@@ -16,7 +16,7 @@ interface ModelOption {
 }
 
 interface MessageInputProps {
-  onSubmit: (value: string) => void;
+  onSubmit: (value: string, options?: { firecrawlEnabled?: boolean }) => void;
   pendingReviewId: string | null;
   sending: boolean;
   onCancel: () => void;
@@ -28,6 +28,10 @@ interface MessageInputProps {
   models: ModelOption[];
   selectedModel: string | null;
   onModelChange: (id: string | null) => void;
+  isIncognito?: boolean;
+  onIncognitoToggle?: () => void;
+  planMode?: boolean;
+  onPlanModeToggle?: () => void;
 }
 
 export default function MessageInput({
@@ -43,10 +47,14 @@ export default function MessageInput({
   models,
   selectedModel,
   onModelChange,
+  isIncognito,
+  onIncognitoToggle,
+  planMode,
+  onPlanModeToggle,
 }: MessageInputProps) {
   return (
     <div style={{
-      padding: "8px 24px 16px",
+      padding: "8px 24px 24px",
       display: "flex",
       justifyContent: "center",
       flexShrink: 0,
@@ -54,7 +62,7 @@ export default function MessageInput({
       <div style={{ width: "100%", maxWidth: 768 }}>
         <ChatInput
           compact
-          onSubmit={onSubmit}
+          onSubmit={(value, options) => onSubmit(value, options)}
           skills={skills}
           selectedSkillIds={selectedSkillIds}
           onSkillsChange={onSkillsChange}
@@ -66,6 +74,10 @@ export default function MessageInput({
           models={models}
           selectedModel={selectedModel}
           onModelChange={onModelChange}
+          isIncognito={isIncognito}
+          onIncognitoToggle={onIncognitoToggle}
+          planMode={planMode}
+          onPlanModeToggle={onPlanModeToggle}
         />
       </div>
     </div>

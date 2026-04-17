@@ -1,76 +1,68 @@
-import { secret } from "encore.dev/config";
 import type { AIProviderAdapter, StandardRequest, StandardResponse, ProviderRequest } from "./provider-interface";
 import { anthropicProvider } from "./providers/anthropic";
 import { openaiProvider } from "./providers/openai";
 import { openrouterProvider } from "./providers/openrouter";
 import { fireworksProvider } from "./providers/fireworks";
-
-// --- API key secrets for each provider ---
-const AnthropicAPIKey = secret("AnthropicAPIKey");
-const OpenRouterApiKey = secret("OpenRouterApiKey");
-const FireworksApiKey = secret("FireworksApiKey");
-const OpenAIApiKey = secret("OpenAIAPIKey");
+import { moonshotProvider } from "./providers/moonshot";
+import { decryptApiKey } from "./lib/crypto";
+import { db } from "./db";
 
 // --- Provider Registry ---
 
 /**
- * Map of provider ID to AIProviderAdapter implementation.
- * New providers are added here.
+ * Map of provider slug to AIProviderAdapter implementation.
+ * Adding a new provider: register it here + add a row in ai_providers table.
  */
 const PROVIDER_MAP: Record<string, AIProviderAdapter> = {
   anthropic: anthropicProvider,
   openai: openaiProvider,
   openrouter: openrouterProvider,
   fireworks: fireworksProvider,
+  moonshot: moonshotProvider,
 };
 
 /**
- * Map of provider ID to the Encore secret accessor for its API key.
- * Each provider's API key is stored as an Encore secret.
- */
-const API_KEY_MAP: Record<string, () => string> = {
-  anthropic: AnthropicAPIKey,
-  openai: OpenAIApiKey,
-  openrouter: OpenRouterApiKey,
-  fireworks: FireworksApiKey,
-};
-
-/**
- * Get provider adapter by ID.
- * All registered providers are available — DB controls which models are active.
+ * Get provider adapter by slug.
  *
- * @throws Error if provider ID is unknown
+ * @throws Error if provider slug is unknown
  */
 export function getProvider(providerId: string): AIProviderAdapter {
   const provider = PROVIDER_MAP[providerId];
   if (!provider) {
     throw new Error(
-      `Unknown provider: "${providerId}". Available providers: ${Object.keys(PROVIDER_MAP).join(", ")}`
+      `Unknown provider: "${providerId}". Available: ${Object.keys(PROVIDER_MAP).join(", ")}`
     );
   }
-
   return provider;
 }
 
 /**
- * Get the API key for a provider.
- * Reads from Encore secrets at runtime.
+ * Retrieve and decrypt the API key for a provider from the DB.
+ * All provider keys are stored AES-256-CBC encrypted in ai_providers.encrypted_api_key.
  *
- * @throws Error if the API key secret is not configured
+ * @throws Error if the provider is not found, disabled, or has no key configured
  */
-export function getProviderApiKey(providerId: string): string {
-  const keyAccessor = API_KEY_MAP[providerId];
-  if (!keyAccessor) {
-    throw new Error(`No API key configured for provider: "${providerId}"`);
-  }
+export async function getProviderApiKey(providerId: string): Promise<string> {
+  const row = await db.queryRow<{ encrypted_api_key: string | null; slug: string }>`
+    SELECT encrypted_api_key, slug
+    FROM ai_providers
+    WHERE slug = ${providerId} AND enabled = true
+  `;
 
-  try {
-    return keyAccessor();
-  } catch {
+  if (!row) {
     throw new Error(
-      `API key not set for provider "${providerId}". Configure the ${PROVIDER_MAP[providerId]?.apiKeySecret || providerId} secret.`
+      `Provider '${providerId}' not found or disabled. Enable it in Settings → AI-modeller.`
     );
   }
+
+  if (!row.encrypted_api_key) {
+    throw new Error(
+      `No API key configured for provider '${providerId}'. ` +
+      `Add it in Settings → AI-modeller → click the pencil icon next to the provider.`
+    );
+  }
+
+  return decryptApiKey(row.encrypted_api_key);
 }
 
 /**
@@ -79,19 +71,17 @@ export function getProviderApiKey(providerId: string): string {
  *
  * @returns ProviderRequest with url, headers, and body ready for fetch()
  */
-export function buildProviderRequest(
+export async function buildProviderRequest(
   providerId: string,
   req: StandardRequest
-): ProviderRequest {
+): Promise<ProviderRequest> {
   const provider = getProvider(providerId);
-  const apiKey = getProviderApiKey(providerId);
+  const apiKey = await getProviderApiKey(providerId);
   return provider.transformRequest(req, apiKey);
 }
 
 /**
  * Transform a raw provider response into a StandardResponse.
- *
- * @returns StandardResponse with normalized content, tokens, stop reason
  */
 export function transformProviderResponse(
   providerId: string,
@@ -103,25 +93,21 @@ export function transformProviderResponse(
 }
 
 /**
- * List all registered provider IDs.
+ * List all registered provider slugs.
  */
 export function listProviderIds(): string[] {
   return Object.keys(PROVIDER_MAP);
 }
 
 /**
- * Resolve a model name to its provider ID.
- * Uses prefix-based detection for known providers,
- * falls back to "anthropic" if no match.
- *
- * This extends the existing getProvider() in ai.ts with support
- * for additional provider prefixes.
+ * Resolve a model name to its provider slug.
+ * Uses prefix/format-based detection, falls back to "anthropic".
  */
 export function resolveProviderFromModel(modelName: string): string {
   if (modelName.startsWith("claude-")) return "anthropic";
   if (modelName.startsWith("gpt-")) return "openai";
-  if (modelName.startsWith("moonshot-")) return "openai"; // Moonshot uses OpenAI-compatible API
-  if (modelName.startsWith("gemini-")) return "openai"; // Google uses OpenAI-compatible format via their API
+  if (modelName.startsWith("moonshot-")) return "moonshot"; // Moonshot AI (Kimi) — own provider slug
+  if (modelName.startsWith("gemini-")) return "openai";     // Google uses OpenAI-compatible format
 
   // Fireworks models use "accounts/fireworks/models/" prefix — check BEFORE "/" catch-all
   if (modelName.startsWith("accounts/")) return "fireworks";
@@ -129,6 +115,6 @@ export function resolveProviderFromModel(modelName: string): string {
   // OpenRouter models use "provider/model" format (e.g., "anthropic/claude-3.5-sonnet")
   if (modelName.includes("/")) return "openrouter";
 
-  // Default: Anthropic (existing behavior)
+  // Default: Anthropic
   return "anthropic";
 }

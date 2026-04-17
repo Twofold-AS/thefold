@@ -7,14 +7,14 @@ import type React from "react";
 // #8ab4f8 on #202124: ~7.5:1 ✓ AAA
 
 export const T = {
-  bg: "#202124",
-  sidebar: "#1b1c1e",
-  tabWrapper: "#171919",
+  bg: "transparent",
+  sidebar: "rgba(20,20,24,0.82)",
+  tabWrapper: "rgba(16,17,19,0.85)",
   tabActive: "#3c4043",
   search: "#2a2c2d",
   raised: "transparent",
-  surface: "#373840",
-  subtle: "rgba(255,255,255,0.04)",
+  surface: "rgba(28,28,32,0.82)",
+  subtle: "rgba(255,255,255,0.05)",
   border: "#3c4043",
   borderHover: "#5f6368",
   text: "#f1f3f4",
@@ -30,8 +30,8 @@ export const T = {
   warning: "#fdd663",
   error: "#f28b82",
   suggestion: "#2d3032",
-  chatbox: "#373840",
-  popup: "#373840",
+  chatbox: "rgba(40,40,46,0.85)",
+  popup: "rgba(20,20,24,0.95)",
 
   successA0: "#1a5c38",
   successA10: "#81c995",

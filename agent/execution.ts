@@ -27,8 +27,22 @@ export async function executePlan(
   },
   tracker: PhaseTracker,
   helpers: ExecutionHelpers,
-  options?: { sandboxId?: string },
+  options?: { sandboxId?: string; planOnly?: boolean },
 ): Promise<ExecutionResult> {
   const planResult = await runPlanPhase(ctx, contextData, tracker, helpers);
+
+  // planOnly: stop after planning — skip code-gen and building
+  if (options?.planOnly) {
+    return {
+      success: true,
+      filesChanged: [],
+      sandboxId: "",
+      planSummary: planResult.planSummary ?? "",
+      costUsd: 0,
+      tokensUsed: 0,
+      planOnlyDone: true,
+    };
+  }
+
   return runBuildLoop(ctx, contextData, planResult, tracker, helpers, options);
 }

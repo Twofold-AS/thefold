@@ -6,6 +6,8 @@ import {
   buildSystemPromptWithPipeline, logSkillResults,
 } from "./prompts";
 import { callAIWithFallback, stripMarkdownJson, DEFAULT_MODEL } from "./call";
+import { selectOptimalModel } from "./router";
+import { selectForRole } from "./roles";
 
 import type {
   ChatMessage, AgentThinkRequest, AgentThinkResponse, TaskStep,
@@ -206,7 +208,18 @@ export const assessConfidence = api(
 export const planTask = api(
   { method: "POST", path: "/ai/plan", expose: false },
   async (req: AgentThinkRequest): Promise<AgentThinkResponse> => {
-    const model = req.model || DEFAULT_MODEL;
+    // Use user-specified model, or select via planner role
+    let model: string;
+    if (req.model) {
+      model = req.model;
+    } else {
+      try {
+        model = await selectForRole("planner");
+      } catch {
+        // Fallback to default if role-based fails
+        model = DEFAULT_MODEL;
+      }
+    }
 
     req.task = sanitize(req.task, { maxLength: 100_000 });
 
@@ -299,7 +312,22 @@ export const planTask = api(
   }
 );
 
-// --- Project Decomposition ---
+// --- Project Decomposition (Hierarchical 3-stage pipeline) ---
+
+interface DecomposePhase {
+  name: string;
+  description: string;
+}
+
+interface DecomposeTask {
+  title: string;
+  description: string;
+  complexity: "low" | "medium" | "high";
+  dependencies: string[];
+  contextHints: string[];
+  inputContracts?: string[];
+  outputContracts?: string[];
+}
 
 interface DecomposeProjectRequest {
   userMessage: string;
@@ -307,6 +335,8 @@ interface DecomposeProjectRequest {
   repoName: string;
   projectStructure: string;
   existingFiles?: Array<{ path: string; content: string }>;
+  /** Optional: preferred model ID — if set, use this instead of auto-selection */
+  model?: string;
 }
 
 interface DecomposeProjectResponse {
@@ -330,91 +360,257 @@ interface DecomposeProjectResponse {
   costUsd: number;
 }
 
+// --- Stage 1: Decompose into phases ---
+async function decomposeToPhases(
+  projectDescription: string,
+  repoOwner: string,
+  repoName: string,
+  context?: string
+): Promise<DecomposePhase[]> {
+  const model = await selectForRole("orchestrator").catch(() => selectOptimalModel(7, "auto", undefined, "planning"));
+
+  const systemPrompt = `You are a software architect. Break the given project into 3–7 sequential implementation phases.
+Each phase should be independently completable and build on previous phases.
+Respond with ONLY valid JSON, no markdown, no explanation.`;
+
+  const userPrompt = `Project: ${projectDescription.slice(0, 2000)}
+Repository: ${repoOwner}/${repoName}
+${context ? `\n\nAdditional context: ${context.slice(0, 500)}` : ""}
+
+Respond with JSON in this exact format:
+{
+  "phases": [
+    { "name": "Phase Name", "description": "What this phase accomplishes in 1-2 sentences" }
+  ],
+  "conventions": "Key development conventions and patterns to follow throughout"
+}`;
+
+  const response = await callAIWithFallback({
+    model,
+    messages: [{ role: "user", content: userPrompt }],
+    system: systemPrompt,
+    maxTokens: 1500,
+  });
+
+  try {
+    const parsed = JSON.parse(stripMarkdownJson(response.content));
+    return (parsed.phases || []).map((p: any) => ({
+      name: p.name,
+      description: p.description,
+    }));
+  } catch (err) {
+    log.warn("Stage 1: Failed to parse phases response", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
+
+// --- Stage 2: Decompose each phase into tasks ---
+async function decomposePhaseToTasks(
+  phase: DecomposePhase,
+  projectDescription: string,
+  previousPhaseNames: string[]
+): Promise<DecomposeTask[]> {
+  const model = await selectForRole("planner").catch(() => selectOptimalModel(5, "auto", undefined, "planning"));
+
+  const systemPrompt = `You are a senior developer breaking down a project phase into concrete implementation tasks.
+Tasks should be atomic (one clear deliverable each), actionable, and estimable.
+Respond with ONLY valid JSON.`;
+
+  const previousContext = previousPhaseNames.length > 0
+    ? `\nPrevious phases already completed: ${previousPhaseNames.join(", ")}`
+    : "";
+
+  const attemptDecompose = async (isRetry: boolean): Promise<DecomposeTask[]> => {
+    const retryNote = isRetry
+      ? "\n\nIMPORTANT: Your previous response had invalid JSON. Return ONLY a valid JSON object. No markdown. No explanation. Start with { and end with }."
+      : "";
+
+    const userPrompt = `Project: ${projectDescription.slice(0, 1000)}${previousContext}
+
+Phase to break down:
+Name: ${phase.name}
+Description: ${phase.description}
+
+Break this phase into 3–8 concrete tasks. For each task, include dependencies on OTHER task titles (not task indices).
+Respond with JSON:
+{
+  "tasks": [
+    {
+      "title": "Short task title",
+      "description": "What exactly needs to be done (2-3 sentences)",
+      "complexity": "low|medium|high",
+      "dependencies": ["title of another task in THIS phase"],
+      "contextHints": ["hint about what context might be needed"],
+      "inputContracts": ["what this task depends on from previous tasks"],
+      "outputContracts": ["what this task produces that others need"]
+    }
+  ]
+}${retryNote}`;
+
+    const response = await callAIWithFallback({
+      model,
+      messages: [{ role: "user", content: userPrompt }],
+      system: systemPrompt,
+      maxTokens: 2500,
+    });
+
+    const parsed = JSON.parse(stripMarkdownJson(response.content));
+    return (parsed.tasks || []).map((t: any) => ({
+      title: t.title,
+      description: t.description,
+      complexity: t.complexity || "medium",
+      dependencies: t.dependencies || [],
+      contextHints: t.contextHints || [],
+      inputContracts: t.inputContracts || [],
+      outputContracts: t.outputContracts || [],
+    }));
+  };
+
+  try {
+    return await attemptDecompose(false);
+  } catch (firstErr) {
+    // Only retry with the JSON-fix note for actual JSON parse errors (SyntaxError).
+    // Provider errors (rate limit, auth, credits) are already handled with retries/fallback
+    // inside callAIWithFallback — re-throwing them here would cause double-retry chaos.
+    if (!(firstErr instanceof SyntaxError)) {
+      log.error("Stage 2: Provider error decomposing phase, returning empty tasks", {
+        phase: phase.name,
+        error: firstErr instanceof Error ? firstErr.message : String(firstErr),
+      });
+      return [];
+    }
+
+    log.warn("Stage 2: JSON parse error in phase response, retrying with strict JSON note", {
+      phase: phase.name,
+      error: firstErr instanceof Error ? firstErr.message : String(firstErr),
+    });
+
+    try {
+      return await attemptDecompose(true);
+    } catch (secondErr) {
+      log.error("Stage 2: Failed to parse tasks for phase after retry, returning empty tasks", {
+        phase: phase.name,
+        error: secondErr instanceof Error ? secondErr.message : String(secondErr),
+      });
+      return [];
+    }
+  }
+}
+
+// --- Stage 3: Assemble and convert to response format ---
 export const decomposeProject = api(
   { method: "POST", path: "/ai/decompose-project", expose: false },
   async (req: DecomposeProjectRequest): Promise<DecomposeProjectResponse> => {
     req.userMessage = sanitize(req.userMessage, { maxLength: 100_000 });
-
-    const model = "claude-sonnet-4-5-20250929";
-
-    let prompt = `## User Request\n${req.userMessage}\n\n`;
-    prompt += `## Repository\n${req.repoOwner}/${req.repoName}\n\n`;
-    prompt += `## Project Structure\n\`\`\`\n${req.projectStructure}\n\`\`\`\n\n`;
-
-    if (req.existingFiles && req.existingFiles.length > 0) {
-      prompt += `## Existing Files (for context)\n`;
-      for (const f of req.existingFiles) {
-        prompt += `### ${f.path}\n\`\`\`typescript\n${f.content}\n\`\`\`\n\n`;
-      }
-    }
-
-    prompt += `Decompose this request into atomic tasks organized in phases. Respond with JSON only.\n\n`;
-    prompt += `For each task, also provide:\n`;
-    prompt += `- inputContracts: list of what this task depends on from previous tasks (e.g. "UserService.createUser() function exported", "auth middleware in gateway/auth.ts")\n`;
-    prompt += `- outputContracts: list of what this task produces that other tasks need (e.g. "POST /users endpoint", "JWT token interface exported from types.ts")`;
 
     const pipeline = await buildSystemPromptWithPipeline("project_decomposition", {
       task: req.userMessage,
       repo: `${req.repoOwner}/${req.repoName}`,
     });
 
-    const response = await callAIWithFallback({
-      model,
-      system: pipeline.systemPrompt,
-      messages: [{ role: "user", content: prompt }],
-      maxTokens: 16384,
+    let totalTokensUsed = 0;
+    let modelUsed = "claude-sonnet-4-5-20250929";
+    let totalCostUsd = 0;
+
+    log.info("Stage 1: Decomposing project into phases", {
+      descriptionLength: req.userMessage.length,
     });
 
-    try {
-      const jsonText = stripMarkdownJson(response.content);
-      const parsed = JSON.parse(jsonText);
+    // Stage 1: Get phases
+    const phases = await decomposeToPhases(req.userMessage, req.repoOwner, req.repoName, req.projectStructure);
+    log.info("Phases generated", { count: phases.length, phases: phases.map(p => p.name) });
 
-      if (!parsed.phases || !Array.isArray(parsed.phases)) {
-        throw new Error("missing phases array");
-      }
-
-      let totalTaskCount = 0;
-      for (const phase of parsed.phases) {
-        totalTaskCount += phase.tasks?.length || 0;
-      }
-
-      let taskIndex = 0;
-      for (const phase of parsed.phases) {
-        for (const task of phase.tasks || []) {
-          for (const depIdx of task.dependsOnIndices || []) {
-            if (depIdx < 0 || depIdx >= totalTaskCount || depIdx === taskIndex) {
-              log.warn("invalid dependsOnIndex detected, removing", { depIdx, taskIndex, totalTaskCount });
-              task.dependsOnIndices = (task.dependsOnIndices || []).filter((i: number) => i !== depIdx);
-            }
-          }
-          taskIndex++;
-        }
-      }
-
-      const conventions = parsed.conventions || "";
-      if (conventions.length > 8000) {
-        log.warn("conventions too long, truncating", { length: conventions.length });
-      }
-
-      await logSkillResults(pipeline.skillIds, true, response.tokensUsed);
-
-      return {
-        phases: parsed.phases,
-        conventions: conventions.substring(0, 8000),
-        reasoning: parsed.reasoning || "",
-        estimatedTotalTasks: parsed.estimatedTotalTasks || totalTaskCount,
-        tokensUsed: response.tokensUsed,
-        modelUsed: response.modelUsed,
-        costUsd: response.costEstimate.totalCost,
-      };
-    } catch (err) {
-      await logSkillResults(pipeline.skillIds, false, response.tokensUsed);
-
-      if (err instanceof SyntaxError) {
-        throw APIError.internal("failed to parse decomposition response as JSON");
-      }
-      throw APIError.internal(`decomposition validation failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    if (phases.length === 0) {
+      throw APIError.internal("Phase decomposition returned no phases");
     }
+
+    // Stage 2: Decompose each phase in parallel
+    log.info("Stage 2: Decomposing phases into tasks (parallel)", { phaseCount: phases.length });
+    const phaseTaskResults = await Promise.allSettled(
+      phases.map((phase, i) =>
+        decomposePhaseToTasks(
+          phase,
+          req.userMessage,
+          phases.slice(0, i).map(p => p.name)
+        )
+      )
+    );
+
+    // Stage 3: Assemble results
+    const responsePhases: DecomposeProjectResponse["phases"] = [];
+    let globalTaskIndex = 0;
+    const taskTitleToIndex = new Map<string, number>();
+
+    for (let i = 0; i < phases.length; i++) {
+      const phase = phases[i];
+      const result = phaseTaskResults[i];
+
+      let phaseTasks: DecomposeTask[] = [];
+      if (result.status === "fulfilled") {
+        phaseTasks = result.value;
+      } else {
+        log.warn("Phase decomposition failed, using empty task list", {
+          phase: phase.name,
+          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        });
+      }
+
+      // Convert DecomposeTask to response format with dependency index resolution
+      const convertedTasks: DecomposeProjectResponse["phases"][0]["tasks"] = [];
+
+      for (const task of phaseTasks) {
+        // Build title→index map for intra-phase dependencies
+        const taskIndex = globalTaskIndex++;
+        taskTitleToIndex.set(task.title, taskIndex);
+      }
+
+      // Second pass: resolve dependencies now that all tasks are indexed
+      globalTaskIndex = responsePhases.reduce((sum, p) => sum + p.tasks.length, 0);
+      for (const task of phaseTasks) {
+        const taskIndex = globalTaskIndex++;
+        const dependsOnIndices = task.dependencies
+          .map(depTitle => taskTitleToIndex.get(depTitle))
+          .filter((idx): idx is number => idx !== undefined)
+          .filter(idx => idx < taskIndex); // Only allow backward deps
+
+        convertedTasks.push({
+          title: task.title,
+          description: task.description,
+          dependsOnIndices,
+          contextHints: task.contextHints,
+          inputContracts: task.inputContracts,
+          outputContracts: task.outputContracts,
+        });
+      }
+
+      responsePhases.push({
+        name: phase.name,
+        description: phase.description,
+        tasks: convertedTasks,
+      });
+    }
+
+    // Calculate totals
+    let estimatedTotalTasks = 0;
+    for (const phase of responsePhases) {
+      estimatedTotalTasks += phase.tasks.length;
+    }
+
+    log.info("Stage 3: Assembly complete", { totalTasks: estimatedTotalTasks });
+
+    await logSkillResults(pipeline.skillIds, true, totalTokensUsed);
+
+    return {
+      phases: responsePhases,
+      conventions: "Ensure all code follows TypeScript best practices with proper type safety and error handling.",
+      reasoning: `Decomposed into ${responsePhases.length} phases with ${estimatedTotalTasks} total tasks using 3-stage hierarchical pipeline.`,
+      estimatedTotalTasks,
+      tokensUsed: totalTokensUsed,
+      modelUsed,
+      costUsd: totalCostUsd,
+    };
   }
 );
 

@@ -5,6 +5,7 @@ import { getMe, type UserProfile } from "@/lib/api";
 
 interface UserPreferences {
   modelMode: "auto" | "manual";
+  preferredModel?: string;
 }
 
 interface UserContextValue {
@@ -44,9 +45,14 @@ export function PreferencesProvider({ children }: { children: React.ReactNode })
       setUser(res.user);
       const prefs = res.user.preferences;
       const mode = prefs.modelMode;
+      const newPrefs: UserPreferences = { modelMode: "auto" };
       if (mode === "auto" || mode === "manual") {
-        setPreferences({ modelMode: mode as "auto" | "manual" });
+        newPrefs.modelMode = mode as "auto" | "manual";
       }
+      if (typeof prefs.preferredModel === "string" && prefs.preferredModel.trim()) {
+        newPrefs.preferredModel = prefs.preferredModel.trim();
+      }
+      setPreferences(newPrefs);
     } catch {
       // Silent — keep existing state
     }

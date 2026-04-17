@@ -16,7 +16,12 @@ import {
   getSecretsStatus,
   listAuditLog,
   getCircuitState,
+  listArchivedConversations,
+  restoreConversation,
+  deleteConversationPermanent,
+  cleanupOrphanedSubTasks,
 } from "@/lib/api";
+import { apiFetch } from "@/lib/api/client";
 import { clearToken } from "@/lib/auth";
 import Tag from "@/components/Tag";
 import Btn from "@/components/Btn";
@@ -64,9 +69,153 @@ const sysCardStyle: React.CSSProperties = {
   padding: S.lg,
 };
 
+// --- Shared modal overlay ---
+function ModalOverlay({ children, onClose }: { children: React.ReactNode; onClose?: () => void }) {
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        zIndex: 200,
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget && onClose) onClose(); }}
+    >
+      <div style={{
+        background: "#1b1c1e",
+        border: `1px solid ${T.border}`,
+        borderRadius: 12,
+        padding: 28,
+        width: 400,
+        maxWidth: "90vw",
+      }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ArchivedConversationsTab() {
+  const { data, loading, refresh } = useApiData(() => listArchivedConversations(), []);
+  const [actionId, setActionId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const convs = data?.conversations ?? [];
+
+  const handleRestore = async (id: string) => {
+    setRestoreError(null);
+    setActionId(id);
+    try { await restoreConversation(id); refresh(); }
+    catch { setRestoreError("Gjenoppretting feilet — prøv igjen"); }
+    finally { setActionId(null); }
+  };
+
+  const handleDeleteConfirmed = async () => {
+    if (!confirmDeleteId) return;
+    setDeleteError(null);
+    setActionId(confirmDeleteId);
+    try {
+      await deleteConversationPermanent(confirmDeleteId);
+      setConfirmDeleteId(null);
+      refresh();
+    } catch {
+      setDeleteError("Sletting feilet — prøv igjen");
+    } finally {
+      setActionId(null);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: S.lg }}>
+      <p style={{ fontSize: 13, color: T.textMuted }}>
+        Samtaler du har arkivert fra historikk-visningen. Du kan gjenopprette dem eller slette dem permanent.
+      </p>
+
+      {restoreError && (
+        <div style={{ fontSize: 12, color: T.error, padding: "8px 12px", background: `${T.error}15`, borderRadius: 6 }}>
+          {restoreError}
+        </div>
+      )}
+
+      <div style={{ border: `1px solid ${T.border}`, borderRadius: T.r, overflow: "hidden", background: "transparent" }}>
+        {loading ? (
+          <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: T.textMuted }}>Laster...</div>
+        ) : convs.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: T.textMuted }}>Ingen arkiverte samtaler.</div>
+        ) : convs.map((c, i) => (
+          <div key={c.id} style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "11px 16px",
+            borderBottom: i < convs.length - 1 ? `1px solid ${T.border}` : "none",
+          }}>
+            <span className="material-symbols-outlined" style={{ fontSize: 16, color: T.textFaint, flexShrink: 0 }}>inventory_2</span>
+            <span style={{ flex: 1, fontSize: 12, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</span>
+            <span style={{ fontSize: 11, color: T.textFaint, fontFamily: T.mono, flexShrink: 0 }}>
+              {c.lastActivity ? new Date(c.lastActivity).toLocaleDateString("nb-NO") : ""}
+            </span>
+            <button
+              onClick={() => handleRestore(c.id)}
+              disabled={actionId === c.id}
+              style={{ padding: "4px 12px", fontSize: 11, background: T.tabActive, border: `1px solid ${T.border}`, borderRadius: 6, color: T.text, cursor: "pointer", fontFamily: T.sans, flexShrink: 0, opacity: actionId === c.id ? 0.5 : 1 }}
+            >
+              Gjenopprett
+            </button>
+            <button
+              onClick={() => { setDeleteError(null); setConfirmDeleteId(c.id); }}
+              disabled={actionId === c.id}
+              style={{ padding: "4px 12px", fontSize: 11, background: "transparent", border: `1px solid ${T.error}40`, borderRadius: 6, color: T.error, cursor: "pointer", fontFamily: T.sans, flexShrink: 0, opacity: actionId === c.id ? 0.5 : 1 }}
+            >
+              Slett permanent
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Confirm delete modal */}
+      {confirmDeleteId && (
+        <ModalOverlay onClose={() => { setConfirmDeleteId(null); setDeleteError(null); }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: T.text, marginBottom: 10 }}>Slett permanent?</div>
+          <p style={{ fontSize: 13, color: T.textMuted, marginBottom: deleteError ? 12 : 20, lineHeight: 1.5 }}>
+            Denne samtalen slettes for alltid og kan ikke gjenopprettes.
+          </p>
+          {deleteError && (
+            <div style={{ fontSize: 12, color: T.error, marginBottom: 14, padding: "8px 10px", background: `${T.error}15`, borderRadius: 6 }}>
+              {deleteError}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button
+              onClick={() => { setConfirmDeleteId(null); setDeleteError(null); }}
+              style={{ padding: "7px 16px", fontSize: 12, background: "transparent", border: `1px solid ${T.border}`, borderRadius: 7, color: T.textMuted, cursor: "pointer", fontFamily: T.sans }}
+            >
+              Avbryt
+            </button>
+            <button
+              onClick={handleDeleteConfirmed}
+              disabled={actionId === confirmDeleteId}
+              style={{ padding: "7px 16px", fontSize: 12, background: T.error, border: "none", borderRadius: 7, color: "#fff", cursor: "pointer", fontFamily: T.sans, opacity: actionId === confirmDeleteId ? 0.5 : 1 }}
+            >
+              {actionId === confirmDeleteId ? "Sletter..." : "Slett permanent"}
+            </button>
+          </div>
+        </ModalOverlay>
+      )}
+    </div>
+  );
+}
+
 function SystemTab() {
   const [monitorRunning, setMonitorRunning] = useState(false);
   const [monitorRepo, setMonitorRepo] = useState("webapp");
+
+  // Prune minner
+  const [pruneOpen, setPruneOpen] = useState(false);
+  const [pruneStatus, setPruneStatus] = useState("");
+  const [pruneRunning, setPruneRunning] = useState(false);
+
+  // Orphan tasks cleanup
+  const [orphanRunning, setOrphanRunning] = useState(false);
+  const [orphanResult, setOrphanResult] = useState<string | null>(null);
 
   const { data: monitorData, refresh: refreshMonitor } = useApiData(() => getMonitorHealth(), []);
   const { data: cacheData } = useApiData(() => getCacheStats(), []);
@@ -83,6 +232,52 @@ function SystemTab() {
     } catch { /* ignore */ }
     finally { setMonitorRunning(false); }
   }, [monitorRepo, refreshMonitor]);
+
+  const handlePruneMinner = async () => {
+    setPruneOpen(true);
+    setPruneRunning(true);
+    setPruneStatus("Henter minner...");
+
+    // Cycle through status messages while waiting for the API
+    const steps = [
+      { msg: "Analyserer duplikater...", delay: 1800 },
+      { msg: "Rydder opp...", delay: 3600 },
+    ];
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    steps.forEach(({ msg, delay }) => {
+      timers.push(setTimeout(() => setPruneStatus(msg), delay));
+    });
+
+    try {
+      const result = await apiFetch<{
+        memoriesConsolidated?: number;
+        memoriesPruned?: number;
+        success?: boolean;
+      }>("/memory/dream", { method: "POST", body: {} });
+      timers.forEach(clearTimeout);
+      const pruned = result.memoriesPruned ?? 0;
+      const consolidated = result.memoriesConsolidated ?? 0;
+      setPruneStatus(`Ferdig — ${pruned} minner fjernet, ${consolidated} konsolidert`);
+    } catch (err) {
+      timers.forEach(clearTimeout);
+      setPruneStatus(`Feil: ${err instanceof Error ? err.message : "ukjent feil"}`);
+    } finally {
+      setPruneRunning(false);
+    }
+  };
+
+  const handleOrphanCleanup = async () => {
+    setOrphanRunning(true);
+    setOrphanResult(null);
+    try {
+      const res = await cleanupOrphanedSubTasks();
+      setOrphanResult(`${res.deleted} foreldreløse under-oppgaver fjernet`);
+    } catch (err) {
+      setOrphanResult(`Feil: ${err instanceof Error ? err.message : "ukjent feil"}`);
+    } finally {
+      setOrphanRunning(false);
+    }
+  };
 
   // Flatten monitor results
   const monitorResults: Array<{ repo: string; checkType: string; status: string }> = [];
@@ -120,6 +315,36 @@ function SystemTab() {
           value={secretsData ? `${Object.values(secretsData).filter(Boolean).length} konfigurert` : "—"}
           color="success"
         />
+      </div>
+
+      {/* Vedlikehold */}
+      <div style={sysCardStyle}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: S.md }}>Vedlikehold</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Prune minner */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
+            <div>
+              <div style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>Rydd opp minner</div>
+              <div style={{ fontSize: 11, color: T.textFaint, marginTop: 2 }}>Konsolider duplikater og fjern utdaterte minner via dream engine</div>
+            </div>
+            <Btn size="sm" onClick={handlePruneMinner}>Kjør nå</Btn>
+          </div>
+          {/* Orphan subtasks */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0" }}>
+            <div>
+              <div style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>Rydd opp foreldreløse oppgaver</div>
+              <div style={{ fontSize: 11, color: T.textFaint, marginTop: 2 }}>Slett under-oppgaver som mangler overordnet oppgave</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              {orphanResult && (
+                <span style={{ fontSize: 11, color: orphanResult.startsWith("Feil") ? T.error : T.textMuted, fontFamily: T.mono }}>
+                  {orphanResult}
+                </span>
+              )}
+              <Btn size="sm" loading={orphanRunning} onClick={handleOrphanCleanup}>Kjør nå</Btn>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Monitor */}
@@ -285,21 +510,39 @@ function SystemTab() {
       {/* Feature flags */}
       <div style={sysCardStyle}>
         <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: S.md }}>Feature Flags</div>
-        {[
-          { f: "ProgressMessageEnabled", v: true },
-          { f: "GitHubAppEnabled", v: true },
-          { f: "DynamicSubAgentsEnabled", v: true },
-          { f: "HealingPipelineEnabled", v: true },
-          { f: "MonitorEnabled", v: true },
-          { f: "SandboxAdvancedPipeline", v: true },
-          { f: "RegistryExtractionEnabled", v: true },
-        ].map((ff, i) => (
-          <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: i < 6 ? `1px solid ${T.border}` : "none" }}>
-            <span style={{ fontSize: 12, fontFamily: T.mono, color: T.textSec }}>{ff.f}</span>
-            <Tag variant="success">aktiv</Tag>
-          </div>
-        ))}
+        <div style={{ fontSize: 12, color: T.textMuted }}>Ingen aktive feature flags</div>
       </div>
+
+      {/* Prune minner modal */}
+      {pruneOpen && (
+        <ModalOverlay onClose={pruneRunning ? undefined : () => setPruneOpen(false)}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: T.text, marginBottom: 16 }}>Rydd opp minner</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+            {pruneRunning && (
+              <span style={{
+                display: "inline-block", width: 14, height: 14,
+                border: `2px solid ${T.border}`, borderTopColor: T.accent,
+                borderRadius: "50%", animation: "spin 0.8s linear infinite",
+                flexShrink: 0,
+              }} />
+            )}
+            <span style={{ fontSize: 13, color: pruneRunning ? T.textMuted : T.text, fontFamily: T.mono }}>
+              {pruneStatus}
+            </span>
+          </div>
+          {!pruneRunning && (
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                onClick={() => setPruneOpen(false)}
+                style={{ padding: "7px 18px", fontSize: 12, background: T.accent, border: "none", borderRadius: 7, color: "#fff", cursor: "pointer", fontFamily: T.sans }}
+              >
+                Lukk
+              </button>
+            </div>
+          )}
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </ModalOverlay>
+      )}
     </div>
   );
 }
@@ -342,8 +585,10 @@ export default function InnstillingerPage() {
   const [nameVal, setNameVal] = useState("");
   const [aiName, setAiName] = useState("");
   const [savingName, setSavingName] = useState(false);
+  const [saveNameError, setSaveNameError] = useState<string | null>(null);
   const [editAiName, setEditAiName] = useState(false);
   const [savingAiName, setSavingAiName] = useState(false);
+  const [saveAiNameError, setSaveAiNameError] = useState<string | null>(null);
 
   useEffect(() => {
     if (user?.name) setNameVal(user.name);
@@ -355,13 +600,14 @@ export default function InnstillingerPage() {
 
   const handleSaveName = async () => {
     setSavingName(true);
+    setSaveNameError(null);
     try {
       await updateProfile({ name: nameVal });
+      setEditName(false);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Feil ved lagring");
+      setSaveNameError(e instanceof Error ? e.message : "Feil ved lagring");
     } finally {
       setSavingName(false);
-      setEditName(false);
     }
   };
 
@@ -393,6 +639,7 @@ export default function InnstillingerPage() {
             { id: "mcp", label: "MCP" },
             { id: "maler", label: "Maler" },
             { id: "system", label: "System" },
+            { id: "arkiv", label: "Arkiverte samtaler" },
           ]}
           active={settingsTab}
           onChange={(id) => setSettingsTab(id)}
@@ -444,6 +691,8 @@ export default function InnstillingerPage() {
 
       {settingsTab === "system" && <SystemTab />}
 
+      {settingsTab === "arkiv" && <ArchivedConversationsTab />}
+
       {settingsTab === "profil" && <><GR>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
 
@@ -455,22 +704,27 @@ export default function InnstillingerPage() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textMuted }}>Navn</span>
                 {editName ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <input
-                      value={nameVal}
-                      onChange={(e) => setNameVal(e.target.value)}
-                      style={{ ...inputStyle, width: 160 }}
-                    />
-                    <Btn sm primary onClick={handleSaveName} style={{ opacity: savingName ? 0.5 : 1 }}>
-                      {savingName ? "..." : "Lagre"}
-                    </Btn>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input
+                        value={nameVal}
+                        onChange={(e) => setNameVal(e.target.value)}
+                        style={{ ...inputStyle, width: 160 }}
+                      />
+                      <Btn sm primary onClick={handleSaveName} style={{ opacity: savingName ? 0.5 : 1 }}>
+                        {savingName ? "..." : "Lagre"}
+                      </Btn>
+                    </div>
+                    {saveNameError && (
+                      <span style={{ fontSize: 11, color: T.error }}>{saveNameError}</span>
+                    )}
                   </div>
                 ) : (
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>
                       {meLoading ? <Skeleton width={100} height={14} /> : (user?.name || "\u2014")}
                     </span>
-                    <Btn sm onClick={() => setEditName(true)}>Endre</Btn>
+                    <Btn sm onClick={() => { setSaveNameError(null); setEditName(true); }}>Endre</Btn>
                   </div>
                 )}
               </div>
@@ -479,27 +733,38 @@ export default function InnstillingerPage() {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textMuted }}>AI-navn</span>
                 {editAiName ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <input
-                      value={aiName}
-                      onChange={(e) => setAiName(e.target.value)}
-                      placeholder="Navn agenten bruker"
-                      style={{ ...inputStyle, width: 160 }}
-                    />
-                    <Btn sm primary onClick={async () => {
-                      setSavingAiName(true);
-                      try { await updatePreferences({ aiName }); } catch { alert("Feil ved lagring"); }
-                      finally { setSavingAiName(false); setEditAiName(false); }
-                    }} style={{ opacity: savingAiName ? 0.5 : 1 }}>
-                      {savingAiName ? "..." : "Lagre"}
-                    </Btn>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <input
+                        value={aiName}
+                        onChange={(e) => setAiName(e.target.value)}
+                        placeholder="Navn agenten bruker"
+                        style={{ ...inputStyle, width: 160 }}
+                      />
+                      <Btn sm primary onClick={async () => {
+                        setSavingAiName(true);
+                        setSaveAiNameError(null);
+                        try {
+                          await updatePreferences({ aiName });
+                          setEditAiName(false);
+                        } catch (e) {
+                          setSaveAiNameError(e instanceof Error ? e.message : "Feil ved lagring");
+                        }
+                        finally { setSavingAiName(false); }
+                      }} style={{ opacity: savingAiName ? 0.5 : 1 }}>
+                        {savingAiName ? "..." : "Lagre"}
+                      </Btn>
+                    </div>
+                    {saveAiNameError && (
+                      <span style={{ fontSize: 11, color: T.error }}>{saveAiNameError}</span>
+                    )}
                   </div>
                 ) : (
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 13, color: T.text, fontWeight: 500 }}>
                       {aiName || "\u2014"}
                     </span>
-                    <Btn sm onClick={() => setEditAiName(true)}>Endre</Btn>
+                    <Btn sm onClick={() => { setSaveAiNameError(null); setEditAiName(true); }}>Endre</Btn>
                   </div>
                 )}
               </div>

@@ -359,6 +359,42 @@ export async function clearProviderApiKey(providerId: string) {
   });
 }
 
+// --- Role-Based Model Preferences ---
+
+export type AgentRole =
+  | "orchestrator"
+  | "planner"
+  | "coder"
+  | "reviewer"
+  | "debugger"
+  | "tester"
+  | "documenter";
+
+export interface RolePreference {
+  modelId: string;
+  priority: number;
+}
+
+export async function getRolePreferences() {
+  return apiFetch<{ preferences: Record<AgentRole, RolePreference[]> }>("/ai/role-preferences", {
+    method: "GET",
+  });
+}
+
+export async function setRolePreference(role: AgentRole, modelId: string, priority?: number) {
+  return apiFetch<{ ok: boolean }>("/ai/role-preferences/set", {
+    method: "POST",
+    body: { role, modelId, priority },
+  });
+}
+
+export async function deleteRolePreference(role: AgentRole, modelId: string) {
+  return apiFetch<{ ok: boolean }>("/ai/role-preferences/delete", {
+    method: "POST",
+    body: { role, modelId },
+  });
+}
+
 export async function estimateCost(inputTokens: number, outputTokens: number, modelId: string) {
   return apiFetch<{
     estimate: {

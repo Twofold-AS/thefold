@@ -1,4 +1,5 @@
 import { api, APIError } from "encore.dev/api";
+import { getAuthData } from "~encore/auth";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import log from "encore.dev/log";
 import { linear } from "~encore/clients";
@@ -39,6 +40,7 @@ interface TaskRow {
   error_message: string | null;
   external_id: string | null;
   external_source: string | null;
+  parent_id: string | null;
   created_by: string | null;
   created_at: Date;
   updated_at: Date;
@@ -53,7 +55,7 @@ interface TaskRow {
 //   depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at,
 //   healing_source_id, estimated_complexity, estimated_tokens, planned_order,
 //   assigned_to, build_job_id, pr_url, review_id, error_message,
-//   external_id, external_source,
+//   external_id, external_source, parent_id,
 //   created_by, created_at, updated_at, completed_at
 
 function parseTask(row: TaskRow): Task {
@@ -88,6 +90,7 @@ function parseTask(row: TaskRow): Task {
     errorMessage: row.error_message || "",
     externalId: row.external_id,
     externalSource: row.external_source,
+    parentId: row.parent_id,
     createdBy: row.created_by,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -111,6 +114,7 @@ interface CreateTaskRequest {
   createdBy?: string;
   externalId?: string;
   externalSource?: string;
+  parentId?: string;
 }
 
 interface CreateTaskResponse {
@@ -128,7 +132,7 @@ export const createTask = api(
     // Duplicate detection: if externalId + externalSource already exists, return existing task
     if (req.externalId && req.externalSource) {
       const existing = await db.queryRow<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at
         FROM tasks WHERE external_id = ${req.externalId} AND external_source = ${req.externalSource}
       `;
       if (existing) {
@@ -138,7 +142,7 @@ export const createTask = api(
     }
 
     const row = await db.queryRow<TaskRow>`
-      INSERT INTO tasks (title, description, repo, labels, priority, phase, depends_on, source, linear_task_id, assigned_to, created_by, external_id, external_source)
+      INSERT INTO tasks (title, description, repo, labels, priority, phase, depends_on, source, linear_task_id, assigned_to, created_by, external_id, external_source, parent_id)
       VALUES (
         ${req.title},
         ${req.description ?? null},
@@ -152,9 +156,10 @@ export const createTask = api(
         ${req.assignedTo ?? "agent"},
         ${req.createdBy ?? null},
         ${req.externalId ?? null},
-        ${req.externalSource ?? null}
+        ${req.externalSource ?? null},
+        ${req.parentId ?? null}
       )
-      RETURNING id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at
+      RETURNING id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at
     `;
 
     const task = parseTask(row!);
@@ -169,6 +174,85 @@ export const createTask = api(
     });
 
     return { task };
+  }
+);
+
+// --- Create Sub-Task ---
+
+interface CreateSubTaskRequest {
+  parentId: string;
+  title: string;
+  description?: string;
+  repo?: string;
+  labels?: string[];
+  priority?: number;
+  source?: TaskSource;
+  assignedTo?: string;
+  createdBy?: string;
+}
+
+export const createSubTask = api(
+  { method: "POST", path: "/tasks/create-subtask", expose: true, auth: true },
+  async (req: CreateSubTaskRequest): Promise<CreateTaskResponse> => {
+    if (!req.parentId) throw APIError.invalidArgument("parentId is required");
+    if (!req.title || req.title.trim().length === 0) {
+      throw APIError.invalidArgument("title is required");
+    }
+
+    // Verify parent exists
+    const parent = await db.queryRow<{ id: string }>`
+      SELECT id FROM tasks WHERE id = ${req.parentId}::uuid AND status != 'deleted'
+    `;
+    if (!parent) throw APIError.notFound("parent task not found");
+
+    const row = await db.queryRow<TaskRow>`
+      INSERT INTO tasks (title, description, repo, labels, priority, source, assigned_to, created_by, parent_id)
+      VALUES (
+        ${req.title},
+        ${req.description ?? null},
+        ${req.repo ?? null},
+        ${req.labels ?? []}::text[],
+        ${req.priority ?? 3},
+        ${req.source ?? "manual"},
+        ${req.assignedTo ?? "agent"},
+        ${req.createdBy ?? null},
+        ${req.parentId}::uuid
+      )
+      RETURNING id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at
+    `;
+
+    const task = parseTask(row!);
+
+    await taskEvents.publish({
+      taskId: task.id,
+      action: "created",
+      repo: task.repo,
+      source: task.source,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { task };
+  }
+);
+
+// --- List Sub-Tasks ---
+
+interface ListSubTasksRequest {
+  parentId: string;
+}
+
+export const listSubTasks = api(
+  { method: "POST", path: "/tasks/list-subtasks", expose: true, auth: true },
+  async (req: ListSubTasksRequest): Promise<{ tasks: Task[] }> => {
+    if (!req.parentId) throw APIError.invalidArgument("parentId is required");
+    const tasks: Task[] = [];
+    const rows = db.query<TaskRow>`
+      SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at
+      FROM tasks WHERE parent_id = ${req.parentId}::uuid AND status != 'deleted'
+      ORDER BY created_at ASC
+    `;
+    for await (const row of rows) tasks.push(parseTask(row));
+    return { tasks };
   }
 );
 
@@ -266,7 +350,7 @@ export const updateTask = api(
     }
 
     // Fetch updated task
-    const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE id = ${req.id}::uuid`;
+    const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE id = ${req.id}::uuid`;
     const task = parseTask(row!);
 
     // Determine event action
@@ -330,6 +414,28 @@ export const permanentDelete = api(
   }
 );
 
+export const cleanupOrphanedSubTasks = api(
+  { method: "POST", path: "/tasks/cleanup-orphans", expose: true, auth: true },
+  async (): Promise<{ deleted: number }> => {
+    const auth = getAuthData();
+    if (!auth) throw APIError.unauthenticated("not authenticated");
+
+    // Delete tasks that have a parent_task_id but whose parent no longer exists
+    const rows: { id: string }[] = [];
+    for await (const row of db.query<{ id: string }>`
+      DELETE FROM tasks
+      WHERE owner_email = ${auth.email}
+        AND parent_task_id IS NOT NULL
+        AND parent_task_id NOT IN (SELECT id FROM tasks)
+      RETURNING id
+    `) {
+      rows.push(row);
+    }
+
+    return { deleted: rows.length };
+  }
+);
+
 interface GetTaskRequest {
   id: string;
 }
@@ -342,7 +448,7 @@ export const getTask = api(
   { method: "GET", path: "/tasks/get", expose: true, auth: true },
   async (req: GetTaskRequest): Promise<GetTaskResponse> => {
     if (!req.id) throw APIError.invalidArgument("id is required");
-    const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE id = ${req.id}::uuid`;
+    const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE id = ${req.id}::uuid`;
     if (!row) throw APIError.notFound("task not found");
     return { task: parseTask(row) };
   }
@@ -354,7 +460,7 @@ export const getTaskInternal = api(
   async (req: GetTaskRequest): Promise<GetTaskResponse> => {
     console.log("[DEBUG-AF] getTaskInternal called with id:", req.id);
     if (!req.id) throw APIError.invalidArgument("id is required");
-    const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE id = ${req.id}::uuid`;
+    const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE id = ${req.id}::uuid`;
     console.log("[DEBUG-AF] getTaskInternal result:", row ? "found: " + row.title : "NOT FOUND");
     if (!row) throw APIError.notFound("task not found");
     return { task: parseTask(row) };
@@ -372,7 +478,7 @@ export const getTaskByExternalId = api(
   async (req: GetTaskByExternalIdRequest): Promise<GetTaskResponse> => {
     if (!req.externalId) throw APIError.invalidArgument("externalId is required");
     if (!req.externalSource) throw APIError.invalidArgument("externalSource is required");
-    const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE external_id = ${req.externalId} AND external_source = ${req.externalSource}`;
+    const row = await db.queryRow<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE external_id = ${req.externalId} AND external_source = ${req.externalSource}`;
     if (!row) throw APIError.notFound("task not found");
     return { task: parseTask(row) };
   }
@@ -385,6 +491,8 @@ interface ListTasksRequest {
   labels?: string[];
   priority?: number;
   assignedTo?: string;
+  parentId?: string;
+  rootOnly?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -411,7 +519,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND source = ${req.source} AND status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND source = ${req.source} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -422,7 +530,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status = ${req.status} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -433,7 +541,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND source = ${req.source} AND status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND source = ${req.source} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -444,7 +552,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE status = ${req.status} AND source = ${req.source} AND status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE status = ${req.status} AND source = ${req.source} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -455,7 +563,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE repo = ${req.repo} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -466,7 +574,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE status = ${req.status} AND status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE status = ${req.status} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -477,7 +585,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE source = ${req.source} AND status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE source = ${req.source} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -488,7 +596,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE priority = ${req.priority} AND status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE priority = ${req.priority} AND status != 'deleted'
         ORDER BY COALESCE(planned_order, 999999), priority, created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -499,7 +607,7 @@ export const listTasks = api(
       `;
       total = countRow?.count ?? 0;
       const rows = db.query<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE status != 'deleted'
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE status != 'deleted'
         ORDER BY created_at DESC
         LIMIT ${limit} OFFSET ${offset}
       `;
@@ -518,6 +626,14 @@ export const listTasks = api(
       tasks = tasks.filter(t => t.assignedTo === req.assignedTo);
     }
 
+    // Filter by parentId if specified — return sub-tasks of given parent
+    if (req.parentId) {
+      tasks = tasks.filter(t => t.parentId === req.parentId);
+    } else if (req.rootOnly !== false) {
+      // By default return only root tasks (no parent). Pass rootOnly: false to get all.
+      tasks = tasks.filter(t => t.parentId === null);
+    }
+
     return { tasks, total };
   }
 );
@@ -529,7 +645,7 @@ export const listDeleted = api(
   async (req: { repoName: string }): Promise<{ tasks: Task[] }> => {
     const tasks: Task[] = [];
     const rows = db.query<TaskRow>`
-      SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at
+      SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at
       FROM tasks WHERE repo = ${req.repoName} AND status = 'deleted'
       ORDER BY updated_at DESC
     `;
@@ -569,7 +685,7 @@ export const syncLinear = api(
     for (const lt of filtered) {
       // Check if this Linear task already exists in TheFold
       const existing = await db.queryRow<TaskRow>`
-        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE linear_task_id = ${lt.id}
+        SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE linear_task_id = ${lt.id}
       `;
 
       if (!existing) {
@@ -652,8 +768,8 @@ export const pushToLinear = api(
 
     // Get tasks with linear_task_id that need to be synced
     const rows = req.taskIds && req.taskIds.length > 0
-      ? db.query<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE linear_task_id IS NOT NULL AND id = ANY(${req.taskIds}::uuid[])`
-      : db.query<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks WHERE linear_task_id IS NOT NULL`;
+      ? db.query<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE linear_task_id IS NOT NULL AND id = ANY(${req.taskIds}::uuid[])`
+      : db.query<TaskRow>`SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks WHERE linear_task_id IS NOT NULL`;
 
     for await (const row of rows) {
       const task = parseTask(row);
@@ -711,7 +827,7 @@ export const planOrder = api(
     // Get backlog and planned tasks for this repo
     const taskList: Task[] = [];
     const rows = db.query<TaskRow>`
-      SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, created_by, created_at, updated_at, completed_at FROM tasks
+      SELECT id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at FROM tasks
       WHERE repo = ${req.repo} AND status IN ('backlog', 'planned')
       ORDER BY priority, created_at
     `;

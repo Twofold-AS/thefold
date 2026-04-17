@@ -1039,6 +1039,23 @@ export const storeProjectPlan = api(
 
     if (!planRow) throw APIError.internal("failed to create project plan");
 
+    // Create a master task in tasks-service to represent the full job
+    let masterTaskId: string | undefined;
+    try {
+      const masterResult = await tasks.createTask({
+        title: req.userRequest.slice(0, 200) || "Orchestrator job",
+        description: `Automatisk dekomponert jobb med ${req.decomposition.estimatedTotalTasks} deloppgaver.`,
+        repo: req.repoName || undefined,
+        source: "orchestrator",
+        priority: 3,
+      });
+      masterTaskId = masterResult.task.id;
+    } catch (e) {
+      log.warn("Failed to create master task in tasks-service", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
     // Insert tasks with dependency resolution
     // Build a global task index → UUID mapping
     const taskIds: string[] = [];
@@ -1068,7 +1085,7 @@ export const storeProjectPlan = api(
 
         taskIds.push(taskRow!.id);
 
-        // Also create in tasks-service (master task table)
+        // Create sub-task in tasks-service linked to master task
         try {
           await tasks.createTask({
             title: task.title,
@@ -1077,9 +1094,10 @@ export const storeProjectPlan = api(
             source: "orchestrator",
             priority: 3,
             phase: `phase-${phaseIdx}`,
+            parentId: masterTaskId,
           });
         } catch (e) {
-          log.warn("Failed to create task in tasks-service", {
+          log.warn("Failed to create sub-task in tasks-service", {
             projectTask: taskRow!.id,
             error: e instanceof Error ? e.message : String(e),
           });

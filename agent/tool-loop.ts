@@ -9,7 +9,6 @@
 //   - Logs to agent audit trail via passed-in log context
 
 import Anthropic from "@anthropic-ai/sdk";
-import { secret } from "encore.dev/config";
 import log from "encore.dev/log";
 import { estimateCost } from "../ai/router";
 import { logTokenUsage } from "../ai/call";
@@ -19,9 +18,7 @@ import { executeAgentTool } from "./agent-tool-executor";
 import type { AgentToolContext } from "./agent-tool-executor";
 import { agentEventBus } from "./event-bus";
 import { createAgentEvent } from "./events";
-
-// --- Secrets ---
-const anthropicKey = secret("AnthropicAPIKey");
+import { ai } from "~encore/clients";
 
 // --- Constants ---
 export const MAX_TOOL_LOOPS = 20;
@@ -84,7 +81,8 @@ export interface ToolLoopResult {
  *   - `sandboxId`    is set on every build_create_sandbox call (last wins)
  */
 export async function runAgentToolLoop(options: ToolLoopOptions): Promise<ToolLoopResult> {
-  const client = new Anthropic({ apiKey: anthropicKey() });
+  const { apiKey } = await ai.getProviderKeyInternal({ slug: "anthropic" });
+  const client = new Anthropic({ apiKey });
   const maxLoops = options.maxLoops ?? MAX_TOOL_LOOPS;
 
   // SSE routing key: prefer the TheFold task ID, fall back to conversation ID

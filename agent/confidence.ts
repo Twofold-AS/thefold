@@ -236,16 +236,20 @@ export async function assessAndRoute(
   let selectedModel: string;
 
   if (ctx.modelOverride) {
+    // User has explicitly set a model (either per-task override or saved preference)
     selectedModel = ctx.modelOverride;
+    log.info("using user-specified model override", { model: selectedModel });
   } else if (ctx.modelMode === "manual") {
-    await report(ctx, "Hvilken modell vil du bruke?", "needs_input");
-    return {
-      shouldContinue: false,
-      selectedModel: ctx.selectedModel,
-      confidenceScore: 90,
-      pauseReason: "needs_model_selection",
-      earlyReturn: { success: false, filesChanged: [], costUsd: ctx.totalCostUsd, tokensUsed: ctx.totalTokensUsed, errorMessage: "needs_model_selection" },
-    };
+    // Manual mode but no preferred model saved — fall back to auto selection
+    log.info("manual mode with no preferred model — falling back to auto");
+    const complexityResult = await auditedStep(ctx, "complexity_assessed", {
+      modelMode: ctx.modelMode,
+    }, () => ai.assessComplexity({
+      taskDescription: ctx.taskDescription,
+      projectStructure: contextData.treeString.substring(0, 2000),
+      fileCount: contextData.treeArray.length,
+    }));
+    selectedModel = selectOptimalModel(complexityResult.complexity, "auto");
   } else {
     const complexityResult = await auditedStep(ctx, "complexity_assessed", {
       modelMode: ctx.modelMode,

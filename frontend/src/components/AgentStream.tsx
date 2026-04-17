@@ -6,6 +6,7 @@ import CheckIcon from "@/components/icons/CheckIcon";
 import Btn from "@/components/Btn";
 import { getReview } from "@/lib/api";
 import AgentReasoningCard from "@/components/chat/AgentReasoningCard";
+import ChangedFilesPanel, { type FileChange } from "@/components/chat/ChangedFilesPanel";
 
 interface StepInfo {
   id: string;

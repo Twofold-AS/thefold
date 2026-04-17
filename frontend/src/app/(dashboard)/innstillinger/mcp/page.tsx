@@ -15,7 +15,7 @@ import {
   validateMCPServer,
   type MCPServer,
 } from "@/lib/api";
-import { CheckCircle2, XCircle, Circle, RefreshCw, Key, Trash2 } from "lucide-react";
+import { CheckCircle2, XCircle, Circle, RefreshCw, Key, Trash2, Plus } from "lucide-react";
 
 // --- Status indicator ---
 
@@ -318,15 +318,60 @@ export default function MCPSetupPage() {
   const installed = servers.filter(s => s.status === "installed");
   const available = servers.filter(s => s.status !== "installed");
 
+  const [showAddCustom, setShowAddCustom] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const [customCommand, setCustomCommand] = useState("");
+  const [customArgs, setCustomArgs] = useState("");
+  const [addingCustom, setAddingCustom] = useState(false);
+
+  const handleAddCustom = async () => {
+    if (!customName.trim() || !customCommand.trim()) {
+      alert("Navn og kommando kreves");
+      return;
+    }
+    setAddingCustom(true);
+    try {
+      const args = customArgs.trim().length > 0 ? customArgs.trim().split(/\s+/) : undefined;
+      const resp = await fetch("/api/mcp/register-custom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: customName.trim(),
+          command: customCommand.trim(),
+          args,
+        }),
+      });
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.message || `Status ${resp.status}`);
+      }
+      setCustomName("");
+      setCustomCommand("");
+      setCustomArgs("");
+      setShowAddCustom(false);
+      refresh();
+    } catch (err) {
+      alert(`Feil ved registrering: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setAddingCustom(false);
+    }
+  };
+
   return (
     <>
-      <div style={{ paddingTop: 0, paddingBottom: 24 }}>
-        <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>
-          MCP Servers
-        </h2>
-        <p style={{ fontSize: 13, color: T.textMuted }}>
-          Model Context Protocol servers extend the agent with tools for code, data, and docs.
-        </p>
+      <div style={{ paddingTop: 0, paddingBottom: 24, display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <h2 style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", marginBottom: 8 }}>
+            MCP Servers
+          </h2>
+          <p style={{ fontSize: 13, color: T.textMuted }}>
+            Model Context Protocol servers extend the agent with tools for code, data, and docs.
+          </p>
+        </div>
+        <Btn primary sm onClick={() => setShowAddCustom(true)}>
+          <Plus size={13} style={{ marginRight: 4 }} />
+          Legg til MCP
+        </Btn>
       </div>
 
       <GR>
@@ -364,6 +409,110 @@ export default function MCPSetupPage() {
           )}
         </div>
       </GR>
+
+      {/* Add Custom MCP Modal */}
+      {showAddCustom && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)",
+            zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowAddCustom(false); }}
+        >
+          <div
+            style={{
+              background: T.surface, border: `1px solid ${T.border}`,
+              borderRadius: 12, padding: 24, width: 420,
+              boxShadow: "0 24px 64px rgba(0,0,0,0.12)",
+            }}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600, color: T.text, marginBottom: 20 }}>
+              Legg til custom MCP-server
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div>
+                <label style={{ display: "block", fontSize: 11, fontFamily: T.mono, color: T.textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                  Navn
+                </label>
+                <input
+                  type="text"
+                  value={customName}
+                  onChange={(e) => setCustomName(e.target.value)}
+                  placeholder="f.eks. my-custom-server"
+                  style={{
+                    width: "100%",
+                    background: T.raised,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: 8,
+                    padding: "8px 12px",
+                    fontSize: 12,
+                    fontFamily: T.mono,
+                    color: T.text,
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                />
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 11, fontFamily: T.mono, color: T.textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                  Kommando
+                </label>
+                <input
+                  type="text"
+                  value={customCommand}
+                  onChange={(e) => setCustomCommand(e.target.value)}
+                  placeholder="f.eks. node server.js"
+                  style={{
+                    width: "100%",
+                    background: T.raised,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: 8,
+                    padding: "8px 12px",
+                    fontSize: 12,
+                    fontFamily: T.mono,
+                    color: T.text,
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                />
+              </div>
+              <div>
+                <label style={{ display: "block", fontSize: 11, fontFamily: T.mono, color: T.textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                  Argumenter (valgfritt)
+                </label>
+                <input
+                  type="text"
+                  value={customArgs}
+                  onChange={(e) => setCustomArgs(e.target.value)}
+                  placeholder="f.eks. --config ./config.json"
+                  style={{
+                    width: "100%",
+                    background: T.raised,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: 8,
+                    padding: "8px 12px",
+                    fontSize: 12,
+                    fontFamily: T.mono,
+                    color: T.text,
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", paddingTop: 20 }}>
+              <Btn sm onClick={() => setShowAddCustom(false)}>Avbryt</Btn>
+              <Btn
+                primary sm
+                onClick={handleAddCustom}
+                style={{ opacity: addingCustom ? 0.6 : 1, pointerEvents: addingCustom ? "none" : "auto" }}
+              >
+                {addingCustom ? "Legger til..." : "Legg til"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

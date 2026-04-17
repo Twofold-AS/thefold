@@ -3,6 +3,7 @@ import log from "encore.dev/log";
 import { sanitize } from "./sanitize";
 import { buildSystemPromptWithPipeline, logSkillResults } from "./prompts";
 import { callAIWithFallback, stripMarkdownJson, DEFAULT_MODEL } from "./call";
+import { selectForRole } from "./roles";
 
 // --- File Generation (for builder service) ---
 
@@ -31,7 +32,18 @@ interface GenerateFileResponse {
 export const generateFile = api(
   { method: "POST", path: "/ai/generate-file", expose: false },
   async (req: GenerateFileRequest): Promise<GenerateFileResponse> => {
-    const model = req.model || DEFAULT_MODEL;
+    // Use user-specified model, or select via coder role
+    let model: string;
+    if (req.model) {
+      model = req.model;
+    } else {
+      try {
+        model = await selectForRole("coder");
+      } catch {
+        // Fallback to default if role-based fails
+        model = DEFAULT_MODEL;
+      }
+    }
 
     const pipeline = await buildSystemPromptWithPipeline("agent_coding", {
       task: req.task,
@@ -134,7 +146,18 @@ interface FixFileResponse {
 export const fixFile = api(
   { method: "POST", path: "/ai/fix-file", expose: false },
   async (req: FixFileRequest): Promise<FixFileResponse> => {
-    const model = req.model || DEFAULT_MODEL;
+    // Use user-specified model, or select via debugger role (fixing errors)
+    let model: string;
+    if (req.model) {
+      model = req.model;
+    } else {
+      try {
+        model = await selectForRole("debugger");
+      } catch {
+        // Fallback to default if role-based fails
+        model = DEFAULT_MODEL;
+      }
+    }
 
     const systemPrompt = `Fix the TypeScript errors in this file. Return the CORRECTED file, complete, without markdown blocks or explanations. Just raw code.`;
 

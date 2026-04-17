@@ -42,7 +42,7 @@ export default function TypewriterPlaceholder({ active }: TypewriterPlaceholderP
   if (active) return null;
 
   return (
-    <span style={{ color: T.textFaint, pointerEvents: "none", userSelect: "none" }}>
+    <span style={{ color: T.textFaint, pointerEvents: "none", userSelect: "none", fontWeight: 600 }}>
       {phrases[pi].slice(0, ci)}
       <span style={{ animation: "blink 1s step-end infinite" }}>|</span>
     </span>

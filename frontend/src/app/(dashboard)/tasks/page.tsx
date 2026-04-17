@@ -17,6 +17,7 @@ import TabWrapper from "@/components/TabWrapper";
 import { S } from "@/lib/tokens";
 import {
   listTheFoldTasks,
+
   listReviews,
   syncLinearTasks,
   approveReview,
@@ -116,8 +117,10 @@ export default function TasksPage() {
   const availableSkills = (skillsData?.skills ?? []).filter(s => s.enabled);
   const [newSkillIds, setNewSkillIds] = useState<string[]>([]);
 
-  const tasks: TheFoldTask[] = taskData?.tasks ?? [];
+  // Only show top-level tasks — sub-tasks (parentId set) are visible inside ExpandableTaskCard
+  const tasks: TheFoldTask[] = (taskData?.tasks ?? []).filter((t: TheFoldTask) => !t.parentId);
   const reviews: ReviewSummary[] = reviewData?.reviews ?? [];
+
 
   const t = sel !== null ? tasks.find((x) => x.id === sel) : null;
   const tReview = t ? reviews.find((r) => r.taskId === t.id) : null;
@@ -357,47 +360,48 @@ export default function TasksPage() {
               </div>
             ) : (
               tasks.map((tk) => (
-                <ExpandableTaskCard
-                  key={tk.id}
-                  task={{
-                    id: tk.id,
-                    title: tk.title,
-                    description: tk.description,
-                    status: tk.status,
-                    source: tk.source,
-                    repo: tk.repo,
-                    complexity: tk.complexity,
-                    estimatedTokens: tk.estimatedTokens,
-                    createdAt: tk.createdAt,
-                    updatedAt: tk.updatedAt,
-                    reviewId: tk.reviewId || reviews.find(r => r.taskId === tk.id)?.id,
-                    prUrl: tk.prUrl,
-                    errorMessage: tk.errorMessage,
-                  }}
-                  review={(() => {
-                    const rev = reviews.find(r => r.taskId === tk.id);
-                    return rev ? { qualityScore: rev.qualityScore, fileCount: rev.fileCount, status: rev.status } : undefined;
-                  })()}
-                  showReviewActions={tk.status === "in_review"}
-                  onApprove={handleApprove ? async (revId) => {
-                    setActionLoading("approve");
-                    try { await approveReview(revId); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                  } : undefined}
-                  onReject={handleReject ? async (revId) => {
-                    const reason = prompt("Grunn for avvisning:");
-                    setActionLoading("reject");
-                    try { await rejectReview(revId, reason || undefined); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                  } : undefined}
-                  onRequestChanges={handleRequestChanges ? async (revId) => {
-                    const feedback = prompt("Hva skal endres?");
-                    if (!feedback) return;
-                    setActionLoading("changes");
-                    try { await requestReviewChanges(revId, feedback); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                  } : undefined}
-                  onDelete={async (taskId) => {
-                    try { await softDeleteTask(taskId); refreshTasks(); } catch {}
-                  }}
-                />
+                <div key={tk.id}>
+                  <ExpandableTaskCard
+                    task={{
+                      id: tk.id,
+                      title: tk.title,
+                      description: tk.description,
+                      status: tk.status,
+                      source: tk.source,
+                      repo: tk.repo,
+                      complexity: tk.complexity,
+                      estimatedTokens: tk.estimatedTokens,
+                      createdAt: tk.createdAt,
+                      updatedAt: tk.updatedAt,
+                      reviewId: tk.reviewId || reviews.find(r => r.taskId === tk.id)?.id,
+                      prUrl: tk.prUrl,
+                      errorMessage: tk.errorMessage,
+                    }}
+                    review={(() => {
+                      const rev = reviews.find(r => r.taskId === tk.id);
+                      return rev ? { qualityScore: rev.qualityScore, fileCount: rev.fileCount, status: rev.status } : undefined;
+                    })()}
+                    showReviewActions={tk.status === "in_review"}
+                    onApprove={handleApprove ? async (revId) => {
+                      setActionLoading("approve");
+                      try { await approveReview(revId); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                    } : undefined}
+                    onReject={handleReject ? async (revId) => {
+                      const reason = prompt("Grunn for avvisning:");
+                      setActionLoading("reject");
+                      try { await rejectReview(revId, reason || undefined); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                    } : undefined}
+                    onRequestChanges={handleRequestChanges ? async (revId) => {
+                      const feedback = prompt("Hva skal endres?");
+                      if (!feedback) return;
+                      setActionLoading("changes");
+                      try { await requestReviewChanges(revId, feedback); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                    } : undefined}
+                    onDelete={async (taskId) => {
+                      try { await softDeleteTask(taskId); refreshTasks(); } catch {}
+                    }}
+                  />
+                </div>
               ))
             )}
           </div>

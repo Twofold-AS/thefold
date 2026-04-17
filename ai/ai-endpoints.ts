@@ -5,6 +5,8 @@ import { buildSystemPromptWithPipeline, logSkillResults } from "./prompts";
 import { callAIWithFallback, stripMarkdownJson, DEFAULT_MODEL } from "./call";
 import { callWithTools, CHAT_TOOLS } from "./tools";
 import { assessComplexity } from "./ai-planning";
+import { selectOptimalModel } from "./router";
+import { selectForRole } from "./roles";
 
 import type {
   ChatRequest, ChatResponse, ReviewRequest, ReviewResponse,
@@ -16,7 +18,18 @@ import type {
 export const chat = api(
   { method: "POST", path: "/ai/chat", expose: false },
   async (req: ChatRequest): Promise<ChatResponse> => {
-    const model = req.model || DEFAULT_MODEL;
+    // If model is explicitly set, use it. Otherwise auto-route via reviewer role (or use complexity fallback).
+    let model: string;
+    if (req.model) {
+      model = req.model;
+    } else {
+      try {
+        model = await selectForRole("reviewer");
+      } catch {
+        // Fallback to complexity-based selection if role-based fails
+        model = selectOptimalModel(req.complexity ?? 5, "auto", undefined, "chat");
+      }
+    }
 
     req.messages = req.messages.map((m) =>
       m.role === "user" ? { ...m, content: sanitize(m.content) } : m
@@ -91,7 +104,18 @@ export const chat = api(
 export const reviewCode = api(
   { method: "POST", path: "/ai/review", expose: false },
   async (req: ReviewRequest): Promise<ReviewResponse> => {
-    const model = req.model || DEFAULT_MODEL;
+    // Use user-specified model, or select via reviewer role
+    let model: string;
+    if (req.model) {
+      model = req.model;
+    } else {
+      try {
+        model = await selectForRole("reviewer");
+      } catch {
+        // Fallback to default if role-based fails
+        model = DEFAULT_MODEL;
+      }
+    }
 
     let prompt = `## Task\n${req.taskDescription}\n\n`;
     prompt += `## Files Changed\n`;
@@ -197,7 +221,18 @@ interface ProjectReviewResponse {
 export const reviewProject = api(
   { method: "POST", path: "/ai/review-project", expose: false },
   async (req: ProjectReviewRequest): Promise<ProjectReviewResponse> => {
-    const model = req.model || "claude-sonnet-4-5-20250929";
+    // Use user-specified model, or select via reviewer role (project-wide review)
+    let model: string;
+    if (req.model) {
+      model = req.model;
+    } else {
+      try {
+        model = await selectForRole("reviewer");
+      } catch {
+        // Fallback to hard-coded model if role-based fails
+        model = "claude-sonnet-4-5-20250929";
+      }
+    }
 
     const MAX_FILE_TOKENS = 60000;
     let fileTokens = 0;
@@ -317,7 +352,18 @@ export interface DiagnosisResult {
 export const diagnoseFailure = api(
   { method: "POST", path: "/ai/diagnose", expose: false },
   async (req: DiagnoseRequest): Promise<{ diagnosis: DiagnosisResult; tokensUsed: number; costUsd: number }> => {
-    const model = req.model || DEFAULT_MODEL;
+    // Use user-specified model, or select via debugger role (root cause analysis)
+    let model: string;
+    if (req.model) {
+      model = req.model;
+    } else {
+      try {
+        model = await selectForRole("debugger");
+      } catch {
+        // Fallback to default if role-based fails
+        model = DEFAULT_MODEL;
+      }
+    }
 
     const prompt = `You are diagnosing why a step in an autonomous coding task failed.
 
@@ -399,7 +445,18 @@ export interface RevisePlanRequest {
 export const revisePlan = api(
   { method: "POST", path: "/ai/revise-plan", expose: false },
   async (req: RevisePlanRequest): Promise<AgentThinkResponse> => {
-    const model = req.model || DEFAULT_MODEL;
+    // Use user-specified model, or select via planner role (replanning after diagnosis)
+    let model: string;
+    if (req.model) {
+      model = req.model;
+    } else {
+      try {
+        model = await selectForRole("planner");
+      } catch {
+        // Fallback to default if role-based fails
+        model = DEFAULT_MODEL;
+      }
+    }
 
     const prompt = `You need to create a NEW plan for this task. The previous plan failed.
 

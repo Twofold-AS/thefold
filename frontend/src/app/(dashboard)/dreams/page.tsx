@@ -85,13 +85,40 @@ export default function DreamsPage() {
     score: r.score,
   }));
 
-  const handleTriggerDream = useCallback(async () => {
+  const handleTriggerDream = useCallback(async (force: boolean = false) => {
     setTriggerLoading(true);
     setTriggerResult(null);
+
+    // Trigger brain activity stripe
+    if (typeof window !== "undefined" && (window as any).__startBrainActivity) {
+      (window as any).__startBrainActivity();
+    }
+
     try {
-      const data = await apiFetch<{ memoriesConsolidated?: number; memoriesPruned?: number }>("/memory/dream", { method: "POST" });
-      setTriggerResult(`Drøm fullført: ${data.memoriesConsolidated ?? 0} konsolidert, ${data.memoriesPruned ?? 0} slettet`);
-      refreshDreams();
+      const data = await apiFetch<{
+        ran: boolean;
+        skippedReason?: string;
+        memoriesMerged?: number;
+        memoriesPruned?: number;
+        clustersFound?: number;
+      }>("/memory/dream", {
+        method: "POST",
+        body: force ? { force: true } : undefined,
+      });
+
+      if (!data.ran) {
+        // Handle skip reasons
+        const skipMessages: Record<string, string> = {
+          too_soon: "Drøm ble nettopp kjørt — venter 24 timer mellom kjøringer",
+          low_activity: "For lite ny aktivitet siden sist — trenger minst 3 nye minner",
+          lock_busy: "En drømmekjøring pågår allerede",
+        };
+        const message = skipMessages[data.skippedReason ?? ""] || "Drøm hoppet over";
+        setTriggerResult(`Hopper over: ${message}`);
+      } else {
+        setTriggerResult(`Drøm fullført: ${data.memoriesMerged ?? 0} konsolidert, ${data.memoriesPruned ?? 0} slettet`);
+        refreshDreams();
+      }
     } catch (err) {
       setTriggerResult(`Feil: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -404,12 +431,21 @@ export default function DreamsPage() {
                 </div>
               </div>
             </div>
-            <div style={{ marginTop: S.lg, display: "flex", gap: S.sm, alignItems: "center" }}>
-              <Btn variant="primary" loading={triggerLoading} onClick={handleTriggerDream}>
+            <div style={{ marginTop: S.lg, display: "flex", gap: S.sm, alignItems: "center", flexWrap: "wrap" }}>
+              <Btn variant="primary" loading={triggerLoading} onClick={() => handleTriggerDream(false)}>
                 La TheFold sove
               </Btn>
+              <Btn variant="default" loading={triggerLoading} onClick={() => handleTriggerDream(true)} title="Kjør drøm uansett (hoppa over gates)">
+                Kjør uansett (debug)
+              </Btn>
               {triggerResult && (
-                <span style={{ fontSize: 12, color: triggerResult.startsWith("Feil") ? T.error : T.success, fontFamily: T.mono }}>
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: triggerResult.startsWith("Feil") ? T.error : triggerResult.startsWith("Hopper over") ? T.warning : T.success,
+                    fontFamily: T.mono,
+                  }}
+                >
                   {triggerResult}
                 </span>
               )}

@@ -102,6 +102,11 @@ function ensureCacheFresh(): void {
   }
 }
 
+/** Force-invalidate the in-memory model cache. Call after save/toggle/delete. */
+export function invalidateModelCache(): void {
+  cacheTime = 0;
+}
+
 // --- Default model IDs for auto-routing ---
 
 const DEFAULT_SIMPLE = "claude-haiku-4-5-20251001";
@@ -118,6 +123,7 @@ const DEFAULT_COMPLEX = "claude-opus-4-5-20251101";
  *
  * context: "chat" | "coding" | "planning" | "review" | "analysis" | "fast"
  * Models are matched by their `bestFor` tags, not by tier/cost.
+ * When multiple candidates exist at the same tier and context, picks cheapest.
  */
 export function selectOptimalModel(
   complexity: number,
@@ -135,6 +141,25 @@ export function selectOptimalModel(
   if (context) {
     const matching = cachedModels.filter(m => m.bestFor.includes(context));
     if (matching.length > 0) {
+      // When multiple candidates at same tier, pick cheapest
+      if (matching.length > 1) {
+        const grouped = new Map<number, typeof matching>();
+        for (const m of matching) {
+          if (!grouped.has(m.tier)) grouped.set(m.tier, []);
+          grouped.get(m.tier)!.push(m);
+        }
+        // Get candidates at the highest tier that has matches
+        const topTier = Math.max(...grouped.keys());
+        const topTierModels = grouped.get(topTier)!;
+
+        // Sort by total cost (input + output per 1M tokens) ascending
+        topTierModels.sort((a, b) => {
+          const costA = a.inputCostPer1M + a.outputCostPer1M;
+          const costB = b.inputCostPer1M + b.outputCostPer1M;
+          return costA - costB;
+        });
+        return topTierModels[0].id;
+      }
       return matching[0].id;
     }
   }
@@ -217,6 +242,16 @@ export function getModelInfo(modelId: string): ModelInfo | null {
 export function listModels(): ModelInfo[] {
   ensureCacheFresh();
   return cachedModels;
+}
+
+/**
+ * Find the best enabled Anthropic model that supports tool-use.
+ * Returns null if no such model is in the current cache (e.g. all Anthropic models disabled).
+ */
+export function getAnthropicToolModel(): string | null {
+  ensureCacheFresh();
+  const m = cachedModels.find(m => m.provider === "anthropic" && m.supportsTools);
+  return m?.id ?? null;
 }
 
 /**

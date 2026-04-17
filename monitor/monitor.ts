@@ -558,6 +558,23 @@ export const runRepoWatch = api(
                   sourceRepo: repoFullName,
                   tags: ["breaking_change", repoName, "auto-detected"],
                 });
+
+                // Auto-create task for breaking changes
+                try {
+                  const { tasks } = await import("~encore/clients");
+                  await tasks.createTask({
+                    title: `[Auto] Breaking change: ${change.slice(0, 50)}`,
+                    description: `Breaking change detected in ${repoFullName}:\n\n${change}\n\nPlease review dependencies and update code if needed.`,
+                    repo: repoFullName,
+                    labels: ["breaking-change", "auto-created"],
+                    priority: 2,
+                    source: "healing",
+                  });
+                  log.info("auto-created breaking change task", { repo: repoFullName, change });
+                } catch (taskErr) {
+                  log.warn("failed to auto-create breaking change task", { repo: repoFullName, error: String(taskErr) });
+                }
+
                 totalFindings++;
               }
 
@@ -579,6 +596,23 @@ export const runRepoWatch = api(
                   tags: ["cve", repoName, "security"],
                   pinned: true,
                 });
+
+                // Auto-create task for critical CVE findings
+                try {
+                  const { tasks } = await import("~encore/clients");
+                  await tasks.createTask({
+                    title: `[Auto] Security: ${cve}`,
+                    description: `CVE risk detected in ${repoFullName}:\n\n${cve}\n\nPlease review and update dependencies.`,
+                    repo: repoFullName,
+                    labels: ["security", "cve", "auto-created"],
+                    priority: 1,
+                    source: "healing",
+                  });
+                  log.info("auto-created CVE task", { repo: repoFullName, cve });
+                } catch (taskErr) {
+                  log.warn("failed to auto-create CVE task", { repo: repoFullName, error: String(taskErr) });
+                }
+
                 totalFindings++;
               }
             }

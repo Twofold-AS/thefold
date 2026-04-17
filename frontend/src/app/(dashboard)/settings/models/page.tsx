@@ -16,8 +16,12 @@ import {
   saveProvider,
   setProviderApiKey,
   clearProviderApiKey,
+  getRolePreferences,
+  setRolePreference,
   type AIProvider,
   type AIModelRow,
+  type AgentRole,
+  type RolePreference,
 } from "@/lib/api";
 import { ChevronDown, ChevronRight, Trash2, Plus, Pencil, Check, X } from "lucide-react";
 
@@ -42,6 +46,16 @@ const TIER_COLORS: Record<number, string> = {
   4: T.accent,
   5: "#a78bfa",
 };
+
+const AGENT_ROLES: { key: AgentRole; label: string; desc: string }[] = [
+  { key: "orchestrator", label: "Prosjektplanlegger", desc: "Dekomponerer prosjekter i faser og oppgaver" },
+  { key: "planner", label: "Oppgaveplanlegger", desc: "Planlegger enkeltoppgaver og filvalg" },
+  { key: "coder", label: "Kodebygger", desc: "Genererer kode fil for fil" },
+  { key: "reviewer", label: "Kodereviewer", desc: "Gjennomgår og vurderer kodekvalitet" },
+  { key: "debugger", label: "Feilsøker", desc: "Analyserer feil og finner rotårsaker" },
+  { key: "tester", label: "Testskriver", desc: "Skriver og validerer tester" },
+  { key: "documenter", label: "Dokumentasjon", desc: "Skriver dokumentasjon og kommentarer" },
+];
 
 type ModelForm = {
   id?: string;
@@ -93,7 +107,13 @@ const emptyProviderForm = (): ProviderForm => ({
 
 export default function ModelsPage() {
   const { data, loading, refresh } = useApiData(() => listProviders(), []);
-  const providers: AIProvider[] = data?.providers ?? [];
+  const { data: roleData, loading: roleLoading, refresh: roleRefresh } = useApiData(() => getRolePreferences(), []);
+  // Optimistic deletions — models removed here disappear immediately without waiting for refresh
+  const [deletedModelIds, setDeletedModelIds] = useState<Set<string>>(new Set());
+  const providers: AIProvider[] = (data?.providers ?? []).map(p => ({
+    ...p,
+    models: (p.models ?? []).filter((m: AIModelRow) => !deletedModelIds.has(m.id)),
+  }));
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [modelModal, setModelModal] = useState<ModelForm | null>(null);
@@ -101,7 +121,10 @@ export default function ModelsPage() {
   const [saving, setSaving] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteConfirmModel, setDeleteConfirmModel] = useState<{ id: string; displayName: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [roleSaving, setRoleSaving] = useState<string | null>(null);
 
   const toggle = (id: string) =>
     setExpanded((prev) => {
@@ -233,11 +256,36 @@ export default function ModelsPage() {
 
   const handleDelete = async (modelId: string) => {
     setDeletingId(modelId);
+    // Close dialog immediately for snappier UX
+    setDeleteConfirmId(null);
+    setDeleteConfirmModel(null);
+    // Optimistic: hide model immediately
+    setDeletedModelIds(prev => new Set([...prev, modelId]));
     try {
       await deleteModel(modelId);
-      refresh();
-    } catch { /* ignore */ } finally {
+      refresh(); // sync DB state in background
+    } catch {
+      // Rollback optimistic removal on error
+      setDeletedModelIds(prev => { const next = new Set(prev); next.delete(modelId); return next; });
+    } finally {
       setDeletingId(null);
+    }
+  };
+
+  const openDeleteConfirm = (modelId: string, displayName: string) => {
+    setDeleteConfirmId(modelId);
+    setDeleteConfirmModel({ id: modelId, displayName });
+  };
+
+  const handleSetRolePreference = async (role: AgentRole, modelId: string) => {
+    setRoleSaving(role);
+    try {
+      await setRolePreference(role, modelId);
+      roleRefresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Lagring av rollepreferanse feilet");
+    } finally {
+      setRoleSaving(null);
     }
   };
 
@@ -365,7 +413,7 @@ export default function ModelsPage() {
                               deleting={deletingId === model.id}
                               onToggle={(enabled) => handleToggle(model.id, enabled)}
                               onEdit={() => openEditModel(provider, model)}
-                              onDelete={() => handleDelete(model.id)}
+                              onDelete={() => openDeleteConfirm(model.id, model.displayName)}
                             />
                           ))}
                         </>
@@ -386,6 +434,85 @@ export default function ModelsPage() {
       </GR>
 
       <GR mb={40}>
+        {/* Role-based model preferences */}
+        <div style={{ marginTop: 24 }}>
+          <SectionLabel>ROLLE-BASERTE MODELLPREFERANSER</SectionLabel>
+          <p style={{ fontSize: 13, color: T.textMuted, marginBottom: 16 }}>
+            Velg hvilken modell som skal brukes for hver agentrolle. Disse instillingene overstyrer complexity-basert valg.
+          </p>
+          {roleLoading ? (
+            <Skeleton rows={3} />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {AGENT_ROLES.map((role) => {
+                const currentPref = roleData?.preferences[role.key]?.[0];
+                const currentModel = currentPref?.modelId;
+                return (
+                  <div
+                    key={role.key}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "180px 1fr 200px",
+                      alignItems: "center",
+                      gap: 12,
+                      padding: "10px 12px",
+                      border: `1px solid ${T.border}`,
+                      borderRadius: 6,
+                      background: T.subtle,
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>
+                        {role.label}
+                      </div>
+                      <div style={{ fontSize: 11, color: T.textFaint }}>
+                        {role.desc}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 12, color: T.textMuted }}>
+                      {currentModel ? (
+                        <span style={{ fontFamily: T.mono }}>
+                          {providers
+                            .flatMap((p) => p.models)
+                            .find((m) => m.modelId === currentModel)?.displayName || currentModel}
+                        </span>
+                      ) : (
+                        <span style={{ color: T.textFaint }}>— Ingen konfigurert —</span>
+                      )}
+                    </div>
+                    <select
+                      value={currentModel || ""}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          handleSetRolePreference(role.key, e.target.value);
+                        }
+                      }}
+                      disabled={roleSaving === role.key || loading}
+                      style={{
+                        ...inputStyle,
+                        fontSize: 12,
+                        cursor: roleSaving === role.key ? "default" : "pointer",
+                        opacity: roleSaving === role.key ? 0.6 : 1,
+                      }}
+                    >
+                      <option value="">— Velg modell —</option>
+                      {providers.flatMap((p) =>
+                        p.models.filter((m) => m.enabled).map((m) => (
+                          <option key={m.id} value={m.modelId}>
+                            {m.displayName}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </GR>
+
+      <GR mb={40}>
         {/* Tier reference */}
         <div style={{ marginTop: 24 }}>
           <SectionLabel>TIER-REFERANSE</SectionLabel>
@@ -398,7 +525,7 @@ export default function ModelsPage() {
             ))}
           </div>
           <p style={{ fontSize: 11, color: T.textFaint, marginTop: 8 }}>
-            Agenten velger modell basert på tier og task-kompleksitet. T1–T2 for enkle oppgaver, T3 standard, T4–T5 for komplekse.
+            Agenten velger modell basert på tier og task-kompleksitet. T1–T2 for enkle oppgaver, T3 standard, T4–T5 for komplekse. Rolle-baserte preferanser overstyrer disse innstillingene.
           </p>
         </div>
       </GR>
@@ -474,12 +601,13 @@ export default function ModelsPage() {
                 </select>
               </FormRow>
             </div>
-            <FormRow label="Tags" hint="kommaseparert: chat, coding, analysis">
-              <input
-                style={inputStyle}
-                value={modelModal.tags}
-                onChange={(e) => setModelModal((m) => m && ({ ...m, tags: e.target.value }))}
-                placeholder="chat, coding, analysis"
+            <FormRow label="Roller" hint="Velg relevante roller for denne modellen">
+              <RoleSelector
+                selectedRoles={modelModal.tags
+                  .split(",")
+                  .map((t) => t.trim())
+                  .filter(Boolean)}
+                onChange={(roles) => setModelModal((m) => m && ({ ...m, tags: roles.join(", ") }))}
               />
             </FormRow>
             <div style={{ display: "flex", gap: 24 }}>
@@ -614,6 +742,48 @@ export default function ModelsPage() {
           </div>
         </Modal>
       )}
+
+      {/* Delete confirmation dialog */}
+      {deleteConfirmModel && (
+        <div
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)",
+            zIndex: 101, display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) { setDeleteConfirmId(null); setDeleteConfirmModel(null); } }}
+        >
+          <div
+            style={{
+              background: T.surface, border: `1px solid ${T.border}`,
+              borderRadius: T.r, padding: 28, width: 400,
+              boxShadow: "0 24px 64px rgba(0,0,0,0.12)",
+            }}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600, color: T.text, marginBottom: 8 }}>
+              Slett modell?
+            </div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 20 }}>
+              Du er i ferd med å slette <strong>{deleteConfirmModel.displayName}</strong>. Dette kan ikke gjøres om.
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <Btn
+                sm
+                onClick={() => { setDeleteConfirmId(null); setDeleteConfirmModel(null); }}
+              >
+                Avbryt
+              </Btn>
+              <Btn
+                sm
+                primary
+                onClick={() => handleDelete(deleteConfirmModel.id)}
+                style={{ background: T.error, borderColor: T.error, opacity: deletingId === deleteConfirmModel.id ? 0.6 : 1, pointerEvents: deletingId === deleteConfirmModel.id ? "none" : "auto" }}
+              >
+                {deletingId === deleteConfirmModel.id ? "Sletter..." : "Slett"}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -657,9 +827,27 @@ function ModelRow({
         <div style={{ fontSize: 11, color: T.textFaint, marginTop: 2 }}>
           {model.displayName}
           {model.tags?.length > 0 && (
-            <span style={{ marginLeft: 8, color: T.textFaint }}>
-              {model.tags.join(" · ")}
-            </span>
+            <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {model.tags.map((tag) => {
+                const role = PREDEFINED_ROLES.find((r) => r.key === tag);
+                return (
+                  <span
+                    key={tag}
+                    style={{
+                      fontSize: 10,
+                      padding: "2px 8px",
+                      borderRadius: 4,
+                      background: role ? "rgba(167, 139, 250, 0.15)" : T.border,
+                      color: role ? "#a78bfa" : T.textMuted,
+                      fontWeight: 500,
+                      fontFamily: T.sans,
+                    }}
+                  >
+                    {role?.label || tag}
+                  </span>
+                );
+              })}
+            </div>
           )}
         </div>
       </div>
@@ -811,6 +999,100 @@ function CheckField({
         {checked && <Check size={10} style={{ color: T.accent }} />}
       </div>
       <span style={{ fontSize: 12, color: T.textSec }}>{label}</span>
+    </div>
+  );
+}
+
+function RoleSelector({
+  selectedRoles,
+  onChange,
+}: {
+  selectedRoles: string[];
+  onChange: (roles: string[]) => void;
+}) {
+  const [customTags, setCustomTags] = useState<string[]>([]);
+
+  // Separer predefinerte roller fra custom
+  const selected = new Set(selectedRoles);
+  const predefinedSelected = PREDEFINED_ROLES.filter((r) => selected.has(r.key));
+  const customSelected = selectedRoles.filter((t) => !PREDEFINED_ROLES.some((r) => r.key === t));
+
+  const toggleRole = (key: string) => {
+    const newRoles = [...selectedRoles];
+    const idx = newRoles.indexOf(key);
+    if (idx >= 0) {
+      newRoles.splice(idx, 1);
+    } else {
+      newRoles.push(key);
+    }
+    onChange(newRoles);
+  };
+
+  const removeCustomTag = (tag: string) => {
+    onChange(selectedRoles.filter((t) => t !== tag));
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {/* Predefinerte roller i 3 kolonner */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 1fr)",
+          gap: 8,
+        }}
+      >
+        {PREDEFINED_ROLES.map((role) => (
+          <div
+            key={role.key}
+            onClick={() => toggleRole(role.key)}
+            style={{
+              padding: "10px 12px",
+              border: `1px solid ${selected.has(role.key) ? T.accent : T.border}`,
+              borderRadius: 8,
+              cursor: "pointer",
+              background: selected.has(role.key) ? "rgba(167, 139, 250, 0.1)" : T.subtle,
+              transition: "all 0.15s",
+              userSelect: "none",
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 500, color: selected.has(role.key) ? "#a78bfa" : T.text }}>
+              {role.label}
+            </div>
+            <div style={{ fontSize: 10, color: T.textFaint, marginTop: 3 }}>
+              {role.desc}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Custom tags under griden */}
+      {customSelected.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+          {customSelected.map((tag) => (
+            <div
+              key={tag}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "4px 8px",
+                background: T.border,
+                borderRadius: 4,
+                fontSize: 11,
+                color: T.textMuted,
+              }}
+            >
+              {tag}
+              <X
+                size={12}
+                style={{ cursor: "pointer" }}
+                onClick={() => removeCustomTag(tag)}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

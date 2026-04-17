@@ -4,14 +4,11 @@
 // Provider-agnostic tool routing prepared for future providers.
 
 import Anthropic from "@anthropic-ai/sdk";
-import { secret } from "encore.dev/config";
 import log from "encore.dev/log";
 import { estimateCost } from "./router";
-import { resolveProviderFromModel } from "./provider-registry";
+import { resolveProviderFromModel, getProviderApiKey } from "./provider-registry";
 import { logTokenUsage } from "./call";
 import type { AICallOptions, AICallResponse } from "./types";
-
-const anthropicKey = secret("AnthropicAPIKey");
 
 // --- Tool Definitions ---
 
@@ -99,7 +96,7 @@ function sanitizeRepoName(name: string): string {
 
 // --- Tool Execution ---
 
-async function executeToolCall(
+export async function executeToolCall(
   name: string,
   input: Record<string, unknown>,
   repoName?: string,
@@ -373,17 +370,22 @@ export interface ToolCallResponse extends AICallResponse {
 export async function callWithTools(options: ToolCallOptions): Promise<ToolCallResponse> {
   const providerId = resolveProviderFromModel(options.model);
 
-  // For now, all providers use Anthropic SDK streaming for tool-use
-  // Future: add fetch-based tool-use for OpenAI-compatible providers
+  // Non-Anthropic providers use OpenAI-compatible tool-use loop (Moonshot, OpenAI, OpenRouter, Fireworks, etc.)
   if (providerId !== "anthropic") {
-    log.warn("Tool-use requested for non-Anthropic provider, falling back to Anthropic SDK", { provider: providerId, model: options.model });
+    log.info("Tool-use: routing to OpenAI-compat loop", {
+      provider: providerId,
+      model: options.model,
+    });
+    const { callOpenAIWithTools } = await import("./tools-openai");
+    return callOpenAIWithTools(options, executeToolCall);
   }
 
   return callAnthropicWithToolsSDK(options);
 }
 
 async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<ToolCallResponse> {
-  const client = new Anthropic({ apiKey: anthropicKey() });
+  const apiKey = await getProviderApiKey("anthropic");
+  const client = new Anthropic({ apiKey });
 
   const systemBlocks: Array<{ type: "text"; text: string; cache_control?: { type: "ephemeral" } }> = [
     { type: "text", text: options.system, cache_control: { type: "ephemeral" } },

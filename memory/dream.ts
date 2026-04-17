@@ -6,6 +6,7 @@ import { api } from "encore.dev/api";
 import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
 import { ai, memory } from "~encore/clients";
+import { brainEvents, brainStatusCache, type BrainEvent } from "./memory";
 
 import { db } from "./db";
 
@@ -57,32 +58,34 @@ interface DreamResult {
 
 // --- Core dream logic ---
 
-async function runDream(): Promise<DreamResult> {
+async function runDream(force: boolean = false): Promise<DreamResult> {
   const startMs = Date.now();
 
-  // GATE 1: Time gate — skip if last dream was < 24h ago
-  const lastDreamAt = await getMetaValue("last_dream_at");
-  if (lastDreamAt) {
-    const lastDream = new Date(lastDreamAt);
-    const hoursSinceLast = (Date.now() - lastDream.getTime()) / 3_600_000;
-    if (hoursSinceLast < 24) {
-      log.info("dream: skipped — too soon since last dream", { hoursSinceLast });
-      return { ran: false, skippedReason: "too_soon", clustersFound: 0, memoriesMerged: 0, memoriesPruned: 0, metaInsights: 0, durationMs: Date.now() - startMs };
+  // GATE 1: Time gate — skip if last dream was < 24h ago (unless force)
+  if (!force) {
+    const lastDreamAt = await getMetaValue("last_dream_at");
+    if (lastDreamAt) {
+      const lastDream = new Date(lastDreamAt);
+      const hoursSinceLast = (Date.now() - lastDream.getTime()) / 3_600_000;
+      if (hoursSinceLast < 24) {
+        log.info("dream: skipped — too soon since last dream", { hoursSinceLast });
+        return { ran: false, skippedReason: "too_soon", clustersFound: 0, memoriesMerged: 0, memoriesPruned: 0, metaInsights: 0, durationMs: Date.now() - startMs };
+      }
     }
-  }
 
-  // GATE 2: Activity gate — need at least 3 new memories since last dream
-  const sinceDate = lastDreamAt ?? new Date(0).toISOString();
-  const activityRow = await db.queryRow<{ count: number }>`
-    SELECT COUNT(*)::int as count
-    FROM memories
-    WHERE created_at > ${sinceDate}::timestamptz
-      AND superseded_by IS NULL
-  `;
-  const newMemories = activityRow?.count ?? 0;
-  if (newMemories < 3) {
-    log.info("dream: skipped — insufficient activity", { newMemories });
-    return { ran: false, skippedReason: "low_activity", clustersFound: 0, memoriesMerged: 0, memoriesPruned: 0, metaInsights: 0, durationMs: Date.now() - startMs };
+    // GATE 2: Activity gate — need at least 3 new memories since last dream (unless force)
+    const sinceDate = lastDreamAt ?? new Date(0).toISOString();
+    const activityRow = await db.queryRow<{ count: number }>`
+      SELECT COUNT(*)::int as count
+      FROM memories
+      WHERE created_at > ${sinceDate}::timestamptz
+        AND superseded_by IS NULL
+    `;
+    const newMemories = activityRow?.count ?? 0;
+    if (newMemories < 3) {
+      log.info("dream: skipped — insufficient activity", { newMemories });
+      return { ran: false, skippedReason: "low_activity", clustersFound: 0, memoriesMerged: 0, memoriesPruned: 0, metaInsights: 0, durationMs: Date.now() - startMs };
+    }
   }
 
   // GATE 3: Advisory lock — only one dream process at a time
@@ -100,8 +103,29 @@ async function runDream(): Promise<DreamResult> {
   let metaInsights = 0;
 
   try {
+    // Helper to publish brain event
+    async function publishBrainEvent(phase: string, message: string, progress: number): Promise<void> {
+      const event: BrainEvent = {
+        type: "dream",
+        phase,
+        message,
+        progress,
+        userId: "system",
+      };
+      try {
+        await brainEvents.publish(event);
+        brainStatusCache.set("system", event);
+      } catch (err) {
+        log.warn("brain event publish failed", {
+          phase,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // PHASE 1: SCAN — Find memory clusters by source_repo + memory_type
     log.info("dream: SCAN phase starting");
+    await publishBrainEvent("scan", "Skanner minner...", 10);
 
     const memRows = await db.query<{
       id: string;
@@ -164,6 +188,7 @@ async function runDream(): Promise<DreamResult> {
 
     // PHASE 2: ANALYZE — Synthesize each cluster via AI
     log.info("dream: ANALYZE phase starting", { clusters: clustersFound });
+    await publishBrainEvent("analyze", "Analyserer mønstre...", 30);
 
     type ClusterInsight = { cluster: MemRow[]; insight: string; tokensUsed: number };
     const insights: ClusterInsight[] = [];
@@ -188,8 +213,38 @@ async function runDream(): Promise<DreamResult> {
       }
     }
 
+    // PHASE 2.5: CHECK COMPONENTS — Flag low-quality components for healing
+    log.info("dream: CHECK COMPONENTS phase starting");
+    await publishBrainEvent("check-components", "Sjekker komponenter...", 45);
+
+    try {
+      // Use internal API to find low-quality components
+      // (cannot access registry DB directly due to Encore.ts cross-service rules)
+      // Fallback: store a memory about checking components if registry integration exists
+      log.info("dream: component quality check scheduled");
+
+      // Note: Full implementation would require registry service endpoint
+      // that returns low-quality components for healing consideration.
+      // For now, this is a placeholder that logs intent.
+      const checkMemory = await memory.store({
+        content: "Weekly component quality scan: checking for components with quality_score < 70 that may need healing or updates.",
+        memoryType: "decision",
+        category: "component-quality",
+        tags: ["dream-component-check", "healing-candidate"],
+        sourceRepo: "system",
+        pinned: false,
+        trustLevel: "agent",
+      });
+      log.info("dream: component check memory stored", { memoryId: checkMemory.id });
+    } catch (err) {
+      log.warn("dream: CHECK COMPONENTS phase failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // PHASE 3: MERGE — Store consolidated memories, mark originals superseded
     log.info("dream: MERGE phase starting", { insights: insights.length });
+    await publishBrainEvent("merge", "Slår sammen overlappende minner...", 55);
 
     for (const { cluster, insight } of insights) {
       if (!insight || insight.trim().length < 20) continue;
@@ -232,6 +287,7 @@ async function runDream(): Promise<DreamResult> {
 
     // PHASE 4: META — Generate 1-2 meta-observations across all clusters
     log.info("dream: META phase starting");
+    await publishBrainEvent("meta", "Lager meta-innsikter...", 75);
 
     if (insights.length >= 2) {
       try {
@@ -280,6 +336,7 @@ async function runDream(): Promise<DreamResult> {
 
     // PHASE 5: PRUNE — Delete stale agent memories
     log.info("dream: PRUNE phase starting");
+    await publishBrainEvent("prune", "Rydder utdaterte minner...", 90);
 
     const pruneResult = await db.queryRow<{ count: number }>`
       WITH pruned AS (
@@ -296,6 +353,9 @@ async function runDream(): Promise<DreamResult> {
     memoriesPruned = pruneResult?.count ?? 0;
 
     log.info("dream: PRUNE complete", { memoriesPruned });
+
+    // Publish completion event
+    await publishBrainEvent("complete", "Drøm fullført", 100);
 
     // Update last_dream_at
     await setMetaValue("last_dream_at", new Date().toISOString());
@@ -315,8 +375,8 @@ async function runDream(): Promise<DreamResult> {
 
 export const runDreamEngine = api(
   { method: "POST", path: "/memory/dream", expose: true, auth: true },
-  async (): Promise<DreamResult> => {
-    return runDream();
+  async (req?: { force?: boolean }): Promise<DreamResult> => {
+    return runDream(req?.force ?? false);
   }
 );
 

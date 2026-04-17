@@ -1,12 +1,15 @@
 "use client";
 
-import { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useState } from "react";
 import { T } from "@/lib/tokens";
 import HuginnIcon from "@/components/icons/HuginnIcon";
 import AgentStream from "@/components/AgentStream";
 import AgentStatusBar from "@/components/chat/AgentStatusBar";
 import TypingIndicator from "@/components/chat/TypingIndicator";
 import MemoryInsight from "@/components/chat/MemoryInsight";
+import ChangedFilesPanel from "@/components/chat/ChangedFilesPanel";
+import MarkdownText from "@/components/chat/MarkdownText";
+import ProjectPlanModal from "@/components/chat/ProjectPlanModal";
 import type { Message } from "@/lib/api";
 import type { ReviewActionType } from "@/hooks/useReviewFlow";
 
@@ -74,7 +77,7 @@ interface MessageListProps {
   reviewInProgress?: ReviewActionType;
 }
 
-export default function MessageList({
+const MessageListComponent = function MessageList({
   msgs,
   loading,
   ac,
@@ -91,6 +94,7 @@ export default function MessageList({
   reviewInProgress,
 }: MessageListProps) {
   const msgEndRef = useRef<HTMLDivElement>(null);
+  const [modalPlanContent, setModalPlanContent] = useState<string | null>(null);
 
   const msgsHash = msgs.map(m => `${m.id}:${(m.content || "").substring(0, 40)}`).join(",");
   useEffect(() => {
@@ -150,12 +154,12 @@ export default function MessageList({
       flex: 1,
       overflowY: "auto",
       minHeight: 0,
-      padding: "20px 24px",
+      padding: "20px 64px 20px 24px",
       display: "flex",
       flexDirection: "column",
       gap: 20,
     }}>
-      {loading ? (
+      {loading && msgs.length === 0 ? (
         <div style={{ textAlign: "center", padding: 40 }}>
           <span style={{ fontSize: 13, color: T.textMuted }}>Laster meldinger...</span>
         </div>
@@ -185,9 +189,8 @@ export default function MessageList({
                       border: `1px solid ${T.border}`,
                       borderRadius: T.r,
                       padding: "10px 16px",
-                      fontSize: 13, lineHeight: 1.6, color: T.text,
                     }}>
-                      {m.content}
+                      <MarkdownText content={m.content} />
                     </div>
                     <div style={{ fontSize: 10, color: T.textFaint, textAlign: "right", marginTop: 2 }}>{time}</div>
                   </div>
@@ -201,23 +204,86 @@ export default function MessageList({
                 </div>
               )}
 
-              {/* ASSISTANT — standalone agent message (not merged under chat) */}
-              {m.role === "assistant" && isAgent && !(m.id === lastAgentMsg?.id && mergedChatId) && (
-                <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
-                  <BotAvatar />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <AgentStream
-                      content={m.content}
-                      onCancel={onCancel}
-                      onApprove={onApprove}
-                      onReject={onReject}
-                      onRequestChanges={onRequestChanges}
-                      reviewInProgress={reviewInProgress}
-                    />
-                    <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
+              {/* PROJECT PLAN — compact AI bubble + modal trigger */}
+              {m.role === "assistant" && (() => {
+                try {
+                  const parsed = JSON.parse(m.content);
+                  if (parsed?.type === "project_plan") {
+                    return (
+                      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
+                        <BotAvatar />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{
+                            display: "inline-block",
+                            background: "rgba(20,20,24,0.82)",
+                            backdropFilter: "blur(14px)",
+                            WebkitBackdropFilter: "blur(14px)",
+                            border: `1px solid ${T.border}`,
+                            borderRadius: T.r,
+                            padding: "10px 16px",
+                            maxWidth: "100%",
+                          }}>
+                            <MarkdownText content={`Prosjektplan klar — **${parsed.title}** (${parsed.totalTasks ?? ""} oppgaver i ${parsed.phases?.length ?? ""} faser)`} />
+                            {/* Se prosjektplan — pil med hale */}
+                            <button
+                              onClick={() => setModalPlanContent(m.content)}
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 5,
+                                marginTop: 8,
+                                background: "transparent",
+                                border: "none",
+                                cursor: "pointer",
+                                padding: "3px 0",
+                                color: T.textMuted,
+                                fontSize: 12,
+                                fontWeight: 500,
+                              }}
+                              onMouseEnter={e => { e.currentTarget.style.color = T.text; }}
+                              onMouseLeave={e => { e.currentTarget.style.color = T.textMuted; }}
+                            >
+                              <svg width="13" height="13" viewBox="0 0 13 13" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M3 2 L3 8.5 L10.5 8.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M8.5 6.5 L10.5 8.5 L8.5 10.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                              Se prosjektplan
+                            </button>
+                          </div>
+                          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4 }}>{time}</div>
+                        </div>
+                      </div>
+                    );
+                  }
+                } catch (e) {
+                  // Not JSON — fall through to normal chat rendering
+                }
+                return null;
+              })()}
+
+              {/* ASSISTANT — standalone agent message (not merged under chat) — skip if project_plan was rendered */}
+              {m.role === "assistant" && isAgent && !(m.id === lastAgentMsg?.id && mergedChatId) && (() => {
+                try {
+                  const parsed = JSON.parse(m.content);
+                  if (parsed?.type === "project_plan") return null; // Already rendered above as ProjectPlanCard
+                } catch {}
+                return (
+                  <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
+                    <BotAvatar />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <AgentStream
+                        content={m.content}
+                        onCancel={onCancel}
+                        onApprove={onApprove}
+                        onReject={onReject}
+                        onRequestChanges={onRequestChanges}
+                        reviewInProgress={reviewInProgress}
+                      />
+                      <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
               {/* ASSISTANT — chat message, with optional merged agent below */}
               {m.role === "assistant" && !isAgent && (
@@ -225,8 +291,17 @@ export default function MessageList({
                   <BotAvatar />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {m.content && m.content.trim() !== "" ? (
-                      <div style={{ fontSize: 13, lineHeight: 1.65, color: T.text, fontFamily: T.sans, paddingTop: 4 }}>
-                        {m.content}
+                      <div style={{
+                        display: "inline-block",
+                        background: "rgba(20,20,24,0.82)",
+                        backdropFilter: "blur(14px)",
+                        WebkitBackdropFilter: "blur(14px)",
+                        border: `1px solid ${T.border}`,
+                        borderRadius: T.r,
+                        padding: "10px 16px",
+                        maxWidth: "100%",
+                      }}>
+                        <MarkdownText content={m.content} />
                       </div>
                     ) : null}
 
@@ -283,6 +358,16 @@ export default function MessageList({
       )}
 
       <div ref={msgEndRef} />
+
+      {/* Project plan modal */}
+      {modalPlanContent && (
+        <ProjectPlanModal
+          content={modalPlanContent}
+          onClose={() => setModalPlanContent(null)}
+        />
+      )}
     </div>
   );
-}
+};
+
+export default React.memo(MessageListComponent);
