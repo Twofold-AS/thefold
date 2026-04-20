@@ -23,11 +23,11 @@ function timeAgo(date: string): string {
   return `${Math.floor(days / 30)}mnd`;
 }
 
+const REPO_ID_REGEX = /^repo-(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function extractRepoFromId(id: string): string | null {
-  if (!id.startsWith("repo-")) return null;
-  const rest = id.substring(5);
-  const parts = rest.split("-");
-  return parts.length >= 6 ? parts.slice(0, parts.length - 5).join("-") : rest;
+  const match = id.match(REPO_ID_REGEX);
+  return match ? match[1] : null;
 }
 
 type FilterTab = "all" | "repo" | "free" | "incognito";

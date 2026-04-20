@@ -95,10 +95,10 @@ export async function refreshModelCache(): Promise<void> {
   }
 }
 
-/** Trigger a non-blocking cache refresh if stale. */
-function ensureCacheFresh(): void {
+/** Ensure the in-memory model cache is fresh; awaits the DB refresh if stale. */
+async function ensureCacheFresh(): Promise<void> {
   if (Date.now() - cacheTime > CACHE_TTL_MS) {
-    refreshModelCache().catch(() => {});
+    await refreshModelCache();
   }
 }
 
@@ -125,17 +125,17 @@ const DEFAULT_COMPLEX = "claude-opus-4-5-20251101";
  * Models are matched by their `bestFor` tags, not by tier/cost.
  * When multiple candidates exist at the same tier and context, picks cheapest.
  */
-export function selectOptimalModel(
+export async function selectOptimalModel(
   complexity: number,
   mode: ModelMode = "auto",
   manualModelId?: string,
   context?: string
-): string {
+): Promise<string> {
   if (mode === "manual" && manualModelId) {
     return manualModelId;
   }
 
-  ensureCacheFresh();
+  await ensureCacheFresh();
 
   // Tag-based selection: find models that match the requested context
   if (context) {

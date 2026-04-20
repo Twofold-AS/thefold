@@ -16,7 +16,7 @@ interface ModelOption {
 }
 
 interface MessageInputProps {
-  onSubmit: (value: string, options?: { firecrawlEnabled?: boolean }) => void;
+  onSubmit: (value: string, options?: { firecrawlEnabled?: boolean; planMode?: boolean }) => void;
   pendingReviewId: string | null;
   sending: boolean;
   onCancel: () => void;

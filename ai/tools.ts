@@ -78,6 +78,45 @@ export const CHAT_TOOLS: Array<{
       required: ["repoName", "query"],
     },
   },
+  {
+    name: "execute_project_plan",
+    description: "Start execution of a project plan. Call this when the user says 'kjør planen', 'start prosjektet', 'sett i gang', 'execute', or similar.",
+    input_schema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string", description: "ID of the plan to execute (found in the latest project_plan message)" },
+        conversationId: { type: "string" },
+        repoOwner: { type: "string" },
+        repoName: { type: "string" },
+      },
+      required: ["projectId", "conversationId"],
+    },
+  },
+  {
+    name: "revise_project_plan",
+    description: "Revise an existing project plan. Call this when the user wants to add tasks, remove tasks, change phases, or restructure the plan.",
+    input_schema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string", description: "ID of the existing plan to revise" },
+        editRequest: { type: "string", description: "What changes to make to the plan" },
+      },
+      required: ["projectId", "editRequest"],
+    },
+  },
+  {
+    name: "respond_to_review",
+    description: "Use when the user responds to a completed project review. Call this when the user approves, requests changes, or rejects the delivery.",
+    input_schema: {
+      type: "object",
+      properties: {
+        reviewId: { type: "string" },
+        action: { type: "string", enum: ["approve", "request_changes", "reject"] },
+        feedback: { type: "string" },
+      },
+      required: ["reviewId", "action"],
+    },
+  },
 ];
 
 // --- Helpers ---
@@ -314,6 +353,78 @@ export async function executeToolCall(
       } catch {
         return { error: "Kunne ikke søke i repoet" };
       }
+    }
+
+    case "execute_project_plan": {
+      const projectId = input.projectId as string;
+      const effectiveRepoName = (input.repoName as string) || repoName || "";
+      const effectiveRepoOwner = (input.repoOwner as string) || repoOwner || "";
+      if (!effectiveRepoOwner || !effectiveRepoName) {
+        return {
+          success: false,
+          needsClarification: true,
+          message: "Jeg trenger å vite hvilket repo prosjektet skal kjøres i. Kan du si meg reponavn og owner? For eksempel: \"Kjør planen i repo my-org/my-repo\"",
+        };
+      }
+      const { agent: agentClient } = await import("~encore/clients");
+      await agentClient.startProject({
+        projectId,
+        conversationId: conversationId || "",
+        repoOwner: effectiveRepoOwner,
+        repoName: effectiveRepoName,
+      });
+      return { success: true, message: "Prosjektet er startet. Du vil motta oppdateringer i samtalen." };
+    }
+
+    case "revise_project_plan": {
+      const projectId = input.projectId as string;
+      const editRequest = input.editRequest as string;
+      const { ai: aiClient, agent: agentClient } = await import("~encore/clients");
+      // Fetch existing plan phases so the AI has full context for the revision
+      let currentPhases: Array<{ name: string; description: string; tasks: Array<{ title: string; description: string; dependsOnIndices: number[] }> }> | undefined;
+      try {
+        const existing = await agentClient.getProjectPlan({ projectId });
+        currentPhases = existing.phases;
+      } catch {
+        // Non-critical — proceed without phases (AI will see existingPlanId only)
+      }
+      const revised = await aiClient.revisePlanUser({ existingPlanId: projectId, editRequest, currentPhases });
+      const stored = await agentClient.storeProjectPlan({
+        conversationId: conversationId || "",
+        userRequest: editRequest,
+        repoName: repoName,
+        supersededPlanId: projectId,
+        decomposition: {
+          phases: revised.phases,
+          conventions: revised.conventions,
+          estimatedTotalTasks: revised.totalTasks,
+        },
+      });
+      return {
+        success: true,
+        message: `Plan oppdatert med ${stored.totalTasks} oppgaver.`,
+        projectId: stored.projectId,
+      };
+    }
+
+    case "respond_to_review": {
+      const reviewId = input.reviewId as string;
+      const action = input.action as "approve" | "request_changes" | "reject";
+      const feedback = (input.feedback as string) || "";
+      const { agent: agentClient } = await import("~encore/clients");
+      if (action === "approve") {
+        await agentClient.approveReview({ reviewId });
+        return { success: true, message: "Prosjektet er godkjent. PR opprettes og sandbox ryddes." };
+      }
+      if (action === "request_changes") {
+        await agentClient.requestChanges({ reviewId, feedback });
+        return { success: true, message: "Tilbakemelding sendt til agenten. Ny iterasjon starter." };
+      }
+      if (action === "reject") {
+        await agentClient.rejectReview({ reviewId, reason: feedback || undefined });
+        return { success: true, message: "Prosjektet er avvist. Sandbox ryddes." };
+      }
+      return { error: "Ugyldig action" };
     }
 
     default:

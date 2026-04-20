@@ -37,7 +37,7 @@ interface AgentStreamState {
 }
 
 interface UseAgentStreamOptions {
-  onDone?: () => void;
+  onDone?: () => void | Promise<void>;
   onError?: (error: string) => void;
 }
 
@@ -257,7 +257,10 @@ export function useAgentStream(
           thinkingText: null,
           status: "done",
         }));
-        optionsRef.current?.onDone?.();
+        const maybePromise = optionsRef.current?.onDone?.();
+        if (maybePromise instanceof Promise) {
+          maybePromise.catch(() => {});
+        }
         cleanup();
       });
 

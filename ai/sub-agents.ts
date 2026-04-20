@@ -1,7 +1,5 @@
 // Sub-agent types and role-to-model mapping for multi-agent orchestration
 
-import { selectOptimalModel } from "./router";
-
 // --- Types ---
 
 export type SubAgentRole = "implementer" | "tester" | "reviewer" | "documenter" | "researcher" | "planner" | "security" | "brain";
@@ -47,27 +45,6 @@ const ROLE_MODEL_MAP: Record<SubAgentRole, string> = {
 // --- Functions ---
 
 export function getModelForRole(role: SubAgentRole, _budgetMode?: BudgetMode): string {
-  // Map roles to context tags for selectOptimalModel
-  const contextMap: Record<SubAgentRole, string> = {
-    planner: "planning",
-    implementer: "coding",
-    tester: "fast",
-    reviewer: "review",
-    documenter: "fast",
-    researcher: "analysis",
-    security: "review",
-    brain: "review",
-  };
-
-  try {
-    const context = contextMap[role];
-    const model = selectOptimalModel(5, "auto", undefined, context);
-    if (model) return model;
-  } catch {
-    // Fall through to hardcoded fallback
-  }
-
-  // Fallback to ROLE_MODEL_MAP if selectOptimalModel fails or returns null
   return ROLE_MODEL_MAP[role];
 }
 

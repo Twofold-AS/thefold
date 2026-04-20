@@ -121,6 +121,26 @@ function convertLegacy(parsed: any): AgentProgress | null {
         })),
         question: parsed.questions?.[0] || "",
       };
+    case "project_review_ready":
+      return {
+        status: "waiting",
+        phase: "reviewing",
+        summary: parsed.summary || `${parsed.tasksCompleted || 0} oppgaver fullfort, ${parsed.filesChanged || 0} filer endret.`,
+        steps: [
+          { id: "tasks", label: `${parsed.tasksCompleted || 0} oppgaver fullfort`, done: true },
+          { id: "files", label: `${parsed.filesChanged || 0} filer endret`, done: true },
+          { id: "review", label: parsed.qualityScore != null ? `Kvalitet: ${parsed.qualityScore}/10` : "Gjennomgatt av AI", done: true },
+          { id: "waiting", label: "Venter pa godkjenning", done: false },
+        ],
+        report: {
+          filesChanged: [],
+          costUsd: 0,
+          duration: "",
+          qualityScore: parsed.qualityScore,
+          reviewId: parsed.reviewId || "",
+        },
+        question: parsed.message,
+      };
     case "completion":
       return {
         status: "done",

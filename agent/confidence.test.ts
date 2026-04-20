@@ -32,7 +32,7 @@ vi.mock("./db", () => ({
 
 // --- Mock ai/router ---
 vi.mock("../ai/router", () => ({
-  selectOptimalModel: vi.fn().mockReturnValue("claude-sonnet-4-5-20250929"),
+  selectOptimalModel: vi.fn().mockResolvedValue("claude-sonnet-4-5-20250929"),
 }));
 
 // --- Helpers ---

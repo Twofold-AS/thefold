@@ -21,12 +21,14 @@ interface Conversation {
   activeTask?: boolean;
 }
 
+// Conv-id format: `repo-${repoName}-${uuid}`. repoName may itself contain hyphens
+// (e.g. "Mikael-er-kul"), so a naive split("-") drops everything after the first chunk.
+// Anchor on the trailing UUID instead.
+const REPO_ID_REGEX = /^repo-(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function extractRepoFromConvId(id: string): string | null {
-  if (id.startsWith("repo-")) {
-    const parts = id.replace("repo-", "").split("-");
-    return parts[0] || null;
-  }
-  return null;
+  const m = id.match(REPO_ID_REGEX);
+  return m ? m[1] : null;
 }
 
 function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
@@ -109,9 +111,11 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     .filter((c) => !c.id.startsWith("inkognito-"))
     .filter((c) => {
       if (selectedRepo) {
-        const repoName = extractRepoFromConvId(c.id);
-        const shortName = selectedRepo.fullName?.split("/")[1] ?? selectedRepo.name;
-        return repoName === shortName || repoName === selectedRepo.name;
+        const repoName = extractRepoFromConvId(c.id)?.toLowerCase();
+        if (!repoName) return false;
+        const shortName = (selectedRepo.fullName?.split("/")[1] ?? selectedRepo.name).toLowerCase();
+        const fallbackName = selectedRepo.name.toLowerCase();
+        return repoName === shortName || repoName === fallbackName;
       }
       return true;
     })
@@ -350,7 +354,7 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
 
                       {/* Historikk — fixed height at bottom of sidebar */}
                       <div style={{
-                        background: T.tabWrapper,
+                        background: T.tabActive,
                         borderRadius: 12,
                         padding: "10px 10px 12px",
                         marginTop: 0,
@@ -362,12 +366,17 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
                         flexDirection: "column",
                         overflow: "hidden",
                       }}>
-                        <div style={{
-                          fontSize: 10, fontWeight: 600, color: T.textFaint,
-                          textTransform: "uppercase", letterSpacing: "0.06em",
-                          marginBottom: 6, paddingLeft: 4, flexShrink: 0,
-                        }}>
-                          Historikk
+                        <div style={{ marginBottom: 6, paddingLeft: 4, flexShrink: 0 }}>
+                          <span style={{
+                            fontSize: 10, fontWeight: 600, color: T.textFaint,
+                            textTransform: "uppercase", letterSpacing: "0.06em",
+                            background: T.tabWrapper,
+                            borderRadius: 6,
+                            padding: "2px 8px",
+                            display: "inline-block",
+                          }}>
+                            Historikk
+                          </span>
                         </div>
                         {/* Inkognito-indikator når ingen repo er valgt */}
                         {isIncognito && (

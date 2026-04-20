@@ -249,7 +249,7 @@ export async function assessAndRoute(
       projectStructure: contextData.treeString.substring(0, 2000),
       fileCount: contextData.treeArray.length,
     }));
-    selectedModel = selectOptimalModel(complexityResult.complexity, "auto");
+    selectedModel = await selectOptimalModel(complexityResult.complexity, "auto");
   } else {
     const complexityResult = await auditedStep(ctx, "complexity_assessed", {
       modelMode: ctx.modelMode,
@@ -266,7 +266,7 @@ export async function assessAndRoute(
       modelUsed: (complexityResult as { modelUsed?: string }).modelUsed || "",
     });
 
-    selectedModel = selectOptimalModel(complexityResult.complexity, "auto");
+    selectedModel = await selectOptimalModel(complexityResult.complexity, "auto");
 
     await audit({
       sessionId: ctx.conversationId,

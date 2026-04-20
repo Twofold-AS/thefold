@@ -22,7 +22,6 @@ interface Plan {
 interface ProjectPlanModalProps {
   content: string;
   onClose: () => void;
-  onStart?: () => void;
 }
 
 // Sjekkliste-ikon med +/=/- symboler
@@ -79,7 +78,7 @@ function PhaseNumber({ n, active }: { n: number; active: boolean }) {
   );
 }
 
-export default function ProjectPlanModal({ content, onClose, onStart }: ProjectPlanModalProps) {
+export default function ProjectPlanModal({ content, onClose }: ProjectPlanModalProps) {
   const [expandedPhases, setExpandedPhases] = useState<Set<number>>(new Set());
 
   let plan: Plan | null = null;
@@ -297,12 +296,10 @@ export default function ProjectPlanModal({ content, onClose, onStart }: ProjectP
           gap: S.sm,
           flexShrink: 0,
         }}>
+          <div style={{ fontSize: 11, color: T.textFaint, marginRight: "auto", alignSelf: "center" }}>
+            Skriv &quot;kjør planen&quot; i chatten for å starte
+          </div>
           <Btn variant="ghost" size="sm" onClick={onClose}>Lukk</Btn>
-          {onStart && (
-            <Btn variant="primary" size="sm" onClick={() => { onClose(); onStart(); }}>
-              Start prosjektet
-            </Btn>
-          )}
         </div>
       </div>
     </div>

@@ -829,7 +829,7 @@ function ModelRow({
           {model.tags?.length > 0 && (
             <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
               {model.tags.map((tag) => {
-                const role = PREDEFINED_ROLES.find((r) => r.key === tag);
+                const role = AGENT_ROLES.find((r) => r.key === tag);
                 return (
                   <span
                     key={tag}
@@ -1014,8 +1014,8 @@ function RoleSelector({
 
   // Separer predefinerte roller fra custom
   const selected = new Set(selectedRoles);
-  const predefinedSelected = PREDEFINED_ROLES.filter((r) => selected.has(r.key));
-  const customSelected = selectedRoles.filter((t) => !PREDEFINED_ROLES.some((r) => r.key === t));
+  const predefinedSelected = AGENT_ROLES.filter((r) => selected.has(r.key));
+  const customSelected = selectedRoles.filter((t) => !AGENT_ROLES.some((r) => r.key === t));
 
   const toggleRole = (key: string) => {
     const newRoles = [...selectedRoles];
@@ -1042,7 +1042,7 @@ function RoleSelector({
           gap: 8,
         }}
       >
-        {PREDEFINED_ROLES.map((role) => (
+        {AGENT_ROLES.map((role) => (
           <div
             key={role.key}
             onClick={() => toggleRole(role.key)}

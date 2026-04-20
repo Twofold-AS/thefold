@@ -37,7 +37,7 @@ interface ChatContainerProps {
   onApprove: (reviewId: string) => Promise<void>;
   onReject: (reviewId: string) => Promise<void>;
   onRequestChanges: (reviewId: string, feedback?: string) => void;
-  onSend: (value: string, options?: { firecrawlEnabled?: boolean }) => void;
+  onSend: (value: string, options?: { firecrawlEnabled?: boolean; planMode?: boolean }) => void;
   pendingReviewId: string | null;
   reviewInProgress?: ReviewActionType;
   skills: Skill[];
@@ -56,6 +56,7 @@ interface ChatContainerProps {
   onIncognitoToggle?: () => void;
   planMode?: boolean;
   onPlanModeToggle?: () => void;
+  activePlanMsgId?: string | null;
 }
 
 export default function ChatContainer({
@@ -92,6 +93,7 @@ export default function ChatContainer({
   onIncognitoToggle,
   planMode,
   onPlanModeToggle,
+  activePlanMsgId,
 }: ChatContainerProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -143,6 +145,7 @@ export default function ChatContainer({
         onReject={onReject}
         onRequestChanges={onRequestChanges}
         reviewInProgress={reviewInProgress}
+        activePlanMsgId={activePlanMsgId}
       />
 
       {/* Mode indicators — rendered above the input, aligned to chat input width */}

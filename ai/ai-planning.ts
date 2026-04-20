@@ -854,3 +854,109 @@ plannedOrder starts at 1 and increments sequentially.`;
     }
   }
 );
+
+// --- User-driven Plan Revision ---
+
+interface RevisePlanUserRequest {
+  existingPlanId: string;
+  editRequest: string;
+  currentPhases?: Array<{
+    name: string;
+    description: string;
+    tasks: Array<{ title: string; description: string; dependsOnIndices: number[] }>;
+  }>;
+}
+
+interface RevisePlanUserResponse {
+  phases: Array<{
+    name: string;
+    description: string;
+    tasks: Array<{
+      title: string;
+      description: string;
+      dependsOnIndices: number[];
+      contextHints: string[];
+    }>;
+  }>;
+  conventions: string;
+  totalTasks: number;
+  reasoning: string;
+  tokensUsed: number;
+  modelUsed: string;
+}
+
+export const revisePlanUser = api(
+  { method: "POST", path: "/ai/revise-plan-user", expose: false },
+  async (req: RevisePlanUserRequest): Promise<RevisePlanUserResponse> => {
+    const model = await selectForRole("planner").catch(() => DEFAULT_MODEL);
+
+    const existingPhasesText = req.currentPhases
+      ? req.currentPhases.map((p, pi) =>
+          `Phase ${pi + 1}: ${p.name}\n${p.tasks.map((t, ti) => `  ${ti + 1}. ${t.title}: ${t.description.substring(0, 120)}`).join("\n")}`
+        ).join("\n\n")
+      : "(current plan not provided)";
+
+    const prompt = `You are revising an existing project plan based on user feedback.
+
+## Existing Plan
+${existingPhasesText}
+
+## User's Edit Request
+${sanitize(req.editRequest)}
+
+Apply the requested changes. You may add phases, remove phases, add tasks, remove tasks, or restructure as needed.
+
+Respond with valid JSON only:
+{
+  "phases": [
+    {
+      "name": "Phase name",
+      "description": "Brief description",
+      "tasks": [
+        {
+          "title": "Task title",
+          "description": "Detailed description",
+          "dependsOnIndices": [],
+          "contextHints": []
+        }
+      ]
+    }
+  ],
+  "conventions": "Any architectural conventions or constraints",
+  "reasoning": "Brief explanation of what changed and why"
+}`;
+
+    const response = await callAIWithFallback({
+      model,
+      system: BASE_RULES,
+      messages: [{ role: "user", content: prompt }],
+      maxTokens: 8000,
+    });
+
+    try {
+      const parsed = JSON.parse(stripMarkdownJson(response.content));
+      const phases = parsed.phases || [];
+      const totalTasks = phases.reduce((sum: number, p: { tasks: unknown[] }) => sum + (p.tasks?.length ?? 0), 0);
+      return {
+        phases,
+        conventions: parsed.conventions || "",
+        totalTasks,
+        reasoning: parsed.reasoning || "",
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+      };
+    } catch {
+      return {
+        phases: req.currentPhases?.map(p => ({
+          ...p,
+          tasks: p.tasks.map(t => ({ ...t, contextHints: [] })),
+        })) || [],
+        conventions: "",
+        totalTasks: req.currentPhases?.reduce((s, p) => s + p.tasks.length, 0) || 0,
+        reasoning: "AI revision failed — returning original plan",
+        tokensUsed: response.tokensUsed,
+        modelUsed: response.modelUsed,
+      };
+    }
+  }
+);

@@ -737,10 +737,20 @@ export async function executeProject(
           WHERE id = ${projectId}
         `;
 
-        await reportProject(conversationId,
-          `Prosjekt-review klar! ${accumulatedFiles.length} filer, ${completedTasks} oppgaver fullfort.\n` +
-          `Se review: /review/${reviewResult.reviewId}`
-        );
+        await agentReports.publish({
+          conversationId,
+          taskId: "project-orchestrator",
+          content: JSON.stringify({
+            type: "project_review_ready",
+            reviewId: reviewResult.reviewId,
+            summary: `${completedTasks} oppgaver fullfort, ${accumulatedFiles.length} filer endret. Kvalitetsscore: ${projectReview.qualityScore}/10.`,
+            message: `Prosjektet er klart for gjennomgang. Godkjenn for å opprette PR, be om endringer, eller avvis.`,
+            filesChanged: accumulatedFiles.length,
+            tasksCompleted: completedTasks,
+            qualityScore: projectReview.qualityScore,
+          }),
+          status: "needs_input",
+        });
 
         // Don't destroy sandbox yet — wait for review approval/rejection
         return;
@@ -995,6 +1005,7 @@ interface StoreProjectPlanRequest {
   userRequest: string;
   repoOwner?: string;
   repoName?: string;
+  supersededPlanId?: string;
   decomposition: {
     phases: Array<{
       name: string;
@@ -1039,6 +1050,34 @@ export const storeProjectPlan = api(
 
     if (!planRow) throw APIError.internal("failed to create project plan");
 
+    // Supersede any active plans for this conversation (auto-detect or explicit)
+    try {
+      const planToSupersede = req.supersededPlanId;
+      if (planToSupersede) {
+        // Explicit supersede: mark the specified plan
+        await db.exec`
+          UPDATE project_plans
+          SET superseded_by_project_id = ${planRow.id}
+          WHERE id = ${planToSupersede}
+            AND superseded_by_project_id IS NULL
+        `;
+      } else {
+        // Auto-detect: supersede all active plans for this conversation
+        await db.exec`
+          UPDATE project_plans
+          SET superseded_by_project_id = ${planRow.id}
+          WHERE conversation_id = ${req.conversationId}
+            AND id != ${planRow.id}
+            AND superseded_by_project_id IS NULL
+            AND status NOT IN ('executing', 'completed')
+        `;
+      }
+    } catch (e) {
+      log.warn("Failed to supersede old project plans", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
     // Create a master task in tasks-service to represent the full job
     let masterTaskId: string | undefined;
     try {
@@ -1050,6 +1089,10 @@ export const storeProjectPlan = api(
         priority: 3,
       });
       masterTaskId = masterResult.task.id;
+      // Persist master_task_id to plan row
+      await db.exec`
+        UPDATE project_plans SET master_task_id = ${masterTaskId} WHERE id = ${planRow.id}
+      `;
     } catch (e) {
       log.warn("Failed to create master task in tasks-service", {
         error: e instanceof Error ? e.message : String(e),
@@ -1130,6 +1173,65 @@ export const storeProjectPlan = api(
     return {
       projectId: planRow.id,
       totalTasks: taskIds.length,
+    };
+  }
+);
+
+// Get a project plan's phases and metadata (used by revise_project_plan tool)
+interface GetProjectPlanRequest {
+  projectId: string;
+}
+
+interface GetProjectPlanResponse {
+  phases: Array<{
+    name: string;
+    description: string;
+    tasks: Array<{
+      title: string;
+      description: string;
+      dependsOnIndices: number[];
+      contextHints: string[];
+    }>;
+  }>;
+  conventions: string;
+  totalTasks: number;
+  status: string;
+  supersededByProjectId: string | null;
+}
+
+export const getProjectPlan = api(
+  { method: "POST", path: "/agent/project/get-plan", expose: false },
+  async (req: GetProjectPlanRequest): Promise<GetProjectPlanResponse> => {
+    const row = await db.queryRow<{
+      plan_data: string | object;
+      conventions: string;
+      total_tasks: number;
+      status: string;
+      superseded_by_project_id: string | null;
+    }>`
+      SELECT plan_data, conventions, total_tasks, status, superseded_by_project_id
+      FROM project_plans WHERE id = ${req.projectId}
+    `;
+    if (!row) throw APIError.notFound(`Project plan ${req.projectId} not found`);
+
+    const planData = typeof row.plan_data === "string" ? JSON.parse(row.plan_data) : row.plan_data;
+    const phases = (planData?.phases || []).map((p: any) => ({
+      name: p.name || "",
+      description: p.description || "",
+      tasks: (p.tasks || []).map((t: any) => ({
+        title: t.title || "",
+        description: t.description || "",
+        dependsOnIndices: t.dependsOnIndices || [],
+        contextHints: t.contextHints || [],
+      })),
+    }));
+
+    return {
+      phases,
+      conventions: row.conventions || "",
+      totalTasks: row.total_tasks,
+      status: row.status,
+      supersededByProjectId: row.superseded_by_project_id,
     };
   }
 );

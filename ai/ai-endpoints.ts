@@ -23,12 +23,7 @@ export const chat = api(
     if (req.model) {
       model = req.model;
     } else {
-      try {
-        model = await selectForRole("reviewer");
-      } catch {
-        // Fallback to complexity-based selection if role-based fails
-        model = selectOptimalModel(req.complexity ?? 5, "auto", undefined, "chat");
-      }
+      model = await selectOptimalModel(req.complexity ?? 2, "auto", undefined, "chat");
     }
 
     req.messages = req.messages.map((m) =>

@@ -225,6 +225,18 @@ export async function uploadChatFile(
   });
 }
 
+export async function startProject(params: {
+  projectId: string;
+  conversationId: string;
+  repoOwner?: string;
+  repoName?: string;
+}): Promise<{ status: string; projectId: string }> {
+  return apiFetch<{ status: string; projectId: string }>("/agent/project/start", {
+    method: "POST",
+    body: params,
+  });
+}
+
 export async function getCostSummary() {
   return apiFetch<CostSummary>("/chat/costs");
 }

@@ -10,50 +10,50 @@ import {
 
 describe("AI Router", () => {
   describe("selectOptimalModel", () => {
-    it("auto mode picks moonshot for simple tasks", () => {
-      const model = selectOptimalModel(2, "auto");
+    it("auto mode picks moonshot for simple tasks", async () => {
+      const model = await selectOptimalModel(2, "auto");
       expect(model).toBe("moonshot-v1-128k");
     });
 
-    it("auto mode picks sonnet for medium tasks", () => {
-      const model = selectOptimalModel(5, "auto");
+    it("auto mode picks sonnet for medium tasks", async () => {
+      const model = await selectOptimalModel(5, "auto");
       expect(model).toBe("claude-sonnet-4-5-20250929");
     });
 
-    it("auto mode picks opus for complex tasks", () => {
-      const model = selectOptimalModel(9, "auto");
+    it("auto mode picks opus for complex tasks", async () => {
+      const model = await selectOptimalModel(9, "auto");
       expect(model).toBe("claude-opus-4-5-20251101");
     });
 
-    it("manual mode respects override", () => {
-      const model = selectOptimalModel(2, "manual", "claude-opus-4-5-20251101");
+    it("manual mode respects override", async () => {
+      const model = await selectOptimalModel(2, "manual", "claude-opus-4-5-20251101");
       expect(model).toBe("claude-opus-4-5-20251101");
     });
 
-    it("auto mode boundary: complexity 3 uses moonshot", () => {
-      expect(selectOptimalModel(3, "auto")).toBe("moonshot-v1-128k");
+    it("auto mode boundary: complexity 3 uses moonshot", async () => {
+      expect(await selectOptimalModel(3, "auto")).toBe("moonshot-v1-128k");
     });
 
-    it("auto mode boundary: complexity 4 uses sonnet", () => {
-      expect(selectOptimalModel(4, "auto")).toBe("claude-sonnet-4-5-20250929");
+    it("auto mode boundary: complexity 4 uses sonnet", async () => {
+      expect(await selectOptimalModel(4, "auto")).toBe("claude-sonnet-4-5-20250929");
     });
 
-    it("auto mode boundary: complexity 7 uses sonnet", () => {
-      expect(selectOptimalModel(7, "auto")).toBe("claude-sonnet-4-5-20250929");
+    it("auto mode boundary: complexity 7 uses sonnet", async () => {
+      expect(await selectOptimalModel(7, "auto")).toBe("claude-sonnet-4-5-20250929");
     });
 
-    it("auto mode boundary: complexity 8 uses opus", () => {
-      expect(selectOptimalModel(8, "auto")).toBe("claude-opus-4-5-20251101");
+    it("auto mode boundary: complexity 8 uses opus", async () => {
+      expect(await selectOptimalModel(8, "auto")).toBe("claude-opus-4-5-20251101");
     });
 
-    it("defaults to auto mode when not specified", () => {
-      expect(selectOptimalModel(1)).toBe("moonshot-v1-128k");
-      expect(selectOptimalModel(5)).toBe("claude-sonnet-4-5-20250929");
-      expect(selectOptimalModel(8)).toBe("claude-opus-4-5-20251101");
+    it("defaults to auto mode when not specified", async () => {
+      expect(await selectOptimalModel(1)).toBe("moonshot-v1-128k");
+      expect(await selectOptimalModel(5)).toBe("claude-sonnet-4-5-20250929");
+      expect(await selectOptimalModel(8)).toBe("claude-opus-4-5-20251101");
     });
 
-    it("manual mode without override falls back to auto logic", () => {
-      const model = selectOptimalModel(5, "manual");
+    it("manual mode without override falls back to auto logic", async () => {
+      const model = await selectOptimalModel(5, "manual");
       expect(model).toBe("claude-sonnet-4-5-20250929");
     });
   });

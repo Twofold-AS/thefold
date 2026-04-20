@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, Suspense, useCallback } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { T } from "@/lib/tokens";
 import ChatComposer from "@/components/ChatComposer";
 import ChatContainer from "@/components/chat/ChatContainer";
@@ -58,6 +58,7 @@ function makeOptimisticMsg(conversationId: string, content: string): Message {
 
 function ChatPageInner() {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const autoMsg = searchParams.get("msg");
   const convParam = searchParams.get("conv");
 
@@ -93,6 +94,11 @@ function ChatPageInner() {
   const wasSendingRef = useRef(false);
   const acPrevRef = useRef<string | null>(null);
   const prevIncognitoRef = useRef(false);
+  // When a brand-new conversation is created, useApiData refetches with empty result
+  // and would wipe the optimistic user message. These refs let the fetcher serve the
+  // optimistic msg instead of fetching, until agent.done triggers a real refresh.
+  const skipNextFetchRef = useRef(false);
+  const optForNewConvRef = useRef<{ convId: string; msg: Message } | null>(null);
 
   useEffect(() => {
     if (ac === acPrevRef.current) return;
@@ -101,7 +107,6 @@ function ChatPageInner() {
       setSending(false);
       setActiveTaskId(null);
       setChatError(null);
-      setPendingMessages([]);
     }
     acPrevRef.current = ac;
   }, [ac]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -121,14 +126,32 @@ function ChatPageInner() {
   );
   const conversations = convData?.conversations ?? [];
 
+  // [debug] history-bug: dump conv ids whenever the list changes so user can
+  // verify whether a missing repo ("Mikael-er-kul") is absent from the API
+  // response or filtered out client-side. Remove once root cause confirmed.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (conversations.length === 0) return;
+    // eslint-disable-next-line no-console
+    console.log("[cowork] conversations from /chat/conversations:", conversations.map(c => ({
+      id: c.id,
+      title: c.title,
+      lastActivity: c.lastActivity,
+    })));
+  }, [conversations]);
+
   const { data: msgData, loading: msgsLoading, refresh: refreshMsgs, setData: setMsgData } = useApiData(
-    () => (ac ? getChatHistory(ac, 50) : Promise.resolve({ messages: [], hasMore: false })),
+    () => {
+      if (skipNextFetchRef.current && optForNewConvRef.current?.convId === ac) {
+        skipNextFetchRef.current = false;
+        const opt = optForNewConvRef.current.msg;
+        return Promise.resolve({ messages: [opt], hasMore: false });
+      }
+      return ac ? getChatHistory(ac, 50) : Promise.resolve({ messages: [], hasMore: false });
+    },
     [ac],
   );
   const msgs: Message[] = msgData?.messages ?? [];
-
-  // Pending messages that haven't been confirmed by the server yet
-  const [pendingMessages, setPendingMessages] = useState<Message[]>([]);
 
   const { data: skillsData } = useApiData(() => listSkills(), []);
   const availableSkills = skillsData?.skills ?? [];
@@ -157,12 +180,11 @@ function ChatPageInner() {
   const { messages: sseMessages, status: streamStatus, agentStartedTaskId, stalled: streamStalled } = useAgentStream(
     sending ? (activeTaskId || ac) : null,
     {
-      onDone: () => {
+      onDone: async () => {
+        // Await DB refresh BEFORE clearing sending so optimistic msg has a confirmed counterpart
+        await refreshMsgs();
         setSending(false);
         setActiveTaskId(null);
-        // Clear pending messages once server confirms them
-        setPendingMessages([]);
-        refreshMsgs();
         // Refresh sidebar when AI response finishes (title now available from first message)
         refreshConvs();
       },
@@ -170,8 +192,6 @@ function ChatPageInner() {
         setSending(false);
         setActiveTaskId(null);
         setChatError(classifyError(new Error(err)));
-        // Keep pending messages visible on error (don't wipe them)
-        // They will stay in pendingMessages until user manually clears or new message overwrites
         refreshMsgs();
       },
     }
@@ -223,12 +243,12 @@ function ChatPageInner() {
   const dbIds = new Set(msgs.map((m) => m.id));
   const filteredSseMsgs = sseAsMsgs.filter((m) => !dbIds.has(m.id));
 
-  // Merge DB messages + SSE messages + pending messages
-  // Pending messages are shown first (in order), then DB/SSE messages
-  const merged = [...pendingMessages, ...msgs, ...filteredSseMsgs];
+  // Merge DB messages + SSE messages. Optimistic user messages live inside msgs
+  // (pushed there by setMsgData before sendMessage resolves), so no separate layer.
+  const merged = [...msgs, ...filteredSseMsgs];
 
-  // Deduplicate: user messages with same content (optimistic + DB can produce dupes)
-  // Also remove pending messages if they're confirmed in DB
+  // Deduplicate user messages by trimmed content — optimistic copy in msgs and the
+  // server-confirmed copy from refreshMsgs() can briefly co-exist with different ids.
   const seen = new Set<string>();
   const displayMsgs = merged.filter((m) => {
     if (m.role === "user") {
@@ -254,8 +274,63 @@ function ChatPageInner() {
     return () => clearTimeout(max);
   }, [sending]);
 
-  // Direct-chat polling fallback removed — SSE delivers content immediately (agent.message, Fase 2)
-  // and agent.done fires reliably to call refreshMsgs(). No polling loop needed for direct chat.
+  // Polling fallback for direct chat (no agent task running).
+  // SSE is the fast path; this is the safety net in case the agent.message event is dropped.
+  // Active only when sending && no activeTaskId (agent path has its own SSE stream).
+  useEffect(() => {
+    if (!sending || activeTaskId || !ac) return;
+
+    let stopped = false;
+    let firstContentAt: number | null = null;
+    const intervals: ReturnType<typeof setInterval>[] = [];
+    const timeouts: ReturnType<typeof setTimeout>[] = [];
+
+    const isReviewMsg = (content: string) => {
+      try { const p = JSON.parse(content); return p.type === "review" || (p.type === "progress" && p.status === "waiting"); }
+      catch { return false; }
+    };
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const result = await getChatHistory(ac, 50);
+        if (stopped) return;
+
+        const assistantMsgs = result.messages.filter(m => m.role === "assistant" && m.content?.trim());
+        const hasContent = assistantMsgs.length > 0;
+        const hasReview = assistantMsgs.some(m => isReviewMsg(m.content));
+
+        if (hasContent) {
+          setMsgData({ messages: result.messages, hasMore: result.hasMore });
+          if (firstContentAt === null) firstContentAt = Date.now();
+          if (hasReview || Date.now() - firstContentAt > 20000) {
+            setSending(false);
+            stopped = true;
+          }
+        }
+      } catch {
+        // ignore transient errors
+      }
+    };
+
+    const startDelay = setTimeout(() => {
+      if (stopped) return;
+      poll();
+      const iv = setInterval(() => { if (!stopped) poll(); }, 2000);
+      intervals.push(iv);
+      const maxTimeout = setTimeout(() => {
+        if (!stopped) { stopped = true; setSending(false); }
+      }, 87000);
+      timeouts.push(maxTimeout);
+    }, 3000);
+    timeouts.push(startDelay);
+
+    return () => {
+      stopped = true;
+      timeouts.forEach(clearTimeout);
+      intervals.forEach(clearInterval);
+    };
+  }, [sending, activeTaskId, ac, setMsgData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSendResult = (result: { agentTriggered: boolean; taskId?: string } | null) => {
     if (result?.taskId) {
@@ -285,10 +360,12 @@ function ChatPageInner() {
         ? repoConversationId(repoName)
         : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-      setAc(convId);
       const optimisticMsg = makeOptimisticMsg(convId, autoMsg);
-      // Add to pendingMessages so it survives refreshMsgs() calls
-      setPendingMessages([optimisticMsg]);
+      optForNewConvRef.current = { convId, msg: optimisticMsg };
+      skipNextFetchRef.current = true;
+      setAc(convId);
+      router.replace(`?conv=${convId}`, { scroll: false });
+      setMsgData({ messages: [optimisticMsg], hasMore: false });
 
       setSending(true);
       sendMessage(convId, autoMsg, {
@@ -331,32 +408,37 @@ function ChatPageInner() {
     </div>
   ) : null;
 
-  const startNewChat = useCallback((msg: string) => {
+  const startNewChat = useCallback((msg: string, options?: { firecrawlEnabled?: boolean; planMode?: boolean }) => {
     const repoName = selectedRepo?.name || null;
     const convId = isIncognito
       ? `inkognito-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       : repoName
         ? repoConversationId(repoName)
         : `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimisticMsg = makeOptimisticMsg(convId, msg);
+    // Pre-seed the fetcher so the useApiData refetch on `ac` change serves the
+    // optimistic msg instead of overwriting it with an empty fetch.
+    optForNewConvRef.current = { convId, msg: optimisticMsg };
+    skipNextFetchRef.current = true;
     setAc(convId);
     setNewChat(false);
-    // Refresh sidebar immediately when new conversation is created
-    refreshConvs();
-    const optimisticMsg = makeOptimisticMsg(convId, msg);
-    // Add to pendingMessages so it survives refreshMsgs() calls
-    setPendingMessages([optimisticMsg]);
+    // Persist convId in URL so refresh restores the conversation
+    router.replace(`?conv=${convId}`, { scroll: false });
+    setMsgData({ messages: [optimisticMsg], hasMore: false });
     hasSent.current = true;
     setSending(true);
     sendMessage(convId, msg, {
       ...(repoName && !isIncognito ? { repoName, repoOwner: selectedRepo?.owner } : {}),
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
+      firecrawlEnabled: options?.firecrawlEnabled,
+      planMode: options?.planMode || planMode || undefined,
     })
       .then(handleSendResult)
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
-  }, [selectedRepo, isIncognito, selectedSkillIds, selectedModel, refreshConvs, handleSendResult]);
+  }, [selectedRepo, isIncognito, selectedSkillIds, selectedModel, planMode, router, setMsgData, handleSendResult]);
 
-  const handleSend = useCallback(async (value: string, options?: { firecrawlEnabled?: boolean }) => {
+  const handleSend = useCallback(async (value: string, options?: { firecrawlEnabled?: boolean; planMode?: boolean }) => {
     if (!ac || !value) return;
     setChatError(null);
 
@@ -367,8 +449,10 @@ function ChatPageInner() {
     }
 
     const optimisticMsg = makeOptimisticMsg(ac, value);
-    // Add to pendingMessages so it survives refreshMsgs() calls
-    setPendingMessages(prev => [...prev, optimisticMsg]);
+    setMsgData(prev => ({
+      messages: [...(prev?.messages ?? []), optimisticMsg],
+      hasMore: prev?.hasMore ?? false,
+    }));
     hasSent.current = true;
     setSending(true);
     sendMessage(ac, value, {
@@ -377,10 +461,11 @@ function ChatPageInner() {
       skillIds: selectedSkillIds.length > 0 ? selectedSkillIds : undefined,
       modelOverride: selectedModel,
       firecrawlEnabled: options?.firecrawlEnabled,
+      planMode: options?.planMode || planMode || undefined,
     })
       .then(handleSendResult)
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
-  }, [ac, pendingReviewId, selectedRepo, curRepo, selectedSkillIds, selectedModel, handleRequestChanges, handleSendResult]);
+  }, [ac, pendingReviewId, selectedRepo, curRepo, selectedSkillIds, selectedModel, planMode, setMsgData, handleRequestChanges, handleSendResult]);
 
   const handleCancel = useCallback(() => {
     if (ac) cancelChatGeneration(ac).catch(() => {});

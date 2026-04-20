@@ -26,12 +26,8 @@ export function isAgentMessage(m: Message): boolean {
 
 function BotAvatar() {
   return (
-    <div style={{
-      width: 28, height: 28, borderRadius: T.r, flexShrink: 0,
-      background: T.surface, border: `1px solid ${T.border}`,
-      display: "flex", alignItems: "center", justifyContent: "center",
-    }}>
-      <HuginnIcon size={16} color={T.textSec} />
+    <div style={{ width: 28, height: 28, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <HuginnIcon size={20} color={T.accent} />
     </div>
   );
 }
@@ -75,6 +71,7 @@ interface MessageListProps {
   onReject: (reviewId: string) => Promise<void>;
   onRequestChanges: (reviewId: string, feedback?: string) => void;
   reviewInProgress?: ReviewActionType;
+  activePlanMsgId?: string | null;
 }
 
 const MessageListComponent = function MessageList({
@@ -92,6 +89,7 @@ const MessageListComponent = function MessageList({
   onReject,
   onRequestChanges,
   reviewInProgress,
+  activePlanMsgId,
 }: MessageListProps) {
   const msgEndRef = useRef<HTMLDivElement>(null);
   const [modalPlanContent, setModalPlanContent] = useState<string | null>(null);
@@ -185,7 +183,9 @@ const MessageListComponent = function MessageList({
                 <div style={{ display: "flex", justifyContent: "flex-end", padding: "4px 0" }}>
                   <div>
                     <div style={{
-                      background: T.subtle,
+                      background: "rgba(20,20,24,0.82)",
+                      backdropFilter: "blur(14px)",
+                      WebkitBackdropFilter: "blur(14px)",
                       border: `1px solid ${T.border}`,
                       borderRadius: T.r,
                       padding: "10px 16px",
@@ -209,8 +209,9 @@ const MessageListComponent = function MessageList({
                 try {
                   const parsed = JSON.parse(m.content);
                   if (parsed?.type === "project_plan") {
+                    const isSuperseded = activePlanMsgId != null && m.id !== activePlanMsgId;
                     return (
-                      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
+                      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0", opacity: isSuperseded ? 0.45 : 1, transition: "opacity 0.2s" }}>
                         <BotAvatar />
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{
@@ -223,6 +224,11 @@ const MessageListComponent = function MessageList({
                             padding: "10px 16px",
                             maxWidth: "100%",
                           }}>
+                            {isSuperseded && (
+                              <div style={{ fontSize: 10, color: T.textFaint, marginBottom: 4, fontStyle: "italic" }}>
+                                Utdatert plan
+                              </div>
+                            )}
                             <MarkdownText content={`Prosjektplan klar — **${parsed.title}** (${parsed.totalTasks ?? ""} oppgaver i ${parsed.phases?.length ?? ""} faser)`} />
                             {/* Se prosjektplan — pil med hale */}
                             <button

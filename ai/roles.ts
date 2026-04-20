@@ -66,7 +66,7 @@ export async function selectForRole(role: AgentRole): Promise<string> {
     documenter: "chat",
   };
 
-  return selectOptimalModel(5, "auto", undefined, roleToTag[role]);
+  return await selectOptimalModel(5, "auto", undefined, roleToTag[role]);
 }
 
 /**

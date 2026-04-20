@@ -77,9 +77,14 @@ export async function callOpenAIWithTools(
   for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
     console.log(`[DEBUG-OPENAI] Loop ${loop + 1}, provider: ${providerId}, model: ${options.model}`);
 
+    // Fireworks rejects max_tokens > 4096 for non-streaming requests
+    const maxTokensForBody = providerId === "fireworks"
+      ? Math.min(options.maxTokens ?? 2048, 4096)
+      : (options.maxTokens ?? 4096);
+
     const body: Record<string, any> = {
       model: options.model,
-      max_tokens: options.maxTokens,
+      max_tokens: maxTokensForBody,
       messages,
       tools,
       tool_choice: "auto",

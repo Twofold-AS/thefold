@@ -1200,9 +1200,14 @@ async function processAIResponse(
 
     if (isCancelled(conversationId)) return;
 
-    // Fase 2: Emit full response immediately via SSE — frontend renders right away
-    // messageId = placeholderId so the frontend dedup system can match SSE msg with DB msg.
-    // The DB write (Step 6) follows synchronously; by then the user already sees the content.
+    // Step 6: Save AI response to DB FIRST so refreshMsgs() always finds completed content.
+    // SSE emit follows below — by the time the frontend reacts to agent.done, the DB
+    // already has the final assistant message.
+    await updateMessageContent(placeholderId, aiResponse.content);
+    await updateMessageType(placeholderId, "chat");
+
+    // Emit full response via SSE (fast path for live UI). messageId = placeholderId
+    // so the frontend dedup logic can match SSE msg with the DB msg from refreshMsgs().
     agentEvt.emitChatEvent({
       streamKey: conversationId,
       eventType: "agent.message",
@@ -1213,10 +1218,6 @@ async function processAIResponse(
         messageId: placeholderId,
       },
     }).catch(() => {});
-
-    // Step 6: Save AI response to DB
-    await updateMessageContent(placeholderId, aiResponse.content);
-    await updateMessageType(placeholderId, "chat");
 
     // Save token/cost metadata (include lastCreatedTaskId so frontend can detect agent handoff)
     await db.exec`UPDATE messages SET metadata = ${JSON.stringify({
@@ -1426,6 +1427,15 @@ export const conversations = api(
         lastActivity: row.lastActivity as string,
       });
     }
+
+    // [debug] history-bug investigation: log id list per email so we can
+    // confirm whether a missing repo conversation is truly absent from the
+    // joined query or filtered out elsewhere. Remove once confirmed.
+    log.info("conversations endpoint result", {
+      email: auth.email,
+      count: convList.length,
+      ids: convList.map(c => c.id),
+    });
 
     return { conversations: convList };
   }

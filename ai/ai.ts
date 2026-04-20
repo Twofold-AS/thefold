@@ -16,7 +16,7 @@ export type { DiagnoseRequest, DiagnosisResult, RevisePlanRequest } from "./ai-e
 
 // ai-planning: planTask, assessComplexity, assessConfidence, decomposeProject, reviseProjectPhase, planTaskOrder
 export {
-  planTask, assessComplexity, assessConfidence, decomposeProject, reviseProjectPhase, planTaskOrder,
+  planTask, assessComplexity, assessConfidence, decomposeProject, reviseProjectPhase, planTaskOrder, revisePlanUser,
 } from "./ai-planning";
 export type {
   AssessComplexityRequest, AssessComplexityResponse,
