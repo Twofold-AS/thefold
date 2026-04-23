@@ -51,6 +51,10 @@ function parseComponent(row: Record<string, unknown>): Component {
     type: (row.type as Component["type"]) ?? "component",
     variables: (variables as ComponentVariable[]) ?? [],
     source: (row.source as Component["source"]) ?? "manual",
+    platform: (row.platform as Component["platform"]) ?? "code",
+    role: (row.role as string) ?? null,
+    framerComponentId: (row.framer_component_id as string) ?? null,
+    figmaNodeId: (row.figma_node_id as string) ?? null,
     createdAt: (row.created_at as Date).toISOString(),
     updatedAt: (row.updated_at as Date).toISOString(),
   };

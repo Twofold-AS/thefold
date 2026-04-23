@@ -23,7 +23,7 @@ export default function ConnectionStatus() {
         left: 0,
         right: 0,
         zIndex: 9999,
-        background: "#7C3AED",
+        background: "#1E3A8A",
         color: "#fff",
         display: "flex",
         alignItems: "center",

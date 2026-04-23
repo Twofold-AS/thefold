@@ -27,3 +27,6 @@ export type {
 export {
   generateFile, fixFile, callForExtraction, consolidateMemories,
 } from "./ai-generation";
+
+// ai-security: aiSecurityAudit (Commit 32 — security sub-agent endpoint)
+export { aiSecurityAudit } from "./ai-security";

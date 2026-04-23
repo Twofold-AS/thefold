@@ -681,12 +681,24 @@ export const listRepos = api(
     }
 
     const token = await resolveToken(targetOwner);
-    const data = await ghApi(
-      `/orgs/${targetOwner}/repos?sort=pushed&direction=desc&per_page=30&type=all`,
-      { token }
-    );
 
-    const repos: RepoInfo[] = (data as Array<Record<string, unknown>>)
+    // Paginate: GitHub returns max 100 per page. Loop page=N until empty
+    // or hard cap (10 pages = 1000 repos) to avoid runaway on mis-configured orgs.
+    const all: Array<Record<string, unknown>> = [];
+    const perPage = 100;
+    const maxPages = 10;
+    for (let page = 1; page <= maxPages; page++) {
+      const data = await ghApi(
+        `/orgs/${targetOwner}/repos?sort=pushed&direction=desc&per_page=${perPage}&type=all&page=${page}`,
+        { token },
+      );
+      const chunk = data as Array<Record<string, unknown>>;
+      if (!Array.isArray(chunk) || chunk.length === 0) break;
+      all.push(...chunk);
+      if (chunk.length < perPage) break; // last page reached
+    }
+
+    const repos: RepoInfo[] = all
       .filter((r) => !r.archived)
       .map((r) => ({
         name: r.name as string,
@@ -702,6 +714,7 @@ export const listRepos = api(
         openIssuesCount: (r.open_issues_count as number) || 0,
       }));
 
+    log.info("listRepos: returning", { owner: targetOwner, count: repos.length, totalFetched: all.length });
     return { repos };
   }
 );

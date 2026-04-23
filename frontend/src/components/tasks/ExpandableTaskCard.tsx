@@ -112,6 +112,7 @@ export default function ExpandableTaskCard({
 
   return (
     <div style={{
+      background: T.sidebar,
       border: `1px solid ${T.border}`,
       borderRadius: T.r,
       overflow: "hidden",

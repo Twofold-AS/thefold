@@ -1,22 +1,16 @@
 // --- OpenAI-Compatible Tool-Use Loop ---
 // Used by Moonshot, OpenAI, OpenRouter, Fireworks and any other provider
 // that exposes an OpenAI-compatible /v1/chat/completions endpoint.
-// The executeToolFn is passed in by the caller to avoid circular imports with tools.ts.
+// Tool execution goes through toolRegistry.execute().
 
 import log from "encore.dev/log";
 import { estimateCost } from "./router";
 import { getProviderApiKey, getProvider, resolveProviderFromModel } from "./provider-registry";
 import { logTokenUsage, wrapProviderError } from "./call";
 import type { ToolCallOptions, ToolCallResponse } from "./tools";
-
-type ExecuteToolFn = (
-  name: string,
-  input: Record<string, unknown>,
-  repoName?: string,
-  conversationId?: string,
-  repoOwner?: string,
-  assessComplexityFn?: ToolCallOptions["assessComplexityFn"],
-) => Promise<Record<string, unknown>>;
+import { toolRegistry } from "./tools/index";
+import type { ToolContext } from "./tools/index";
+import { isDebugEnabled } from "./system-settings";
 
 interface OpenAIMessage {
   role: string;
@@ -41,7 +35,6 @@ function safeParseArgs(args: string | undefined): Record<string, unknown> {
 
 export async function callOpenAIWithTools(
   options: ToolCallOptions,
-  executeToolFn: ExecuteToolFn,
 ): Promise<ToolCallResponse> {
   const providerId = resolveProviderFromModel(options.model);
   const apiKey = await getProviderApiKey(providerId);
@@ -73,9 +66,10 @@ export async function callOpenAIWithTools(
   let lastStartedTaskId: string | null = null;
 
   const MAX_TOOL_LOOPS = 10;
+  const debug = await isDebugEnabled();
 
   for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
-    console.log(`[DEBUG-OPENAI] Loop ${loop + 1}, provider: ${providerId}, model: ${options.model}`);
+    if (debug) console.log(`[DEBUG-OPENAI] Loop ${loop + 1}, provider: ${providerId}, model: ${options.model}`);
 
     // Fireworks rejects max_tokens > 4096 for non-streaming requests
     const maxTokensForBody = providerId === "fireworks"
@@ -122,13 +116,26 @@ export async function callOpenAIWithTools(
     const finishReason = choice?.finish_reason;
     const toolCalls: typeof choice.message.tool_calls = choice?.message?.tool_calls;
 
-    console.log(
+    if (debug) console.log(
       `[DEBUG-OPENAI] finish_reason: ${finishReason}, tool_calls: ${toolCalls?.length ?? 0}`,
     );
 
     // No tool calls — return final response
     if (finishReason !== "tool_calls" || !toolCalls?.length) {
-      const content = choice?.message?.content || "";
+      const rawContent = choice?.message?.content || "";
+      // MiniMax / Moonshot and some other non-native tool-use models leak their
+      // native XML tool-call syntax into the `content` field even when the
+      // OpenAI-compat shim has parsed tool_calls correctly. Strip empty/self-
+      // closing <tool_calls> blocks so the UI never shows them. The regex
+      // catches both `<tool_calls></tool_calls>` and bare `</tool_calls>`.
+      const content = rawContent
+        .replace(/<tool_calls>\s*<\/tool_calls>/g, "")
+        .replace(/<\/tool_calls>/g, "")
+        .replace(/<tool_calls>/g, "")
+        .replace(/<end_turn>/g, "")
+        .replace(/<\/end_turn>/g, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
 
       logTokenUsage({
         inputTokens: totalInputTokens,
@@ -162,17 +169,27 @@ export async function callOpenAIWithTools(
       tool_calls: toolCalls,
     });
 
-    // Execute each tool call and collect results
+    // Execute each tool call and collect results.
+    // Some providers (notably Moonshot) emit the same tool_call twice in a single response.
+    // Dedup by tool_call_id within this iteration so we never run the same call twice.
+    const executedToolCallIds = new Set<string>();
+
     for (const tc of toolCalls) {
+      if (executedToolCallIds.has(tc.id)) {
+        log.warn("Skipping duplicate tool_call", { id: tc.id, name: tc.function.name });
+        continue;
+      }
+      executedToolCallIds.add(tc.id);
+
       const toolName = tc.function.name;
       const toolInput = safeParseArgs(tc.function.arguments);
 
-      console.log(`[DEBUG-OPENAI] Executing tool: ${toolName}, input: ${JSON.stringify(toolInput).substring(0, 200)}`);
+      if (debug) console.log(`[DEBUG-OPENAI] Executing tool: ${toolName}, input: ${JSON.stringify(toolInput).substring(0, 200)}`);
       allToolsUsed.push(toolName);
 
       // Pass lastCreatedTaskId automatically to start_task
       if (toolName === "start_task" && lastCreatedTaskId) {
-        console.log(`[DEBUG-OPENAI] start_task: injecting lastCreatedTaskId: ${lastCreatedTaskId}`);
+        if (debug) console.log(`[DEBUG-OPENAI] start_task: injecting lastCreatedTaskId: ${lastCreatedTaskId}`);
         toolInput.taskId = lastCreatedTaskId;
       }
 
@@ -187,23 +204,48 @@ export async function callOpenAIWithTools(
               "Du har allerede opprettet en oppgave i denne samtalen. Beskriv alt i én oppgave.",
           };
         } else {
-          result = await executeToolFn(
-            toolName,
-            toolInput,
-            options.repoName,
-            options.conversationId,
-            options.repoOwner,
-            options.assessComplexityFn,
-          );
+          const ctx: ToolContext = {
+            userId: "system",
+            userEmail: options.userEmail,
+            conversationId: options.conversationId,
+            repoName: options.repoName,
+            repoOwner: options.repoOwner,
+            lastCreatedTaskId,
+            lastStartedTaskId,
+            emit: () => {},
+            log,
+          };
+          const toolResult = await toolRegistry.execute(toolName, toolInput, ctx);
+          result = toolResult as unknown as Record<string, unknown>;
 
-          if (toolName === "create_task" && result?.taskId) {
-            lastCreatedTaskId = result.taskId as string;
-            console.log(`[DEBUG-OPENAI] lastCreatedTaskId: ${lastCreatedTaskId}`);
+          // Commit 20b: handler returned success: false — surface per-tool error.
+          if (!toolResult.success && options.conversationId) {
+            try {
+              const { agent } = await import("~encore/clients");
+              await agent.emitChatEvent({
+                streamKey: options.conversationId,
+                eventType: "agent.tool_error",
+                data: {
+                  toolName,
+                  toolCallId: tc.id,
+                  error: toolResult.message ?? "Tool failed",
+                  phase: "executing_tools",
+                  recoverable: true,
+                },
+              });
+            } catch (e) {
+              log.warn("emitChatEvent (tool_error) failed", { error: e instanceof Error ? e.message : String(e) });
+            }
           }
 
-          if (toolName === "start_task" && result?.success && result?.taskId) {
-            lastStartedTaskId = result.taskId as string;
-            console.log(`[DEBUG-OPENAI] lastStartedTaskId: ${lastStartedTaskId}`);
+          if (toolName === "create_task" && toolResult?.success && toolResult?.taskId) {
+            lastCreatedTaskId = toolResult.taskId;
+            if (debug) console.log(`[DEBUG-OPENAI] lastCreatedTaskId: ${lastCreatedTaskId}`);
+          }
+
+          if (toolName === "start_task" && toolResult?.success && toolResult?.startedTaskId) {
+            lastStartedTaskId = toolResult.startedTaskId;
+            if (debug) console.log(`[DEBUG-OPENAI] lastStartedTaskId: ${lastStartedTaskId}`);
 
             // Emit SSE so frontend can connect to the agent's stream
             if (options.conversationId) {
@@ -223,11 +265,30 @@ export async function callOpenAIWithTools(
           }
         }
       } catch (e) {
-        console.error(`[DEBUG-OPENAI] Tool ${toolName} FAILED:`, e);
+        if (debug) console.error(`[DEBUG-OPENAI] Tool ${toolName} FAILED:`, e);
+        // Commit 20b: emit per-tool error SSE; loop continues.
+        if (options.conversationId) {
+          try {
+            const { agent } = await import("~encore/clients");
+            await agent.emitChatEvent({
+              streamKey: options.conversationId,
+              eventType: "agent.tool_error",
+              data: {
+                toolName,
+                toolCallId: tc.id,
+                error: e instanceof Error ? e.message : String(e),
+                phase: "executing_tools",
+                recoverable: true,
+              },
+            });
+          } catch (emitErr) {
+            log.warn("emitChatEvent (tool_error) failed", { error: emitErr instanceof Error ? emitErr.message : String(emitErr) });
+          }
+        }
         result = { error: String(e) };
       }
 
-      console.log(
+      if (debug) console.log(
         `[DEBUG-OPENAI] Tool ${toolName} result: ${JSON.stringify(result).substring(0, 200)}`,
       );
 
@@ -239,13 +300,13 @@ export async function callOpenAIWithTools(
       } as OpenAIMessage);
     }
 
-    console.log(
+    if (debug) console.log(
       `[DEBUG-OPENAI] Loop ${loop + 1} complete, tools so far: ${allToolsUsed.join(", ")}`,
     );
   }
 
   // Max loops reached — return truncated response
-  console.warn("[DEBUG-OPENAI] Max tool loops reached!");
+  if (debug) console.warn("[DEBUG-OPENAI] Max tool loops reached!");
 
   logTokenUsage({
     inputTokens: totalInputTokens,

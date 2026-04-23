@@ -2,7 +2,14 @@
 
 import { useRef, useState } from "react";
 import { T } from "@/lib/tokens";
-import { useRepoContext } from "@/lib/repo-context";
+
+const INCOGNITO_SUGGESTIONS = [
+  "Hva vil du bygge?",
+  "Start med en idé",
+  "Jeg kan hjelpe deg å komme i gang",
+  "Beskriv en funksjon du ønsker",
+  "Still et teknisk spørsmål",
+];
 
 const DEFAULT_SUGGESTIONS = [
   "Bygg en booking-app med kalender",
@@ -13,26 +20,56 @@ const DEFAULT_SUGGESTIONS = [
   "Skriv tester for API-endepunktene",
 ];
 
-function repoSuggestions(repoName: string): string[] {
+const DESIGNER_DEFAULT_SUGGESTIONS = [
+  "Bygg en Framer-landingsside",
+  "Lag en header og footer-komponent",
+  "Scrape en nettside og replikér designet",
+  "Lag en komponent-bibliotek-struktur",
+  "Opprett en responsive navigation",
+  "Design en About-seksjon",
+];
+
+function projectSuggestions(projectName: string): string[] {
   return [
-    `Analyser kodebasen i ${repoName}`,
-    `Fiks bugs i ${repoName}`,
-    `Legg til tester i ${repoName}`,
-    `Dokumenter ${repoName}`,
-    `Refaktorer ${repoName}`,
-    `Lag en PR-oppsummering for ${repoName}`,
+    `Analyser kodebasen i ${projectName}`,
+    `Fiks bugs i ${projectName}`,
+    `Legg til tester i ${projectName}`,
+    `Dokumenter ${projectName}`,
+    `Refaktorer ${projectName}`,
+    `Lag en PR-oppsummering for ${projectName}`,
   ];
 }
 
-interface SuggestionChipsProps {
-  onSelect: (text: string) => void;
+function designerProjectSuggestions(projectName: string): string[] {
+  return [
+    `Bygg en landingsside for ${projectName}`,
+    `Lag en header og footer for ${projectName}`,
+    `Generer en About-seksjon for ${projectName}`,
+    `Scrape en nettside og replikér designet i ${projectName}`,
+    `Opprett en responsive navigation for ${projectName}`,
+    `Lag en komponent-bibliotek-struktur i ${projectName}`,
+  ];
 }
 
-export default function SuggestionChips({ onSelect }: SuggestionChipsProps) {
-  const { selectedRepo } = useRepoContext();
-  const suggestions = selectedRepo
-    ? repoSuggestions(selectedRepo.name)
-    : DEFAULT_SUGGESTIONS;
+type ProjectType = "code" | "framer" | "figma" | "framer_figma";
+
+interface SuggestionChipsProps {
+  onSelect: (text: string) => void;
+  /** Active project name. When omitted → DEFAULT_SUGGESTIONS. */
+  projectName?: string | null;
+  /** When true → INCOGNITO_SUGGESTIONS (generic, no repo/project references). */
+  incognito?: boolean;
+  /** Project type — framer/figma/framer_figma triggers designer-suggestions. */
+  projectType?: ProjectType | null;
+}
+
+export default function SuggestionChips({ onSelect, projectName, incognito, projectType }: SuggestionChipsProps) {
+  const isDesigner = projectType === "framer" || projectType === "figma" || projectType === "framer_figma";
+  const suggestions = incognito
+    ? INCOGNITO_SUGGESTIONS
+    : projectName
+      ? (isDesigner ? designerProjectSuggestions(projectName) : projectSuggestions(projectName))
+      : (isDesigner ? DESIGNER_DEFAULT_SUGGESTIONS : DEFAULT_SUGGESTIONS);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const isDown = useRef(false);

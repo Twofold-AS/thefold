@@ -13,11 +13,18 @@ export type AgentEventType =
   | "agent.message"
   | "agent.tool_use"
   | "agent.tool_result"
+  | "agent.tool_error"
   | "agent.thinking"
   | "agent.error"
   | "agent.done"
   | "agent.progress"
-  | "agent.heartbeat";
+  | "agent.heartbeat"
+  // Fase H — per-sub-agent events (Commit 40). Aggregated into swarm_status
+  // by SwarmAggregator; available raw for debug mode + detail-modal history.
+  | "subagent.started"
+  | "subagent.progress"
+  | "subagent.status_change"
+  | "subagent.completed";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-type data shapes
@@ -70,6 +77,63 @@ export interface AgentToolResultData {
 
 export interface AgentThinkingData {
   thought: string;
+}
+
+// --- Per-sub-agent events (Fase H, Commit 40) ---
+// Emitted by agent/execution-plan.ts callbacks during executeSubAgents. The
+// SwarmAggregator listens on these for the same parentTaskId and produces a
+// single upserted swarm_status chat message.
+
+export type SubAgentStatus = "waiting" | "running" | "completed" | "failed";
+
+export interface SubAgentStartedData {
+  /** Unique per-run ID — matches across all subagent.* events for same agent */
+  agentId: string;
+  parentTaskId: string;
+  role: string;
+  /** 1-indexed display number ("1#", "2#", ...) */
+  num: number;
+  startedAt: string;
+}
+
+export interface SubAgentProgressData {
+  agentId: string;
+  parentTaskId: string;
+  role: string;
+  /** Human-readable one-liner of what the agent is doing */
+  activity: string;
+  progressLabel?: string;
+}
+
+export interface SubAgentStatusChangeData {
+  agentId: string;
+  parentTaskId: string;
+  role: string;
+  status: SubAgentStatus;
+}
+
+export interface SubAgentCompletedData {
+  agentId: string;
+  parentTaskId: string;
+  role: string;
+  success: boolean;
+  completedAt: string;
+  /** Optional summary of the result (first 500 chars of the output) */
+  resultPreview?: string;
+  durationMs?: number;
+  costUsd?: number;
+}
+
+export interface AgentToolErrorData {
+  toolName: string;
+  /** Matches the toolUseId from the corresponding agent.tool_use event */
+  toolCallId: string;
+  /** Human-readable error message from the handler or the dispatcher */
+  error: string;
+  /** Optional phase label, e.g. "executing_tools", "dispatch" */
+  phase?: string;
+  /** true when the tool-loop will continue after this error */
+  recoverable?: boolean;
 }
 
 export interface AgentErrorData {
@@ -125,11 +189,16 @@ export interface AgentEventDataMap {
   "agent.message": AgentMessageData;
   "agent.tool_use": AgentToolUseData;
   "agent.tool_result": AgentToolResultData;
+  "agent.tool_error": AgentToolErrorData;
   "agent.thinking": AgentThinkingData;
   "agent.error": AgentErrorData;
   "agent.done": AgentDoneData;
   "agent.progress": AgentProgressData;
   "agent.heartbeat": AgentHeartbeatData;
+  "subagent.started": SubAgentStartedData;
+  "subagent.progress": SubAgentProgressData;
+  "subagent.status_change": SubAgentStatusChangeData;
+  "subagent.completed": SubAgentCompletedData;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

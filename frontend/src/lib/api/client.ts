@@ -1,4 +1,4 @@
-import { getToken } from "../auth";
+import { getToken, getCsrfToken } from "../auth";
 import { debugToast } from "../debug";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
@@ -96,9 +96,11 @@ export async function apiFetch<T>(path: string, options?: FetchOptions): Promise
   }
 
   const token = getToken();
+  const csrfToken = getCsrfToken();
   const url = `${API_BASE}${path}`;
   const method = options?.method || "GET";
   const bodyStr = options?.body ? JSON.stringify(options.body) : undefined;
+  const isStateChanging = ["POST", "PUT", "PATCH", "DELETE"].includes(method.toUpperCase());
 
   let lastError: Error | null = null;
 
@@ -112,9 +114,13 @@ export async function apiFetch<T>(path: string, options?: FetchOptions): Promise
     try {
       const res = await fetch(url, {
         method,
+        // Fase J.1 — credentials: "include" sender HttpOnly-auth-cookie.
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          // Fase J.1 — CSRF-header for state-changing requests.
+          ...(csrfToken && isStateChanging ? { "X-CSRF-Token": csrfToken } : {}),
           ...options?.headers,
         },
         body: bodyStr,

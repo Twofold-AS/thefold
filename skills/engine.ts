@@ -2,6 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import log from "encore.dev/log";
 import { cache, memory } from "~encore/clients";
 import { db } from "./skills";
+import { isDebugEnabled } from "./debug";
 
 // --- Types ---
 
@@ -128,7 +129,7 @@ export const resolve = api(
       });
     }
 
-    console.log("[DEBUG-AF] skills.resolve found", allSkills.length, "enabled skills");
+    if (await isDebugEnabled()) console.log("[DEBUG-AF] skills.resolve found", allSkills.length, "enabled skills");
 
     // 2. Filter on routing rules (keywords, file patterns, labels)
     let matched = allSkills.filter((s) => matchesRoutingRules(s.routingRules, ctx));

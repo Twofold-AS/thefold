@@ -6,7 +6,7 @@
 // Multi-agent coordination — always enabled (no feature flag)
 
 import log from "encore.dev/log";
-import type { AgentToolName } from "./agent-tools";
+import type { AgentToolName } from "./agent-tool-types";
 import { SubAgent, type SubAgentResult } from "./sub-agent";
 
 export function isMultiAgentEnabled(): boolean {

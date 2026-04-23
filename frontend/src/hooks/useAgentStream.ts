@@ -189,6 +189,35 @@ export function useAgentStream(
         }
       });
 
+      // Per-tool error emitted when a tool throws OR returns { success: false }.
+      // Wire format: { timestamp, data: { toolName, toolCallId, error, phase, recoverable } }
+      // The matching agent.tool_result also arrives with isError: true — this
+      // event just gives the UI an earlier / more descriptive error string.
+      es.addEventListener("agent.tool_error", (e: MessageEvent) => {
+        resetStallTimer();
+        try {
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
+          const toolCallId = data.toolCallId;
+          const errorMsg = typeof data.error === "string" ? data.error : "Tool failed";
+          setState((prev) => ({
+            ...prev,
+            toolCalls: prev.toolCalls.map((tc) =>
+              tc.id === toolCallId
+                ? {
+                    ...tc,
+                    isError: true,
+                    status: "error",
+                    result: tc.result ?? JSON.stringify({ error: errorMsg }),
+                  }
+                : tc
+            ),
+          }));
+        } catch {
+          // ignore
+        }
+      });
+
       // Phase / status update.
       // Wire format: { timestamp, data: { status, phase, message, loop } }
       es.addEventListener("agent.status", (e: MessageEvent) => {

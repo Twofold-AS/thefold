@@ -4,17 +4,28 @@ import React, { useState, useRef, useCallback, useEffect } from "react";
 import { T } from "@/lib/tokens";
 import PillIcon from "@/components/PillIcon";
 import TypewriterPlaceholder from "@/components/TypewriterPlaceholder";
-import { ChevronDown } from "lucide-react";
-import { useRepoContext } from "@/lib/repo-context";
+import { Ghost } from "lucide-react";
+import ComposerPopup, { type ComposerMode } from "@/components/ComposerPopup";
+import SlashCommandDropdown from "@/components/SlashCommandDropdown";
+import { matchSlashCommands, type SlashCommand } from "@/lib/slash-commands";
+import {
+  getConversationToolState,
+  saveConversationToolState,
+  listTFProjects,
+  getIntegrationApiKeyStatus,
+  uploadZip,
+  type TFProject,
+} from "@/lib/api";
 
-/** Compute fixed popup position above a trigger element */
-function getPopupPos(ref: React.RefObject<HTMLElement | null>): { bottom: number; left?: number; right?: number } {
-  if (!ref.current) return { bottom: 0, left: 0 };
-  const r = ref.current.getBoundingClientRect();
-  return {
-    bottom: window.innerHeight - r.top + 6,
-    left: r.left,
-  };
+/** ArrayBuffer → base64 (browser-safe, chunked to avoid stack overflow on large bufs). */
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+  }
+  return btoa(binary);
 }
 
 interface ChatInputProps {
@@ -35,6 +46,20 @@ interface ChatInputProps {
   onIncognitoToggle?: () => void;
   planMode?: boolean;
   onPlanModeToggle?: () => void;
+  autoMode?: boolean;
+  onAutoModeToggle?: () => void;
+  /** Fase I.0.e — per-samtale tool-state persistence */
+  conversationId?: string;
+  /** Fase I.0.f — filtrerer prosjekt-liste i "+"-popup */
+  projectScope?: "cowork" | "designer";
+  /** Fase I.0.f — kaller opp CodeProjectModal/DesignProjectModal (I.3) */
+  onNewProject?: () => void;
+  /** Fase I.0.e — valgt prosjekt for denne samtalen */
+  selectedProjectId?: string | null;
+  onSelectProject?: (id: string | null) => void;
+  /** Active mode label (e.g. "Planlegger" / "Auto" / "Agenter"). When set,
+   *  rendered as shimmer text beside the ghost icon. null = hide. */
+  activeModeLabel?: string | null;
 }
 
 export default function ChatInput({
@@ -55,28 +80,125 @@ export default function ChatInput({
   onIncognitoToggle,
   planMode: externalPlanMode,
   onPlanModeToggle,
+  autoMode,
+  onAutoModeToggle,
+  conversationId,
+  projectScope,
+  onNewProject,
+  selectedProjectId,
+  onSelectProject,
+  activeModeLabel,
 }: ChatInputProps) {
   const [v, setV] = useState("");
+  const [isFocused, setIsFocused] = useState(false);
   const ty = v.length > 0;
+  const hidePlaceholder = ty || isFocused;
   const [localPlanMode, setLocalPlanMode] = useState(false);
   const planMode = externalPlanMode !== undefined ? externalPlanMode : localPlanMode;
-  const togglePlanMode = () => {
-    if (onPlanModeToggle) onPlanModeToggle();
-    else setLocalPlanMode(p => !p);
-  };
-  const [skillsOpen, setSkillsOpen] = useState(false);
-  const [modelOpen, setModelOpen] = useState(false);
-  const [repoOpen, setRepoOpen] = useState(false);
   const [firecrawlEnabled, setFirecrawlEnabled] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const repoTriggerRef = useRef<HTMLDivElement>(null);
-  const skillsTriggerRef = useRef<HTMLDivElement>(null);
-  const modelTriggerRef = useRef<HTMLDivElement>(null);
-  const { repos, selectedRepo, selectRepo, clearRepo } = useRepoContext();
+  // True once we've fetched /integrations/api-key/status for firecrawl.
+  // null until checked (prevents flicker between "loading" and "disabled").
+  const [firecrawlConfigured, setFirecrawlConfigured] = useState<boolean | null>(null);
 
-  // --- File upload state ---
+  const [tfProjects, setTfProjects] = useState<TFProject[]>([]);
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+
+  // Fase I.8 — Slash-command dropdown state
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [slashOpen, setSlashOpen] = useState(true);
+  const slashScope = (projectScope ?? "cowork") as "cowork" | "designer";
+  const slashMatches: SlashCommand[] =
+    slashOpen && v.trimStart().startsWith("/") ? matchSlashCommands(v, slashScope) : [];
+  const slashActive = slashMatches.length > 0;
+
+  const applySlashCommand = (cmd: SlashCommand) => {
+    setV(cmd.template);
+    setSlashOpen(false);
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+
+  useEffect(() => {
+    const scope = projectScope ?? "cowork";
+    listTFProjects(scope).then((r) => setTfProjects(r.projects ?? [])).catch(() => setTfProjects([]));
+  }, [projectScope]);
+
+  // Check if Firecrawl API-key is configured for this user (gates "Web søk"-toggle).
+  useEffect(() => {
+    let cancelled = false;
+    getIntegrationApiKeyStatus("firecrawl")
+      .then((r) => {
+        if (cancelled) return;
+        setFirecrawlConfigured(r.status.configured);
+        // Default ON when configured AND no explicit user-saved state yet.
+        if (r.status.configured && !conversationId) setFirecrawlEnabled(true);
+      })
+      .catch(() => { if (!cancelled) setFirecrawlConfigured(false); });
+    return () => { cancelled = true; };
+  }, [conversationId]);
+
+  useEffect(() => {
+    if (!conversationId) return;
+    let cancelled = false;
+    getConversationToolState(conversationId)
+      .then((r) => {
+        if (cancelled) return;
+        setFirecrawlEnabled(!!r.state.toolToggles.firecrawl);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [conversationId]);
+
+  const persistState = useCallback((next: Record<string, boolean>) => {
+    if (!conversationId) return;
+    saveConversationToolState({
+      conversationId,
+      toolToggles: next,
+      selectedSkillIds: selectedSkillIds ?? [],
+      selectedModel: selectedModel ?? null,
+      projectId: selectedProjectId ?? null,
+      mode: next.autoMode ? "auto" : next.planMode ? "plan" : "chat",
+    }).catch(() => {});
+  }, [conversationId, selectedSkillIds, selectedModel, selectedProjectId]);
+
+  // UX spec 2026-04-22 — mutually-exclusive Moduser: auto / agents / planner / null.
+  // Derived from host-controlled booleans so state ownership stays with the page.
+  const composerMode: ComposerMode =
+    externalPlanMode ? "planner" :
+    subAgentsEnabled ? "agents" :
+    autoMode ? "auto" :
+    null;
+
+  const onChangeComposerMode = useCallback((next: ComposerMode) => {
+    const shouldPlan = next === "planner";
+    const shouldAgents = next === "agents";
+    const shouldAuto = next === "auto";
+    if (shouldPlan !== planMode) {
+      if (onPlanModeToggle) onPlanModeToggle();
+      else setLocalPlanMode(p => !p);
+    }
+    if (shouldAgents !== !!subAgentsEnabled) {
+      onSubAgentsToggle?.();
+    }
+    if (shouldAuto !== !!autoMode) {
+      onAutoModeToggle?.();
+    }
+    persistState({ autoMode: shouldAuto, planMode: shouldPlan, subAgents: shouldAgents });
+  }, [planMode, subAgentsEnabled, autoMode, onPlanModeToggle, onSubAgentsToggle, onAutoModeToggle, persistState]);
+
+  const onToggleWebSearch = useCallback((v: boolean) => {
+    setFirecrawlEnabled(v);
+    persistState({ firecrawl: v });
+  }, [persistState]);
+
+  const handleToggleSkill = useCallback((id: string, value: boolean) => {
+    if (!onSkillsChange) return;
+    const current = selectedSkillIds ?? [];
+    const next = value ? Array.from(new Set([...current, id])) : current.filter((x) => x !== id);
+    onSkillsChange(next);
+  }, [onSkillsChange, selectedSkillIds]);
 
   const MAX_INPUT_HEIGHT = 200;
 
@@ -100,25 +222,57 @@ export default function ChatInput({
     }
   };
 
-  // --- .md file upload handler ---
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // --- File upload handler: .md (inline), .zip (server extraction) ---
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setFileError(null);
 
-    if (!file.name.endsWith(".md")) {
-      setFileError("Kun .md-filer støttes");
+    const name = file.name.toLowerCase();
+
+    // .md: paste content inline into the message (legacy behaviour)
+    if (name.endsWith(".md")) {
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const text = evt.target?.result as string;
+        const header = `Fil: ${file.name}\n\n${text}`;
+        setV((prev) => (prev ? `${header}\n\n${prev}` : header));
+      };
+      reader.readAsText(file);
       e.target.value = "";
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const text = evt.target?.result as string;
-      const header = `📎 Fil: ${file.name}\n\n${text}`;
-      setV(prev => (prev ? `${header}\n\n${prev}` : header));
-    };
-    reader.readAsText(file);
+    // .zip: upload to backend for extraction. Requires an active conversation.
+    if (name.endsWith(".zip")) {
+      if (!conversationId) {
+        setFileError("Start en samtale først før du laster opp .zip.");
+        e.target.value = "";
+        return;
+      }
+      if (file.size > 50 * 1024 * 1024) {
+        setFileError("Zip for stor (maks 50 MB).");
+        e.target.value = "";
+        return;
+      }
+      try {
+        const arrayBuf = await file.arrayBuffer();
+        const base64 = arrayBufferToBase64(arrayBuf);
+        const result = await uploadZip(conversationId, file.name, base64);
+        const summary = Object.entries(result.byCategory)
+          .map(([cat, n]) => `${n} ${cat}`)
+          .join(", ");
+        const msg = `Lastet opp ${file.name}: ${result.filesExtracted} filer${summary ? ` (${summary})` : ""}. upload-id: ${result.uploadId}`;
+        setV((prev) => (prev ? `${msg}\n\n${prev}` : msg));
+      } catch (err) {
+        setFileError(err instanceof Error ? err.message : "Zip-opplasting feilet");
+      } finally {
+        e.target.value = "";
+      }
+      return;
+    }
+
+    setFileError("Støttede filer: .md, .zip");
     e.target.value = "";
   };
 
@@ -143,7 +297,7 @@ export default function ChatInput({
           position: "relative",
         }}
       >
-        {!ty && (
+        {!hidePlaceholder && (
           <div style={{
             position: "absolute",
             top: 16,
@@ -152,7 +306,7 @@ export default function ChatInput({
             fontSize: 13,
             fontFamily: T.sans,
           }}>
-            <TypewriterPlaceholder active={ty} />
+            <TypewriterPlaceholder active={hidePlaceholder} />
           </div>
         )}
         <textarea
@@ -160,8 +314,34 @@ export default function ChatInput({
           data-chat-input
           rows={1}
           value={v}
-          onChange={(e) => setV(e.target.value)}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setIsFocused(false)}
+          onChange={(e) => { setV(e.target.value); setSlashOpen(true); setSlashActiveIndex(0); }}
           onKeyDown={(e) => {
+            // Fase I.8 — Slash-command navigation
+            if (slashActive) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setSlashActiveIndex((i) => (i + 1) % slashMatches.length);
+                return;
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setSlashActiveIndex((i) => (i - 1 + slashMatches.length) % slashMatches.length);
+                return;
+              }
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                const cmd = slashMatches[slashActiveIndex];
+                if (cmd) applySlashCommand(cmd);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setSlashOpen(false);
+                return;
+              }
+            }
             // Cmd+Enter (Mac) or Ctrl+Enter (Windows) — always send
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && v) {
               e.preventDefault();
@@ -176,8 +356,7 @@ export default function ChatInput({
             }
             // Escape — close open dropdowns
             if (e.key === "Escape") {
-              setSkillsOpen(false);
-              setModelOpen(false);
+              setSlashOpen(false);
             }
           }}
           placeholder=""
@@ -190,7 +369,7 @@ export default function ChatInput({
             outline: "none",
             color: T.text,
             fontSize: 13,
-            fontWeight: 600,
+            fontWeight: 400,
             fontFamily: T.sans,
             position: "relative",
             zIndex: 1,
@@ -217,290 +396,127 @@ export default function ChatInput({
             scrollbarWidth: "none", msOverflowStyle: "none",
           } as React.CSSProperties}
         >
-          {/* Repo selector — disabled in inkognito mode */}
-          <div style={isIncognito ? { opacity: 0.4, pointerEvents: "none", cursor: "not-allowed" } : { position: "relative" }}>
-            <div
-              ref={repoTriggerRef}
-              onClick={() => setRepoOpen(p => !p)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "4px 10px",
-                border: `1px solid ${selectedRepo ? T.tabActive : T.border}`,
-                borderRadius: T.r,
-                fontSize: 11,
-                fontFamily: T.mono,
-                color: selectedRepo ? T.text : T.textMuted,
-                cursor: "pointer",
-                background: selectedRepo ? T.tabActive : "transparent",
-              }}
-            >
-              <img src="https://github.com/favicon.ico" width={11} height={11} alt="" style={{ display: "block", opacity: 0.8 }} />
-              <span style={{ maxWidth: 100, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {selectedRepo ? selectedRepo.name : "Prosjekter"}
-              </span>
-              <ChevronDown size={10} strokeWidth={2} />
-            </div>
-            {repoOpen && (
+          {/* UX cleanup 2026-04-22 — "+"-popup + ghost-incognito-button + send remain in bottom row. */}
+          <ComposerPopup
+            mode={composerMode}
+            onChangeMode={onChangeComposerMode}
+            webSearchEnabled={firecrawlEnabled}
+            onToggleWebSearch={onToggleWebSearch}
+            skills={(skills ?? []).map((s) => ({ id: s.id, name: s.name, enabled: s.enabled }))}
+            selectedSkillIds={selectedSkillIds}
+            onToggleSkill={handleToggleSkill}
+            projects={tfProjects}
+            selectedProjectId={selectedProjectId}
+            onSelectProject={onSelectProject}
+            onNewProject={onNewProject}
+            models={models?.map((m) => ({
+              id: m.id,
+              displayName: m.displayName,
+              provider: m.provider,
+              supportsVision: (m as { supportsVision?: boolean }).supportsVision,
+              tags: (m as { tags?: string[] }).tags,
+            })) ?? []}
+            selectedModel={selectedModel}
+            onSelectModel={onModelChange}
+            onAttachFile={() => { setFileError(null); fileInputRef.current?.click(); }}
+            disabledItems={{
+              auto: projectScope === "designer",
+              webSearch: firecrawlConfigured === false,
+            }}
+            disabledTooltips={{
+              webSearch: "Koble til Firecrawl i Innstillinger → Integrasjoner",
+            }}
+          />
+
+          {/* Ghost-ikon: sticky inkognito-innganspunkt.
+              - Når bruker ALLEREDE er i inkognito (enten via auto — ingen prosjekt — eller
+                eksplisitt toggle): disabled, grå, ikke klikkbar. Ingen toggle-ut.
+              - Når bruker er i et prosjekt: klikkbar → starter ny inkognito-samtale (forlater
+                prosjektet, rydder URL, åpner ny chat).
+              Inkognito er dermed "sticky per samtale" — forlates kun ved ny samtale i et prosjekt. */}
+          {(() => {
+            const alreadyIncognito = isIncognito || !selectedProjectId;
+            return (
+              <button
+                type="button"
+                onClick={alreadyIncognito ? undefined : () => onIncognitoToggle?.()}
+                disabled={alreadyIncognito}
+                title={
+                  alreadyIncognito
+                    ? "Du er allerede i inkognito"
+                    : "Start ny inkognito-samtale"
+                }
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 24,
+                  height: 24,
+                  padding: 0,
+                  border: "none",
+                  background: "transparent",
+                  color: alreadyIncognito ? T.accent : T.textMuted,
+                  cursor: alreadyIncognito ? "not-allowed" : "pointer",
+                  opacity: alreadyIncognito ? 0.4 : 1,
+                  flexShrink: 0,
+                }}
+              >
+                <Ghost
+                  size={16}
+                  fill={alreadyIncognito ? T.accent : "none"}
+                  strokeWidth={alreadyIncognito ? 2 : 1.5}
+                />
+              </button>
+            );
+          })()}
+          {/* Active mode + model labels — shimmer text beside the ghost icon.
+              Shown when planMode / autoMode / subAgentsEnabled is active,
+              or when the user has picked a specific model (not "Smart"). */}
+          {(() => {
+            const selectedModelLabel = selectedModel
+              ? (models?.find((m) => m.id === selectedModel)?.displayName ?? null)
+              : null;
+            const shimmerStyle: React.CSSProperties = {
+              fontSize: 12,
+              fontFamily: T.sans,
+              fontWeight: 500,
+              letterSpacing: "0.02em",
+              flexShrink: 0,
+              userSelect: "none",
+              color: "transparent",
+              backgroundImage:
+                "linear-gradient(90deg, rgba(255,255,255,0.3) 0%, rgba(255,255,255,1) 50%, rgba(255,255,255,0.3) 100%)",
+              backgroundSize: "200% 100%",
+              backgroundClip: "text",
+              WebkitBackgroundClip: "text",
+              animation: "tf-shimmer 2.5s linear infinite",
+            };
+            return (
               <>
-                <div style={{ position: "fixed", inset: 0, zIndex: 9998 }} onClick={() => setRepoOpen(false)} />
-                <div style={{
-                  position: "fixed",
-                  bottom: getPopupPos(repoTriggerRef).bottom,
-                  left: getPopupPos(repoTriggerRef).left,
-                  background: T.popup ?? T.surface,
-                  border: `1px solid ${T.border}`,
-                  borderRadius: 12,
-                  minWidth: 280,
-                  maxHeight: 360,
-                  overflowY: "auto",
-                  zIndex: 9999,
-                  boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
-                  padding: "6px 0",
-                }}>
-                  <div style={{ padding: "8px 16px 6px", fontSize: 11, fontWeight: 500, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                    Prosjekter
-                  </div>
-                  {repos.map(repo => (
-                    <div
-                      key={repo.fullName}
-                      onClick={() => { selectRepo(repo.fullName); setRepoOpen(false); }}
-                      style={{
-                        padding: "12px 16px", fontSize: 13,
-                        color: T.text,
-                        background: selectedRepo?.fullName === repo.fullName ? T.tabActive : "transparent",
-                        cursor: "pointer",
-                        transition: "background 0.1s",
-                      }}
-                      onMouseEnter={(e) => { if (selectedRepo?.fullName !== repo.fullName) e.currentTarget.style.background = T.subtle; }}
-                      onMouseLeave={(e) => { if (selectedRepo?.fullName !== repo.fullName) e.currentTarget.style.background = "transparent"; }}
-                    >
-                      <div style={{ fontWeight: 500 }}>{repo.name}</div>
-                      <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>{repo.fullName}</div>
-                    </div>
-                  ))}
-                  {repos.length === 0 && (
-                    <div style={{ padding: "16px", fontSize: 12, color: T.textMuted, textAlign: "center" }}>
-                      Ingen repos funnet
-                    </div>
-                  )}
-                </div>
+                {activeModeLabel && <span style={shimmerStyle}>{activeModeLabel}</span>}
+                {selectedModelLabel && <span style={shimmerStyle}>{selectedModelLabel}</span>}
               </>
-            )}
-          </div>
-
-          {/* Plan / sub-agents / skills / firecrawl — all disabled in inkognito */}
-          <div style={{
-            display: "flex", alignItems: "center", gap: 6,
-            ...(isIncognito ? { opacity: 0.4, pointerEvents: "none" } : {}),
-          }}>
-          {/* Plan mode toggle */}
-          <PillIcon
-            tooltip="Planleggingsmodus"
-            active={planMode}
-            onClick={togglePlanMode}
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: 14, lineHeight: 1 }}>checklist</span>
-          </PillIcon>
-          {/* Sub-agents — grayed out when planMode active */}
-          <div style={planMode ? { opacity: 0.4, pointerEvents: "none", cursor: "not-allowed" } : undefined}>
-            <PillIcon
-              tooltip={planMode ? "Deaktivert i planleggingsmodus" : "Sub-agenter"}
-              active={subAgentsEnabled && !planMode}
-              onClick={() => !planMode && onSubAgentsToggle && onSubAgentsToggle()}
-            >
-              <span className="material-symbols-outlined" style={{ fontSize: 14, lineHeight: 1 }}>support_agent</span>
-            </PillIcon>
-          </div>
-          {/* Skills dropdown */}
-          <div style={{ position: "relative" }} ref={skillsTriggerRef as any}>
-            <PillIcon
-              tooltip="Skills"
-              active={(selectedSkillIds?.length ?? 0) > 0}
-              onClick={() => setSkillsOpen((p) => !p)}
-            >
-              <span className="material-symbols-outlined" style={{ fontSize: 14, lineHeight: 1 }}>auto_fix_high</span>
-            </PillIcon>
-            {skillsOpen && skills && skills.length > 0 && (
-              <>
-                <div style={{ position: "fixed", inset: 0, zIndex: 9998 }} onClick={() => setSkillsOpen(false)} />
-                <div style={{
-                  position: "fixed",
-                  bottom: getPopupPos(skillsTriggerRef).bottom,
-                  left: getPopupPos(skillsTriggerRef).left,
-                  background: T.popup,
-                  border: `1px solid ${T.border}`,
-                  borderRadius: 12,
-                  padding: "6px 0",
-                  minWidth: 220,
-                  overflow: "hidden",
-                  zIndex: 9999,
-                  boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-                }}>
-                  {skills
-                    .filter((s) => s.enabled)
-                    .map((skill) => {
-                      const selected = selectedSkillIds?.includes(skill.id) ?? false;
-                      return (
-                        <div
-                          key={skill.id}
-                          onClick={() => {
-                            if (!onSkillsChange || !selectedSkillIds) return;
-                            onSkillsChange(
-                              selected
-                                ? selectedSkillIds.filter((id) => id !== skill.id)
-                                : [...selectedSkillIds, skill.id]
-                            );
-                          }}
-                          style={{
-                            padding: "10px 16px",
-                            fontSize: 13,
-                            color: T.text,
-                            background: selected ? T.tabActive : "transparent",
-                            cursor: "pointer",
-                            transition: "background 0.1s",
-                          }}
-                          onMouseEnter={(e) => { if (!selected) e.currentTarget.style.background = T.subtle; }}
-                          onMouseLeave={(e) => { if (!selected) e.currentTarget.style.background = "transparent"; }}
-                        >
-                          {skill.name}
-                        </div>
-                      );
-                    })}
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Firecrawl: on/off toggle */}
-          <PillIcon
-            tooltip={firecrawlEnabled ? "Firecrawl aktiv" : "Aktivér Firecrawl"}
-            active={firecrawlEnabled}
-            onClick={() => setFirecrawlEnabled(p => !p)}
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: 14, lineHeight: 1 }}>travel_explore</span>
-          </PillIcon>
-          </div>
-
-          {/* Inkognito toggle */}
-          <PillIcon
-            tooltip={isIncognito ? "Inkognito aktiv — klikk for å deaktivere" : "Inkognito modus"}
-            active={isIncognito}
-            onClick={() => onIncognitoToggle?.()}
-          >
-            <span className="material-symbols-outlined" style={{ fontSize: 14, lineHeight: 1 }}>visibility_off</span>
-          </PillIcon>
-
-          {/* .md file upload */}
-          <div style={{ position: "relative" }}>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".md"
-              style={{ display: "none" }}
-              onChange={handleFileChange}
-            />
-            <PillIcon
-              tooltip="Last opp .md-fil"
-              active={false}
-              onClick={() => { setFileError(null); fileInputRef.current?.click(); }}
-            >
-              <span className="material-symbols-outlined" style={{ fontSize: 14, lineHeight: 1 }}>attach_file</span>
-            </PillIcon>
-            {fileError && (
-              <div style={{
-                position: "absolute",
-                bottom: "calc(100% + 6px)",
-                left: 0,
-                background: T.popup ?? T.surface,
-                border: `1px solid ${T.border}`,
-                borderRadius: 8,
-                padding: "6px 10px",
-                fontSize: 11,
-                color: T.error ?? "#f87171",
-                whiteSpace: "nowrap",
-                zIndex: 1000,
-                boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
-              }}>
-                {fileError}
-              </div>
-            )}
-          </div>
+            );
+          })()}
+          {/* Hidden file input — triggered by "+"-popup "Legg ved fil" action.
+              Supports .md (pasted inline) and .zip (uploaded + extracted server-side). */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".md,.zip"
+            style={{ display: "none" }}
+            onChange={handleFileChange}
+          />
+          {fileError && (
+            <span style={{
+              fontSize: 10, color: T.error ?? "#f87171", fontFamily: T.mono,
+              paddingLeft: 8,
+            }}>
+              {fileError}
+            </span>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {/* Model selector dropdown */}
-          <div style={{ position: "relative" }}>
-            <div
-              ref={modelTriggerRef}
-              onClick={() => setModelOpen((p) => !p)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "4px 10px",
-                border: `1px solid ${T.border}`,
-                borderRadius: 999,
-                fontSize: 11,
-                fontFamily: T.mono,
-                color: T.textMuted,
-                cursor: "pointer",
-                background: "transparent",
-              }}
-            >
-              {selectedModel
-                ? models?.find(m => m.id === selectedModel)?.displayName || selectedModel
-                : "Auto (anbefalt)"}
-              <ChevronDown size={10} strokeWidth={2} />
-            </div>
-            {modelOpen && (
-              <>
-                <div style={{ position: "fixed", inset: 0, zIndex: 9998 }} onClick={() => setModelOpen(false)} />
-                <div style={{
-                  position: "fixed",
-                  bottom: getPopupPos(modelTriggerRef).bottom,
-                  right: modelTriggerRef.current ? window.innerWidth - modelTriggerRef.current.getBoundingClientRect().right : 0,
-                  background: T.surface,
-                  border: `1px solid ${T.border}`,
-                  borderRadius: 12,
-                  minWidth: 220,
-                  zIndex: 9999,
-                  overflow: "hidden",
-                  boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-                }}>
-                  <div
-                    onClick={() => { onModelChange?.(null); setModelOpen(false); }}
-                    style={{
-                      padding: "10px 16px",
-                      fontSize: 12,
-                      fontFamily: T.mono,
-                      color: !selectedModel ? T.text : T.textMuted,
-                      background: !selectedModel ? T.subtle : "transparent",
-                      cursor: "pointer",
-                    }}
-                  >
-                    Auto (anbefalt)
-                  </div>
-                  {(models || []).map((m) => (
-                    <div
-                      key={m.id}
-                      onClick={() => { onModelChange?.(m.id); setModelOpen(false); }}
-                      style={{
-                        padding: "10px 16px",
-                        fontSize: 12,
-                        fontFamily: T.mono,
-                        color: selectedModel === m.id ? T.text : T.textMuted,
-                        background: selectedModel === m.id ? T.subtle : "transparent",
-                        cursor: "pointer",
-                      }}
-                    >
-                      {m.displayName}
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
           <PillIcon
             active={ty || isLoading}
             onClick={isLoading ? onCancel : doSend}
@@ -527,6 +543,15 @@ export default function ChatInput({
         </div>
       </div>
     </div>
+    {/* Fase I.8 — Slash-command dropdown, UNDER chatboksen som plain text */}
+    {slashActive && (
+      <SlashCommandDropdown
+        commands={slashMatches}
+        activeIndex={Math.min(slashActiveIndex, slashMatches.length - 1)}
+        onSelect={applySlashCommand}
+        onHover={setSlashActiveIndex}
+      />
+    )}
     </>
   );
 }

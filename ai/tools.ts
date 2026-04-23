@@ -1,7 +1,8 @@
 // --- Chat Tool-Use (Function Calling) ---
-// CHAT_TOOLS, executeToolCall, enrichTaskWithAI, sanitizeRepoName, callWithTools.
-// Currently Anthropic-only for tool-use (SDK streaming required per Sprint 6.24).
-// Provider-agnostic tool routing prepared for future providers.
+// Provider-agnostic tool-use loop using the new ToolRegistry (ai/tools/).
+// Backward-compatible CHAT_TOOLS export computed from registry.
+// Currently Anthropic-only via SDK streaming for tool-use; non-Anthropic
+// providers route to ai/tools-openai.ts.
 
 import Anthropic from "@anthropic-ai/sdk";
 import log from "encore.dev/log";
@@ -9,455 +10,50 @@ import { estimateCost } from "./router";
 import { resolveProviderFromModel, getProviderApiKey } from "./provider-registry";
 import { logTokenUsage } from "./call";
 import type { AICallOptions, AICallResponse } from "./types";
+import { toolRegistry } from "./tools/index";
+import type { ToolContext } from "./tools/index";
+import { isDebugEnabled } from "./system-settings";
 
 // --- Tool Definitions ---
-
+// Computed view from ToolRegistry — backward-compat shape for legacy callers.
+// New code should call `toolRegistry.filtered({ surface, activePlan })` directly.
 export const CHAT_TOOLS: Array<{
   name: string;
   description: string;
   input_schema: Record<string, unknown>;
-}> = [
-  {
-    name: "create_task",
-    description: "Create a new development task. Use when the user asks you to build, fix, change, or create something in the codebase.",
-    input_schema: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "Short task title — describe EVERYTHING the user asks for in one task" },
-        description: { type: "string", description: "Detailed description of what needs to be done. Include all steps." },
-        priority: { type: "number", enum: [1, 2, 3, 4], description: "1=Urgent, 2=High, 3=Normal, 4=Low" },
-        repoName: { type: "string", description: "Which repository the task applies to" },
-      },
-      required: ["title", "description"],
-    },
-  },
-  {
-    name: "start_task",
-    description: "Start a task — the agent begins working. Use when the user says 'start', 'run', 'go', 'yes'. Three ways to identify the task: (1) provide taskId (UUID), (2) provide query to match task title, (3) omit both to start the latest unstarted task. Prefer calling start_task directly after create_task in the same turn.",
-    input_schema: {
-      type: "object",
-      properties: {
-        taskId: { type: "string", description: "Task UUID — exact ID" },
-        query: { type: "string", description: "Search text to match task title, e.g. 'index' or 'style.css'" },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "list_tasks",
-    description: "List tasks for a repository. Use when the user asks about status, what remains, etc.",
-    input_schema: {
-      type: "object",
-      properties: {
-        repoName: { type: "string" },
-        status: { type: "string", enum: ["backlog", "planned", "in_progress", "in_review", "done", "blocked"] },
-      },
-    },
-  },
-  {
-    name: "read_file",
-    description: "Read a specific file from the repository. Use when the user asks to look at a file, or when you need more context.",
-    input_schema: {
-      type: "object",
-      properties: {
-        repoName: { type: "string" },
-        path: { type: "string", description: "File path in the repository" },
-      },
-      required: ["repoName", "path"],
-    },
-  },
-  {
-    name: "search_code",
-    description: "Search for relevant files in the repository based on a description.",
-    input_schema: {
-      type: "object",
-      properties: {
-        repoName: { type: "string" },
-        query: { type: "string" },
-      },
-      required: ["repoName", "query"],
-    },
-  },
-  {
-    name: "execute_project_plan",
-    description: "Start execution of a project plan. Call this when the user says 'kjør planen', 'start prosjektet', 'sett i gang', 'execute', or similar.",
-    input_schema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string", description: "ID of the plan to execute (found in the latest project_plan message)" },
-        conversationId: { type: "string" },
-        repoOwner: { type: "string" },
-        repoName: { type: "string" },
-      },
-      required: ["projectId", "conversationId"],
-    },
-  },
-  {
-    name: "revise_project_plan",
-    description: "Revise an existing project plan. Call this when the user wants to add tasks, remove tasks, change phases, or restructure the plan.",
-    input_schema: {
-      type: "object",
-      properties: {
-        projectId: { type: "string", description: "ID of the existing plan to revise" },
-        editRequest: { type: "string", description: "What changes to make to the plan" },
-      },
-      required: ["projectId", "editRequest"],
-    },
-  },
-  {
-    name: "respond_to_review",
-    description: "Use when the user responds to a completed project review. Call this when the user approves, requests changes, or rejects the delivery.",
-    input_schema: {
-      type: "object",
-      properties: {
-        reviewId: { type: "string" },
-        action: { type: "string", enum: ["approve", "request_changes", "reject"] },
-        feedback: { type: "string" },
-      },
-      required: ["reviewId", "action"],
-    },
-  },
-];
+}> = toolRegistry
+  .toAnthropicFormat(toolRegistry.forSurface("chat"))
+  .map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.input_schema as Record<string, unknown>,
+  }));
 
 // --- Helpers ---
 
-// Sanitize repo name — GitHub only allows alphanumeric, hyphens, underscores, dots
-function sanitizeRepoName(name: string): string {
-  if (!name) return "";
-  return name
-    .trim()
-    .replace(/\s+/g, "-")           // spaces → hyphens
-    .replace(/[^a-zA-Z0-9._-]/g, "") // remove invalid chars
-    .replace(/^[-_.]+/, "")          // don't start with special chars
-    .replace(/[-_.]+$/, "")          // don't end with special chars
-    .substring(0, 100);              // GitHub max 100 chars
-}
-
-// --- Tool Execution ---
-
-export async function executeToolCall(
-  name: string,
-  input: Record<string, unknown>,
-  repoName?: string,
-  conversationId?: string,
-  repoOwner?: string,
-  assessComplexityFn?: (req: { taskDescription: string; projectStructure: string; fileCount: number }) => Promise<{ complexity: number; tokensUsed: number }>,
-): Promise<Record<string, unknown>> {
-  const owner = repoOwner || "";
-
-  switch (name) {
-    case "create_task": {
-      console.log("[DEBUG-AF] === CREATE_TASK TOOL ===");
-      console.log("[DEBUG-AF] Input:", JSON.stringify(input).substring(0, 300));
-
-      const { tasks: tasksClient } = await import("~encore/clients");
-      let taskRepo = sanitizeRepoName((input.repoName as string) || repoName || "") || undefined;
-      if (!taskRepo) {
-        const repoMatch = (input.title as string).match(/repo\s+[""]?([A-Za-z0-9_-]+)[""]?/i);
-        if (repoMatch) taskRepo = repoMatch[1];
-      }
-
-      // Duplicate check
-      try {
-        const existing = await tasksClient.listTasks({ repo: taskRepo, limit: 20 });
-        const title = (input.title as string).toLowerCase();
-        const duplicate = existing.tasks.find((t: { title: string; status: string; repo?: string | null }) => {
-          if (["deleted", "done", "blocked", "failed"].includes(t.status)) return false;
-          const existingTitle = t.title.toLowerCase();
-          const titleMatch = existingTitle === title ||
-            existingTitle.includes(title.substring(0, 30)) ||
-            title.includes(existingTitle.substring(0, 30));
-          const repoMatch2 = !taskRepo || !t.repo || t.repo === taskRepo;
-          return titleMatch && repoMatch2;
-        });
-        if (duplicate) {
-          console.log("[DEBUG-AF] Duplicate found:", duplicate.id);
-          return { success: false, taskId: duplicate.id, message: `Oppgave "${input.title}" finnes allerede (ID: ${duplicate.id})` };
-        }
-      } catch { /* non-critical — proceed with creation */ }
-
-      const result = await tasksClient.createTask({
-        title: input.title as string,
-        description: (input.description as string) || "",
-        priority: (input.priority as number) || 3,
-        repo: taskRepo,
-        source: "chat",
-      });
-
-      console.log("[DEBUG-AF] Task created with ID:", result.task.id);
-
-      // Fire-and-forget: enrich task with AI complexity assessment
-      if (assessComplexityFn) {
-        enrichTaskWithAI(result.task.id, input.title as string, (input.description as string) || "", taskRepo, assessComplexityFn).catch((e) =>
-          log.error("Task enrichment failed:", { error: e instanceof Error ? e.message : String(e) })
-        );
-      }
-
-      return { success: true, taskId: result.task.id, message: `Oppgave opprettet: "${input.title}". Kaller start_task nå.` };
-    }
-
-    case "start_task": {
-      console.log("[DEBUG-AF] === START_TASK TOOL ===");
-      console.log("[DEBUG-AF] Input taskId:", input.taskId);
-      console.log("[DEBUG-AF] conversationId:", conversationId);
-
-      try {
-        const { tasks: tasksClient } = await import("~encore/clients");
-        let taskId = String(input.taskId || "").trim();
-
-        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-        if (!taskId || !uuidRegex.test(taskId)) {
-          console.log("[DEBUG-AF] No valid taskId provided, searching for task...");
-          const taskRepo = repoName || undefined;
-          const query = String(input.query || "").trim().toLowerCase();
-          try {
-            const existing = await tasksClient.listTasks({ repo: taskRepo, limit: 20 });
-            const unstarted = existing.tasks
-              .filter((t: { status: string }) =>
-                ["backlog", "planned"].includes(t.status)
-              )
-              .sort((a: { createdAt: string }, b: { createdAt: string }) =>
-                new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-              );
-
-            if (unstarted.length === 0) {
-              return { success: false, error: "Ingen ustartet oppgave funnet. Opprett en oppgave først med create_task." };
-            }
-
-            if (query) {
-              const matched = unstarted.find((t: { title: string }) =>
-                t.title.toLowerCase().includes(query)
-              );
-              if (matched) {
-                taskId = matched.id;
-                console.log(`[DEBUG-AF] Query "${query}" matched task:`, taskId, `"${matched.title}"`);
-              } else {
-                const available = unstarted.slice(0, 5).map((t: { title: string; id: string }) => `• "${t.title}" (${t.id})`).join("\n");
-                return { success: false, error: `Ingen oppgave matcher "${input.query}". Tilgjengelige oppgaver:\n${available}` };
-              }
-            } else {
-              taskId = unstarted[0].id;
-              console.log("[DEBUG-AF] Auto-resolved to latest unstarted task:", taskId, `"${unstarted[0].title}"`);
-            }
-          } catch (e) {
-            console.log("[DEBUG-AF] Task search failed:", e);
-            return { success: false, error: `Kunne ikke søke etter oppgaver: ${e instanceof Error ? e.message : String(e)}` };
-          }
-        }
-
-        console.log("[DEBUG-AF] Using taskId:", taskId);
-
-        let taskData: { repo?: string | null; title?: string | null; status?: string | null; errorMessage?: string | null } | null = null;
-        try {
-          const result = await tasksClient.getTaskInternal({ id: taskId });
-          if (result?.task) {
-            taskData = { repo: result.task.repo, title: result.task.title, status: result.task.status, errorMessage: result.task.errorMessage };
-            console.log("[DEBUG-AF] Task found:", taskData.title, "status:", taskData.status, "repo:", taskData.repo);
-          }
-        } catch (e) {
-          console.log("[DEBUG-AF] ERROR: getTaskInternal failed:", e instanceof Error ? e.message : String(e));
-          taskData = null;
-        }
-
-        if (!taskData) {
-          console.log("[DEBUG-AF] ERROR: Task not found:", taskId);
-          return { success: false, error: `Fant ikke oppgave med ID ${taskId}` };
-        }
-
-        if (taskData.status === "blocked") {
-          console.log("[DEBUG-AF] Task is blocked:", taskData.errorMessage);
-          return { success: false, error: `Oppgaven "${taskData.title}" er blokkert${taskData.errorMessage ? ": " + taskData.errorMessage : ""}. Opprett en ny oppgave.` };
-        }
-        if (taskData.status === "done") {
-          console.log("[DEBUG-AF] Task already done");
-          return { success: false, error: "Oppgaven er allerede fullfort." };
-        }
-        if (taskData.status === "in_progress") {
-          console.log("[DEBUG-AF] Task already in_progress");
-          return { success: false, error: "Oppgaven kjorer allerede." };
-        }
-
-        try {
-          await tasksClient.updateTaskStatus({ id: taskId, status: "in_progress" });
-          console.log("[DEBUG-AF] Task status updated to in_progress");
-        } catch (e) {
-          console.log("[DEBUG-AF] WARNING: Failed to update task status:", e);
-        }
-
-        const { agent: agentClient } = await import("~encore/clients");
-        const startPayload = {
-          conversationId: conversationId || "tool-" + Date.now(),
-          taskId,
-          userMessage: "Start oppgave: " + taskData.title,
-          thefoldTaskId: taskId,
-          repoName: sanitizeRepoName(taskData.repo || repoName || ""),
-          repoOwner: repoOwner || "",
-        };
-
-        console.log("[DEBUG-AF] Calling agent.startTask with:", JSON.stringify(startPayload).substring(0, 500));
-
-        agentClient.startTask(startPayload).then(() => {
-          console.log("[DEBUG-AF] agent.startTask promise resolved");
-        }).catch(async (e: Error) => {
-          console.error("[DEBUG-AF] ERROR: agent.startTask FAILED:", e.message);
-          try {
-            await tasksClient.updateTaskStatus({ id: taskId, status: "blocked", errorMessage: e.message?.substring(0, 500) });
-            console.log("[DEBUG-AF] Task marked as blocked after agent failure");
-          } catch { /* non-critical */ }
-        });
-
-        console.log("[DEBUG-AF] agent.startTask fired (async)");
-        return { success: true, taskId, message: `Oppgave "${taskData.title || taskId}" startet. Agenten jobber na.` };
-      } catch (e) {
-        console.error("[DEBUG-AF] START_TASK CRASHED:", e instanceof Error ? e.message : String(e));
-        return { success: false, error: e instanceof Error ? e.message : String(e) };
-      }
-    }
-
-    case "list_tasks": {
-      const { tasks: tasksClient } = await import("~encore/clients");
-      const result = await tasksClient.listTasks({
-        repo: (input.repoName as string) || repoName || undefined,
-        status: (input.status || undefined) as any,
-      });
-      return { tasks: result.tasks.map((t: { id: string; title: string; status: string; priority: number }) => ({ id: t.id, title: t.title, status: t.status, priority: t.priority })), total: result.total };
-    }
-
-    case "read_file": {
-      const { github: ghClient } = await import("~encore/clients");
-      try {
-        const file = await ghClient.getFile({
-          owner,
-          repo: (input.repoName as string) || repoName || "",
-          path: input.path as string,
-        });
-        return { path: input.path, content: file.content?.substring(0, 5000) };
-      } catch {
-        return { error: `Kunne ikke lese ${input.path}` };
-      }
-    }
-
-    case "search_code": {
-      const { github: ghClient } = await import("~encore/clients");
-      try {
-        const repo = (input.repoName as string) || repoName || "";
-        const tree = await ghClient.getTree({ owner, repo });
-        const relevant = await ghClient.findRelevantFiles({
-          owner,
-          repo,
-          taskDescription: input.query as string,
-          tree: tree.tree,
-        });
-        return { matchingFiles: relevant.paths };
-      } catch {
-        return { error: "Kunne ikke søke i repoet" };
-      }
-    }
-
-    case "execute_project_plan": {
-      const projectId = input.projectId as string;
-      const effectiveRepoName = (input.repoName as string) || repoName || "";
-      const effectiveRepoOwner = (input.repoOwner as string) || repoOwner || "";
-      if (!effectiveRepoOwner || !effectiveRepoName) {
-        return {
-          success: false,
-          needsClarification: true,
-          message: "Jeg trenger å vite hvilket repo prosjektet skal kjøres i. Kan du si meg reponavn og owner? For eksempel: \"Kjør planen i repo my-org/my-repo\"",
-        };
-      }
-      const { agent: agentClient } = await import("~encore/clients");
-      await agentClient.startProject({
-        projectId,
-        conversationId: conversationId || "",
-        repoOwner: effectiveRepoOwner,
-        repoName: effectiveRepoName,
-      });
-      return { success: true, message: "Prosjektet er startet. Du vil motta oppdateringer i samtalen." };
-    }
-
-    case "revise_project_plan": {
-      const projectId = input.projectId as string;
-      const editRequest = input.editRequest as string;
-      const { ai: aiClient, agent: agentClient } = await import("~encore/clients");
-      // Fetch existing plan phases so the AI has full context for the revision
-      let currentPhases: Array<{ name: string; description: string; tasks: Array<{ title: string; description: string; dependsOnIndices: number[] }> }> | undefined;
-      try {
-        const existing = await agentClient.getProjectPlan({ projectId });
-        currentPhases = existing.phases;
-      } catch {
-        // Non-critical — proceed without phases (AI will see existingPlanId only)
-      }
-      const revised = await aiClient.revisePlanUser({ existingPlanId: projectId, editRequest, currentPhases });
-      const stored = await agentClient.storeProjectPlan({
-        conversationId: conversationId || "",
-        userRequest: editRequest,
-        repoName: repoName,
-        supersededPlanId: projectId,
-        decomposition: {
-          phases: revised.phases,
-          conventions: revised.conventions,
-          estimatedTotalTasks: revised.totalTasks,
-        },
-      });
-      return {
-        success: true,
-        message: `Plan oppdatert med ${stored.totalTasks} oppgaver.`,
-        projectId: stored.projectId,
-      };
-    }
-
-    case "respond_to_review": {
-      const reviewId = input.reviewId as string;
-      const action = input.action as "approve" | "request_changes" | "reject";
-      const feedback = (input.feedback as string) || "";
-      const { agent: agentClient } = await import("~encore/clients");
-      if (action === "approve") {
-        await agentClient.approveReview({ reviewId });
-        return { success: true, message: "Prosjektet er godkjent. PR opprettes og sandbox ryddes." };
-      }
-      if (action === "request_changes") {
-        await agentClient.requestChanges({ reviewId, feedback });
-        return { success: true, message: "Tilbakemelding sendt til agenten. Ny iterasjon starter." };
-      }
-      if (action === "reject") {
-        await agentClient.rejectReview({ reviewId, reason: feedback || undefined });
-        return { success: true, message: "Prosjektet er avvist. Sandbox ryddes." };
-      }
-      return { error: "Ugyldig action" };
-    }
-
-    default:
-      return { error: `Ukjent tool: ${name}` };
-  }
-}
-
-/** Fire-and-forget: assess complexity and update task with enrichment data */
-export async function enrichTaskWithAI(
-  taskId: string,
-  title: string,
-  description: string,
-  repoName?: string,
-  assessComplexityFn?: (req: { taskDescription: string; projectStructure: string; fileCount: number }) => Promise<{ complexity: number; tokensUsed: number }>,
-) {
-  if (!assessComplexityFn) return;
-  try {
-    const { tasks: tasksClient } = await import("~encore/clients");
-
-    const complexity = await assessComplexityFn({
-      taskDescription: title + "\n" + description,
-      projectStructure: "",
-      fileCount: 0,
-    });
-
-    await tasksClient.updateTask({
-      id: taskId,
-      estimatedComplexity: complexity.complexity,
-      estimatedTokens: complexity.tokensUsed,
-    });
-  } catch (e) {
-    log.error("enrichTaskWithAI failed:", { taskId, error: e instanceof Error ? e.message : String(e) });
-  }
+/** Build a ToolContext for registry.execute(). Loop-state fields like
+ * lastCreatedTaskId/lastStartedTaskId are filled in per loop iteration. */
+function buildToolContext(opts: {
+  conversationId?: string;
+  repoName?: string;
+  repoOwner?: string;
+  userEmail?: string;
+  lastCreatedTaskId?: string | null;
+  lastStartedTaskId?: string | null;
+}): ToolContext {
+  return {
+    userId: "system", // legacy callers don't pass userId; OK for chat tools
+    userEmail: opts.userEmail,
+    conversationId: opts.conversationId,
+    repoName: opts.repoName,
+    repoOwner: opts.repoOwner,
+    lastCreatedTaskId: opts.lastCreatedTaskId,
+    lastStartedTaskId: opts.lastStartedTaskId,
+    emit: () => {
+      // No-op for legacy callers; tools that need SSE call agent.emitChatEvent directly
+    },
+    log,
+  };
 }
 
 // --- Provider-agnostic Tool-Use Loop ---
@@ -469,6 +65,7 @@ export interface ToolCallOptions extends AICallOptions {
   repoName?: string;
   repoOwner?: string;
   conversationId?: string;
+  userEmail?: string;
   assessComplexityFn?: (req: { taskDescription: string; projectStructure: string; fileCount: number }) => Promise<{ complexity: number; tokensUsed: number }>;
 }
 
@@ -488,7 +85,7 @@ export async function callWithTools(options: ToolCallOptions): Promise<ToolCallR
       model: options.model,
     });
     const { callOpenAIWithTools } = await import("./tools-openai");
-    return callOpenAIWithTools(options, executeToolCall);
+    return callOpenAIWithTools(options);
   }
 
   return callAnthropicWithToolsSDK(options);
@@ -513,9 +110,10 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
   ];
 
   const MAX_TOOL_LOOPS = 10;
+  const debug = await isDebugEnabled();
 
   for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
-    console.log(`[DEBUG-AH] Tool loop iteration ${loop + 1}`);
+    if (debug) console.log(`[DEBUG-AH] Tool loop iteration ${loop + 1}`);
 
     const responseStream = client.messages.stream({
       model: options.model,
@@ -529,7 +127,7 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
     totalInputTokens += response.usage.input_tokens;
     totalOutputTokens += response.usage.output_tokens;
 
-    console.log(`[DEBUG-AH] Stop reason: ${response.stop_reason}, content blocks: ${response.content.length}`);
+    if (debug) console.log(`[DEBUG-AH] Stop reason: ${response.stop_reason}, content blocks: ${response.content.length}`);
 
     if (response.stop_reason !== "tool_use") {
       const textContent = response.content
@@ -537,7 +135,7 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
         .map((block: any) => block.text)
         .join("");
 
-      console.log(`[DEBUG-AH] Final content length: ${textContent.length}`);
+      if (debug) console.log(`[DEBUG-AH] Final content length: ${textContent.length}`);
 
       const cacheReadTokens = (response.usage as unknown as Record<string, number>).cache_read_input_tokens ?? 0;
       const cacheCreationTokens = (response.usage as unknown as Record<string, number>).cache_creation_input_tokens ?? 0;
@@ -571,15 +169,27 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
     const toolUseBlocks = response.content.filter((block: any) => block.type === "tool_use");
     const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean }> = [];
 
+    // Dedup by tool_use_id within this iteration: the Anthropic SDK can deliver
+    // the same tool_use block twice in a single response (rare, but observed).
+    // Skip duplicates so we never run the same call twice.
+    const executedToolUseIds = new Set<string>();
+
     for (const toolBlock of toolUseBlocks) {
+      const blockId = (toolBlock as any).id as string;
+      if (executedToolUseIds.has(blockId)) {
+        log.warn("Skipping duplicate tool_use", { id: blockId, name: (toolBlock as any).name });
+        continue;
+      }
+      executedToolUseIds.add(blockId);
+
       const toolName = (toolBlock as any).name;
       const toolInput = { ...(toolBlock as any).input } as Record<string, unknown>;
 
-      console.log(`[DEBUG-AH] Executing tool: ${toolName}, input: ${JSON.stringify(toolInput).substring(0, 300)}`);
+      if (debug) console.log(`[DEBUG-AH] Executing tool: ${toolName}, input: ${JSON.stringify(toolInput).substring(0, 300)}`);
       allToolsUsed.push(toolName);
 
       if (toolName === "start_task" && lastCreatedTaskId) {
-        console.log(`[DEBUG-AH] start_task: overriding taskId ${toolInput.taskId} → ${lastCreatedTaskId}`);
+        if (debug) console.log(`[DEBUG-AH] start_task: overriding taskId ${toolInput.taskId} → ${lastCreatedTaskId}`);
         toolInput.taskId = lastCreatedTaskId;
       }
 
@@ -591,7 +201,7 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
             const serverName = parts[1];
             const actualToolName = parts.slice(2).join("_");
 
-            console.log(`[DEBUG-AH] MCP tool call: ${serverName}/${actualToolName}`);
+            if (debug) console.log(`[DEBUG-AH] MCP tool call: ${serverName}/${actualToolName}`);
 
             try {
               const { mcp } = await import("~encore/clients");
@@ -613,9 +223,9 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
                 is_error: mcpResult.result.isError ?? false,
               });
 
-              console.log(`[DEBUG-AH] MCP tool result: ${resultText.substring(0, 200)}`);
+              if (debug) console.log(`[DEBUG-AH] MCP tool result: ${resultText.substring(0, 200)}`);
             } catch (mcpErr) {
-              console.error(`[DEBUG-AH] MCP tool ${toolName} FAILED:`, mcpErr);
+              if (debug) console.error(`[DEBUG-AH] MCP tool ${toolName} FAILED:`, mcpErr);
               toolResults.push({
                 type: "tool_result",
                 tool_use_id: (toolBlock as any).id,
@@ -645,17 +255,47 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
             continue;
           }
 
-          // Regular tool call
-          const result = await executeToolCall(toolName, toolInput, options.repoName, options.conversationId, options.repoOwner, options.assessComplexityFn);
+          // Regular tool call via registry
+          const ctx = buildToolContext({
+            conversationId: options.conversationId,
+            repoName: options.repoName,
+            repoOwner: options.repoOwner,
+            userEmail: options.userEmail,
+            lastCreatedTaskId,
+            lastStartedTaskId,
+          });
+          const result = await toolRegistry.execute(toolName, toolInput, ctx);
 
-          if (toolName === "create_task" && result?.taskId) {
-            lastCreatedTaskId = result.taskId as string;
-            console.log(`[DEBUG-AH] lastCreatedTaskId: ${lastCreatedTaskId}`);
+          // Commit 20b: surface handler-level failures (success: false) as a
+          // per-tool SSE event so the UI can show which call failed without
+          // halting the whole chat loop.
+          if (!result.success && options.conversationId) {
+            try {
+              const { agent } = await import("~encore/clients");
+              await agent.emitChatEvent({
+                streamKey: options.conversationId,
+                eventType: "agent.tool_error",
+                data: {
+                  toolName,
+                  toolCallId: (toolBlock as any).id,
+                  error: result.message ?? "Tool failed",
+                  phase: "executing_tools",
+                  recoverable: true,
+                },
+              });
+            } catch (e) {
+              log.warn("emitChatEvent (tool_error) failed", { error: e instanceof Error ? e.message : String(e) });
+            }
           }
 
-          if (toolName === "start_task" && result?.success && result?.taskId) {
-            lastStartedTaskId = result.taskId as string;
-            console.log(`[DEBUG-AH] lastStartedTaskId: ${lastStartedTaskId}`);
+          if (toolName === "create_task" && result?.success && result?.taskId) {
+            lastCreatedTaskId = result.taskId;
+            if (debug) console.log(`[DEBUG-AH] lastCreatedTaskId: ${lastCreatedTaskId}`);
+          }
+
+          if (toolName === "start_task" && result?.success && result?.startedTaskId) {
+            lastStartedTaskId = result.startedTaskId;
+            if (debug) console.log(`[DEBUG-AH] lastStartedTaskId: ${lastStartedTaskId}`);
             // Notify frontend via SSE so it can connect to the agent's stream
             if (options.conversationId) {
               try {
@@ -671,7 +311,7 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
             }
           }
 
-          console.log(`[DEBUG-AH] Tool ${toolName} result: ${JSON.stringify(result).substring(0, 200)}`);
+          if (debug) console.log(`[DEBUG-AH] Tool ${toolName} result: ${JSON.stringify(result).substring(0, 200)}`);
 
           toolResults.push({
             type: "tool_result",
@@ -680,7 +320,28 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
           });
         }
       } catch (e) {
-        console.error(`[DEBUG-AH] Tool ${toolName} FAILED:`, e);
+        if (debug) console.error(`[DEBUG-AH] Tool ${toolName} FAILED:`, e);
+        // Commit 20b: emit per-tool error SSE so the UI can mark exactly
+        // which call failed. Loop continues — the AI sees the error_result
+        // and can retry with adjusted input.
+        if (options.conversationId) {
+          try {
+            const { agent } = await import("~encore/clients");
+            await agent.emitChatEvent({
+              streamKey: options.conversationId,
+              eventType: "agent.tool_error",
+              data: {
+                toolName,
+                toolCallId: (toolBlock as any).id,
+                error: e instanceof Error ? e.message : String(e),
+                phase: "executing_tools",
+                recoverable: true,
+              },
+            });
+          } catch (emitErr) {
+            log.warn("emitChatEvent (tool_error) failed", { error: emitErr instanceof Error ? emitErr.message : String(emitErr) });
+          }
+        }
         toolResults.push({
           type: "tool_result",
           tool_use_id: (toolBlock as any).id,
@@ -699,11 +360,11 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
       content: toolResults,
     });
 
-    console.log(`[DEBUG-AH] Sent tool results back, looping... (tools so far: ${allToolsUsed.join(", ")})`);
+    if (debug) console.log(`[DEBUG-AH] Sent tool results back, looping... (tools so far: ${allToolsUsed.join(", ")})`);
   }
 
   // Max loops reached
-  console.warn("[DEBUG-AH] Max tool loops reached!");
+  if (debug) console.warn("[DEBUG-AH] Max tool loops reached!");
 
   logTokenUsage({
     inputTokens: totalInputTokens,

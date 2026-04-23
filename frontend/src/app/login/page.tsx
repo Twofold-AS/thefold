@@ -85,6 +85,8 @@ function LoginContent() {
         return;
       }
       if (result.token) {
+        // Fase J.1 — HttpOnly-cookie settes av backend-middleware (users.cookieMiddleware).
+        // Vi beholder setToken() som legacy-fallback til eldre klienter er migrert.
         setToken(result.token);
         window.location.href = redirectTo;
       }

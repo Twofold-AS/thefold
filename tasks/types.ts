@@ -27,6 +27,8 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  taskScope: "cowork" | "designer";
+  projectId: string | null;
 }
 
 export type TaskStatus = "backlog" | "planned" | "in_progress" | "in_review" | "done" | "blocked" | "needs_input" | "deleted";

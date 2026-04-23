@@ -67,6 +67,8 @@ interface VerifyOTPRequest {
 interface VerifyOTPResponse {
   success: boolean;
   token?: string;
+  /** Fase J.1 — CSRF-token parret med auth-token. Frontend lagrer i ikke-HttpOnly cookie. */
+  csrfToken?: string;
   user?: {
     id: string;
     email: string;
@@ -84,6 +86,19 @@ interface LogoutResponse {
 
 function hashCode(code: string): string {
   return crypto.createHash("sha256").update(code).digest("hex");
+}
+
+// Fase J.2/J.3 — constant-time sammenligning av OTP-hash for å unngå timing-leaks.
+// Rå `!==` på hex-strings kan i teorien lekke informasjon om prefiks-match.
+function timingSafeHashEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, "hex");
+  const bb = Buffer.from(b, "hex");
+  if (ab.length !== bb.length) return false;
+  try {
+    return crypto.timingSafeEqual(ab, bb);
+  } catch {
+    return false;
+  }
 }
 
 async function logAudit(
@@ -140,48 +155,29 @@ interface LockoutResult {
 }
 
 async function checkLockout(email: string): Promise<LockoutResult> {
-  // 3+ failures in 5 min → 60s lockout
-  const recent5 = await db.queryRow<{ count: number }>`
-    SELECT COUNT(*)::int AS count FROM login_audit
+  // Fase J.3 — Eksponensiell lockout:
+  //   3 feil  = 30s lockout
+  //   5 feil  = 5 min
+  //  10 feil  = 1 time
+  // Telles innen 2-timers vindu for robusthet mot sprint-angrep.
+  const window = await db.queryRow<{ count: number; last: Date }>`
+    SELECT COUNT(*)::int AS count, MAX(created_at) AS last
+    FROM login_audit
     WHERE email = ${email} AND success = false
-      AND created_at > NOW() - INTERVAL '5 minutes'
+      AND created_at > NOW() - INTERVAL '2 hours'
   `;
-  if (recent5 && recent5.count >= 3) {
-    // Check if the most recent failure is within lockout window
-    const lastFail = await db.queryRow<{ created_at: Date }>`
-      SELECT created_at FROM login_audit
-      WHERE email = ${email} AND success = false
-      ORDER BY created_at DESC LIMIT 1
-    `;
-    if (lastFail) {
-      const elapsed = (Date.now() - new Date(lastFail.created_at).getTime()) / 1000;
-      let lockoutSeconds = 60;
+  if (!window || window.count < 3) return { locked: false };
 
-      // 10+ failures in 2 hours → 30 min lockout
-      const recent2h = await db.queryRow<{ count: number }>`
-        SELECT COUNT(*)::int AS count FROM login_audit
-        WHERE email = ${email} AND success = false
-          AND created_at > NOW() - INTERVAL '2 hours'
-      `;
-      if (recent2h && recent2h.count >= 10) {
-        lockoutSeconds = 1800;
-      }
-      // 5+ failures in 30 min → 5 min lockout
-      else {
-        const recent30 = await db.queryRow<{ count: number }>`
-          SELECT COUNT(*)::int AS count FROM login_audit
-          WHERE email = ${email} AND success = false
-            AND created_at > NOW() - INTERVAL '30 minutes'
-        `;
-        if (recent30 && recent30.count >= 5) {
-          lockoutSeconds = 300;
-        }
-      }
+  let lockoutSeconds = 0;
+  if (window.count >= 10) lockoutSeconds = 3600;
+  else if (window.count >= 5) lockoutSeconds = 300;
+  else if (window.count >= 3) lockoutSeconds = 30;
 
-      const remaining = lockoutSeconds - elapsed;
-      if (remaining > 0) {
-        return { locked: true, retryAfterSeconds: Math.ceil(remaining) };
-      }
+  if (lockoutSeconds > 0 && window.last) {
+    const elapsed = (Date.now() - new Date(window.last).getTime()) / 1000;
+    const remaining = lockoutSeconds - elapsed;
+    if (remaining > 0) {
+      return { locked: true, retryAfterSeconds: Math.ceil(remaining) };
     }
   }
   return { locked: false };
@@ -224,6 +220,21 @@ export const requestOtp = api(
     if (!user) {
       await logAudit(email, false);
       return { success: true, message: "Hvis e-posten finnes, vil du motta en kode." };
+    }
+
+    // Fase J.3 — Resend-throttle: minst 60s mellom OTP-send pr. email.
+    const lastSend = await db.queryRow<{ created_at: Date }>`
+      SELECT created_at FROM otp_codes
+      WHERE user_id = ${user.id}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    if (lastSend) {
+      const elapsedMs = Date.now() - new Date(lastSend.created_at).getTime();
+      if (elapsedMs < 60_000) {
+        await logAudit(email, false, user.id);
+        // Ikke avslør detaljer — returner samme melding for å hindre enumeration.
+        return { success: true, message: "Hvis e-posten finnes, vil du motta en kode." };
+      }
     }
 
     // Rate limiting: max 5 codes per email per hour
@@ -320,9 +331,9 @@ export const verifyOtp = api(
       UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ${otp.id}
     `;
 
-    // Verify code
+    // Fase J.2/J.3 — timing-safe sammenligning av OTP-hash
     const inputHash = hashCode(req.code.trim());
-    if (inputHash !== otp.code_hash) {
+    if (!timingSafeHashEqual(inputHash, otp.code_hash)) {
       await logAudit(email, false, user.id);
       // Check for suspicious login activity (A09: Security logging)
       await checkSuspiciousActivity(email);
@@ -339,9 +350,9 @@ export const verifyOtp = api(
       UPDATE users SET last_login_at = NOW() WHERE id = ${user.id}
     `;
 
-    // Generate token via gateway service
-    const role = user.role as "admin" | "viewer";
-    const { token } = await gateway.createToken({
+    // Generate token + CSRF-token via gateway service
+    const role = user.role as "user" | "admin" | "superadmin";
+    const { token, csrfToken } = await gateway.createToken({
       userId: user.id,
       email: user.email,
       role,
@@ -353,6 +364,7 @@ export const verifyOtp = api(
     return {
       success: true,
       token,
+      csrfToken,
       user: {
         id: user.id,
         email: user.email,
@@ -364,11 +376,30 @@ export const verifyOtp = api(
 );
 
 // POST /auth/logout — revoke token + audit
+// Fase J.1 — Støtter både Authorization-header og cookie-basert auth.
+// Middleware i users-service sletter cookien via Set-Cookie Max-Age=0.
 export const logout = api(
   { method: "POST", path: "/auth/logout", expose: true, auth: true },
-  async (params: { authorization: Header<"Authorization"> }): Promise<LogoutResponse> => {
+  async (params: {
+    authorization?: Header<"Authorization">;
+    cookie?: Header<"Cookie">;
+  }): Promise<LogoutResponse> => {
     const authData = getAuthData()!;
-    const token = params.authorization?.replace("Bearer ", "");
+
+    // Hent token enten fra Authorization-header eller auth-cookie.
+    let token: string | null = null;
+    if (params.authorization) {
+      token = params.authorization.replace(/^Bearer\s+/i, "").trim();
+    } else if (params.cookie) {
+      const cookieParts = params.cookie.split(";");
+      for (const part of cookieParts) {
+        const trimmed = part.trim();
+        if (trimmed.startsWith("thefold_token=")) {
+          token = decodeURIComponent(trimmed.slice("thefold_token=".length));
+          break;
+        }
+      }
+    }
 
     if (token) {
       try {

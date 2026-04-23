@@ -9,6 +9,20 @@ export interface ProgressStep {
   label: string;           // "Analyserte repository", "gateway/auth.ts"
   detail?: string;         // "14 filer, 3 minner"
   done: boolean | null;    // true=done, false=in progress, null=waiting
+  timestamp?: number;      // U5 — epoch ms, for chronological merge with tool-calls
+}
+
+/** U5 — Persistent representation of a tool-call for AgentStream rendering. */
+export interface ProgressToolCall {
+  id: string;                  // toolCallId (Anthropic tool_use_id / OpenAI tc.id)
+  timestamp: number;           // epoch ms — chronology key
+  toolName: string;
+  status: "pending" | "running" | "done" | "error" | "skipped";
+  input?: Record<string, unknown>;
+  result?: unknown;
+  durationMs?: number;
+  isError?: boolean;
+  errorMessage?: string;
 }
 
 export interface ProgressReport {
@@ -30,6 +44,8 @@ export interface AgentProgress {
     currentFile?: string;
   };
   steps: ProgressStep[];
+  /** U5 — tool-call-linjer merget kronologisk med steps i AgentStream */
+  toolCalls?: ProgressToolCall[];
   report?: ProgressReport;           // only when done
   question?: string;                 // only when waiting
   subAgents?: Array<{                // only during sub-agent work

@@ -19,9 +19,21 @@ export interface ChatRequest {
   repoName?: string; // Which repo the user is chatting about (from repo-chat)
   repoOwner?: string; // GitHub owner/org for the repo
   repoContext?: string; // Actual file content from the repo (tree + relevant files)
+  /**
+   * Fase I.1 — Silent project context injected as a distinct system-prompt
+   * section (NOT memoryContext). Used to scope answers, never parroted back.
+   */
+  projectContext?: string;
   conversationId?: string; // For tool-use (e.g. start_task needs conversation reference)
   aiName?: string; // User-configurable AI assistant name (default: "Jorgen Andre")
   complexity?: number; // 1-10 — used for auto model routing when model is not set
+  activePlanId?: string; // §3.3: If set, filter create_task/start_task from CHAT_TOOLS + inject plan-context
+  userEmail?: string; // Fase E: propagated to ToolContext so tool handlers can gate on role
+  /** Gate web_scrape tool. When false, filter removes it from tool list for this turn. */
+  firecrawlEnabled?: boolean;
+  /** Project type — when set to "framer" or "framer_figma", design-platform
+   *  rules are appended to the system prompt. */
+  projectType?: "code" | "framer" | "figma" | "framer_figma";
 }
 
 export interface ChatResponse {
@@ -29,6 +41,8 @@ export interface ChatResponse {
   tokensUsed: number;
   stopReason: string;
   modelUsed: string;
+  /** U11 — short human-readable slug for UI (e.g. "Claude Sonnet"). Falls back to modelUsed if unresolved. */
+  modelSlug?: string;
   costUsd: number;
   toolsUsed?: string[];
   lastCreatedTaskId?: string; // BUG 7 FIX: Pass task ID across chat turns

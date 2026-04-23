@@ -37,6 +37,7 @@ import Link from "next/link";
 const ModelsTab = lazy(() => import("@/app/(dashboard)/settings/models/page"));
 const IntegrationsTab = lazy(() => import("@/app/(dashboard)/integrasjoner/page"));
 const MCPTab = lazy(() => import("@/app/(dashboard)/innstillinger/mcp/page"));
+const UsersTab = lazy(() => import("@/app/(dashboard)/innstillinger/UsersTab"));
 
 function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "\u2014";
@@ -63,7 +64,7 @@ const inputStyle: React.CSSProperties = {
 };
 
 const sysCardStyle: React.CSSProperties = {
-  background: T.raised,
+  background: T.sidebar,
   border: `1px solid ${T.border}`,
   borderRadius: T.r,
   padding: S.lg,
@@ -138,7 +139,7 @@ function ArchivedConversationsTab() {
         </div>
       )}
 
-      <div style={{ border: `1px solid ${T.border}`, borderRadius: T.r, overflow: "hidden", background: "transparent" }}>
+      <div style={{ border: `1px solid ${T.border}`, borderRadius: T.r, overflow: "hidden", background: T.sidebar }}>
         {loading ? (
           <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: T.textMuted }}>Laster...</div>
         ) : convs.length === 0 ? (
@@ -640,6 +641,10 @@ export default function InnstillingerPage() {
             { id: "maler", label: "Maler" },
             { id: "system", label: "System" },
             { id: "arkiv", label: "Arkiverte samtaler" },
+            // Admin-only — Commit 29. Hidden entirely for regular users.
+            ...(user?.role === "admin" || user?.role === "superadmin"
+              ? [{ id: "brukere", label: "Brukere" }]
+              : []),
           ]}
           active={settingsTab}
           onChange={(id) => setSettingsTab(id)}
@@ -665,6 +670,12 @@ export default function InnstillingerPage() {
         </Suspense>
       )}
 
+      {settingsTab === "brukere" && (user?.role === "admin" || user?.role === "superadmin") && (
+        <Suspense fallback={<Skeleton rows={6} />}>
+          <UsersTab currentUserRole={user.role} currentUserEmail={user.email} />
+        </Suspense>
+      )}
+
       {settingsTab === "maler" && (
         <div style={{ paddingTop: 0 }}>
           <p style={{ fontSize: 13, color: T.textMuted, marginBottom: S.md }}>
@@ -675,7 +686,7 @@ export default function InnstillingerPage() {
               <div
                 key={cat}
                 style={{
-                  background: T.raised,
+                  background: T.sidebar,
                   border: `1px solid ${T.border}`,
                   borderRadius: T.r,
                   padding: S.md,

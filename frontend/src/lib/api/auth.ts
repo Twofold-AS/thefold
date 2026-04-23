@@ -34,12 +34,19 @@ export async function verifyOtp(email: string, code: string) {
   return apiFetch<{
     success: boolean;
     token?: string;
+    /** Fase J.1 — CSRF-token. Lagres som ikke-HttpOnly cookie av backend. */
+    csrfToken?: string;
     user?: { id: string; email: string; name: string; role: string };
     error?: string;
   }>("/auth/verify-otp", {
     method: "POST",
     body: { email, code },
   });
+}
+
+// Fase J.1 — Hent ny CSRF-token for nåværende sesjon (roterer lokalt lagret token).
+export async function getCsrfToken() {
+  return apiFetch<{ csrfToken: string }>("/gateway/csrf-token", { method: "GET" });
 }
 
 export async function logout() {
@@ -79,4 +86,28 @@ export async function updatePreferences(prefs: Record<string, unknown>) {
 
 export async function getSecretsStatus() {
   return apiFetch<{ secrets: SecretStatus[] }>("/gateway/secrets-status", { method: "GET" });
+}
+
+// --- User role management (Fase E, Commit 29) ---
+
+export type UserRole = "user" | "admin" | "superadmin";
+
+export interface UserRoleRow {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export async function listUsersWithRoles() {
+  return apiFetch<{ users: UserRoleRow[] }>("/users/list-with-roles", { method: "GET" });
+}
+
+export async function setUserRole(email: string, role: UserRole) {
+  return apiFetch<{ email: string; role: UserRole }>("/users/set-role", {
+    method: "POST",
+    body: { email, role },
+  });
 }

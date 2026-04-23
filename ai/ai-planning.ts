@@ -592,7 +592,11 @@ export const decomposeProject = api(
       });
     }
 
-    // Calculate totals
+    // Fase F, §27.10 — Mandatory Review + Security tail phases.
+    // Every decomposed project gets these two phases appended. No opt-out.
+    injectMandatoryPhases(responsePhases);
+
+    // Calculate totals AFTER phase injection
     let estimatedTotalTasks = 0;
     for (const phase of responsePhases) {
       estimatedTotalTasks += phase.tasks.length;
@@ -613,6 +617,48 @@ export const decomposeProject = api(
     };
   }
 );
+
+// --- Mandatory phase injection (Commit 36, §27.10) ---
+// Appended to every decomposed project. Review and Security are non-optional;
+// the caller cannot skip them. Security uses the §27.5 blocker rule — any
+// finding halts PR creation until resolved or overridden by a superadmin.
+
+function injectMandatoryPhases(
+  phases: DecomposeProjectResponse["phases"],
+): void {
+  // The indices here reference positions inside the review + security phases
+  // themselves (single task each); no back-references to earlier phases
+  // because both consume ALL prior output, not a specific task.
+  phases.push({
+    name: "Review",
+    description:
+      "AI-gjennomgang av hele prosjektets output: kvalitet, arkitektur-valg, og kontrakt-overholdelse.",
+    tasks: [
+      {
+        title: "Kjør prosjekt-review",
+        description:
+          "Kjør ai.reviewProject() mot alle filer og faser. Identifiser kvalitetsproblemer, arkitekturavvik, og konsistens-feil. Resultat logges til review-systemet.",
+        dependsOnIndices: [],
+        contextHints: ["all_previous_output"],
+      },
+    ],
+  });
+
+  phases.push({
+    name: "Security",
+    description:
+      "Security-audit av genererte filer: regex CWE-sjekk, secret-scan, AI sub-agent, npm audit. §27.5 blokkerer PR ved enhver finding.",
+    tasks: [
+      {
+        title: "Kjør security-audit",
+        description:
+          "Kall security.scanFiles med alle endrede filer + sandboxId. Regex-scanner + AI security sub-agent + secrets-scan + npm audit kjøres parallelt. Enhver finding (uansett severity) blokkerer PR inntil fikset eller manuelt overstyrt av superadmin.",
+        dependsOnIndices: [],
+        contextHints: ["all_previous_output", "sandbox_ref"],
+      },
+    ],
+  });
+}
 
 // --- Phase Revision (between-phase re-planning) ---
 

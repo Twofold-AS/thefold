@@ -7,11 +7,19 @@ import Btn from "@/components/Btn";
 import { getReview } from "@/lib/api";
 import AgentReasoningCard from "@/components/chat/AgentReasoningCard";
 import ChangedFilesPanel, { type FileChange } from "@/components/chat/ChangedFilesPanel";
+import ToolCallLine from "@/components/chat/ToolCallLine";
+import ToolCallDetailModal from "@/components/chat/ToolCallDetailModal";
+import SubAgentLine from "@/components/chat/SubAgentLine";
+import ValidationPhaseLine from "@/components/chat/ValidationPhaseLine";
+import StdoutStreamModal from "@/components/chat/StdoutStreamModal";
+import type { ToolCallLineData, SwarmGroupLine, ValidationPhaseLine as ValidationPhaseLineData } from "@/components/chat/types";
 
 interface StepInfo {
   id: string;
   label: string;
   done: boolean | null;
+  /** Optional timestamp for chronological merge with tool calls (U3) */
+  timestamp?: number;
 }
 
 interface AgentReport {
@@ -29,6 +37,10 @@ interface AgentProgress {
   phase: string;
   summary: string;
   steps: StepInfo[];
+  /** U5 — tool-call-lines merged kronologisk med steps. */
+  toolCalls?: ToolCallLineData[];
+  /** Fase K.1 — Sandbox-validation-phases merged kronologisk med steps + tool-calls. */
+  validations?: ValidationPhaseLineData[];
   question?: string;
   report?: AgentReport;
 }
@@ -49,6 +61,8 @@ interface AgentStreamProps {
   onRequestChanges?: (reviewId: string, feedback: string) => void | Promise<void>;
   /** Page-level review action state — persists across re-renders */
   reviewInProgress?: ReviewActionType;
+  /** Inline sub-agent swarm groups matched from swarm_status messages (Fase H refactor) */
+  swarmGroups?: SwarmGroupLine[];
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -199,8 +213,50 @@ function parseProgress(content?: string): AgentProgress | null {
   }
 }
 
-export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges, reviewInProgress }: AgentStreamProps) {
+type MergedLine =
+  | { kind: "step"; id: string; label: string; done: boolean | null; timestamp: number }
+  | { kind: "tool"; data: ToolCallLineData; timestamp: number }
+  | { kind: "swarm"; data: SwarmGroupLine; timestamp: number }
+  | { kind: "validation"; data: ValidationPhaseLineData; timestamp: number };
+
+export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges, reviewInProgress, swarmGroups }: AgentStreamProps) {
   const progress = useMemo(() => parseProgress(content), [content]);
+
+  // Tool-call detail modal state (U3)
+  const [openToolCall, setOpenToolCall] = useState<ToolCallLineData | null>(null);
+  // Fase K.1/K.3 — stdout-stream modal state
+  const [openStdout, setOpenStdout] = useState<{ sandboxId: string; phaseIndex?: number } | null>(null);
+
+  // Merge steps + toolCalls + swarmGroups into one chronological stack
+  // (U3/U8 + Fase H inline refactor). Swarm groups are appended at the tail
+  // so they render below the most recent step/tool — they represent the
+  // "currently running" swarm which should sit at the bottom of the stack.
+  const mergedLines = useMemo<MergedLine[]>(() => {
+    const lines: MergedLine[] = [];
+    if (progress) {
+      (progress.steps ?? []).forEach((s, i) => {
+        lines.push({
+          kind: "step",
+          id: s.id,
+          label: s.label,
+          done: s.done,
+          timestamp: s.timestamp ?? i, // fallback keeps input order
+        });
+      });
+      (progress.toolCalls ?? []).forEach((t) => {
+        lines.push({ kind: "tool", data: t, timestamp: t.timestamp });
+      });
+      // Fase K.1 — validation-phases merges kronologisk.
+      (progress.validations ?? []).forEach((v) => {
+        lines.push({ kind: "validation", data: v, timestamp: v.timestamp });
+      });
+    }
+    (swarmGroups ?? []).forEach((g) => {
+      lines.push({ kind: "swarm", data: g, timestamp: g.timestamp });
+    });
+    lines.sort((a, b) => a.timestamp - b.timestamp);
+    return lines;
+  }, [progress, swarmGroups]);
 
   // Use page-level reviewInProgress (survives re-renders) with local fallback
   const reviewAction = reviewInProgress ?? null;
@@ -340,69 +396,96 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
         </div>
       )}
 
-      {/* Steps */}
-      {progress.steps && progress.steps.length > 0 && (
+      {/* Steps + tool-calls + swarm-groups + validations merged chronologically (U3 + Fase H + Fase K) */}
+      {((progress.steps && progress.steps.length > 0) || (progress.toolCalls && progress.toolCalls.length > 0) || (swarmGroups && swarmGroups.length > 0) || (progress.validations && progress.validations.length > 0)) && (
         <div style={{ display: "flex", flexDirection: "column", gap: 3, paddingLeft: 4 }}>
-          {progress.steps.map((step) => (
-            <div
-              key={step.id}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "3px 0",
-              }}
-            >
-              {step.done === true ? (
-                <CheckIcon color={T.success} size={12} />
-              ) : step.done === null ? (
-                <div
-                  style={{
-                    width: 12,
-                    height: 12,
-                    borderRadius: "50%",
-                    border: `2px solid ${T.accent}`,
-                    borderTopColor: "transparent",
-                    animation: "spin 0.7s linear infinite",
-                  }}
-                />
-              ) : (
-                <div
-                  style={{
-                    width: 12,
-                    height: 12,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}
-                >
-                  <div
-                    style={{
-                      width: 4,
-                      height: 4,
-                      borderRadius: "50%",
-                      background: T.textFaint,
-                    }}
-                  />
-                </div>
-              )}
-              <span
+          {mergedLines.map((line, idx) =>
+            line.kind === "step" ? (
+              <div
+                key={`step-${line.id}-${idx}`}
                 style={{
-                  fontSize: 12,
-                  fontFamily: T.sans,
-                  color:
-                    step.done === true
-                      ? T.textMuted
-                      : step.done === null
-                        ? T.textSec
-                        : T.textFaint,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "3px 0",
                 }}
               >
-                {step.label}
-              </span>
-            </div>
-          ))}
+                {line.done === true ? (
+                  <CheckIcon color={T.success} size={12} />
+                ) : line.done === null ? (
+                  <div
+                    style={{
+                      width: 12,
+                      height: 12,
+                      borderRadius: "50%",
+                      border: `2px solid ${T.accent}`,
+                      borderTopColor: "transparent",
+                      animation: "spin 0.7s linear infinite",
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: 12,
+                      height: 12,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: 4,
+                        height: 4,
+                        borderRadius: "50%",
+                        background: T.textFaint,
+                      }}
+                    />
+                  </div>
+                )}
+                <span
+                  style={{
+                    fontSize: 12,
+                    fontFamily: T.sans,
+                    color:
+                      line.done === true
+                        ? T.textMuted
+                        : line.done === null
+                          ? T.textSec
+                          : T.textFaint,
+                  }}
+                >
+                  {line.label}
+                </span>
+              </div>
+            ) : line.kind === "tool" ? (
+              <ToolCallLine key={`tool-${line.data.id}-${idx}`} data={line.data} onClick={setOpenToolCall} />
+            ) : line.kind === "swarm" ? (
+              <SubAgentLine key={`swarm-${line.data.id}-${idx}`} group={line.data} />
+            ) : (
+              // Fase K.1 — validation-phase line med Terminal-knapp som åpner stdout-modal
+              <ValidationPhaseLine
+                key={`val-${line.data.id}-${idx}`}
+                data={line.data}
+                onOpenStdout={(sandboxId, phaseIndex) => {
+                  if (sandboxId) setOpenStdout({ sandboxId, phaseIndex });
+                }}
+              />
+            )
+          )}
         </div>
+      )}
+
+      {/* Detail modal for clicked tool-calls */}
+      <ToolCallDetailModal data={openToolCall} onClose={() => setOpenToolCall(null)} />
+
+      {/* Fase K.3 — Live-stdout-stream modal åpnes fra ValidationPhaseLine */}
+      {openStdout && (
+        <StdoutStreamModal
+          sandboxId={openStdout.sandboxId}
+          initialPhaseIndex={openStdout.phaseIndex}
+          onClose={() => setOpenStdout(null)}
+        />
       )}
 
       {/* Report (when done or waiting for review) */}

@@ -1,12 +1,15 @@
 import { api, APIError } from "encore.dev/api";
 import log from "encore.dev/log";
 import { sanitize } from "./sanitize";
-import { buildSystemPromptWithPipeline, logSkillResults } from "./prompts";
+import { buildSystemPromptWithPipeline, buildPlanContext, logSkillResults } from "./prompts";
+import type { PlanContextMeta } from "./prompts";
 import { callAIWithFallback, stripMarkdownJson, DEFAULT_MODEL } from "./call";
-import { callWithTools, CHAT_TOOLS } from "./tools";
+import { callWithTools } from "./tools";
+import { toolRegistry } from "./tools/index";
 import { assessComplexity } from "./ai-planning";
-import { selectOptimalModel } from "./router";
+import { selectOptimalModel, smartSelect, inferNeedsVision, resolveModelSlug } from "./router";
 import { selectForRole } from "./roles";
+import { isDebugEnabled } from "./system-settings";
 
 import type {
   ChatRequest, ChatResponse, ReviewRequest, ReviewResponse,
@@ -18,12 +21,21 @@ import type {
 export const chat = api(
   { method: "POST", path: "/ai/chat", expose: false },
   async (req: ChatRequest): Promise<ChatResponse> => {
-    // If model is explicitly set, use it. Otherwise auto-route via reviewer role (or use complexity fallback).
-    let model: string;
-    if (req.model) {
-      model = req.model;
-    } else {
-      model = await selectOptimalModel(req.complexity ?? 2, "auto", undefined, "chat");
+    // Smart-select: explicit model wins. Otherwise infer vision-need for
+    // framer-projects + route to cheapest tag-matching model. Log the pick.
+    const lastUserText = [...req.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+    const isDesignProject = req.projectType === "framer" || req.projectType === "framer_figma";
+    const needsVision = isDesignProject && inferNeedsVision(lastUserText);
+    const model = await smartSelect({
+      manualModelId: req.model,
+      needsVision,
+      context: "chat",
+      complexity: req.complexity ?? 2,
+    });
+    if (!req.model) {
+      log.info("smart-select routed chat", {
+        model, needsVision, projectType: req.projectType, complexity: req.complexity,
+      });
     }
 
     req.messages = req.messages.map((m) =>
@@ -33,6 +45,7 @@ export const chat = api(
     const lastUserMsg = [...req.messages].reverse().find((m) => m.role === "user");
     const pipeline = await buildSystemPromptWithPipeline(req.systemContext, {
       task: lastUserMsg?.content || "",
+      projectType: req.projectType,
     }, req.aiName);
 
     let system = pipeline.systemPrompt;
@@ -50,6 +63,14 @@ export const chat = api(
       system += `\n\n--- REPOSITORY CONTEXT ---\nThis is ACTUAL content from the repository. Base your answer ONLY on this — NEVER fabricate files or code not present here.\n${req.repoContext}`;
     }
 
+    // Fase I.1 (fikset regresjon) — Project context has its OWN section with
+    // explicit "do not announce" instructions. Must NOT be merged into the
+    // numbered memoryContext list where the AI would treat it as a user-
+    // asked-about topic and parrot it back.
+    if (req.projectContext) {
+      system += `\n\n${req.projectContext}`;
+    }
+
     if (req.memoryContext.length > 0) {
       system += "\n\n## Relevant Context from Memory\n";
       req.memoryContext.forEach((m, i) => {
@@ -57,16 +78,62 @@ export const chat = api(
       });
     }
 
-    console.log("[DEBUG-AG] ai.chat: using callWithTools, repoName:", req.repoName || "(none)");
+    // §3.4: If a project plan is running for this conversation, append a
+    // plan-context block so the AI understands *why* create_task/start_task
+    // are unavailable (they're filtered below) and which tools to reach for
+    // instead. Fail-soft: if the lookup errors, continue without the block.
+    if (req.activePlanId && req.conversationId) {
+      try {
+        const { agent } = await import("~encore/clients");
+        const result = await agent.getActivePlanByConversation({
+          conversationId: req.conversationId,
+        });
+        if (result.plan) {
+          const meta: PlanContextMeta = {
+            status: result.plan.status,
+            currentPhase: result.plan.currentPhase,
+            totalPhases: result.plan.totalPhases,
+            lastTaskTitle: result.plan.lastCompletedTaskTitle,
+            remainingTasks: result.plan.remainingTasks,
+          };
+          system += buildPlanContext(meta);
+        }
+      } catch (e) {
+        log.warn("ai.chat: plan-context fetch failed — proceeding without it", {
+          error: e instanceof Error ? e.message : String(e),
+          activePlanId: req.activePlanId,
+        });
+      }
+    }
+
+    // §3.3: Plan-aware tool filtering via registry. When a project plan is active,
+    // tools flagged `forbiddenWithActivePlan` (create_task, start_task) are stripped.
+    // Tools flagged `requiresActivePlan` (revise/respond) surface only in plan mode.
+    let filteredTools = toolRegistry.filtered({ surface: "chat", activePlan: !!req.activePlanId });
+    // Web-søk-gate: strip web_scrape when user has disabled it for this turn.
+    if (req.firecrawlEnabled === false) {
+      filteredTools = filteredTools.filter((t) => t.name !== "web_scrape");
+    }
+    const toolsForChat = toolRegistry
+      .toAnthropicFormat(filteredTools)
+      .map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.input_schema as Record<string, unknown>,
+      }));
+
+    if (await isDebugEnabled()) console.log("[DEBUG-AG] ai.chat: using callWithTools, repoName:", req.repoName || "(none)",
+      "activePlanId:", req.activePlanId || "(none)", "toolCount:", toolsForChat.length);
     const toolResponse = await callWithTools({
       model,
       system,
       messages: req.messages,
       maxTokens: 8192,
-      tools: CHAT_TOOLS,
+      tools: toolsForChat,
       repoName: req.repoName,
       repoOwner: req.repoOwner,
       conversationId: req.conversationId,
+      userEmail: req.userEmail,
       assessComplexityFn: async (r) => {
         const result = await assessComplexity(r);
         return { complexity: result.complexity, tokensUsed: result.tokensUsed };
@@ -75,11 +142,14 @@ export const chat = api(
 
     await logSkillResults(pipeline.skillIds, true, toolResponse.tokensUsed);
 
+    const modelSlug = await resolveModelSlug(toolResponse.modelUsed);
+
     return {
       content: toolResponse.content,
       tokensUsed: toolResponse.tokensUsed,
       stopReason: toolResponse.stopReason,
       modelUsed: toolResponse.modelUsed,
+      modelSlug,
       costUsd: toolResponse.costEstimate.totalCost,
       toolsUsed: toolResponse.toolsUsed.length > 0 ? toolResponse.toolsUsed : undefined,
       lastCreatedTaskId: toolResponse.lastCreatedTaskId,

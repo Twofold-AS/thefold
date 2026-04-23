@@ -15,33 +15,24 @@ import {
   validateMCPServer,
   type MCPServer,
 } from "@/lib/api";
-import { CheckCircle2, XCircle, Circle, RefreshCw, Key, Trash2, Plus } from "lucide-react";
+import { RefreshCw, Plus, ChevronDown, ChevronRight } from "lucide-react";
+import Tag from "@/components/Tag";
 
-// --- Status indicator ---
+// --- Status label helper (Norwegian, matches Integrasjoner tone) ---
 
-function StatusDot({ status }: { status: MCPServer["status"] }) {
-  if (status === "installed") {
-    return <CheckCircle2 size={14} style={{ color: T.success, flexShrink: 0 }} />;
-  }
-  if (status === "error" || status === "not_configured") {
-    return <XCircle size={14} style={{ color: T.error, flexShrink: 0 }} />;
-  }
-  return <Circle size={14} style={{ color: T.textFaint, flexShrink: 0 }} />;
+function statusTagVariant(status: MCPServer["status"]): "success" | "error" | "default" {
+  if (status === "installed") return "success";
+  if (status === "error" || status === "not_configured") return "error";
+  return "default";
 }
 
-function statusLabel(status: MCPServer["status"]): string {
+function statusTagLabel(status: MCPServer["status"]): string {
   switch (status) {
-    case "installed": return "Active";
-    case "available": return "Available";
-    case "not_configured": return "Needs config";
-    case "error": return "Error";
+    case "installed":      return "tilkoblet";
+    case "available":      return "tilgjengelig";
+    case "not_configured": return "trenger konfig";
+    case "error":          return "feil";
   }
-}
-
-function statusColor(status: MCPServer["status"]): string {
-  if (status === "installed") return T.success;
-  if (status === "error" || status === "not_configured") return T.error;
-  return T.textFaint;
 }
 
 // --- API key form ---
@@ -131,6 +122,7 @@ function ServerRow({
   server: MCPServer;
   onRefresh: () => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [healthResult, setHealthResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [showKeyForm, setShowKeyForm] = useState(false);
@@ -178,134 +170,112 @@ function ServerRow({
     onRefresh();
   };
 
-  return (
-    <div
-      style={{
-        padding: "16px 20px",
-        borderBottom: `1px solid ${T.border}`,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-        {/* Status */}
-        <div style={{ paddingTop: 2 }}>
-          <StatusDot status={server.status} />
-        </div>
+  const isInstalled = server.status === "installed";
 
-        {/* Info */}
+  return (
+    <>
+      {/* Header row — klikkbar, collapsed-default */}
+      <div
+        onClick={() => setExpanded(v => !v)}
+        style={{
+          display: "flex", alignItems: "center", gap: 12,
+          padding: "14px 20px", cursor: "pointer",
+        }}
+      >
+        <span style={{ color: T.textFaint, flexShrink: 0 }}>
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
-            <span style={{ fontSize: 13, fontWeight: 500, color: T.text }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 15, fontWeight: 600, color: T.text }}>
               {server.name}
             </span>
-            <span
-              style={{
-                fontSize: 10,
-                fontFamily: T.mono,
-                color: statusColor(server.status),
-                textTransform: "uppercase",
-              }}
-            >
-              {statusLabel(server.status)}
-            </span>
-            <span
-              style={{
-                fontSize: 10,
-                fontFamily: T.mono,
-                color: T.textFaint,
-                background: T.subtle,
-                padding: "1px 6px",
-                borderRadius: 4,
-              }}
-            >
+            <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textFaint }}>
               {server.category}
             </span>
           </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+          <Tag variant={statusTagVariant(server.status)}>{statusTagLabel(server.status)}</Tag>
+        </div>
+      </div>
+
+      {/* Expanded content */}
+      {expanded && (
+        <div
+          style={{
+            padding: "16px 20px",
+            borderTop: `1px solid ${T.border}`,
+            background: "#2a2d30",
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
           {server.description && (
-            <div style={{ fontSize: 12, color: T.textSec, marginBottom: 6 }}>
+            <p style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5, marginBottom: 12 }}>
               {server.description}
-            </div>
+            </p>
           )}
+
           {healthResult && (
             <div
               style={{
                 fontSize: 11,
                 fontFamily: T.mono,
                 color: healthResult.ok ? T.success : T.error,
-                marginBottom: 6,
+                marginBottom: 12,
               }}
             >
               {healthResult.ok ? "✓ " : "✗ "}{healthResult.message}
             </div>
           )}
+
           {showKeyForm && (
-            <ApiKeyForm
-              server={server}
-              onSave={handleSaveKeys}
-              onClose={() => setShowKeyForm(false)}
-            />
+            <div style={{ marginBottom: 12 }}>
+              <ApiKeyForm
+                server={server}
+                onSave={handleSaveKeys}
+                onClose={() => setShowKeyForm(false)}
+              />
+            </div>
           )}
+
+          {/* Actions */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            {isInstalled ? (
+              <>
+                <Btn sm onClick={handleUninstall}>
+                  {actionLoading === "uninstall" ? "Kobler fra…" : "Koble fra"}
+                </Btn>
+                {server.configRequired && (
+                  <Btn sm onClick={() => setShowKeyForm(v => !v)}>
+                    {showKeyForm ? "Skjul nøkler" : "Rediger"}
+                  </Btn>
+                )}
+                <Btn sm onClick={handleHealthCheck} style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                }}>
+                  <RefreshCw size={12} style={{
+                    animation: actionLoading === "health" ? "spin 0.8s linear infinite" : "none",
+                  }} />
+                  {actionLoading === "health" ? "Sjekker…" : "Reconnect"}
+                </Btn>
+              </>
+            ) : (
+              <>
+                <Btn sm primary onClick={handleInstall}>
+                  {actionLoading === "install" ? "Installerer…" : "Koble til"}
+                </Btn>
+                {server.configRequired && (
+                  <Btn sm onClick={() => setShowKeyForm(v => !v)}>
+                    {showKeyForm ? "Skjul nøkler" : "Konfigurer"}
+                  </Btn>
+                )}
+              </>
+            )}
+          </div>
         </div>
-
-        {/* Actions */}
-        <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-          {/* Health check — only for installed */}
-          {server.status === "installed" && (
-            <button
-              onClick={handleHealthCheck}
-              disabled={actionLoading !== null}
-              title="Health check"
-              style={{
-                background: "none",
-                border: `1px solid ${T.border}`,
-                borderRadius: 6,
-                padding: "5px 8px",
-                cursor: "pointer",
-                color: T.textMuted,
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <RefreshCw size={13} style={{ animation: actionLoading === "health" ? "spin 0.8s linear infinite" : "none" }} />
-            </button>
-          )}
-
-          {/* API key config */}
-          {server.configRequired && (
-            <button
-              onClick={() => setShowKeyForm(v => !v)}
-              title="Configure API keys"
-              style={{
-                background: "none",
-                border: `1px solid ${T.border}`,
-                borderRadius: 6,
-                padding: "5px 8px",
-                cursor: "pointer",
-                color: showKeyForm ? T.accent : T.textMuted,
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <Key size={13} />
-            </button>
-          )}
-
-          {/* Install / Uninstall */}
-          {server.status === "installed" ? (
-            <Btn sm onClick={handleUninstall}>
-              {actionLoading === "uninstall" ? (
-                <RefreshCw size={12} style={{ animation: "spin 0.8s linear infinite" }} />
-              ) : (
-                <Trash2 size={12} />
-              )}
-            </Btn>
-          ) : (
-            <Btn primary sm onClick={handleInstall}>
-              {actionLoading === "install" ? "Installing…" : "Install"}
-            </Btn>
-          )}
-        </div>
-      </div>
-    </div>
+      )}
+    </>
   );
 }
 
@@ -375,39 +345,45 @@ export default function MCPSetupPage() {
       </div>
 
       <GR>
-        <div style={{ borderRadius: 12, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-          {/* Active servers */}
-          {installed.length > 0 && (
-            <>
-              <div style={{ padding: "10px 20px", borderBottom: `1px solid ${T.border}`, background: T.subtle }}>
+        {loading ? (
+          <Skeleton rows={4} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {installed.length > 0 && (
+              <>
                 <SectionLabel>ACTIVE ({installed.length})</SectionLabel>
-              </div>
-              {loading ? (
-                <div style={{ padding: 20 }}><Skeleton rows={2} /></div>
-              ) : (
-                installed.map(s => (
-                  <ServerRow key={s.id} server={s} onRefresh={refresh} />
-                ))
-              )}
-            </>
-          )}
+                {installed.map(s => (
+                  <div key={s.id} style={{
+                    background: T.sidebar,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: T.r,
+                    overflow: "hidden",
+                  }}>
+                    <ServerRow server={s} onRefresh={refresh} />
+                  </div>
+                ))}
+              </>
+            )}
 
-          {/* Available servers */}
-          <div style={{ padding: "10px 20px", borderBottom: `1px solid ${T.border}`, background: T.subtle }}>
             <SectionLabel>AVAILABLE ({available.length})</SectionLabel>
+            {available.length === 0 ? (
+              <div style={{ padding: "24px 20px", textAlign: "center", fontSize: 13, color: T.textFaint, background: T.sidebar, border: `1px solid ${T.border}`, borderRadius: T.r }}>
+                All servers installed
+              </div>
+            ) : (
+              available.map(s => (
+                <div key={s.id} style={{
+                  background: T.sidebar,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: T.r,
+                  overflow: "hidden",
+                }}>
+                  <ServerRow server={s} onRefresh={refresh} />
+                </div>
+              ))
+            )}
           </div>
-          {loading ? (
-            <div style={{ padding: 20 }}><Skeleton rows={4} /></div>
-          ) : available.length === 0 ? (
-            <div style={{ padding: "24px 20px", textAlign: "center", fontSize: 13, color: T.textFaint }}>
-              All servers installed
-            </div>
-          ) : (
-            available.map(s => (
-              <ServerRow key={s.id} server={s} onRefresh={refresh} />
-            ))
-          )}
-        </div>
+        )}
       </GR>
 
       {/* Add Custom MCP Modal */}

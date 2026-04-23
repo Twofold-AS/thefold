@@ -1,17 +1,27 @@
 "use client";
 
-import { useState, useEffect, useCallback, Suspense, useRef } from "react";
+import React, { useState, useEffect, useCallback, Suspense, useRef } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { T, S, Layout } from "@/lib/tokens";
-import TopBar from "@/components/TopBar";
+import TopBar from "@/components/topbar";
 import NotifBell from "@/components/NotifBell";
 import GlobalBackground from "@/components/GlobalBackground";
-import { Search, Menu, X } from "lucide-react";
+import { Menu, X, ArrowLeft, Circle, CircleDot, Projector } from "lucide-react";
 import { RepoProvider, useRepoContext } from "@/lib/repo-context";
 import { ErrorBoundary } from "@/components/shared/ErrorBoundary";
 import BrainActivityStripe from "@/components/BrainActivityStripe";
-import { getConversations, listTheFoldTasks, listSubTasks, getNotifications, archiveConversation } from "@/lib/api";
+import DreamStatusWidget from "@/components/DreamStatusWidget";
+import { getConversations, getNotifications, archiveConversation, listTFProjects, type TFProject } from "@/lib/api";
+import { buildUrl } from "@/lib/url-utils";
+import PlatformIcon from "@/components/icons/PlatformIcon";
+import SquigglyDivider from "@/components/SquigglyDivider";
+import AgentAvatar from "@/components/AgentAvatar";
+import ProjectSettingsModal from "@/components/ProjectSettingsModal";
+import CodeProjectModal from "@/components/CodeProjectModal";
+import DesignProjectModal from "@/components/DesignProjectModal";
+import ProjectSyncModal from "@/components/ProjectSyncModal";
+import { Settings as SettingsIcon, RefreshCw } from "lucide-react";
 
 interface Conversation {
   id: string;
@@ -19,12 +29,29 @@ interface Conversation {
   createdAt?: string;
   updatedAt?: string;
   activeTask?: boolean;
+  scope?: "cowork" | "designer";
+  projectId?: string | null;
 }
 
 // Conv-id format: `repo-${repoName}-${uuid}`. repoName may itself contain hyphens
 // (e.g. "Mikael-er-kul"), so a naive split("-") drops everything after the first chunk.
 // Anchor on the trailing UUID instead.
 const REPO_ID_REGEX = /^repo-(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Shared sidebar header style — applied to "Prosjekter" (flat-view),
+// project title (drill-in), and "Samtalehistorikk" label so they all
+// have the same size/weight/position.
+const sidebarHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "8px 6px",
+  fontSize: 14,
+  fontWeight: 600,
+  color: T.text,
+  fontFamily: T.sans,
+  flexShrink: 0,
+};
 
 function extractRepoFromConvId(id: string): string | null {
   const m = id.match(REPO_ID_REGEX);
@@ -35,26 +62,34 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [activeMode, setActiveMode] = useState<"cowork" | "auto">("cowork");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [activeMode, setActiveMode] = useState<"cowork" | "designer">("cowork");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
-  const [sidebarTasks, setSidebarTasks] = useState<any[]>([]);
-  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
-  const [expandedSidebarTaskId, setExpandedSidebarTaskId] = useState<string | null>(null);
-  const [sidebarSubTasks, setSidebarSubTasks] = useState<Record<string, any[]>>({});
-  const [sidebarSubLoading, setSidebarSubLoading] = useState<Record<string, boolean>>({});
-  const [repoView, setRepoView] = useState<string | null>(null);
   const [hoveredConvId, setHoveredConvId] = useState<string | null>(null);
+  // Cached per scope: null = not yet loaded (show loader), [] or [...] = loaded.
+  const [tfProjectsByScope, setTfProjectsByScope] = useState<{
+    cowork: TFProject[] | null;
+    designer: TFProject[] | null;
+  }>({ cowork: null, designer: null });
+  const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null);
+  const [settingsProject, setSettingsProject] = useState<TFProject | null>(null);
+  const [newProjectScope, setNewProjectScope] = useState<"cowork" | "designer" | null>(null);
+  const [syncModalOpen, setSyncModalOpen] = useState(false);
+  // Drill-in state: driven entirely by URL `?project=<uuid>`. No local useState —
+  // keeps sidebar + chat-page in sync without cross-component state drift.
   const searchParams = useSearchParams();
-  const convParam = searchParams.get("conv");
-  const { repos, selectedRepo, selectRepo } = useRepoContext();
+  const selectedSidebarProjectId = searchParams.get("project");
+  const { selectedRepo } = useRepoContext();
 
   useEffect(() => {
-    if (pathname.startsWith("/auto")) setActiveMode("auto");
+    if (pathname.startsWith("/designer")) setActiveMode("designer");
+    else if (pathname.startsWith("/auto")) {
+      // Legacy /auto-rute: redirect til /cowork?mode=auto
+      router.replace("/cowork?mode=auto");
+    }
     else setActiveMode("cowork");
-  }, [pathname]);
+  }, [pathname, router]);
 
   const convCacheRef = useRef<{ data: Conversation[]; time: number } | null>(null);
 
@@ -78,12 +113,46 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     // No polling interval — conversations refresh on demand via refreshConvs() after sends.
   }, [fetchConversations]);
 
+  // Fase I.0.d — Hent TFProjects filtrert pr. aktiv mode (cowork vs designer).
+  // Caches per scope so tab-switch after first load shows instantly — no loader
+  // flash. `force=true` re-fetches (used after mutations like link-repo/delete).
+  const fetchTFProjects = useCallback(async (force = false) => {
+    const scope = activeMode === "designer" ? "designer" : "cowork";
+    // Skip fetch if we already have data for this scope and no force-refresh
+    // is requested. Prevents loader flash on tab-switch.
+    const current = tfProjectsByScope[scope];
+    if (!force && current !== null) return;
+    try {
+      const res = await listTFProjects(scope);
+      // eslint-disable-next-line no-console
+      console.log("[sidebar] listTFProjects", scope, "→", res.projects?.length ?? 0,
+        (res.projects ?? []).map((p) => ({ id: p.id, name: p.name, type: p.projectType })));
+      setTfProjectsByScope((prev) => ({ ...prev, [scope]: res.projects ?? [] }));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[sidebar] listTFProjects failed", err);
+      setTfProjectsByScope((prev) => ({ ...prev, [scope]: [] }));
+    }
+  }, [activeMode, tfProjectsByScope]);
+
+  // Current-scope projects list (null until first load completes).
+  const tfProjects = tfProjectsByScope[activeMode] ?? [];
+  const loadingProjects = tfProjectsByScope[activeMode] === null;
+
   useEffect(() => {
-    if (activeMode !== "auto") return;
-    listTheFoldTasks({ rootOnly: true, limit: 20 })
-      .then((data) => setSidebarTasks(data.tasks ?? []))
-      .catch(() => {});
-  }, [activeMode]);
+    fetchTFProjects();
+  }, [fetchTFProjects]);
+
+  // Fase I.0.f — Custom event "tf:new-project" fra ComposerPopup bunn-knappen.
+  // Lytteren her åpner CodeProjectModal/DesignProjectModal (I.3).
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { scope?: "cowork" | "designer" } | undefined;
+      setNewProjectScope(detail?.scope ?? "cowork");
+    };
+    window.addEventListener("tf:new-project", handler);
+    return () => window.removeEventListener("tf:new-project", handler);
+  }, []);
 
   // Fetch notification count once on mount for the badge (no polling loop).
   // NotifBell handles fresh data via its own 60s interval when the popup is open.
@@ -106,10 +175,31 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     fetchCount();
   }, []);
 
-  // When a repo is selected, show only that project's convos; otherwise show all
+  // Scope-gate + project-gate: when drilled into a project, match conversations.project_id
+  // OR fall back to repo-name-prefix for legacy conversations (created before link-repo backfill).
+  const drilledProjectForFilter = selectedSidebarProjectId
+    ? tfProjects.find((p) => p.id === selectedSidebarProjectId) ?? null
+    : null;
+  const drilledRepoName = drilledProjectForFilter?.githubRepo?.split("/")[1]?.toLowerCase() ?? null;
+
   const filtered = conversations
     .filter((c) => !c.id.startsWith("inkognito-"))
     .filter((c) => {
+      const convScope = c.scope ?? "cowork";
+      return convScope === activeMode;
+    })
+    .filter((c) => {
+      if (selectedSidebarProjectId) {
+        // Primary: direct project_id match (populated on new chats + backfilled on link-repo).
+        if (c.projectId === selectedSidebarProjectId) return true;
+        // Fallback: legacy conversation with no project_id but matching repo-name in id-prefix.
+        if (!c.projectId && drilledRepoName) {
+          const convRepo = extractRepoFromConvId(c.id)?.toLowerCase();
+          if (convRepo === drilledRepoName) return true;
+        }
+        return false;
+      }
+      // No drill-in — legacy behaviour (repo filter / all)
       if (selectedRepo) {
         const repoName = extractRepoFromConvId(c.id)?.toLowerCase();
         if (!repoName) return false;
@@ -119,11 +209,6 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
       }
       return true;
     })
-    .filter((c) => {
-      if (!searchQuery) return true;
-      const title = c.title || c.id;
-      return title.toLowerCase().includes(searchQuery.toLowerCase());
-    })
     .sort((a, b) => {
       const da = new Date(b.updatedAt || b.createdAt || 0).getTime();
       const db = new Date(a.updatedAt || a.createdAt || 0).getTime();
@@ -131,11 +216,17 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     })
     .filter((c, i, arr) => arr.findIndex((x) => x.id === c.id) === i);
 
-  const isIncognito = activeMode === "cowork" && !selectedRepo;
+  // Resolve the drilled-in project object from id.
+  const drilledProject = selectedSidebarProjectId
+    ? tfProjects.find((p) => p.id === selectedSidebarProjectId) ?? null
+    : null;
 
-  const [showAllRepos, setShowAllRepos] = useState(false);
+  // Active conversation id — used to render the filled bullet.
+  const activeConvId = typeof window !== "undefined"
+    ? new URLSearchParams(typeof window !== "undefined" ? window.location.search : "").get("conv")
+    : null;
 
-  const isFullHeight = pathname === "/cowork" || pathname.startsWith("/cowork/") || pathname === "/auto" || pathname.startsWith("/auto/");
+  const isFullHeight = pathname === "/cowork" || pathname.startsWith("/cowork/") || pathname === "/designer" || pathname.startsWith("/designer/");
 
   return (
     <>
@@ -152,7 +243,11 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
 
       <div style={{ display: "flex", flexDirection: "column", height: "100vh", fontFamily: T.sans, color: T.text, position: "relative" }}>
         <GlobalBackground />
-        <TopBar notifCount={notifCount} onNotifClick={() => setNotifOpen((p) => !p)} onNewChat={() => router.push("/cowork")} />
+        <TopBar
+          notifCount={notifCount}
+          onNotifClick={() => setNotifOpen((p) => !p)}
+          onNewChat={() => router.push(buildUrl("/cowork", { conv: null }))}
+        />
 
         {notifOpen && (
           <div style={{ position: "fixed", top: Layout.topbarHeight, right: 24, zIndex: 200 }}>
@@ -200,7 +295,11 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
               }}
             >
               <button
-                onClick={() => { setActiveMode("cowork"); router.push("/cowork"); }}
+                onClick={() => {
+                  setActiveMode("cowork");
+                  // Scope-switch: drop project + conv (belongs to other mode) via buildUrl
+                  router.push(buildUrl("/cowork", { project: null, conv: null }));
+                }}
                 style={{
                   flex: 1, padding: "8px 0", fontSize: 13, fontWeight: 500,
                   fontFamily: T.sans,
@@ -213,336 +312,226 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
                 CoWork
               </button>
               <button
-                onClick={() => { setActiveMode("auto"); router.push("/auto"); }}
+                onClick={() => {
+                  setActiveMode("designer");
+                  router.push(buildUrl("/designer", { project: null, conv: null }));
+                }}
                 style={{
                   flex: 1, padding: "8px 0", fontSize: 13, fontWeight: 500,
                   fontFamily: T.sans,
-                  color: activeMode === "auto" ? T.text : T.textMuted,
-                  background: activeMode === "auto" ? T.tabActive : "transparent",
+                  color: activeMode === "designer" ? T.text : T.textMuted,
+                  background: activeMode === "designer" ? T.tabActive : "transparent",
                   border: "none", borderRadius: 10, cursor: "pointer",
                   transition: "background 0.15s, color 0.15s",
                 }}
               >
-                Auto
+                Designer
               </button>
             </div>
 
-            {/* Search / task selection */}
-            <div
-              style={{
-                display: "flex", alignItems: "center", gap: 8,
-                background: T.search, borderRadius: 20,
-                padding: "8px 12px", margin: "0 12px",
-              }}
-            >
-              <Search size={14} color={T.textMuted} />
-              {activeMode === "cowork" ? (
-                <input
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Søk etter samtale..."
-                  style={{
-                    flex: 1, background: "transparent", border: "none",
-                    outline: "none", color: T.text, fontSize: 13, fontFamily: T.sans,
-                  }}
-                />
-              ) : (
-                <>
-                  <span style={{ flex: 1, fontSize: 13, color: T.textMuted }}>Velg oppgaver</span>
-                  {selectedTaskIds.size > 0 && (
-                    <button
-                      onClick={() => router.push(`/auto?start=${Array.from(selectedTaskIds).join(",")}`)}
-                      style={{
-                        fontSize: 11, fontWeight: 600, color: T.text,
-                        background: T.tabActive, border: `1px solid ${T.border}`,
-                        borderRadius: 12, padding: "4px 12px", cursor: "pointer",
-                        fontFamily: T.sans, whiteSpace: "nowrap",
-                      }}
-                    >
-                      Start ({selectedTaskIds.size})
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-
-            {/* Sidebar content — no overflow on the outer wrapper, only historikk scrolls */}
+            {/* Sidebar content — drill-in pattern (2026-04-22 refactor).
+                Default: flat project list. After clicking a project: project header
+                + back button + scoped conversation list (no Historikk-wrapper). */}
             <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2, padding: "0 8px", minHeight: 0, overflow: "hidden" }}>
-              {activeMode === "cowork" ? (
-                <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, marginTop: 4 }}>
-
-                  {/* "Se alle prosjekter"-visning */}
-                  {showAllRepos ? (
-                    <>
-                      <button
-                        onClick={() => setShowAllRepos(false)}
-                        style={{
-                          display: "flex", alignItems: "center", gap: 4,
-                          padding: "6px 4px", marginBottom: 4,
-                          fontSize: 12, fontWeight: 500, color: T.textMuted,
-                          background: "transparent", border: "none",
-                          cursor: "pointer", fontFamily: T.sans, flexShrink: 0,
-                        }}
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 16 }}>arrow_back</span>
-                        Tilbake
-                      </button>
-                      <div style={{ padding: "2px 4px 6px", fontSize: 10, fontWeight: 600, color: T.textFaint, textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>
-                        Alle prosjekter
+              <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, marginTop: 4 }}>
+                {drilledProject ? (
+                  /* ── PROJECT-DRILLED STATE ── */
+                  <>
+                    {/* Project title — sidebarHeaderStyle, ikon + navn + innstillinger */}
+                    <div style={{ ...sidebarHeaderStyle }}>
+                      <PlatformIcon type={drilledProject.projectType} size={16} />
+                      <div style={{
+                        flex: 1, minWidth: 0,
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>
+                        {drilledProject.name}
                       </div>
-                      {/* Scrollable repo list */}
-                      <div style={{ flex: 1, overflowY: "scroll", scrollbarWidth: "none" as any }}>
-                        {repos.map((repo) => (
+                      <button
+                        onClick={() => setSettingsProject(drilledProject)}
+                        style={{ background: "transparent", border: "none", cursor: "pointer", padding: 4, color: T.textMuted, display: "flex", alignItems: "center" }}
+                        title="Prosjekt-innstillinger"
+                      >
+                        <SettingsIcon size={14} />
+                      </button>
+                    </div>
+
+                    {/* Separator between project title and conv list */}
+                    <div style={{ padding: "12px 6px", flexShrink: 0 }}>
+                      <SquigglyDivider height={16} mode="static" />
+                    </div>
+
+                    {/* Conversations list — no background, bullet icons, large hit-target. */}
+                    <div style={{ flex: 1, overflowY: "scroll", scrollbarWidth: "none" as any, minHeight: 0 }}>
+                      {filtered.length === 0 ? (
+                        <div style={{ padding: "12px 4px", textAlign: "center", fontSize: 12, color: T.textMuted }}>
+                          Ingen samtaler ennå
+                        </div>
+                      ) : (
+                        filtered.map((conv) => {
+                          const isActive = activeConvId === conv.id;
+                          return (
+                            <div
+                              key={conv.id}
+                              className="conv-item"
+                              style={{
+                                display: "flex", alignItems: "center", gap: 8,
+                                padding: "8px 6px", borderRadius: 8, position: "relative",
+                                background: "transparent",
+                              }}
+                              onMouseEnter={() => setHoveredConvId(conv.id)}
+                              onMouseLeave={() => setHoveredConvId(null)}
+                            >
+                              {isActive
+                                ? <CircleDot size={11} color={T.text} style={{ flexShrink: 0 }} />
+                                : <Circle size={11} color={T.text} style={{ flexShrink: 0 }} />}
+                              <Link
+                                href={buildUrl(
+                                  activeMode === "designer" ? "/designer" : "/cowork",
+                                  { conv: conv.id },
+                                )}
+                                style={{ flex: 1, minWidth: 0, textDecoration: "none" }}
+                              >
+                                <div style={{
+                                  fontSize: 13,
+                                  fontWeight: isActive ? 500 : 400,
+                                  color: isActive ? T.text : T.textMuted,
+                                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                                }}>
+                                  {conv.title || "Ny samtale"}
+                                </div>
+                              </Link>
+                              {hoveredConvId === conv.id && (
+                                <button
+                                  onClick={async (e) => {
+                                    e.preventDefault(); e.stopPropagation();
+                                    try { await archiveConversation(conv.id); fetchConversations(true); } catch {}
+                                  }}
+                                  style={{ background: "transparent", border: "none", cursor: "pointer", padding: 2, flexShrink: 0, color: T.textMuted, display: "flex", alignItems: "center" }}
+                                  title="Arkiver samtale"
+                                >
+                                  <X size={13} />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  /* ── DEFAULT PROJECT-LIST STATE ── */
+                  <>
+                    <div style={{ ...sidebarHeaderStyle }}>
+                      <Projector size={16} color={T.text} />
+                      <span>Prosjekter</span>
+                    </div>
+                    <div style={{ padding: "12px 6px", flexShrink: 0 }}>
+                      <SquigglyDivider height={16} mode="static" />
+                    </div>
+                    {loadingProjects ? (
+                      <div style={{ padding: "32px 6px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+                        <AgentAvatar size={32} state="working" />
+                        <span style={{
+                          fontSize: 11,
+                          color: "transparent",
+                          backgroundImage:
+                            "linear-gradient(90deg, rgba(255,255,255,0.3) 0%, rgba(255,255,255,1) 50%, rgba(255,255,255,0.3) 100%)",
+                          backgroundSize: "200% 100%",
+                          backgroundClip: "text",
+                          WebkitBackgroundClip: "text",
+                          animation: "tf-shimmer 2.5s linear infinite",
+                          fontFamily: T.sans,
+                        }}>
+                          Laster prosjekter...
+                        </span>
+                      </div>
+                    ) : tfProjects.length === 0 ? (
+                      <div style={{ padding: "18px 6px", textAlign: "center", fontSize: 12, color: T.textMuted }}>
+                        Ingen prosjekter ennå
+                      </div>
+                    ) : (
+                      <div style={{ flex: 1, overflowY: "auto", scrollbarWidth: "none" as any }}>
+                        {tfProjects.map((proj) => (
                           <div
-                            key={repo.fullName}
-                            onClick={() => { selectRepo(repo.fullName); setShowAllRepos(false); router.push("/cowork"); }}
+                            key={proj.id}
+                            onMouseEnter={() => setHoveredProjectId(proj.id)}
+                            onMouseLeave={() => setHoveredProjectId(null)}
+                            onClick={() => {
+                              const basePath = activeMode === "designer" ? "/designer" : "/cowork";
+                              // Drill-in: set project, preserve conv if user is mid-chat
+                              router.replace(buildUrl(basePath, { project: proj.id }));
+                            }}
                             className="conv-item repo-item"
-                            style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 4px", borderRadius: 10, cursor: "pointer" }}
+                            style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 6px", borderRadius: 10, cursor: "pointer", position: "relative" }}
                           >
-                            <img src="https://github.com/favicon.ico" width={14} height={14} alt="" style={{ flexShrink: 0, borderRadius: 2, opacity: 0.8 }} />
+                            <PlatformIcon type={proj.projectType} size={14} />
                             <div style={{ flex: 1, minWidth: 0 }}>
                               <div style={{ fontSize: 13, fontWeight: 400, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                {repo.name}
+                                {proj.name}
                               </div>
                             </div>
+                            {hoveredProjectId === proj.id && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setSettingsProject(proj); }}
+                                style={{ background: "transparent", border: "none", cursor: "pointer", padding: 2, color: T.textMuted, display: "flex", alignItems: "center", flexShrink: 0 }}
+                                title="Prosjekt-innstillinger"
+                              >
+                                <SettingsIcon size={13} />
+                              </button>
+                            )}
                           </div>
                         ))}
                       </div>
-                    </>
-                  ) : (
-                    <>
-                      {/* Prosjekter — maks 5 */}
-                      {repos.length > 0 && (
-                        <>
-                          <div style={{ padding: "2px 4px 2px", fontSize: 10, fontWeight: 600, color: T.textFaint, textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>
-                            Prosjekter
-                          </div>
-                          {repos.slice(0, 5).map((repo) => (
-                            <div
-                              key={repo.fullName}
-                              onClick={() => { selectRepo(repo.fullName); router.push("/cowork"); }}
-                              className="conv-item repo-item"
-                              style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 4px", borderRadius: 10, cursor: "pointer", flexShrink: 0 }}
-                            >
-                              <img src="https://github.com/favicon.ico" width={14} height={14} alt="" style={{ flexShrink: 0, borderRadius: 2, opacity: 0.8 }} />
-                              <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontSize: 13, fontWeight: 400, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {repo.name}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                          {repos.length > 5 && (
-                            <button
-                              onClick={() => setShowAllRepos(true)}
-                              style={{
-                                padding: "7px 4px", fontSize: 12, color: T.textMuted,
-                                background: "transparent", border: "none", cursor: "pointer",
-                                fontFamily: T.sans, textAlign: "left", width: "100%", flexShrink: 0,
-                                display: "flex", alignItems: "center", gap: 4,
-                              }}
-                            >
-                              <span className="material-symbols-outlined" style={{ fontSize: 14 }}>subdirectory_arrow_right</span>
-                              Se alle prosjekter ({repos.length})
-                            </button>
-                          )}
-                        </>
-                      )}
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
 
-                      {/* Spacer — push historikk to the bottom */}
-                      <div style={{ flex: 1, minHeight: 12 }} />
-
-                      {/* Historikk — fixed height at bottom of sidebar */}
-                      <div style={{
-                        background: T.tabActive,
-                        borderRadius: 12,
-                        padding: "10px 10px 12px",
-                        marginTop: 0,
-                        margin: "0 4px",
-                        flex: "0 0 46%",
-                        height: "46%",
-                        minHeight: 80,
-                        display: "flex",
-                        flexDirection: "column",
-                        overflow: "hidden",
-                      }}>
-                        <div style={{ marginBottom: 6, paddingLeft: 4, flexShrink: 0 }}>
-                          <span style={{
-                            fontSize: 10, fontWeight: 600, color: T.textFaint,
-                            textTransform: "uppercase", letterSpacing: "0.06em",
-                            background: T.tabWrapper,
-                            borderRadius: 6,
-                            padding: "2px 8px",
-                            display: "inline-block",
-                          }}>
-                            Historikk
-                          </span>
-                        </div>
-                        {/* Inkognito-indikator når ingen repo er valgt */}
-                        {isIncognito && (
-                          <div style={{
-                            display: "flex", alignItems: "center", gap: 6,
-                            padding: "5px 6px", marginBottom: 4,
-                            background: `${T.tabActive}`, borderRadius: 8,
-                            flexShrink: 0,
-                          }}>
-                            <span className="material-symbols-outlined" style={{ fontSize: 13, color: T.textMuted }}>visibility_off</span>
-                            <span style={{ fontSize: 11, color: T.textMuted, fontWeight: 500 }}>Inkognito — ikke lagret</span>
-                          </div>
-                        )}
-                        {/* Scrollable list */}
-                        <div style={{ flex: 1, overflowY: "scroll", scrollbarWidth: "none" as any, minHeight: 0 }}>
-                          {filtered.length === 0 ? (
-                            <div style={{ padding: "12px 4px", textAlign: "center", fontSize: 12, color: T.textMuted }}>
-                              {isIncognito ? "Inkognito — ingen historikk" : searchQuery ? "Ingen resultater" : "Ingen samtaler ennå"}
-                            </div>
-                          ) : (
-                            filtered.map((conv) => {
-                              const repoName = extractRepoFromConvId(conv.id);
-                              return (
-                                <div
-                                  key={conv.id}
-                                  className="conv-item"
-                                  style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 10px", borderRadius: 8, position: "relative" }}
-                                  onMouseEnter={() => setHoveredConvId(conv.id)}
-                                  onMouseLeave={() => setHoveredConvId(null)}
-                                >
-                                  <Link href={`/cowork?conv=${encodeURIComponent(conv.id)}`} style={{ flex: 1, minWidth: 0, textDecoration: "none" }}>
-                                    <div style={{ fontSize: 13, fontWeight: 400, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                      {conv.title || "Ny samtale"}
-                                    </div>
-                                    {repoName && !selectedRepo && (
-                                      <div style={{ fontSize: 11, color: T.textMuted, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                        {repoName}
-                                      </div>
-                                    )}
-                                  </Link>
-                                  {hoveredConvId === conv.id && (
-                                    <button
-                                      onClick={async (e) => {
-                                        e.preventDefault(); e.stopPropagation();
-                                        try { await archiveConversation(conv.id); fetchConversations(true); } catch {}
-                                      }}
-                                      style={{ background: "transparent", border: "none", cursor: "pointer", padding: 2, flexShrink: 0, color: T.textMuted, display: "flex", alignItems: "center" }}
-                                      title="Arkiver samtale"
-                                    >
-                                      <span className="material-symbols-outlined" style={{ fontSize: 16 }}>inventory_2</span>
-                                    </button>
-                                  )}
-                                </div>
-                              );
-                            })
-                          )}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              ) : (
-                /* Auto mode */
-                <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, marginTop: 12 }}>
-                  {/* Oppgaver section title */}
-                  <div style={{ padding: "2px 4px 2px", fontSize: 10, fontWeight: 600, color: T.textFaint, textTransform: "uppercase", letterSpacing: "0.06em", flexShrink: 0 }}>
-                    Oppgaver
-                  </div>
-                  {sidebarTasks.length === 0 ? (
-                    <div style={{ padding: "20px 12px", textAlign: "center", fontSize: 12, color: T.textMuted }}>
-                      Ingen oppgaver
-                    </div>
-                  ) : (
-                    sidebarTasks.map((task: any) => {
-                      const isExpanded = expandedSidebarTaskId === task.id;
-                      const subTasks = sidebarSubTasks[task.id] ?? [];
-                      const subLoading = sidebarSubLoading[task.id] ?? false;
-                      const dotColor = task.status === "in_progress" ? T.accent
-                        : task.status === "done" || task.status === "completed" ? (T.success ?? "#22c55e")
-                        : task.status === "blocked" ? (T.error ?? "#f87171")
-                        : T.textFaint;
-                      return (
-                        <div key={task.id}>
-                          <div
-                            onClick={async () => {
-                              if (isExpanded) {
-                                setExpandedSidebarTaskId(null);
-                              } else {
-                                setExpandedSidebarTaskId(task.id);
-                                if (!sidebarSubTasks[task.id]) {
-                                  setSidebarSubLoading(prev => ({ ...prev, [task.id]: true }));
-                                  try {
-                                    const r = await listSubTasks(task.id);
-                                    setSidebarSubTasks(prev => ({ ...prev, [task.id]: r.tasks }));
-                                  } catch {
-                                    setSidebarSubTasks(prev => ({ ...prev, [task.id]: [] }));
-                                  } finally {
-                                    setSidebarSubLoading(prev => ({ ...prev, [task.id]: false }));
-                                  }
-                                }
-                              }
-                            }}
-                            className="conv-item"
-                            style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderRadius: 10, cursor: "pointer" }}
-                          >
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontSize: 12, fontWeight: 400, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                {task.title}
-                              </div>
-                            </div>
-                            <span style={{
-                              fontSize: 11, padding: "1px 6px", borderRadius: 4,
-                              background: dotColor + "20", color: dotColor, fontFamily: T.mono, whiteSpace: "nowrap", flexShrink: 0,
-                            }}>
-                              {task.status === "in_progress" ? "aktiv" : task.status === "done" ? "done" : task.status}
-                            </span>
-                          </div>
-                          {isExpanded && (
-                            <div style={{ marginLeft: 20, paddingBottom: 4 }}>
-                              {subLoading ? (
-                                <div style={{ fontSize: 11, color: T.textFaint, padding: "4px 8px" }}>Laster...</div>
-                              ) : subTasks.length === 0 ? (
-                                <div style={{ display: "flex", alignItems: "flex-start" }}>
-                                  <div style={{ width: 16, minWidth: 16, alignSelf: "stretch", position: "relative", marginRight: 6 }}>
-                                    <div style={{ position: "absolute", top: 0, bottom: "50%", left: 6, borderLeft: `1px solid ${T.border}` }} />
-                                    <div style={{ position: "absolute", top: "50%", left: 6, width: 10, borderBottom: `1px solid ${T.border}` }} />
-                                  </div>
-                                  <div style={{ fontSize: 11, color: T.textFaint, padding: "4px 0" }}>Ingen deloppgaver</div>
-                                </div>
-                              ) : (
-                                subTasks.map((sub: any, i: number) => (
-                                  <div key={sub.id} style={{ display: "flex", alignItems: "flex-start" }}>
-                                    <div style={{ width: 16, minWidth: 16, alignSelf: "stretch", position: "relative", marginRight: 6 }}>
-                                      <div style={{ position: "absolute", top: 0, bottom: i === subTasks.length - 1 ? "50%" : 0, left: 6, borderLeft: `1px solid ${T.border}` }} />
-                                      <div style={{ position: "absolute", top: "50%", left: 6, width: 10, borderBottom: `1px solid ${T.border}` }} />
-                                    </div>
-                                    <div
-                                      onClick={(e) => { e.stopPropagation(); router.push(`/tasks?start=${sub.id}`); }}
-                                      className="conv-item"
-                                      style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, padding: "4px 6px", borderRadius: 6, cursor: "pointer" }}
-                                    >
-                                      <span style={{ fontSize: 11, color: T.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub.title}</span>
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); router.push(`/auto?start=${sub.id}`); }}
-                                        style={{
-                                          background: T.tabActive, border: "none", borderRadius: 4,
-                                          width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center",
-                                          cursor: "pointer", flexShrink: 0,
-                                        }}
-                                        title="Start oppgave"
-                                      >
-                                        <svg width="8" height="8" viewBox="0 0 8 8" fill={T.textMuted}>
-                                          <polygon points="1,0.5 7.5,4 1,7.5" />
-                                        </svg>
-                                      </button>
-                                    </div>
-                                  </div>
-                                ))
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
+            {/* Bunn-row: Synkroniser alltid venstre, Tilbake til høyre i drill-in. */}
+            <div style={{
+              display: "flex",
+              justifyContent: "flex-start",
+              gap: 8,
+              padding: "0 12px",
+              marginTop: "auto",
+              marginBottom: 12,
+            }}>
+              <button
+                type="button"
+                onClick={() => setSyncModalOpen(true)}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 8,
+                  background: "#3c4043", borderRadius: 20, border: "none",
+                  padding: "8px 16px",
+                  width: "fit-content",
+                  color: "#FFFFFF", cursor: "pointer", userSelect: "none",
+                  fontFamily: T.sans, fontSize: 13,
+                }}
+              >
+                <RefreshCw size={14} color="#FFFFFF" />
+                <span>Synkroniser</span>
+              </button>
+              {drilledProject && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const basePath = activeMode === "designer" ? "/designer" : "/cowork";
+                    router.replace(buildUrl(basePath, { project: null }));
+                  }}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 8,
+                    background: "#3c4043", borderRadius: 20, border: "none",
+                    padding: "8px 16px",
+                    width: "fit-content",
+                    color: "#FFFFFF",
+                    cursor: "pointer", userSelect: "none", fontFamily: T.sans,
+                    fontSize: 13,
+                  }}
+                >
+                  <ArrowLeft size={14} color="#FFFFFF" />
+                  <span>Tilbake</span>
+                </button>
               )}
             </div>
           </aside>
@@ -580,6 +569,58 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
           </main>
         </div>
       </div>
+
+      {/* Fase I.0.d — Per-prosjekt innstillinger, mountet på layout-nivå */}
+      <ProjectSettingsModal
+        project={settingsProject}
+        open={settingsProject !== null}
+        onClose={() => setSettingsProject(null)}
+        onSaved={(p) => {
+          const scope = p.projectType === "code" ? "cowork" : "designer";
+          setTfProjectsByScope((prev) => ({
+            ...prev,
+            [scope]: (prev[scope] ?? []).map((x) => (x.id === p.id ? p : x)),
+          }));
+          setSettingsProject(null);
+        }}
+        onArchived={(id) => {
+          setTfProjectsByScope((prev) => ({
+            cowork: prev.cowork === null ? null : prev.cowork.filter((x) => x.id !== id),
+            designer: prev.designer === null ? null : prev.designer.filter((x) => x.id !== id),
+          }));
+          setSettingsProject(null);
+        }}
+      />
+
+      {/* Fase I.3 — Split: CodeProjectModal (CoWork) + DesignProjectModal (Designer).
+         Åpnes via "tf:new-project"-event dispatchet fra ComposerPopup bunn-knappen. */}
+      <CodeProjectModal
+        open={newProjectScope === "cowork"}
+        onClose={() => setNewProjectScope(null)}
+        onCreated={(p) => {
+          setTfProjectsByScope((prev) => ({
+            ...prev,
+            cowork: [p, ...(prev.cowork ?? [])],
+          }));
+          setNewProjectScope(null);
+        }}
+      />
+      <DesignProjectModal
+        open={newProjectScope === "designer"}
+        onClose={() => setNewProjectScope(null)}
+        onCreated={(p) => {
+          setTfProjectsByScope((prev) => ({
+            ...prev,
+            designer: [p, ...(prev.designer ?? [])],
+          }));
+          setNewProjectScope(null);
+        }}
+      />
+      <ProjectSyncModal
+        open={syncModalOpen}
+        onClose={() => setSyncModalOpen(false)}
+        onChange={() => fetchTFProjects(true)}
+      />
     </>
   );
 }
@@ -590,6 +631,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <Suspense fallback={null}>
         <DashboardLayoutInner>{children}</DashboardLayoutInner>
       </Suspense>
+      {/* Fase G — Dream-widget, bottom-right, auth-only via dashboard layout */}
+      <DreamStatusWidget />
     </RepoProvider>
   );
 }

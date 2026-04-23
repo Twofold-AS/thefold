@@ -1235,3 +1235,89 @@ export const getProjectPlan = api(
     };
   }
 );
+
+// --- Active-plan lookup for chat routing (§3.3) ---
+
+interface GetActivePlanByConversationRequest {
+  conversationId: string;
+}
+
+interface ActivePlanMeta {
+  id: string;
+  status: string;
+  currentPhase: number;
+  totalTasks: number;
+  completedTasks: number;
+  lastCompletedTaskTitle: string | null;
+  remainingTasks: number;
+  totalPhases: number;
+}
+
+interface GetActivePlanByConversationResponse {
+  plan: ActivePlanMeta | null;
+}
+
+/**
+ * Look up the latest ACTIVE project plan for a conversation.
+ * "Active" = status in (planning, executing, paused). Returns null if none.
+ *
+ * Excludes pending_review — during review the user is choosing approve/reject,
+ * so chat is free to create new work (§3.3 edge case).
+ *
+ * Used by chat.send to decide whether to filter create_task/start_task from
+ * CHAT_TOOLS and inject a plan-context system block.
+ */
+export const getActivePlanByConversation = api(
+  { method: "POST", path: "/agent/project/active-by-conversation", expose: false },
+  async (req: GetActivePlanByConversationRequest): Promise<GetActivePlanByConversationResponse> => {
+    const row = await db.queryRow<{
+      id: string;
+      status: string;
+      current_phase: number;
+      total_tasks: number;
+      completed_tasks: number;
+      plan_data: string | object | null;
+    }>`
+      SELECT id, status, current_phase, total_tasks, completed_tasks, plan_data
+      FROM project_plans
+      WHERE conversation_id = ${req.conversationId}
+        AND status IN ('planning', 'executing', 'paused')
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+
+    if (!row) return { plan: null };
+
+    let totalPhases = 0;
+    try {
+      const planData = typeof row.plan_data === "string"
+        ? JSON.parse(row.plan_data)
+        : row.plan_data;
+      totalPhases = Array.isArray(planData?.phases) ? planData.phases.length : 0;
+    } catch {
+      totalPhases = 0;
+    }
+
+    const lastDone = await db.queryRow<{ title: string }>`
+      SELECT title FROM project_tasks
+      WHERE project_id = ${row.id} AND status = 'completed'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `;
+
+    const remaining = Math.max(0, (row.total_tasks ?? 0) - (row.completed_tasks ?? 0));
+
+    return {
+      plan: {
+        id: row.id,
+        status: row.status,
+        currentPhase: row.current_phase,
+        totalTasks: row.total_tasks,
+        completedTasks: row.completed_tasks,
+        lastCompletedTaskTitle: lastDone?.title ?? null,
+        remainingTasks: remaining,
+        totalPhases,
+      },
+    };
+  }
+);

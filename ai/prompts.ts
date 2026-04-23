@@ -383,6 +383,33 @@ IMPORTANT: Always respond to the user in Norwegian (norsk). All your messages to
 - list_tasks: List task status for a repository
 - read_file: Read a specific file from the repository
 - search_code: Search the codebase for relevant files
+- web_scrape: Fetch the content of a public web page by URL (returns Markdown)
+- list_uploads: List recent file-uploads for this conversation
+- read_uploaded_content: Read the extracted contents of a .zip the user uploaded
+- transfer_conversation: Move the current chat into a specific project (lagre/flytt/overfør samtalen)
+
+## Web Content
+When the user's message contains a URL (http:// or https://), call the web_scrape tool to fetch the page content before answering. The tool returns an object with content/title/links/wordCount fields — use the content field (Markdown) as ground truth for your reply; do not invent details that are not in it. Rules:
+- Scrape by default whenever a public URL is present — unless the user explicitly asks you NOT to fetch.
+- Skip for clearly personal or private URLs (docs.google.com, internal wikis, company intranets) and ask the user first.
+- After scraping, summarize or answer based on the actual fetched content — never fabricate details.
+- If web_scrape fails (rate limit, 4xx/5xx, not configured), tell the user briefly and continue with what you already know.
+
+## Uploaded Content
+When the user uploads a .zip file, you can access its contents:
+1. Call list_uploads to find the uploadId for the most recent upload.
+2. Call read_uploaded_content with that uploadId. Use categoryFilter (html/css/jsx/tsx/md/json/image) to focus on what you need — this keeps context small.
+3. Text files come as a content field (truncated to 20k chars by default). Binary files (images) come as truncated base64.
+4. Use the actual file contents to answer — don't fabricate. Reference paths explicitly (e.g. layout.html, styles/main.css).
+5. Typical flows: design bundle → look at HTML + CSS to understand structure; code sample → read jsx/tsx to answer questions; docs → read .md files.
+
+## Saving an incognito chat into a project
+Users start in incognito mode when no project is selected — nothing is anchored to a project yet. When the user asks to save/move the conversation into a project ("lagre denne samtalen i <prosjekt>", "flytt til <prosjekt>", "overfør samtalen til <prosjekt>"):
+1. If the project name is ambiguous, ask the user to confirm which one.
+2. Resolve the UUID (ask the user or use any projectId already in context).
+3. Call transfer_conversation({targetProjectId}).
+4. Confirm briefly: "Samtalen er nå lagret i <prosjektnavn>." Don't show the UUID.
+The call also relinks any .zip uploads made in this chat to the project.
 
 You have access to GitHub via an installed GitHub App in the thefold-dev organization. You CAN create new repositories, read and write to repos, commit code, and create branches. Do not say you cannot do this.
 
@@ -414,7 +441,7 @@ NEVER do this:
 ## Post-creation Rules
 - Never show Task ID / UUID to the user — they do not need to see it
 - After create_task: IMMEDIATELY call start_task in the SAME response — do NOT ask for confirmation
-- NEVER say "Vil du at jeg starter oppgaven nå?" or ask permission — just start it
+- NEVER ask for permission before starting (in any language) — just start it
 - The user asked you to do something, so DO it end-to-end: create_task → start_task in one turn`;
 }
 
@@ -448,7 +475,15 @@ export interface PipelineContext {
   userId?: string;
   tokenBudget?: number;
   taskType?: string;
+  /** When the task belongs to a Framer or Framer+Figma project, extra
+   *  design-platform rules are appended to the system prompt. */
+  projectType?: "code" | "framer" | "figma" | "framer_figma";
 }
+
+export const FRAMER_RULES = `## Framer-specific Rules (design-platform work)
+When building pages in Framer: always start with a template that includes header and footer components.
+Header and footer MUST be implemented as separate components in their own files, never inline.
+If the web_scrape tool is enabled, use it to gather images, text content, style references, and any other data needed to build the page.`;
 
 export interface PipelineResult {
   systemPrompt: string;
@@ -497,6 +532,9 @@ export async function buildSystemPromptWithPipeline(
     if (result.injectedPrompt) {
       prompt += "\n\n## Active Skills\n" + result.injectedPrompt;
     }
+    if (pipelineCtx.projectType === "framer" || pipelineCtx.projectType === "framer_figma") {
+      prompt += "\n\n" + FRAMER_RULES;
+    }
 
     return {
       systemPrompt: prompt,
@@ -505,8 +543,12 @@ export async function buildSystemPromptWithPipeline(
       tokensUsed: result.tokensUsed || 0,
     };
   } catch {
-    // Fallback to legacy if pipeline fails
-    return await buildSystemPromptLegacy(baseContext, basePrompt);
+    // Fallback to legacy if pipeline fails — still honours projectType.
+    const legacy = await buildSystemPromptLegacy(baseContext, basePrompt);
+    if (pipelineCtx?.projectType === "framer" || pipelineCtx?.projectType === "framer_figma") {
+      legacy.systemPrompt += "\n\n" + FRAMER_RULES;
+    }
+    return legacy;
   }
 }
 
@@ -536,4 +578,48 @@ export async function logSkillResults(skillIds: string[], success: boolean, toke
       // Non-critical, don't fail the request
     }
   }
+}
+
+// --- §3.4: Plan-context prompt block ---
+
+export interface PlanContextMeta {
+  status: string;
+  currentPhase: number;
+  totalPhases: number;
+  lastTaskTitle?: string | null;
+  remainingTasks?: number | null;
+}
+
+/**
+ * Build a short system-prompt block explaining the currently running project plan.
+ *
+ * When an active plan is detected, ai-endpoints.ts strips create_task/start_task
+ * from the tool-set (§3.3). This block tells the AI *why* those tools are gone
+ * and which tools to reach for instead, so the response quality stays high:
+ * the AI should say "a plan is running — should I adjust it?" rather than
+ * "I cannot create tasks right now."
+ *
+ * Kept under ~200 tokens (guideline from §3.4). English instructions;
+ * reply to the user in Norwegian to match chat tone.
+ */
+export function buildPlanContext(plan: PlanContextMeta): string {
+  const last = plan.lastTaskTitle ?? "none yet";
+  const remaining = plan.remainingTasks == null ? "unknown" : String(plan.remainingTasks);
+  const phaseLine = plan.totalPhases > 0
+    ? `${plan.currentPhase} of ${plan.totalPhases}`
+    : `${plan.currentPhase}`;
+
+  return `
+
+## ACTIVE PROJECT PLAN IN PROGRESS
+- Status: ${plan.status}
+- Phase: ${phaseLine}
+- Last completed task: ${last}
+- Remaining tasks: ${remaining}
+
+IMPORTANT: While a plan is active, you do NOT have access to create_task or start_task.
+- If the user wants to change direction, use revise_project_plan.
+- If the user asks about the review, use respond_to_review.
+- For other requests, respond normally without creating parallel tasks.
+- Reply to the user in Norwegian.`;
 }

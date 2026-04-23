@@ -7,7 +7,7 @@ export interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress" | "memory_insight";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress" | "memory_insight" | "swarm_status";
   metadata: string | null;
   createdAt: string;
   updatedAt?: string;
@@ -19,6 +19,8 @@ export interface ConversationSummary {
   lastMessage: string;
   lastActivity: string;
   activeTask?: string;
+  scope?: "cowork" | "designer";
+  projectId?: string | null;
 }
 
 export interface CostPeriod {
@@ -84,6 +86,8 @@ export async function sendMessage(conversationId: string, message: string, optio
   repoOwner?: string;
   planMode?: boolean;
   firecrawlEnabled?: boolean;
+  projectId?: string;
+  scope?: "cowork" | "designer";
 }) {
   return apiFetch<{
     message: Message;
@@ -225,6 +229,97 @@ export async function uploadChatFile(
   });
 }
 
+// --- .zip upload (chat/uploads.ts) ---
+
+export interface ZipUploadResponse {
+  uploadId: string;
+  filename: string;
+  filesExtracted: number;
+  totalBytes: number;
+  byCategory: Record<string, number>;
+  files: Array<{
+    path: string;
+    category: string;
+    sizeBytes: number;
+    contentType: string;
+  }>;
+}
+
+export async function uploadZip(conversationId: string, filename: string, contentBase64: string) {
+  return apiFetch<ZipUploadResponse>("/chat/upload-zip", {
+    method: "POST",
+    body: { conversationId, filename, contentBase64 },
+  });
+}
+
+// --- Project uploads (project-scoped) ---
+
+export interface ProjectUploadItem {
+  uploadId: string;
+  filename: string;
+  uploadType: string;
+  fileCount: number;
+  totalBytes: number;
+  version: number;
+  isLatest: boolean;
+  conversationId: string;
+  projectId: string | null;
+  createdAt: string;
+}
+
+export async function listProjectUploads(projectId: string, includeSuperseded?: boolean, limit?: number) {
+  return apiFetch<{ uploads: ProjectUploadItem[] }>("/chat/upload/project-list", {
+    method: "POST",
+    body: { projectId, includeSuperseded, limit },
+  });
+}
+
+export async function deleteUpload(uploadId: string) {
+  return apiFetch<{ success: boolean }>("/chat/upload/delete", {
+    method: "POST",
+    body: { uploadId },
+  });
+}
+
+// --- Project scrapes (project-scoped) ---
+
+export interface ProjectScrapeItem {
+  id: string;
+  userEmail: string;
+  projectId: string | null;
+  conversationId: string | null;
+  url: string;
+  title: string | null;
+  contentMd: string;
+  links: string[];
+  wordCount: number;
+  contentHash: string;
+  fetchedAt: string;
+  expiresAt: string;
+  expired: boolean;
+}
+
+export async function listProjectScrapes(projectId: string, includeExpired?: boolean, limit?: number) {
+  return apiFetch<{ records: ProjectScrapeItem[] }>("/chat/scrape/project-list", {
+    method: "POST",
+    body: { projectId, includeExpired, limit },
+  });
+}
+
+export async function deleteScrape(scrapeId: string) {
+  return apiFetch<{ success: boolean }>("/chat/scrape/delete", {
+    method: "POST",
+    body: { scrapeId },
+  });
+}
+
+export async function invalidateScrape(scrapeId: string) {
+  return apiFetch<{ success: boolean }>("/chat/scrape/invalidate", {
+    method: "POST",
+    body: { scrapeId },
+  });
+}
+
 export async function startProject(params: {
   projectId: string;
   conversationId: string;
@@ -243,4 +338,48 @@ export async function getCostSummary() {
 
 export async function getRepoActivity(repoName: string) {
   return apiFetch<{ activities: RepoActivityEvent[] }>(`/chat/activity/${repoName}`);
+}
+
+// --- Fase I.0.e — Conversation tool-state ---
+
+export type ChatToolMode = "chat" | "auto" | "plan";
+
+export interface ConversationToolState {
+  conversationId: string;
+  userEmail: string;
+  toolToggles: Record<string, boolean>;
+  selectedSkillIds: string[];
+  selectedModel: string | null;
+  projectId: string | null;
+  mode: ChatToolMode;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function getConversationToolState(conversationId: string) {
+  return apiFetch<{ state: ConversationToolState }>("/chat/tool-state/get", {
+    method: "POST",
+    body: { conversationId },
+  });
+}
+
+export async function saveConversationToolState(payload: {
+  conversationId: string;
+  toolToggles?: Record<string, boolean>;
+  selectedSkillIds?: string[];
+  selectedModel?: string | null;
+  projectId?: string | null;
+  mode?: ChatToolMode;
+}) {
+  return apiFetch<{ state: ConversationToolState }>("/chat/tool-state/save", {
+    method: "POST",
+    body: payload as unknown as Record<string, unknown>,
+  });
+}
+
+export async function resetConversationToolState(conversationId: string) {
+  return apiFetch<{ success: boolean }>("/chat/tool-state/reset", {
+    method: "POST",
+    body: { conversationId },
+  });
 }

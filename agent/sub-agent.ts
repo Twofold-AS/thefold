@@ -4,8 +4,8 @@
 // are isolated from the parent stream but observable via agentEventBus.
 
 import log from "encore.dev/log";
-import type { AgentToolName } from "./agent-tools";
-import { AGENT_TOOLS } from "./agent-tools";
+import type { AgentToolName } from "./agent-tool-types";
+import { toolRegistry } from "../ai/tools/index";
 import { agentEventBus } from "./event-bus";
 import { createAgentEvent } from "./events";
 
@@ -37,9 +37,13 @@ export class SubAgent {
     });
   }
 
-  /** Filtered tool list for this sub-agent's scope */
+  /** Filtered tool list for this sub-agent's scope (Anthropic format) */
   get tools() {
-    return AGENT_TOOLS.filter(t => this.opts.toolSubset.includes(t.name as AgentToolName));
+    const subset = new Set<string>(this.opts.toolSubset);
+    const agentTools = toolRegistry
+      .forSurface("agent")
+      .filter((t) => subset.has(t.name));
+    return toolRegistry.toAnthropicFormat(agentTools);
   }
 
   get description(): string {

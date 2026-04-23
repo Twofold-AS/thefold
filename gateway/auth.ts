@@ -4,20 +4,27 @@ import { secret } from "encore.dev/config";
 import { CronJob } from "encore.dev/cron";
 import * as crypto from "crypto";
 import { db } from "./db";
+import { parseCookie, generateCsrfToken } from "./csrf";
 
 const authSecret = secret("AuthSecret");
 
 // --- Types ---
 
 interface AuthParams {
-  authorization: Header<"Authorization">;
+  authorization?: Header<"Authorization">;
+  // Fase J.1 — HttpOnly-cookie som primær auth-transport.
+  // Autorisasjons-headeren beholdes for bakoverkompatibilitet + API-klienter.
+  cookie?: Header<"Cookie">;
 }
 
 export interface AuthData {
   userID: string;
   email: string;
-  role: "admin" | "viewer";
+  role: "user" | "admin" | "superadmin";
 }
+
+/** Cookie-name for auth-token. Synkronisert med frontend/src/lib/auth.ts. */
+export const AUTH_COOKIE_NAME = "thefold_token";
 
 // Token format: base64(JSON payload).hmac-sha256
 // Payload includes exp claim for 7-day expiry
@@ -48,7 +55,18 @@ function verifyToken(token: string): AuthData | null {
     .update(payload)
     .digest("hex");
 
-  if (signature !== expectedSig) return null;
+  // Fase J.2 — timing-safe sammenligning av HMAC-signatur.
+  // Rå `!==` lekker informasjon om hvor mye av signaturen som matcher.
+  let providedBuf: Buffer;
+  let expectedBuf: Buffer;
+  try {
+    providedBuf = Buffer.from(signature, "hex");
+    expectedBuf = Buffer.from(expectedSig, "hex");
+  } catch {
+    return null;
+  }
+  if (providedBuf.length !== expectedBuf.length) return null;
+  if (!crypto.timingSafeEqual(providedBuf, expectedBuf)) return null;
 
   try {
     const decoded = JSON.parse(Buffer.from(payload, "base64").toString());
@@ -68,7 +86,7 @@ function verifyToken(token: string): AuthData | null {
   }
 }
 
-export function generateToken(userId: string, email: string, role: "admin" | "viewer"): string {
+export function generateToken(userId: string, email: string, role: "user" | "admin" | "superadmin"): string {
   const payload = Buffer.from(
     JSON.stringify({
       userId,
@@ -91,18 +109,32 @@ export function generateToken(userId: string, email: string, role: "admin" | "vi
 interface CreateTokenRequest {
   userId: string;
   email: string;
-  role: "admin" | "viewer";
+  role: "user" | "admin" | "superadmin";
 }
 
 interface CreateTokenResponse {
   token: string;
+  csrfToken: string;
 }
 
 export const createToken = api(
   { method: "POST", path: "/gateway/create-token", expose: false },
   async (req: CreateTokenRequest): Promise<CreateTokenResponse> => {
     const token = generateToken(req.userId, req.email, req.role);
-    return { token };
+    const csrfToken = generateCsrfToken(req.userId);
+    return { token, csrfToken };
+  }
+);
+
+// --- CSRF: get a fresh token for the authenticated user ---
+
+export const csrfToken = api(
+  { method: "GET", path: "/gateway/csrf-token", expose: true, auth: true },
+  async (): Promise<{ csrfToken: string }> => {
+    const { getAuthData } = await import("~encore/auth");
+    const authData = getAuthData();
+    if (!authData) throw APIError.unauthenticated("not authed");
+    return { csrfToken: generateCsrfToken(authData.userID) };
   }
 );
 
@@ -115,13 +147,13 @@ interface RevokeResponse {
 /** Revoke the current Bearer token. Call this on logout. */
 export const revoke = api(
   { method: "POST", path: "/gateway/revoke", expose: true, auth: true },
-  async (params: { authorization: Header<"Authorization"> }): Promise<RevokeResponse> => {
-    const header = params.authorization;
-    if (!header) {
-      throw APIError.invalidArgument("missing authorization header");
-    }
+  async (params: {
+    authorization?: Header<"Authorization">;
+    cookie?: Header<"Cookie">;
+  }): Promise<RevokeResponse> => {
+    const token = extractTokenFromParams(params);
+    if (!token) throw APIError.invalidArgument("missing token");
 
-    const token = header.replace("Bearer ", "");
     const tokenHash = hashToken(token);
     const exp = extractExpiry(token);
 
@@ -190,17 +222,32 @@ const _cleanupCron = new CronJob("cleanup-revoked-tokens", {
   endpoint: cleanupRevokedTokens,
 });
 
+// --- Helpers for cookie/header token extraction ---
+
+function extractTokenFromParams(p: {
+  authorization?: string;
+  cookie?: string;
+}): string | null {
+  // 1. Prefer HttpOnly cookie (Fase J.1)
+  const cookieToken = parseCookie(p.cookie, AUTH_COOKIE_NAME);
+  if (cookieToken) return cookieToken;
+  // 2. Fall back to Authorization header (legacy + service-to-service + CLI-klienter)
+  const header = p.authorization;
+  if (header) {
+    return header.replace(/^Bearer\s+/i, "").trim();
+  }
+  return null;
+}
+
 // --- Auth Handler ---
 
 export const auth = authHandler(async (params: AuthParams): Promise<AuthData> => {
-  const header = params.authorization;
-  if (!header) {
-    throw APIError.unauthenticated("missing authorization header");
+  const token = extractTokenFromParams(params);
+  if (!token) {
+    throw APIError.unauthenticated("missing authentication");
   }
 
-  const token = header.replace("Bearer ", "");
   const data = verifyToken(token);
-
   if (!data) {
     throw APIError.unauthenticated("invalid or expired token");
   }

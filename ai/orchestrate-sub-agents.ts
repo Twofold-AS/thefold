@@ -53,10 +53,14 @@ export function createSharedAgentContext(): SharedAgentContext {
   };
 }
 
-// --- Callbacks for real-time progress reporting (9.3) ---
+// --- Callbacks for real-time progress reporting (9.3 + Fase H Commit 40) ---
 
 export interface SubAgentCallbacks {
+  /** Fired once for every planned agent at queue-time (before any execution) */
+  onAgentQueued?: (agent: SubAgent) => void | Promise<void>;
+  /** Fired when an agent actually begins executing (deps resolved, AI call made) */
   onAgentStart?: (agent: SubAgent) => void | Promise<void>;
+  /** Fired when an agent finishes (success or failure) */
   onAgentComplete?: (result: SubAgentResult) => void | Promise<void>;
 }
 
@@ -341,6 +345,14 @@ export async function executeSubAgents(
   const ctx = sharedCtx ?? createSharedAgentContext();
   const results = new Map<string, SubAgentResult>();
   const pending = new Set(plan.agents.map((a) => a.id));
+
+  // Fase H — notify the orchestrator about every queued agent up-front so it
+  // can emit subagent.started + subagent.status_change("waiting") before any
+  // agent actually runs. Keeps the swarm_status message consistent from the
+  // first tick.
+  if (callbacks?.onAgentQueued) {
+    await Promise.allSettled(plan.agents.map((a) => callbacks.onAgentQueued!(a)));
+  }
 
   while (pending.size > 0) {
     // Find agents whose deps are all resolved

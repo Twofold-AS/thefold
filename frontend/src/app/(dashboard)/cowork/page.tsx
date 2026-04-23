@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useRef, Suspense, useCallback } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
+import { buildUrl } from "@/lib/url-utils";
 import { T } from "@/lib/tokens";
 import ChatComposer from "@/components/ChatComposer";
 import ChatContainer from "@/components/chat/ChatContainer";
@@ -21,12 +22,10 @@ import {
   forceContinueTask,
   type Message,
 } from "@/lib/api";
-import type { ReactNode } from "react";
 import { apiFetch } from "@/lib/api/client";
 import { useRepoContext } from "@/lib/repo-context";
 import { useAgentStream } from "@/hooks/useAgentStream";
 import { useReviewFlow } from "@/hooks/useReviewFlow";
-import ModeIndicator from "@/components/ModeIndicator";
 
 function classifyError(e: unknown): string {
   const msg = e instanceof Error ? e.message : "Noe gikk galt";
@@ -61,10 +60,25 @@ function ChatPageInner() {
   const router = useRouter();
   const autoMsg = searchParams.get("msg");
   const convParam = searchParams.get("conv");
+  const projectParam = searchParams.get("project");
+  const pathname = usePathname();
+  // Fase I.0.c/f — samme side brukes av /cowork og /designer; scope bestemmes av ruten.
+  const projectScope: "cowork" | "designer" = pathname.startsWith("/designer") ? "designer" : "cowork";
 
   const { selectedRepo } = useRepoContext();
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(projectParam);
+  // Keep selectedProjectId reactive to URL changes (sidebar drill-in updates `?project=<uuid>`).
+  // Without this the state is only read at mount and gets stale on sidebar navigation.
+  useEffect(() => {
+    setSelectedProjectId(projectParam);
+  }, [projectParam]);
   const [ac, setAc] = useState<string | null>(convParam || null);
   const [newChat, setNewChat] = useState(!convParam);
+
+  // resolvedProjectName + resolvedProjectType state declared here; actual
+  // resolve-effect runs below once convData is in scope (needed for conv.projectId fallback).
+  const [resolvedProjectName, setResolvedProjectName] = useState<string | null>(null);
+  const [resolvedProjectType, setResolvedProjectType] = useState<"code" | "framer" | "figma" | "framer_figma" | null>(null);
 
   // React to URL conversation changes (sidebar clicks + logo click reset)
   useEffect(() => {
@@ -84,6 +98,17 @@ function ChatPageInner() {
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [subAgentsEnabled, setSubAgentsEnabled] = useState(false);
   const [planMode, setPlanMode] = useState(false);
+  const [autoMode, setAutoMode] = useState(false);
+
+  // Modes are per-conversation: reset whenever the active conversation changes
+  // (sidebar click, "+"-new-chat, incognito toggle). Prevents mode-bleed across chats.
+  useEffect(() => {
+    setPlanMode(false);
+    setAutoMode(false);
+    setSubAgentsEnabled(false);
+    setSelectedModel(null); // reset to Smart (AI) auto-routing on new conv
+  }, [convParam]);
+
   const [thinkSeconds, setThinkSeconds] = useState(0);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -125,6 +150,36 @@ function ChatPageInner() {
     [],
   );
   const conversations = convData?.conversations ?? [];
+
+  // Derived project context: prefer URL ?project, fall back to active
+  // conversation's projectId. This keeps the ghost/suggestions correct even
+  // when the user "drills out" to root while still in a conv owned by a project.
+  const activeConv = ac ? conversations.find(c => c.id === ac) : null;
+  const derivedProjectId: string | null = selectedProjectId ?? activeConv?.projectId ?? null;
+
+  // Resolve project name + type for SuggestionChips based on derivedProjectId.
+  useEffect(() => {
+    if (!derivedProjectId) {
+      setResolvedProjectName(null);
+      setResolvedProjectType(null);
+      return;
+    }
+    let cancelled = false;
+    import("@/lib/api").then(({ getTFProject }) => {
+      getTFProject(derivedProjectId)
+        .then((r) => {
+          if (cancelled) return;
+          setResolvedProjectName(r.project.name);
+          setResolvedProjectType(r.project.projectType ?? null);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setResolvedProjectName(null);
+          setResolvedProjectType(null);
+        });
+    });
+    return () => { cancelled = true; };
+  }, [derivedProjectId]);
 
   // [debug] history-bug: dump conv ids whenever the list changes so user can
   // verify whether a missing repo ("Mikael-er-kul") is absent from the API
@@ -364,7 +419,7 @@ function ChatPageInner() {
       optForNewConvRef.current = { convId, msg: optimisticMsg };
       skipNextFetchRef.current = true;
       setAc(convId);
-      router.replace(`?conv=${convId}`, { scroll: false });
+      router.replace(buildUrl(pathname, { conv: convId }), { scroll: false });
       setMsgData({ messages: [optimisticMsg], hasMore: false });
 
       setSending(true);
@@ -380,33 +435,12 @@ function ChatPageInner() {
 
   const curRepo = ac ? extractRepoFromId(ac) : null;
 
-  // Build mode indicators slot (shown above chatbox in both new-chat and existing-chat views)
-  const hasModeIndicators = subAgentsEnabled || isIncognito || planMode;
-  const modeIndicatorSlot: ReactNode = hasModeIndicators ? (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      {planMode && (
-        <ModeIndicator
-          icon="edit_note"
-          color={T.accent}
-          label="Planleggingsmodus aktiv — sender en strukturert plan i stedet for å kjøre direkte"
-        />
-      )}
-      {subAgentsEnabled && (
-        <ModeIndicator
-          icon="hub"
-          color={T.warning ?? "#f59e0b"}
-          label="Sub-agenter er aktive — dette medfører ekstra kostnad"
-        />
-      )}
-      {isIncognito && (
-        <ModeIndicator
-          icon="visibility_off"
-          color={T.textMuted}
-          label="Inkognito — samtalen lagres ikke i historikken"
-        />
-      )}
-    </div>
-  ) : null;
+  // Active mode label rendered inline inside ChatInput beside the ghost icon.
+  // Mutually-exclusive: planMode > subAgents > autoMode.
+  const activeModeLabel: string | null = planMode ? "Planlegger"
+    : subAgentsEnabled ? "Agenter"
+    : autoMode ? "Auto"
+    : null;
 
   const startNewChat = useCallback((msg: string, options?: { firecrawlEnabled?: boolean; planMode?: boolean }) => {
     const repoName = selectedRepo?.name || null;
@@ -433,10 +467,12 @@ function ChatPageInner() {
       modelOverride: selectedModel,
       firecrawlEnabled: options?.firecrawlEnabled,
       planMode: options?.planMode || planMode || undefined,
+      projectId: selectedProjectId ?? undefined,
+      scope: projectScope,
     })
       .then(handleSendResult)
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
-  }, [selectedRepo, isIncognito, selectedSkillIds, selectedModel, planMode, router, setMsgData, handleSendResult]);
+  }, [selectedRepo, isIncognito, selectedSkillIds, selectedModel, planMode, selectedProjectId, router, setMsgData, handleSendResult]);
 
   const handleSend = useCallback(async (value: string, options?: { firecrawlEnabled?: boolean; planMode?: boolean }) => {
     if (!ac || !value) return;
@@ -462,10 +498,12 @@ function ChatPageInner() {
       modelOverride: selectedModel,
       firecrawlEnabled: options?.firecrawlEnabled,
       planMode: options?.planMode || planMode || undefined,
+      projectId: selectedProjectId ?? undefined,
+      scope: projectScope,
     })
       .then(handleSendResult)
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
-  }, [ac, pendingReviewId, selectedRepo, curRepo, selectedSkillIds, selectedModel, planMode, setMsgData, handleRequestChanges, handleSendResult]);
+  }, [ac, pendingReviewId, selectedRepo, curRepo, selectedSkillIds, selectedModel, planMode, selectedProjectId, setMsgData, handleRequestChanges, handleSendResult]);
 
   const handleCancel = useCallback(() => {
     if (ac) cancelChatGeneration(ac).catch(() => {});
@@ -516,6 +554,9 @@ function ChatPageInner() {
       {newChat ? (
         <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
           <ChatComposer
+            heading={projectScope === "designer" ? "Velkommen til Designer." : "Velkommen til CoWork."}
+            projectName={resolvedProjectName}
+            projectType={resolvedProjectType ?? (projectScope === "designer" ? "framer" : null)}
             onSubmit={startNewChat}
             skills={availableSkills.map(s => ({ id: s.id, name: s.name, enabled: s.enabled }))}
             selectedSkillIds={selectedSkillIds}
@@ -525,11 +566,44 @@ function ChatPageInner() {
             models={allModels}
             selectedModel={selectedModel}
             onModelChange={setSelectedModel}
-            modeIndicatorSlot={modeIndicatorSlot}
+            activeModeLabel={activeModeLabel}
             isIncognito={isIncognito}
-            onIncognitoToggle={() => setIsIncognito(p => !p)}
+            onIncognitoToggle={() => {
+              // Ghost-click: leave project + start new chat + flag incognito.
+              const next = !isIncognito;
+              setIsIncognito(next);
+              if (next) {
+                setSelectedProjectId(null);
+                setAc(null);
+                setNewChat(true);
+                if (typeof window !== "undefined") {
+                  const url = new URL(window.location.href);
+                  url.searchParams.delete("conv");
+                  url.searchParams.delete("project");
+                  router.replace(url.pathname);
+                }
+              }
+            }}
             planMode={planMode}
             onPlanModeToggle={() => setPlanMode(p => !p)}
+            autoMode={autoMode}
+            onAutoModeToggle={() => setAutoMode(p => !p)}
+            conversationId={ac ?? undefined}
+            projectScope={projectScope}
+            onNewProject={() => {
+              // Fase I.0.f — CodeProjectModal/DesignProjectModal lyttes på i I.3.
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("tf:new-project", { detail: { scope: projectScope } }));
+              }
+            }}
+            selectedProjectId={derivedProjectId}
+            onSelectProject={(id) => {
+              setSelectedProjectId(id);
+              const url = new URL(window.location.href);
+              if (id) url.searchParams.set("project", id);
+              else url.searchParams.delete("project");
+              router.replace(url.pathname + url.search);
+            }}
           />
         </div>
       ) : (
@@ -615,11 +689,43 @@ function ChatPageInner() {
             selectedModel={selectedModel}
             onModelChange={setSelectedModel}
             onNewChat={() => { setNewChat(true); setAc(null); }}
-            modeIndicatorSlot={modeIndicatorSlot}
+            activeModeLabel={activeModeLabel}
             isIncognito={isIncognito}
-            onIncognitoToggle={() => setIsIncognito(p => !p)}
+            onIncognitoToggle={() => {
+              // Ghost-click: leave project + start new chat + flag incognito.
+              const next = !isIncognito;
+              setIsIncognito(next);
+              if (next) {
+                setSelectedProjectId(null);
+                setAc(null);
+                setNewChat(true);
+                if (typeof window !== "undefined") {
+                  const url = new URL(window.location.href);
+                  url.searchParams.delete("conv");
+                  url.searchParams.delete("project");
+                  router.replace(url.pathname);
+                }
+              }
+            }}
             planMode={planMode}
             onPlanModeToggle={() => setPlanMode(p => !p)}
+            autoMode={autoMode}
+            onAutoModeToggle={() => setAutoMode(p => !p)}
+            conversationId={ac ?? undefined}
+            projectScope={projectScope}
+            onNewProject={() => {
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("tf:new-project", { detail: { scope: projectScope } }));
+              }
+            }}
+            selectedProjectId={derivedProjectId}
+            onSelectProject={(id) => {
+              setSelectedProjectId(id);
+              const url = new URL(window.location.href);
+              if (id) url.searchParams.set("project", id);
+              else url.searchParams.delete("project");
+              router.replace(url.pathname + url.search);
+            }}
           />
         </div>
       )}

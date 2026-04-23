@@ -2,7 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import { CronJob } from "encore.dev/cron";
 import log from "encore.dev/log";
 import { getAuthData } from "~encore/auth";
-import { github, linear, sandbox, users, tasks, mcp } from "~encore/clients";
+import { github, linear, sandbox, users, tasks, mcp, projects } from "~encore/clients";
 import { agentReports } from "../chat/events";
 import { type ModelMode } from "../ai/router";
 import type { AgentExecutionContext, CuratedContext } from "./types";
@@ -15,7 +15,7 @@ import { executePlan, type ExecutionResult } from "./execution";
 import { handleReview, type ReviewResult } from "./review-handler";
 import { completeTask, type CompletionResult } from "./completion";
 import { runAgentToolLoop, buildToolLoopInitialMessage } from "./tool-loop";
-import type { AgentToolContext } from "./agent-tool-executor";
+import type { AgentToolContext } from "./agent-tool-types";
 
 // --- Helpers (extracted in XK) ---
 import {
@@ -247,6 +247,57 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     } else {
       const taskRead = await readTaskDescription(ctx, options);
       taskTitle = taskRead.taskTitle;
+
+      // Lazy companion-repo: if this task belongs to a non-code project (Framer / Figma)
+      // that doesn't yet have a GitHub repo, create one now so builder has somewhere to
+      // commit generated code. ensureProjectRepo is idempotent and a no-op for code
+      // projects — safe to call whenever a task has a projectId.
+      let resolvedProjectType: string | null = null;
+      if (ctx.thefoldTaskId) {
+        try {
+          const tRes = await tasks.getTaskInternal({ id: ctx.thefoldTaskId });
+          const projectId = tRes.task.projectId;
+          if (projectId) {
+            const ensured = await projects.ensureProjectRepo({ projectId });
+            resolvedProjectType = ensured.projectType;
+            if (ensured.created) {
+              await report(ctx, `Opprettet companion-repo: ${ensured.githubRepo}`, "working");
+            }
+            if (ensured.githubRepo) {
+              const [owner, name] = ensured.githubRepo.split("/");
+              if (owner && name) {
+                ctx.repoOwner = owner;
+                ctx.repoName = name;
+              }
+            }
+          }
+        } catch (err) {
+          log.warn("ensureProjectRepo failed (continuing with existing ctx.repo)", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      // Vision-capability warning: if project is Framer/framer_figma and the
+      // task involves visual work (scrape/screenshot keywords), check whether
+      // the selected model supports vision. Don't block — just inform so the
+      // user can switch to Sonnet/Opus for higher visual fidelity.
+      if (resolvedProjectType === "framer" || resolvedProjectType === "framer_figma") {
+        const desc = (ctx.taskDescription ?? "").toLowerCase();
+        const visionRelevant = /scrape|screenshot|skjermbilde|bilde|image|design|figma|layout/.test(desc);
+        if (visionRelevant && ctx.selectedModel) {
+          const { getCapabilities } = await import("../ai/router");
+          const caps = getCapabilities(ctx.selectedModel);
+          if (caps && !caps.vision) {
+            await report(
+              ctx,
+              `Modellen du har valgt (${ctx.selectedModel}) støtter ikke bilder/screenshots. Jeg fortsetter med tekst-fidelitet alene. Bytt til Sonnet/Opus hvis du vil ha høyere visuell nøyaktighet.`,
+              "working",
+            );
+          }
+        }
+      }
+
       const ctxResult: AgentContext = await buildContext(ctx, tracker, { report, think, auditedStep, audit, autoInitRepo, githubBreaker, checkCancelled });
       treeString = ctxResult.treeString; treeArray = ctxResult.treeArray; packageJson = ctxResult.packageJson;
       relevantFiles = ctxResult.relevantFiles; memoryStrings = ctxResult.memoryStrings; docsStrings = ctxResult.docsStrings;
@@ -496,6 +547,22 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
 
       ctx.totalCostUsd    += loopResult.costUsd;
       ctx.totalTokensUsed += loopResult.totalInputTokens + loopResult.totalOutputTokens;
+
+      // Commit 20: tool asked the loop to pause — surface as early return.
+      // Task status is already "needs_input" (set by the tool handler).
+      // respondToClarification will resume by re-running executeTask with the
+      // user's answer folded into taskDescription.
+      if (loopResult.pauseReason === "paused_for_clarification") {
+        sm.transitionTo("needs_input");
+        ctx.phase = sm.current;
+        return {
+          success: false,
+          filesChanged: [],
+          costUsd: ctx.totalCostUsd,
+          tokensUsed: ctx.totalTokensUsed,
+          errorMessage: "paused_for_clarification",
+        };
+      }
 
       executionOutcome = {
         success:      !loopResult.stoppedAtMaxLoops && loopResult.filesWritten.length > 0,

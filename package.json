@@ -10,16 +10,20 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@tanstack/react-table": "^8.21.3",
+    "@types/diff": "^8.0.0",
+    "diff": "^9.0.0",
     "encore.dev": "^1.54.0",
+    "jszip": "^3.10.1",
     "openai": "^6.19.0",
     "pg": "^8.13.0",
     "pgvector": "^0.2.0",
     "postprocessing": "^6.38.3",
     "three": "^0.183.1",
-    "zod": "^3.24.0"
+    "zod": "^3.24.0",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^22.19.17",
     "@types/three": "^0.183.1",
     "typescript": "^5.7.0",
     "vitest": "^4.0.18"

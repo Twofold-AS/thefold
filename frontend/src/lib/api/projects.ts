@@ -24,6 +24,8 @@ export interface ComponentFile {
   language: string;
 }
 
+export type ComponentPlatform = "code" | "framer" | "figma";
+
 export interface Component {
   id: string;
   name: string;
@@ -38,6 +40,11 @@ export interface Component {
   validationStatus: string;
   qualityScore: number | null;
   tags: string[];
+  /** Fase I.4 — Platform-metadata */
+  platform?: ComponentPlatform;
+  role?: string | null;
+  framerComponentId?: string | null;
+  figmaNodeId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -276,5 +283,321 @@ export async function deleteIntegration(platform: string) {
   return apiFetch<{ success: boolean }>("/integrations/delete", {
     method: "POST",
     body: { platform },
+  });
+}
+
+// --- Integration API keys (Firecrawl etc) ---
+
+export interface IntegrationApiKeyStatus {
+  platform: string;
+  configured: boolean;
+  preview: string | null;
+  lastTestAt: string | null;
+  lastTestStatus: "success" | "error" | null;
+}
+
+export async function getIntegrationApiKeyStatus(platform: string) {
+  return apiFetch<{ status: IntegrationApiKeyStatus }>("/integrations/api-key/status", {
+    method: "POST",
+    body: { platform },
+  });
+}
+
+export async function setIntegrationApiKey(platform: string, value: string) {
+  return apiFetch<{ status: IntegrationApiKeyStatus }>("/integrations/api-key/set", {
+    method: "POST",
+    body: { platform, value },
+  });
+}
+
+export async function deleteIntegrationApiKey(platform: string) {
+  return apiFetch<{ success: boolean }>("/integrations/api-key/delete", {
+    method: "POST",
+    body: { platform },
+  });
+}
+
+export async function testIntegrationApiKey(platform: string) {
+  return apiFetch<{ success: boolean; message: string }>("/integrations/api-key/test", {
+    method: "POST",
+    body: { platform },
+  });
+}
+
+// --- Canonical projects registry (Fase I.0.a) ---
+
+export type TFProjectType = "code" | "framer" | "figma" | "framer_figma";
+export type TFProjectScope = "cowork" | "designer";
+export type TFProjectSourceOfTruth = "repo" | "framer" | "figma";
+
+export interface TFProject {
+  id: string;
+  name: string;
+  projectType: TFProjectType;
+  description: string | null;
+  ownerEmail: string;
+  githubRepo: string | null;
+  githubPrivate: boolean;
+  githubAutoMerge: boolean;
+  githubAutoPr: boolean;
+  framerSiteUrl: string | null;
+  figmaFileUrl: string | null;
+  sourceOfTruth: TFProjectSourceOfTruth;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function tfProjectScope(type: TFProjectType): TFProjectScope {
+  return type === "code" ? "cowork" : "designer";
+}
+
+export async function listTFProjects(scope?: TFProjectScope) {
+  return apiFetch<{ projects: TFProject[] }>("/projects/list", {
+    method: "POST",
+    body: scope ? { scope } : {},
+  });
+}
+
+export async function getTFProject(id: string) {
+  return apiFetch<{ project: TFProject }>("/projects/get", {
+    method: "POST",
+    body: { id },
+  });
+}
+
+export async function checkProjectName(name: string) {
+  return apiFetch<{ available: boolean; reason?: string }>("/projects/check-name", {
+    method: "POST",
+    body: { name },
+  });
+}
+
+export interface CreateTFProjectPayload {
+  name: string;
+  projectType: TFProjectType;
+  description?: string;
+  githubPrivate?: boolean;
+  githubAutoMerge?: boolean;
+  githubAutoPr?: boolean;
+  createGithubRepo?: boolean;
+  githubOrg?: string;
+  framerSiteUrl?: string;
+  figmaFileUrl?: string;
+}
+
+export async function createTFProject(payload: CreateTFProjectPayload) {
+  return apiFetch<{ project: TFProject }>("/projects/create", {
+    method: "POST",
+    body: payload as unknown as Record<string, unknown>,
+  });
+}
+
+export async function updateTFProject(
+  id: string,
+  patch: Partial<CreateTFProjectPayload> & { sourceOfTruth?: TFProjectSourceOfTruth },
+) {
+  return apiFetch<{ project: TFProject }>("/projects/update", {
+    method: "POST",
+    body: { id, ...patch } as Record<string, unknown>,
+  });
+}
+
+export async function archiveTFProject(id: string) {
+  return apiFetch<{ success: boolean }>("/projects/archive", {
+    method: "POST",
+    body: { id },
+  });
+}
+
+// --- GitHub sync hub (Prosjekt-sync-modal) ---
+
+export interface GithubSyncRow {
+  fullName: string;
+  owner: string;
+  name: string;
+  description: string;
+  private: boolean;
+  defaultBranch: string;
+  pushedAt: string;
+  linkedProject: {
+    id: string;
+    name: string;
+    type: TFProjectType;
+  } | null;
+}
+
+export async function getGithubSyncData() {
+  return apiFetch<{ rows: GithubSyncRow[]; ownerResolved: string | null }>(
+    "/projects/github-sync-data",
+    { method: "POST", body: {} },
+  );
+}
+
+export async function linkRepo(repoFullName: string, projectType: TFProjectType, projectName?: string) {
+  return apiFetch<{
+    projectId: string;
+    projectName: string;
+    projectType: TFProjectType;
+    linked: boolean;
+    reason?: string;
+    backfilledConversations?: number;
+  }>("/projects/link-repo", {
+    method: "POST",
+    body: { repoFullName, projectType, projectName },
+  });
+}
+
+export async function unlinkRepo(projectId: string) {
+  return apiFetch<{ success: boolean; previousRepo: string | null }>("/projects/unlink-repo", {
+    method: "POST",
+    body: { projectId },
+  });
+}
+
+// --- Fase I.1 — Per-project API keys ---
+
+export interface ProjectApiKey {
+  id: string;
+  projectId: string;
+  keyName: string;
+  preview: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listProjectApiKeys(projectId: string) {
+  return apiFetch<{ keys: ProjectApiKey[] }>("/projects/api-keys/list", {
+    method: "POST",
+    body: { projectId },
+  });
+}
+
+export async function setProjectApiKey(projectId: string, keyName: string, value: string) {
+  return apiFetch<{ key: ProjectApiKey }>("/projects/api-keys/set", {
+    method: "POST",
+    body: { projectId, keyName, value },
+  });
+}
+
+export async function deleteProjectApiKey(projectId: string, keyName: string) {
+  return apiFetch<{ success: boolean }>("/projects/api-keys/delete", {
+    method: "POST",
+    body: { projectId, keyName },
+  });
+}
+
+// --- Fase I.1 — Per-project integrations ---
+
+export type ProjectIntegrationPlatform = "github" | "framer" | "figma";
+
+export interface ProjectIntegration {
+  id: string;
+  projectId: string;
+  platform: ProjectIntegrationPlatform;
+  remoteId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listProjectIntegrations(projectId: string) {
+  return apiFetch<{ integrations: ProjectIntegration[] }>("/projects/integrations/list", {
+    method: "POST",
+    body: { projectId },
+  });
+}
+
+export async function saveProjectIntegration(payload: {
+  projectId: string;
+  platform: ProjectIntegrationPlatform;
+  remoteId?: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return apiFetch<{ integration: ProjectIntegration }>("/projects/integrations/save", {
+    method: "POST",
+    body: payload as unknown as Record<string, unknown>,
+  });
+}
+
+export async function deleteProjectIntegration(projectId: string, platform: ProjectIntegrationPlatform) {
+  return apiFetch<{ success: boolean }>("/projects/integrations/delete", {
+    method: "POST",
+    body: { projectId, platform },
+  });
+}
+
+// --- Fase I.2 — Design imports ---
+
+export interface DesignImportSummary {
+  id: string;
+  projectId: string;
+  filename: string;
+  sizeBytes: number;
+  source: string;
+  nodeCount: number;
+  assetCount: number;
+  warnings: string[];
+  createdAt: string;
+}
+
+export async function uploadDesign(projectId: string, filename: string, contentBase64: string) {
+  return apiFetch<{ import: DesignImportSummary }>("/projects/design/upload", {
+    method: "POST",
+    body: { projectId, filename, contentBase64 },
+  });
+}
+
+export async function listDesignImports(projectId: string) {
+  return apiFetch<{ imports: DesignImportSummary[] }>("/projects/design/list", {
+    method: "POST",
+    body: { projectId },
+  });
+}
+
+// --- Fase I.5 — Sync jobs ---
+
+export type SyncDirection = "repo_to_design" | "design_to_repo" | "bidirectional";
+export type SyncStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type SyncPlatform = "github" | "framer" | "figma";
+
+export interface SyncJob {
+  id: string;
+  projectId: string;
+  direction: SyncDirection;
+  status: SyncStatus;
+  triggeredBy: "manual" | "webhook" | "cron";
+  sourcePlatform: SyncPlatform;
+  targetPlatform: SyncPlatform;
+  details: Record<string, unknown>;
+  errorMessage: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export async function triggerSync(payload: {
+  projectId: string;
+  direction: SyncDirection;
+  sourcePlatform: SyncPlatform;
+  targetPlatform: SyncPlatform;
+}) {
+  return apiFetch<{ job: SyncJob }>("/projects/sync/trigger", {
+    method: "POST",
+    body: payload as unknown as Record<string, unknown>,
+  });
+}
+
+export async function listSyncJobs(projectId: string, limit?: number) {
+  return apiFetch<{ jobs: SyncJob[] }>("/projects/sync/list", {
+    method: "POST",
+    body: { projectId, limit },
+  });
+}
+
+export async function cancelSyncJob(jobId: string) {
+  return apiFetch<{ success: boolean }>("/projects/sync/cancel", {
+    method: "POST",
+    body: { jobId },
   });
 }

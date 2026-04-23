@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { ToastRoot } from "@/components/Toast";
 
 export const metadata: Metadata = {
   title: "TheFold",
@@ -20,6 +21,7 @@ export default function RootLayout({
       </head>
       <body className="antialiased">
         {children}
+        <ToastRoot />
       </body>
     </html>
   );

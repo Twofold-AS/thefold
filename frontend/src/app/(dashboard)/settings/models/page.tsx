@@ -16,14 +16,10 @@ import {
   saveProvider,
   setProviderApiKey,
   clearProviderApiKey,
-  getRolePreferences,
-  setRolePreference,
   type AIProvider,
   type AIModelRow,
-  type AgentRole,
-  type RolePreference,
 } from "@/lib/api";
-import { ChevronDown, ChevronRight, Trash2, Plus, Pencil, Check, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Trash2, Plus, Pencil, X, Check } from "lucide-react";
 
 const inputStyle: React.CSSProperties = {
   background: T.subtle,
@@ -38,23 +34,20 @@ const inputStyle: React.CSSProperties = {
   boxSizing: "border-box",
 };
 
-const TIER_LABELS: Record<number, string> = { 1: "Small", 2: "Medium", 3: "Large", 4: "XL", 5: "Max" };
-const TIER_COLORS: Record<number, string> = {
-  1: T.textFaint,
-  2: T.textMuted,
-  3: T.textSec,
-  4: T.accent,
-  5: "#a78bfa",
-};
-
-const AGENT_ROLES: { key: AgentRole; label: string; desc: string }[] = [
-  { key: "orchestrator", label: "Prosjektplanlegger", desc: "Dekomponerer prosjekter i faser og oppgaver" },
-  { key: "planner", label: "Oppgaveplanlegger", desc: "Planlegger enkeltoppgaver og filvalg" },
-  { key: "coder", label: "Kodebygger", desc: "Genererer kode fil for fil" },
-  { key: "reviewer", label: "Kodereviewer", desc: "Gjennomgår og vurderer kodekvalitet" },
-  { key: "debugger", label: "Feilsøker", desc: "Analyserer feil og finner rotårsaker" },
-  { key: "tester", label: "Testskriver", desc: "Skriver og validerer tester" },
-  { key: "documenter", label: "Dokumentasjon", desc: "Skriver dokumentasjon og kommentarer" },
+// Keys match backend tag-based auto-routing (ai/router.ts selectOptimalModel
+// filters models by `bestFor.includes(context)`). Labels are UX-facing
+// Norwegian. Extra UX-only tags (review, docs, text, long-context) are harmless
+// metadata that doesn't affect auto-routing.
+const AGENT_ROLES: { key: string; label: string; desc: string }[] = [
+  { key: "text",         label: "Tekst",         desc: "Ren tekstgenerering for billige modeller" },
+  { key: "chat",         label: "Chat",          desc: "Konversasjon og direkte svar" },
+  { key: "coding",       label: "Kode",          desc: "Generering og refaktorering av kode" },
+  { key: "review",       label: "Kode-review",   desc: "PR-review og diff-analyse" },
+  { key: "planning",     label: "Planlegging",   desc: "Task-dekomponering og prosjektplan" },
+  { key: "analysis",     label: "Resonnering",   desc: "Dyp analyse av komplekse problemer" },
+  { key: "docs",         label: "Dokumentasjon", desc: "Skrive docs, README og kommentarer" },
+  { key: "fast",         label: "Rask",          desc: "Modeller som prioriterer lav latens" },
+  { key: "long-context", label: "Lang kontekst", desc: "Store context-vinduer (200k+)" },
 ];
 
 type ModelForm = {
@@ -107,7 +100,6 @@ const emptyProviderForm = (): ProviderForm => ({
 
 export default function ModelsPage() {
   const { data, loading, refresh } = useApiData(() => listProviders(), []);
-  const { data: roleData, loading: roleLoading, refresh: roleRefresh } = useApiData(() => getRolePreferences(), []);
   // Optimistic deletions — models removed here disappear immediately without waiting for refresh
   const [deletedModelIds, setDeletedModelIds] = useState<Set<string>>(new Set());
   const providers: AIProvider[] = (data?.providers ?? []).map(p => ({
@@ -124,7 +116,6 @@ export default function ModelsPage() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleteConfirmModel, setDeleteConfirmModel] = useState<{ id: string; displayName: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [roleSaving, setRoleSaving] = useState<string | null>(null);
 
   const toggle = (id: string) =>
     setExpanded((prev) => {
@@ -277,18 +268,6 @@ export default function ModelsPage() {
     setDeleteConfirmModel({ id: modelId, displayName });
   };
 
-  const handleSetRolePreference = async (role: AgentRole, modelId: string) => {
-    setRoleSaving(role);
-    try {
-      await setRolePreference(role, modelId);
-      roleRefresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Lagring av rollepreferanse feilet");
-    } finally {
-      setRoleSaving(null);
-    }
-  };
-
   return (
     <>
       <div style={{ paddingTop: 0, paddingBottom: 24 }}>
@@ -331,19 +310,19 @@ export default function ModelsPage() {
                 <div
                   key={provider.id}
                   style={{
+                    background: T.sidebar,
                     border: `1px solid ${T.border}`,
                     borderRadius: T.r,
                     overflow: "hidden",
                   }}
                 >
-                  {/* Provider header */}
+                  {/* Provider header — ingen bakgrunns-skift ved expand. */}
                   <div
                     onClick={() => toggle(provider.id)}
                     style={{
                       display: "flex", alignItems: "center", gap: 12,
                       padding: "14px 20px", cursor: "pointer",
-                      background: isOpen ? T.subtle : "transparent",
-                      transition: "background 0.1s",
+                      background: "transparent",
                     }}
                   >
                     <span style={{ color: T.textFaint, flexShrink: 0 }}>
@@ -395,11 +374,11 @@ export default function ModelsPage() {
                           {/* Column headers */}
                           <div style={{
                             display: "grid",
-                            gridTemplateColumns: "1fr 120px 100px 80px 80px 80px",
+                            gridTemplateColumns: "1fr 100px 100px 90px",
                             padding: "8px 20px",
                             borderBottom: `1px solid ${T.border}`,
                           }}>
-                            {["MODELL", "TIER", "PRIS INN", "PRIS UT", "TOOLS", ""].map((h, i) => (
+                            {["MODELL", "PRIS INN", "PRIS UT", ""].map((h, i) => (
                               <div key={i} style={{ fontSize: 10, fontWeight: 600, color: T.textFaint, fontFamily: T.mono, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                                 {h}
                               </div>
@@ -431,103 +410,6 @@ export default function ModelsPage() {
             })}
           </div>
         )}
-      </GR>
-
-      <GR mb={40}>
-        {/* Role-based model preferences */}
-        <div style={{ marginTop: 24 }}>
-          <SectionLabel>ROLLE-BASERTE MODELLPREFERANSER</SectionLabel>
-          <p style={{ fontSize: 13, color: T.textMuted, marginBottom: 16 }}>
-            Velg hvilken modell som skal brukes for hver agentrolle. Disse instillingene overstyrer complexity-basert valg.
-          </p>
-          {roleLoading ? (
-            <Skeleton rows={3} />
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {AGENT_ROLES.map((role) => {
-                const currentPref = roleData?.preferences[role.key]?.[0];
-                const currentModel = currentPref?.modelId;
-                return (
-                  <div
-                    key={role.key}
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "180px 1fr 200px",
-                      alignItems: "center",
-                      gap: 12,
-                      padding: "10px 12px",
-                      border: `1px solid ${T.border}`,
-                      borderRadius: 6,
-                      background: T.subtle,
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: T.text }}>
-                        {role.label}
-                      </div>
-                      <div style={{ fontSize: 11, color: T.textFaint }}>
-                        {role.desc}
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 12, color: T.textMuted }}>
-                      {currentModel ? (
-                        <span style={{ fontFamily: T.mono }}>
-                          {providers
-                            .flatMap((p) => p.models)
-                            .find((m) => m.modelId === currentModel)?.displayName || currentModel}
-                        </span>
-                      ) : (
-                        <span style={{ color: T.textFaint }}>— Ingen konfigurert —</span>
-                      )}
-                    </div>
-                    <select
-                      value={currentModel || ""}
-                      onChange={(e) => {
-                        if (e.target.value) {
-                          handleSetRolePreference(role.key, e.target.value);
-                        }
-                      }}
-                      disabled={roleSaving === role.key || loading}
-                      style={{
-                        ...inputStyle,
-                        fontSize: 12,
-                        cursor: roleSaving === role.key ? "default" : "pointer",
-                        opacity: roleSaving === role.key ? 0.6 : 1,
-                      }}
-                    >
-                      <option value="">— Velg modell —</option>
-                      {providers.flatMap((p) =>
-                        p.models.filter((m) => m.enabled).map((m) => (
-                          <option key={m.id} value={m.modelId}>
-                            {m.displayName}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </GR>
-
-      <GR mb={40}>
-        {/* Tier reference */}
-        <div style={{ marginTop: 24 }}>
-          <SectionLabel>TIER-REFERANSE</SectionLabel>
-          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-            {Object.entries(TIER_LABELS).map(([tier, label]) => (
-              <div key={tier} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 8, height: 8, borderRadius: "50%", background: TIER_COLORS[Number(tier)] }} />
-                <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted }}>T{tier} — {label}</span>
-              </div>
-            ))}
-          </div>
-          <p style={{ fontSize: 11, color: T.textFaint, marginTop: 8 }}>
-            Agenten velger modell basert på tier og task-kompleksitet. T1–T2 for enkle oppgaver, T3 standard, T4–T5 for komplekse. Rolle-baserte preferanser overstyrer disse innstillingene.
-          </p>
-        </div>
       </GR>
 
       {/* Model Modal */}
@@ -572,7 +454,7 @@ export default function ModelsPage() {
                 />
               </FormRow>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <FormRow label="Kontekstvindu">
                 <input
                   style={inputStyle}
@@ -589,17 +471,6 @@ export default function ModelsPage() {
                   onChange={(e) => setModelModal((m) => m && ({ ...m, maxOutputTokens: e.target.value }))}
                 />
               </FormRow>
-              <FormRow label="Tier (1–5)">
-                <select
-                  style={{ ...inputStyle, cursor: "pointer" }}
-                  value={modelModal.tier}
-                  onChange={(e) => setModelModal((m) => m && ({ ...m, tier: e.target.value }))}
-                >
-                  {[1, 2, 3, 4, 5].map((t) => (
-                    <option key={t} value={t}>T{t} — {TIER_LABELS[t]}</option>
-                  ))}
-                </select>
-              </FormRow>
             </div>
             <FormRow label="Roller" hint="Velg relevante roller for denne modellen">
               <RoleSelector
@@ -615,11 +486,6 @@ export default function ModelsPage() {
                 label="Aktivert"
                 checked={modelModal.enabled}
                 onChange={(v) => setModelModal((m) => m && ({ ...m, enabled: v }))}
-              />
-              <CheckField
-                label="Støtter verktøy"
-                checked={modelModal.supportsTools}
-                onChange={(v) => setModelModal((m) => m && ({ ...m, supportsTools: v }))}
               />
               <CheckField
                 label="Støtter visjon"
@@ -805,18 +671,17 @@ function ModelRow({
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const tierColor = TIER_COLORS[model.tier] ?? T.textFaint;
-
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "1fr 120px 100px 80px 80px 80px",
+        gridTemplateColumns: "1fr 100px 100px 90px",
         alignItems: "center",
         padding: "10px 20px",
         borderBottom: `1px solid ${T.border}`,
-        opacity: model.enabled ? 1 : 0.5,
-        transition: "opacity 0.15s",
+        background: "#2a2d30",
+        filter: model.enabled ? undefined : "brightness(0.4)",
+        transition: "filter 0.15s",
       }}
     >
       {/* Model info */}
@@ -852,14 +717,6 @@ function ModelRow({
         </div>
       </div>
 
-      {/* Tier */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <div style={{ width: 6, height: 6, borderRadius: "50%", background: tierColor }} />
-        <span style={{ fontSize: 12, fontFamily: T.mono, color: tierColor }}>
-          T{model.tier} {TIER_LABELS[model.tier] ?? ""}
-        </span>
-      </div>
-
       {/* Input price */}
       <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted }}>
         ${(model.inputPrice ?? 0).toFixed(2)}
@@ -869,14 +726,6 @@ function ModelRow({
       <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted }}>
         ${(model.outputPrice ?? 0).toFixed(2)}
       </span>
-
-      {/* Supports tools */}
-      <div style={{ display: "flex", alignItems: "center" }}>
-        {model.supportsTools
-          ? <Check size={13} style={{ color: T.success }} />
-          : <X size={13} style={{ color: T.textFaint }} />
-        }
-      </div>
 
       {/* Actions */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>

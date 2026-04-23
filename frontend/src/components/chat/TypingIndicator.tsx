@@ -1,48 +1,54 @@
 "use client";
 
+// --- TypingIndicator (U10) ---
+// While the assistant is generating, we show ONLY the dot-field AgentAvatar
+// plus a single status line — no bubble. The bubble appears once the
+// assistant has actually produced content.
+
 import { T } from "@/lib/tokens";
-import MagicSpinner from "@/components/MagicSpinner";
+import AgentAvatar from "@/components/AgentAvatar";
 
 interface TypingIndicatorProps {
   statusText?: string | null;
-  /** "wand" for CoWork, "broom" for Auto */
+  /** Retained for API back-compat — no longer influences rendering. */
   variant?: "wand" | "broom";
 }
 
-/**
- * Loading indicator shown while the assistant is generating a response.
- * Uses MagicSpinner (orbiting wand/broom with sparkles).
- */
-export default function TypingIndicator({ statusText, variant = "wand" }: TypingIndicatorProps) {
+export default function TypingIndicator({ statusText }: TypingIndicatorProps) {
   return (
-    <div style={{ padding: "4px 0", animation: "fadeIn 0.15s ease-out" }}>
+    <div
+      style={{
+        padding: "4px 0",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        animation: "fadeIn 0.15s ease-out",
+      }}
+    >
       <style>{`
         @keyframes fadeIn {
           from { opacity: 0; transform: translateY(4px); }
           to { opacity: 1; transform: translateY(0); }
         }
       `}</style>
-      <div style={{
-        display: "inline-flex",
-        gap: 10,
-        alignItems: "center",
-        padding: "10px 14px",
-        background: "rgba(20,20,24,0.82)",
-        backdropFilter: "blur(14px)",
-        WebkitBackdropFilter: "blur(14px)",
-        border: `1px solid ${T.border}`,
-        borderRadius: 10,
-      }}>
-        <MagicSpinner size={22} variant={variant} />
-        <span style={{
-          fontSize: 13,
+      <AgentAvatar size={28} state="working" />
+      <span
+        style={{
+          fontSize: 14,
+          fontFamily: T.sans,
           fontWeight: 500,
-          fontFamily: T.mono,
-          color: T.textMuted,
-        }}>
-          {statusText || "Tenker..."}
-        </span>
-      </div>
+          letterSpacing: "0.01em",
+          color: "transparent",
+          backgroundImage:
+            "linear-gradient(90deg, rgba(255,255,255,0.3) 0%, rgba(255,255,255,1) 50%, rgba(255,255,255,0.3) 100%)",
+          backgroundSize: "200% 100%",
+          backgroundClip: "text",
+          WebkitBackgroundClip: "text",
+          animation: "tf-shimmer 2.5s linear infinite",
+        }}
+      >
+        {statusText || "Tenker..."}
+      </span>
     </div>
   );
 }

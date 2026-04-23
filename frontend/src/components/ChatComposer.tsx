@@ -3,7 +3,6 @@
 import { T } from "@/lib/tokens";
 import ChatInput from "@/components/ChatInput";
 import SuggestionChips from "@/components/SuggestionChips";
-import type { ReactNode } from "react";
 
 interface ChatComposerProps {
   onSubmit?: (msg: string, options?: { planMode?: boolean }) => void;
@@ -16,11 +15,24 @@ interface ChatComposerProps {
   models?: Array<{ id: string; displayName: string; provider: string }>;
   selectedModel?: string | null;
   onModelChange?: (modelId: string | null) => void;
-  modeIndicatorSlot?: ReactNode;
+  /** Active mode label shown inline in ChatInput beside the ghost icon. */
+  activeModeLabel?: string | null;
   isIncognito?: boolean;
   onIncognitoToggle?: () => void;
   planMode?: boolean;
   onPlanModeToggle?: () => void;
+  autoMode?: boolean;
+  onAutoModeToggle?: () => void;
+  /** Fase I.0.e/f */
+  conversationId?: string;
+  projectScope?: "cowork" | "designer";
+  onNewProject?: () => void;
+  selectedProjectId?: string | null;
+  onSelectProject?: (id: string | null) => void;
+  /** Active project name — drives SuggestionChips. Null = generic suggestions. */
+  projectName?: string | null;
+  /** Active project type — drives SuggestionChips designer variants. */
+  projectType?: "code" | "framer" | "figma" | "framer_figma" | null;
 }
 
 export default function ChatComposer({
@@ -34,11 +46,20 @@ export default function ChatComposer({
   models,
   selectedModel,
   onModelChange,
-  modeIndicatorSlot,
+  activeModeLabel,
   isIncognito,
   onIncognitoToggle,
   planMode,
   onPlanModeToggle,
+  autoMode,
+  onAutoModeToggle,
+  conversationId,
+  projectScope,
+  onNewProject,
+  selectedProjectId,
+  onSelectProject,
+  projectName,
+  projectType,
 }: ChatComposerProps) {
   return (
     <div
@@ -69,16 +90,15 @@ export default function ChatComposer({
       </h1>
 
       {/* Suggestion chips */}
-      <SuggestionChips onSelect={(text) => onSubmit?.(text)} />
+      <SuggestionChips
+        onSelect={(text) => onSubmit?.(text)}
+        projectName={projectName ?? null}
+        projectType={projectType ?? null}
+        incognito={!!isIncognito || !selectedProjectId}
+      />
 
       {/* Chat input — Stitch style */}
       <div style={{ width: "100%", maxWidth: 700 }}>
-        {/* Mode indicators above input */}
-        {modeIndicatorSlot && (
-          <div style={{ marginBottom: 6 }}>
-            {modeIndicatorSlot}
-          </div>
-        )}
         <ChatInput
           onSubmit={(msg, opts) => onSubmit?.(msg, opts)}
           skills={skills}
@@ -93,6 +113,14 @@ export default function ChatComposer({
           onIncognitoToggle={onIncognitoToggle}
           planMode={planMode}
           onPlanModeToggle={onPlanModeToggle}
+          autoMode={autoMode}
+          onAutoModeToggle={onAutoModeToggle}
+          conversationId={conversationId}
+          projectScope={projectScope}
+          onNewProject={onNewProject}
+          selectedProjectId={selectedProjectId}
+          onSelectProject={onSelectProject}
+          activeModeLabel={activeModeLabel}
         />
       </div>
     </div>

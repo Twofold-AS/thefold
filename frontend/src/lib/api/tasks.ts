@@ -28,10 +28,15 @@ export interface TheFoldTask {
   errorMessage: string | null;
   parentId?: string | null;
   subTasks?: TheFoldTask[];
+  complexity?: number;
+  estimatedTokens?: number;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  /** Fase I.0.a — split for Tasks-side seksjoner */
+  taskScope?: "cowork" | "designer";
+  projectId?: string | null;
 }
 
 // --- Linear Tasks ---

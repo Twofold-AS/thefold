@@ -6,7 +6,6 @@ import MessageInput from "@/components/chat/MessageInput";
 import { Clock } from "lucide-react";
 import type { Message } from "@/lib/api";
 import type { ReviewActionType } from "@/hooks/useReviewFlow";
-import type { ReactNode } from "react";
 
 interface Skill {
   id: string;
@@ -50,13 +49,20 @@ interface ChatContainerProps {
   onModelChange: (id: string | null) => void;
   onHistoryToggle?: () => void;
   onNewChat?: () => void;
-  /** Rendered above the chat input — for ModeIndicators (sub-agents, plan mode, inkognito) */
-  modeIndicatorSlot?: ReactNode;
+  /** Active mode label rendered inline inside ChatInput beside the ghost icon. */
+  activeModeLabel?: string | null;
   isIncognito?: boolean;
   onIncognitoToggle?: () => void;
   planMode?: boolean;
   onPlanModeToggle?: () => void;
+  autoMode?: boolean;
+  onAutoModeToggle?: () => void;
   activePlanMsgId?: string | null;
+  conversationId?: string;
+  projectScope?: "cowork" | "designer";
+  onNewProject?: () => void;
+  selectedProjectId?: string | null;
+  onSelectProject?: (id: string | null) => void;
 }
 
 export default function ChatContainer({
@@ -88,12 +94,19 @@ export default function ChatContainer({
   onModelChange,
   onHistoryToggle,
   onNewChat,
-  modeIndicatorSlot,
+  activeModeLabel,
   isIncognito,
   onIncognitoToggle,
   planMode,
   onPlanModeToggle,
+  autoMode,
+  onAutoModeToggle,
   activePlanMsgId,
+  conversationId,
+  projectScope,
+  onNewProject,
+  selectedProjectId,
+  onSelectProject,
 }: ChatContainerProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -148,17 +161,9 @@ export default function ChatContainer({
         activePlanMsgId={activePlanMsgId}
       />
 
-      {/* Mode indicators — rendered above the input, aligned to chat input width */}
-      {modeIndicatorSlot && (
-        <div style={{ display: "flex", justifyContent: "center", padding: "0 20px 4px", flexShrink: 0 }}>
-          <div style={{ width: "100%", maxWidth: 700 }}>
-            {modeIndicatorSlot}
-          </div>
-        </div>
-      )}
-
       {/* Input */}
       <MessageInput
+        activeModeLabel={activeModeLabel}
         onSubmit={onSend}
         pendingReviewId={pendingReviewId}
         sending={sending}
@@ -175,6 +180,13 @@ export default function ChatContainer({
         onIncognitoToggle={onIncognitoToggle}
         planMode={planMode}
         onPlanModeToggle={onPlanModeToggle}
+        autoMode={autoMode}
+        onAutoModeToggle={onAutoModeToggle}
+        conversationId={conversationId}
+        projectScope={projectScope}
+        onNewProject={onNewProject}
+        selectedProjectId={selectedProjectId}
+        onSelectProject={onSelectProject}
       />
     </div>
   );

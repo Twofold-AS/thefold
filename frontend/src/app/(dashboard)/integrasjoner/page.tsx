@@ -8,7 +8,18 @@ import Skeleton from "@/components/Skeleton";
 
 import { GR } from "@/components/GridRow";
 import { useApiData } from "@/lib/hooks";
-import { listIntegrations, saveIntegration, deleteIntegration, type IntegrationConfig } from "@/lib/api";
+import {
+  listIntegrations,
+  saveIntegration,
+  deleteIntegration,
+  getIntegrationApiKeyStatus,
+  setIntegrationApiKey,
+  deleteIntegrationApiKey,
+  testIntegrationApiKey,
+  type IntegrationConfig,
+} from "@/lib/api";
+import { useEffect } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 interface StaticIntegration {
   n: string;
@@ -72,7 +83,9 @@ const staticIntegrations: StaticIntegration[] = [
 ];
 
 // Platforms configured server-side via secrets — user cannot add/remove these
-const SERVER_SIDE_PLATFORMS = ["linear", "resend", "brave-search", "firecrawl"];
+const SERVER_SIDE_PLATFORMS = ["linear", "resend", "brave-search"];
+// Platforms with API-key-based flow (uses /integrations/api-key/* endpoints, encrypted).
+const API_KEY_PLATFORMS = ["firecrawl"];
 // GitHub is server-side but also shown as "tilkoblet" since it's the core integration
 const GITHUB_PLATFORM = "github";
 
@@ -87,6 +100,10 @@ const INTEGRATION_FIELDS: Record<string, { label: string; field: string; placeho
 /** True only if user has saved a config for this platform */
 function isUserConnected(platform: string, configs: IntegrationConfig[]): boolean {
   return configs.some(c => c.platform === platform && c.enabled);
+}
+
+function isApiKeyPlatform(p: string): boolean {
+  return API_KEY_PLATFORMS.includes(p);
 }
 
 /** True if platform is github (always shown as active) or user has configured it */
@@ -120,37 +137,82 @@ export default function IntegrasjonerPage() {
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
-  const merged = staticIntegrations.map(si => ({
-    ...si,
-    connected: isConnected(si.platform, configs),
-    serverSide: isServerSide(si.platform),
-    isGitHub: si.platform === GITHUB_PLATFORM,
-    userConfigured: isUserConnected(si.platform, configs),
-  }));
+  // API-key-platform status (Firecrawl etc) — separate lookup from integration_configs.
+  const [apiKeyPreview, setApiKeyPreview] = useState<Record<string, string | null>>({});
+  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
 
-  // Only count platforms that are truly connected (github + user-configured)
-  const connectedCount = merged.filter(i => i.connected).length;
-  const disconnectedCount = merged.filter(i => !i.connected && !i.serverSide).length;
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(
+      API_KEY_PLATFORMS.map(async (p) => {
+        try {
+          const r = await getIntegrationApiKeyStatus(p);
+          return [p, r.status.preview] as const;
+        } catch {
+          return [p, null] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      setApiKeyPreview(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const merged = staticIntegrations.map(si => {
+    const apiKeyConfigured = isApiKeyPlatform(si.platform) && !!apiKeyPreview[si.platform];
+    const userConfigured = apiKeyConfigured || isUserConnected(si.platform, configs);
+    return {
+      ...si,
+      connected: si.platform === GITHUB_PLATFORM || userConfigured,
+      serverSide: isServerSide(si.platform),
+      apiKey: isApiKeyPlatform(si.platform),
+      apiKeyPreview: apiKeyPreview[si.platform] ?? null,
+      isGitHub: si.platform === GITHUB_PLATFORM,
+      userConfigured,
+    };
+  });
+
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggle = (platform: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(platform)) next.delete(platform); else next.add(platform);
+      return next;
+    });
+  };
 
   const handleOpenConfig = (platform: string) => {
     setConfigPlatform(platform);
     setConfigValues({});
+    setTestResult(null);
   };
 
   const handleSaveConfig = async () => {
     if (!configPlatform) return;
     setSaving(true);
     try {
-      const fields = INTEGRATION_FIELDS[configPlatform] ?? [];
-      const req: Record<string, unknown> = { platform: configPlatform, enabled: true };
-      for (const f of fields) {
-        if (configValues[f.field]) {
-          req[f.field] = configValues[f.field];
+      if (isApiKeyPlatform(configPlatform)) {
+        // Firecrawl-style: encrypted API key endpoint
+        const field = INTEGRATION_FIELDS[configPlatform]?.[0]?.field ?? "botToken";
+        const value = configValues[field] ?? "";
+        if (!value.trim()) throw new Error("API-nøkkel mangler");
+        const res = await setIntegrationApiKey(configPlatform, value.trim());
+        setApiKeyPreview((prev) => ({ ...prev, [configPlatform]: res.status.preview }));
+      } else {
+        const fields = INTEGRATION_FIELDS[configPlatform] ?? [];
+        const req: Record<string, unknown> = { platform: configPlatform, enabled: true };
+        for (const f of fields) {
+          if (configValues[f.field]) {
+            req[f.field] = configValues[f.field];
+          }
         }
+        await saveIntegration(req as Parameters<typeof saveIntegration>[0]);
       }
-      await saveIntegration(req as Parameters<typeof saveIntegration>[0]);
       setConfigPlatform(null);
       setConfigValues({});
+      setTestResult(null);
       refresh();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Lagring feilet");
@@ -159,9 +221,28 @@ export default function IntegrasjonerPage() {
     }
   };
 
+  const handleTestConnection = async () => {
+    if (!configPlatform || !isApiKeyPlatform(configPlatform)) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const r = await testIntegrationApiKey(configPlatform);
+      setTestResult(r.success ? `✓ ${r.message}` : `✗ ${r.message}`);
+    } catch (e) {
+      setTestResult(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const handleDisconnect = async (platform: string) => {
     try {
-      await deleteIntegration(platform);
+      if (isApiKeyPlatform(platform)) {
+        await deleteIntegrationApiKey(platform);
+        setApiKeyPreview((prev) => ({ ...prev, [platform]: null }));
+      } else {
+        await deleteIntegration(platform);
+      }
       refresh();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Frakobling feilet");
@@ -175,61 +256,86 @@ export default function IntegrasjonerPage() {
         <p style={{ fontSize: 13, color: T.textMuted }}>Eksterne tjenester og tilkoblinger.</p>
       </div>
 
-      <GR>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
-          {[
-            { l: "TILKOBLET", v: loading ? "–" : connectedCount },
-            { l: "FRAKOBLET", v: loading ? "–" : disconnectedCount },
-            { l: "EVENTS I DAG", v: "–" },
-            { l: "FEIL", v: "0" },
-          ].map((s, i) => (
-            <div key={i} style={{ padding: "18px 20px", borderRight: i < 3 ? `1px solid ${T.border}` : "none" }}>
-              <div style={{ fontSize: 10, fontWeight: 500, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>{s.l}</div>
-              <div style={{ fontSize: 28, fontWeight: 600, color: T.text, letterSpacing: "-0.03em", lineHeight: 1 }}>{s.v}</div>
-            </div>
-          ))}
-        </div>
-      </GR>
-
       <GR mb={40}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", marginTop: 20, borderRadius: 12, border: `1px solid ${T.border}`, position: "relative", overflow: "hidden" }}>
-          {loading ? (
-            <div style={{ padding: 40, gridColumn: "1 / -1" }}>
-              <Skeleton rows={4} />
-            </div>
-          ) : (
-            merged.map((ig, i) => {
-              const ir = i % 2 === 1;
-              const nl = i < merged.length - 2 || (merged.length % 2 === 1 && i < merged.length - 1);
+        {loading ? (
+          <Skeleton rows={4} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {merged.map((ig) => {
+              const isOpen = expanded.has(ig.platform);
               return (
-                <div key={i} style={{ padding: 20, borderRight: ir ? "none" : `1px solid ${T.border}`, borderBottom: nl ? `1px solid ${T.border}` : "none" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
-                    <span style={{ fontSize: 15, fontWeight: 600, color: T.text }}>{ig.n}</span>
-                    {ig.connected && <Tag variant="success">tilkoblet</Tag>}
-                    {!ig.connected && ig.serverSide && <Tag>via server</Tag>}
-                    {!ig.connected && !ig.serverSide && <Tag variant="default">frakoblet</Tag>}
-                  </div>
-                  <div style={{ fontSize: 10, fontFamily: T.mono, color: T.textFaint, marginBottom: 6 }}>{ig.cat}</div>
-                  <p style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5, marginBottom: 10 }}>{ig.desc}</p>
-                  {ig.ev && ig.connected && (
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
-                      {ig.ev.map(e => (<Tag key={e}>{e}</Tag>))}
+                <div
+                  key={ig.platform}
+                  style={{
+                    background: T.sidebar,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: T.r,
+                    overflow: "hidden",
+                  }}
+                >
+                  {/* Header row */}
+                  <div
+                    onClick={() => toggle(ig.platform)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 12,
+                      padding: "14px 20px", cursor: "pointer",
+                    }}
+                  >
+                    <span style={{ color: T.textFaint, flexShrink: 0 }}>
+                      {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ fontSize: 15, fontWeight: 600, color: T.text }}>{ig.n}</span>
+                        <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textFaint }}>{ig.cat}</span>
+                      </div>
                     </div>
-                  )}
-                  {ig.isGitHub ? (
-                    <Tag variant="success">Aktiv — GitHub App</Tag>
-                  ) : ig.serverSide ? (
-                    <Tag>Konfigurert via server</Tag>
-                  ) : ig.userConfigured ? (
-                    <Btn sm onClick={() => handleDisconnect(ig.platform)}>Koble fra</Btn>
-                  ) : (
-                    <Btn sm primary onClick={() => handleOpenConfig(ig.platform)}>Koble til</Btn>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+                      {ig.connected && <Tag variant="success">tilkoblet</Tag>}
+                      {!ig.connected && ig.serverSide && <Tag>via server</Tag>}
+                      {!ig.connected && !ig.serverSide && <Tag variant="default">frakoblet</Tag>}
+                    </div>
+                  </div>
+
+                  {/* Expanded detail */}
+                  {isOpen && (
+                    <div style={{
+                      padding: "16px 20px",
+                      borderTop: `1px solid ${T.border}`,
+                      background: "#2a2d30",
+                    }}>
+                      <p style={{ fontSize: 12, color: T.textMuted, lineHeight: 1.5, marginBottom: 12 }}>{ig.desc}</p>
+                      {ig.ev && ig.connected && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }}>
+                          {ig.ev.map(e => (<Tag key={e}>{e}</Tag>))}
+                        </div>
+                      )}
+                      {ig.isGitHub ? (
+                        <Tag variant="success">Aktiv — GitHub App</Tag>
+                      ) : ig.serverSide ? (
+                        <Tag>Konfigurert via server</Tag>
+                      ) : ig.userConfigured ? (
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                          {ig.apiKey && ig.apiKeyPreview && (
+                            <span style={{ fontSize: 11, fontFamily: T.mono, color: T.textMuted }}>
+                              {ig.apiKeyPreview}
+                            </span>
+                          )}
+                          {ig.apiKey && (
+                            <Btn sm onClick={() => handleOpenConfig(ig.platform)}>Rediger</Btn>
+                          )}
+                          <Btn sm onClick={() => handleDisconnect(ig.platform)}>Koble fra</Btn>
+                        </div>
+                      ) : (
+                        <Btn sm primary onClick={() => handleOpenConfig(ig.platform)}>Koble til</Btn>
+                      )}
+                    </div>
                   )}
                 </div>
               );
-            })
-          )}
-        </div>
+            })}
+          </div>
+        )}
       </GR>
 
       {/* Config dialog */}
@@ -273,16 +379,37 @@ export default function IntegrasjonerPage() {
               </div>
             ))}
 
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
-              <Btn sm onClick={() => setConfigPlatform(null)}>Avbryt</Btn>
-              <Btn
-                primary
-                sm
-                onClick={handleSaveConfig}
-                style={{ opacity: saving ? 0.5 : 1, pointerEvents: saving ? "none" : "auto" }}
-              >
-                {saving ? "Lagrer..." : "Lagre"}
-              </Btn>
+            {testResult && (
+              <div style={{
+                marginTop: 10,
+                padding: "8px 12px",
+                background: testResult.startsWith("✓") ? "rgba(34,197,94,0.10)" : "rgba(248,113,113,0.10)",
+                border: `1px solid ${testResult.startsWith("✓") ? "#22c55e" : "#f87171"}`,
+                borderRadius: 6,
+                fontSize: 12,
+                color: testResult.startsWith("✓") ? "#22c55e" : "#f87171",
+              }}>
+                {testResult}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "space-between", marginTop: 20 }}>
+              {isApiKeyPlatform(configPlatform) && apiKeyPreview[configPlatform] ? (
+                <Btn sm onClick={handleTestConnection} style={{ opacity: testing ? 0.5 : 1, pointerEvents: testing ? "none" : "auto" }}>
+                  {testing ? "Tester..." : "Test tilkobling"}
+                </Btn>
+              ) : <span />}
+              <div style={{ display: "flex", gap: 8 }}>
+                <Btn sm onClick={() => setConfigPlatform(null)}>Avbryt</Btn>
+                <Btn
+                  primary
+                  sm
+                  onClick={handleSaveConfig}
+                  style={{ opacity: saving ? 0.5 : 1, pointerEvents: saving ? "none" : "auto" }}
+                >
+                  {saving ? "Lagrer..." : "Lagre"}
+                </Btn>
+              </div>
             </div>
           </div>
         </div>

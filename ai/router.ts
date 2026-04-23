@@ -1,5 +1,33 @@
 import { api } from "encore.dev/api";
+import log from "encore.dev/log";
 import { db } from "./db";
+
+// --- Model slug cache (U11) ---
+// Small in-process cache so /ai/chat doesn't hit the DB for every message.
+// 60-second TTL — slugs change only when an admin updates the seed.
+
+const SLUG_CACHE_TTL_MS = 60_000;
+let slugCache: Map<string, { slug: string; expiresAt: number }> = new Map();
+
+export async function resolveModelSlug(modelId: string): Promise<string> {
+  const now = Date.now();
+  const hit = slugCache.get(modelId);
+  if (hit && hit.expiresAt > now) return hit.slug;
+  try {
+    const row = await db.queryRow<{ slug: string | null; display_name: string }>`
+      SELECT slug, display_name FROM ai_models WHERE model_id = ${modelId}
+    `;
+    const slug = row?.slug ?? row?.display_name ?? modelId;
+    slugCache.set(modelId, { slug, expiresAt: now + SLUG_CACHE_TTL_MS });
+    return slug;
+  } catch (err) {
+    log.warn("resolveModelSlug failed", {
+      modelId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return modelId;
+  }
+}
 
 // --- Types ---
 
@@ -107,6 +135,50 @@ export function invalidateModelCache(): void {
   cacheTime = 0;
 }
 
+// --- Model Capabilities (for vision/tools gating) ---
+//
+// Source of truth is the DB (ai_models.supports_tools / supports_vision).
+// This supplement covers model IDs that haven't been added to the DB yet
+// (new releases, aliased tags). getCapabilities() checks DB cache first,
+// falls back to this map, and finally to a conservative all-false default.
+
+export interface ModelCapabilities {
+  vision: boolean;
+  tools: boolean;
+  maxInput: number;
+  maxOutput: number;
+  provider: string;
+}
+
+const CAPABILITY_SUPPLEMENT: Record<string, ModelCapabilities> = {
+  "claude-sonnet-4-6":          { vision: true,  tools: true, maxInput: 200_000,   maxOutput: 16_000, provider: "anthropic" },
+  "claude-opus-4-7":            { vision: true,  tools: true, maxInput: 200_000,   maxOutput: 32_000, provider: "anthropic" },
+  "claude-opus-4-7[1m]":        { vision: true,  tools: true, maxInput: 1_000_000, maxOutput: 32_000, provider: "anthropic" },
+  "claude-haiku-4-5-20251001":  { vision: false, tools: true, maxInput: 200_000,   maxOutput: 8_000,  provider: "anthropic" },
+  "claude-sonnet-4-5-20250929": { vision: false, tools: true, maxInput: 200_000,   maxOutput: 16_000, provider: "anthropic" },
+  "claude-opus-4-5-20251101":   { vision: false, tools: true, maxInput: 200_000,   maxOutput: 32_000, provider: "anthropic" },
+  "minimax-m2":                 { vision: false, tools: true, maxInput: 100_000,   maxOutput: 4_000,  provider: "minimax" },
+  "gpt-4o":                     { vision: true,  tools: true, maxInput: 128_000,   maxOutput: 4_096,  provider: "openai" },
+  "gpt-4o-mini":                { vision: true,  tools: true, maxInput: 128_000,   maxOutput: 16_384, provider: "openai" },
+  "gemini-2.0-flash":           { vision: true,  tools: true, maxInput: 1_000_000, maxOutput: 8_192,  provider: "google" },
+  "gemini-2.0-pro":             { vision: true,  tools: true, maxInput: 2_000_000, maxOutput: 8_192,  provider: "google" },
+};
+
+export function getCapabilities(modelId: string): ModelCapabilities | null {
+  // Prefer DB-cached model info (has authoritative supports_vision/tools).
+  const cached = cachedModels.find((m) => m.id === modelId);
+  if (cached) {
+    return {
+      vision: cached.supportsVision,
+      tools: cached.supportsTools,
+      maxInput: cached.contextWindow,
+      maxOutput: CAPABILITY_SUPPLEMENT[modelId]?.maxOutput ?? 4_096,
+      provider: cached.provider,
+    };
+  }
+  return CAPABILITY_SUPPLEMENT[modelId] ?? null;
+}
+
 // --- Default model IDs for auto-routing ---
 
 const DEFAULT_SIMPLE = "claude-haiku-4-5-20251001";
@@ -178,6 +250,59 @@ export async function selectOptimalModel(
   // Fallback: first available model with tool support
   const withTools = cachedModels.filter(m => m.supportsTools);
   return withTools[0]?.id || cachedModels[0]?.id || targetId;
+}
+
+/**
+ * Smart-select model for chat turn. Considers:
+ *   - `manualModelId`: explicit user override, always wins
+ *   - `needsVision`: filter to vision-capable models (framer/figma + scrape/screenshot in msg)
+ *   - `context`: role-tag-based matching ("coding" | "planning" | ...)
+ *   - `complexity`: fallback to tier-based default
+ * Picks the cheapest (input_price) model remaining after filters.
+ * Degrades gracefully: if no vision-model matches, drops the vision filter.
+ */
+export interface SmartSelectParams {
+  manualModelId?: string | null;
+  needsVision?: boolean;
+  context?: string;
+  complexity?: number;
+}
+export async function smartSelect(params: SmartSelectParams): Promise<string> {
+  if (params.manualModelId) return params.manualModelId;
+
+  await ensureCacheFresh();
+
+  let pool = [...cachedModels];
+
+  // Apply vision filter first (hard requirement if flagged)
+  if (params.needsVision) {
+    const visionPool = pool.filter((m) => m.supportsVision);
+    if (visionPool.length > 0) {
+      pool = visionPool;
+    }
+    // else: fall through without filter (can't satisfy → prefer SOMETHING over nothing)
+  }
+
+  // Apply role-tag filter on top
+  if (params.context) {
+    const contextPool = pool.filter((m) => m.bestFor.includes(params.context!));
+    if (contextPool.length > 0) {
+      pool = contextPool;
+    }
+  }
+
+  // Pick cheapest by input_price
+  pool.sort((a, b) => a.inputCostPer1M - b.inputCostPer1M);
+  if (pool.length > 0) return pool[0].id;
+
+  // Nothing in cache — fall back to complexity-based default
+  return selectOptimalModel(params.complexity ?? 5, "auto");
+}
+
+/** Heuristic: does the user message or task description imply a need for
+ *  image/vision capability? Used for auto vision-gate in framer projects. */
+export function inferNeedsVision(text: string): boolean {
+  return /scrape|screenshot|skjermbilde|replike|bilde|image|design|layout/i.test(text);
 }
 
 /**

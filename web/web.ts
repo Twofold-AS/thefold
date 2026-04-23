@@ -7,6 +7,10 @@ const FirecrawlApiKey = secret("FirecrawlApiKey");
 interface ScrapeRequest {
   url: string;
   maxLength?: number; // Max chars returned (default 50000)
+  /** Per-user API key (from integration_configs). If set, overrides global secret. */
+  apiKeyOverride?: string;
+  /** When true, ask Firecrawl for a full-page screenshot alongside markdown. */
+  screenshot?: boolean;
 }
 
 interface ScrapeResponse {
@@ -14,6 +18,9 @@ interface ScrapeResponse {
   content: string; // Markdown-formatted content
   links: string[];
   metadata: { wordCount: number; language?: string };
+  /** Full-page screenshot URL (Firecrawl-hosted). Only set when
+   *  `screenshot: true` was requested AND Firecrawl returned one. */
+  screenshotUrl?: string;
 }
 
 function isUrlAllowed(url: string): boolean {
@@ -44,12 +51,17 @@ function isUrlAllowed(url: string): boolean {
 export const scrape = api(
   { method: "POST", path: "/web/scrape", expose: false },
   async (req: ScrapeRequest): Promise<ScrapeResponse> => {
-    let apiKey: string;
-    try {
-      apiKey = FirecrawlApiKey();
-    } catch {
+    let apiKey: string | null = req.apiKeyOverride?.trim() || null;
+    if (!apiKey) {
+      try {
+        apiKey = FirecrawlApiKey();
+      } catch {
+        apiKey = null;
+      }
+    }
+    if (!apiKey) {
       throw APIError.unavailable(
-        "Web scraping service not configured. Set FirecrawlApiKey to enable.",
+        "Web scraping service not configured. Set FirecrawlApiKey via Innstillinger → Integrasjoner.",
       );
     }
 
@@ -65,6 +77,9 @@ export const scrape = api(
       throw APIError.invalidArgument("URL not allowed: internal or private addresses are blocked");
     }
 
+    const formats: string[] = ["markdown"];
+    if (req.screenshot) formats.push("screenshot@fullPage");
+
     const res = await fetch("https://api.firecrawl.dev/v1/scrape", {
       method: "POST",
       headers: {
@@ -73,7 +88,7 @@ export const scrape = api(
       },
       body: JSON.stringify({
         url: req.url,
-        formats: ["markdown"],
+        formats,
         onlyMainContent: true,
       }),
     });
@@ -106,6 +121,7 @@ export const scrape = api(
         wordCount: content.split(/\s+/).length,
         language: data.data?.metadata?.language,
       },
+      screenshotUrl: typeof data.data?.screenshot === "string" ? data.data.screenshot : undefined,
     };
   },
 );

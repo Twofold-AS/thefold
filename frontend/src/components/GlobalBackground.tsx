@@ -13,9 +13,11 @@ export default function GlobalBackground() {
       }}
     >
       {/* WebGL shader layer */}
+      {/* Deep space blue palette (2026-04-22): replaces prior purple gradient.
+          Deep navy → mid space → bright accent blue. */}
       <div style={{ position: "absolute", inset: 0 }}>
         <ColorBends
-          colors={["#A855F7", "#7C3AED", "#1E0B3A"]}
+          colors={["#3B82F6", "#1E3A8A", "#0B1D3A"]}
           rotation={90}
           speed={0.15}
           scale={1}
@@ -43,9 +45,9 @@ export default function GlobalBackground() {
           cursorRadius={500}
           cursorForce={0.1}
           bulgeOnly
-          gradientFrom="#A855F7"
-          gradientTo="#B497CF"
-          glowColor="#120F17"
+          gradientFrom="#3B82F6"
+          gradientTo="#93C5FD"
+          glowColor="#0A1128"
         />
       </div>
     </div>

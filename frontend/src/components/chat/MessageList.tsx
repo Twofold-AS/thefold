@@ -2,7 +2,6 @@
 
 import React, { useRef, useEffect, useState } from "react";
 import { T } from "@/lib/tokens";
-import HuginnIcon from "@/components/icons/HuginnIcon";
 import AgentStream from "@/components/AgentStream";
 import AgentStatusBar from "@/components/chat/AgentStatusBar";
 import TypingIndicator from "@/components/chat/TypingIndicator";
@@ -10,11 +9,19 @@ import MemoryInsight from "@/components/chat/MemoryInsight";
 import ChangedFilesPanel from "@/components/chat/ChangedFilesPanel";
 import MarkdownText from "@/components/chat/MarkdownText";
 import ProjectPlanModal from "@/components/chat/ProjectPlanModal";
+import SwarmStatusMessage, {
+  parseSwarmPayload,
+  swarmToGroupLine,
+} from "@/components/chat/SwarmStatusMessage";
+import type { SwarmGroupLine } from "@/components/chat/types";
 import type { Message } from "@/lib/api";
 import type { ReviewActionType } from "@/hooks/useReviewFlow";
 
 export function isAgentMessage(m: Message): boolean {
   if (m.messageType === "memory_insight") return false;
+  // swarm_status is rendered as its own standalone chat entry — never let the
+  // agent-message deduplicator collapse it (Fase H).
+  if (m.messageType === "swarm_status") return false;
   return (
     m.messageType === "agent_status" ||
     m.messageType === "agent_thought" ||
@@ -24,34 +31,71 @@ export function isAgentMessage(m: Message): boolean {
   );
 }
 
-function BotAvatar() {
+// Strip XML tool-call leaks from non-native tool-use models (MiniMax / Moonshot
+// OpenAI-compat shim sometimes leaves empty <tool_calls> tags in content).
+// Applied at render time so existing DB messages display cleanly too.
+function sanitizeContent(raw: string): string {
+  return raw
+    .replace(/<tool_calls>\s*<\/tool_calls>/g, "")
+    .replace(/<\/tool_calls>/g, "")
+    .replace(/<tool_calls>/g, "")
+    .replace(/<end_turn>/g, "")
+    .replace(/<\/end_turn>/g, "")
+    // Trailing "<" or "</" from a truncated XML fragment (content cut mid-tag).
+    .replace(/\n\s*<\/?$/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function parseMeta(metadata: Message["metadata"]): Record<string, unknown> | null {
+  if (!metadata) return null;
+  try {
+    return typeof metadata === "string" ? JSON.parse(metadata) : metadata;
+  } catch {
+    return null;
+  }
+}
+
+// U11 — Model slug shown ABOVE the bubble. Prefers short slug, falls back to
+// full model_id so legacy messages without a slug still render something.
+function ModelSlugLabel({ metadata }: { metadata: Message["metadata"] }) {
+  const meta = parseMeta(metadata);
+  if (!meta) return null;
+  const slug = (meta.modelSlug as string | undefined) ?? (meta.model as string | undefined);
+  if (!slug) return null;
   return (
-    <div style={{ width: 28, height: 28, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <HuginnIcon size={20} color={T.accent} />
+    <div style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono, marginBottom: 4 }}>
+      {slug}
     </div>
   );
 }
 
-function MessageMeta({ time, metadata }: { time: string; metadata: Message["metadata"] }) {
-  const extra = (() => {
-    if (!metadata) return null;
-    try {
-      const meta = typeof metadata === "string" ? JSON.parse(metadata) : metadata;
-      if (!meta) return null;
-      const parts: string[] = [];
-      if (meta.model) parts.push(meta.model);
-      if (meta.cost != null) parts.push(`$${Number(meta.cost).toFixed(4)}`);
-      if (meta.tokens?.totalTokens != null) parts.push(`${Number(meta.tokens.totalTokens).toLocaleString()} tokens`);
-      return parts.length > 0 ? parts.join(" \u00b7 ") : null;
-    } catch { return null; }
-  })();
-
+// U11 — Token counter rendered INSIDE the bubble (tiny footer). Shows
+// "in → out tokens · cost" when data is present.
+function TokenFooter({ metadata }: { metadata: Message["metadata"] }) {
+  const meta = parseMeta(metadata);
+  if (!meta) return null;
+  const tokens = meta.tokens as { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined;
+  const cost = meta.cost as number | undefined;
+  if (!tokens && cost == null) return null;
+  const parts: string[] = [];
+  if (tokens?.inputTokens != null && tokens?.outputTokens != null) {
+    parts.push(`${tokens.inputTokens.toLocaleString()} → ${tokens.outputTokens.toLocaleString()} tokens`);
+  } else if (tokens?.totalTokens != null) {
+    parts.push(`${tokens.totalTokens.toLocaleString()} tokens`);
+  }
+  if (typeof cost === "number") {
+    parts.push(`$${cost.toFixed(4)}`);
+  }
+  if (parts.length === 0) return null;
   return (
-    <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 2 }}>
-      <span style={{ fontSize: 10, color: T.textFaint }}>{time}</span>
-      {extra && (
-        <span style={{ fontSize: 10, color: T.textFaint, fontFamily: T.mono }}>{extra}</span>
-      )}
+    <div style={{
+      marginTop: 6,
+      fontSize: 10,
+      color: T.textFaint,
+      fontFamily: T.mono,
+    }}>
+      {parts.join(" \u00b7 ")}
     </div>
   );
 }
@@ -112,6 +156,27 @@ const MessageListComponent = function MessageList({
   for (let i = visibleMsgs.length - 1; i >= 0; i--) {
     if (isAgentMessage(visibleMsgs[i])) { lastAgentIdx = i; break; }
   }
+
+  // Fase H inline — collect latest swarm_status payload. Parsed once per
+  // render and passed into AgentStream so the swarm shows up as inline
+  // indented lines in the same stack as steps + tool-calls, not as a
+  // standalone chat bubble.
+  let latestSwarmGroup: SwarmGroupLine | null = null;
+  for (let i = visibleMsgs.length - 1; i >= 0; i--) {
+    const m = visibleMsgs[i];
+    if (m.messageType !== "swarm_status") continue;
+    const parsed = parseSwarmPayload(m.content);
+    if (parsed) {
+      latestSwarmGroup = swarmToGroupLine(parsed);
+      break;
+    }
+  }
+  // Whether the swarm will be adopted by an AgentStream. If no agent message
+  // exists, we keep the standalone swarm_status bubble as a fallback.
+  const hasAgentToAdoptSwarm = latestSwarmGroup !== null && lastAgentIdx >= 0;
+  const swarmGroupsForAgent: SwarmGroupLine[] | undefined = hasAgentToAdoptSwarm && latestSwarmGroup
+    ? [latestSwarmGroup]
+    : undefined;
   const dedupedMsgs = visibleMsgs.filter((m, i) => {
     if (m.messageType === "memory_insight") return true;
     if (!isAgentMessage(m)) return true;
@@ -152,7 +217,14 @@ const MessageListComponent = function MessageList({
       flex: 1,
       overflowY: "auto",
       minHeight: 0,
-      padding: "20px 64px 20px 24px",
+      padding: "20px 24px",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+    }}>
+    <div style={{
+      width: "100%",
+      maxWidth: 720, // U4 — −30% vs. dagens ubegrensede bredde
       display: "flex",
       flexDirection: "column",
       gap: 20,
@@ -204,6 +276,19 @@ const MessageListComponent = function MessageList({
                 </div>
               )}
 
+              {/* SWARM STATUS fallback (Fase H inline refactor) — only rendered
+                  as a standalone bubble when no agent message is in view to
+                  adopt it. Normally the swarm is merged inline by AgentStream. */}
+              {m.messageType === "swarm_status" && !hasAgentToAdoptSwarm && (
+                <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
+                  
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <SwarmStatusMessage content={m.content} />
+                    <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
+                  </div>
+                </div>
+              )}
+
               {/* PROJECT PLAN — compact AI bubble + modal trigger */}
               {m.role === "assistant" && (() => {
                 try {
@@ -212,7 +297,7 @@ const MessageListComponent = function MessageList({
                     const isSuperseded = activePlanMsgId != null && m.id !== activePlanMsgId;
                     return (
                       <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0", opacity: isSuperseded ? 0.45 : 1, transition: "opacity 0.2s" }}>
-                        <BotAvatar />
+                        
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{
                             display: "inline-block",
@@ -271,11 +356,11 @@ const MessageListComponent = function MessageList({
               {m.role === "assistant" && isAgent && !(m.id === lastAgentMsg?.id && mergedChatId) && (() => {
                 try {
                   const parsed = JSON.parse(m.content);
-                  if (parsed?.type === "project_plan") return null; // Already rendered above as ProjectPlanCard
+                  if (parsed?.type === "project_plan") return null; // Already rendered inline above
                 } catch {}
                 return (
                   <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
-                    <BotAvatar />
+                    
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <AgentStream
                         content={m.content}
@@ -284,6 +369,7 @@ const MessageListComponent = function MessageList({
                         onReject={onReject}
                         onRequestChanges={onRequestChanges}
                         reviewInProgress={reviewInProgress}
+                        swarmGroups={m.id === lastAgentMsg?.id ? swarmGroupsForAgent : undefined}
                       />
                       <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
                     </div>
@@ -294,21 +380,25 @@ const MessageListComponent = function MessageList({
               {/* ASSISTANT — chat message, with optional merged agent below */}
               {m.role === "assistant" && !isAgent && (
                 <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
-                  <BotAvatar />
+                  
                   <div style={{ flex: 1, minWidth: 0 }}>
                     {m.content && m.content.trim() !== "" ? (
-                      <div style={{
-                        display: "inline-block",
-                        background: "rgba(20,20,24,0.82)",
-                        backdropFilter: "blur(14px)",
-                        WebkitBackdropFilter: "blur(14px)",
-                        border: `1px solid ${T.border}`,
-                        borderRadius: T.r,
-                        padding: "10px 16px",
-                        maxWidth: "100%",
-                      }}>
-                        <MarkdownText content={m.content} />
-                      </div>
+                      <>
+                        <ModelSlugLabel metadata={m.metadata} />
+                        <div style={{
+                          display: "inline-block",
+                          background: "rgba(20,20,24,0.82)",
+                          backdropFilter: "blur(14px)",
+                          WebkitBackdropFilter: "blur(14px)",
+                          border: `1px solid ${T.border}`,
+                          borderRadius: T.r,
+                          padding: "10px 16px",
+                          maxWidth: "100%",
+                        }}>
+                          <MarkdownText content={sanitizeContent(m.content)} />
+                          <TokenFooter metadata={m.metadata} />
+                        </div>
+                      </>
                     ) : null}
 
                     {m.id === mergedChatId && lastAgentMsg && (
@@ -319,11 +409,12 @@ const MessageListComponent = function MessageList({
                           onApprove={onApprove}
                           onReject={onReject}
                           onRequestChanges={onRequestChanges}
+                          swarmGroups={swarmGroupsForAgent}
                         />
                       </div>
                     )}
 
-                    <MessageMeta time={time} metadata={m.metadata} />
+                    <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
                   </div>
                 </div>
               )}
@@ -372,6 +463,7 @@ const MessageListComponent = function MessageList({
           onClose={() => setModalPlanContent(null)}
         />
       )}
+    </div>
     </div>
   );
 };

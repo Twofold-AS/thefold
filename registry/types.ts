@@ -20,6 +20,8 @@ export interface ComponentVariable {
   defaultValue?: string;
 }
 
+export type ComponentPlatform = "code" | "framer" | "figma";
+
 export interface Component {
   id: string;
   name: string;
@@ -44,6 +46,11 @@ export interface Component {
   source: ComponentSource;
   dependencySnapshot?: Record<string, string>; // { "encore.dev": "1.x", "react": "18.x" }
   generatedAt?: Date;
+  /** Fase I.4 — Platform-metadata for å støtte kode- og design-komponenter side-om-side */
+  platform?: ComponentPlatform;
+  role?: string | null;
+  framerComponentId?: string | null;
+  figmaNodeId?: string | null;
   createdAt: string;
   updatedAt: string;
 }

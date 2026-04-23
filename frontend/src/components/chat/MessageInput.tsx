@@ -32,6 +32,14 @@ interface MessageInputProps {
   onIncognitoToggle?: () => void;
   planMode?: boolean;
   onPlanModeToggle?: () => void;
+  autoMode?: boolean;
+  onAutoModeToggle?: () => void;
+  conversationId?: string;
+  projectScope?: "cowork" | "designer";
+  onNewProject?: () => void;
+  selectedProjectId?: string | null;
+  onSelectProject?: (id: string | null) => void;
+  activeModeLabel?: string | null;
 }
 
 export default function MessageInput({
@@ -51,6 +59,14 @@ export default function MessageInput({
   onIncognitoToggle,
   planMode,
   onPlanModeToggle,
+  autoMode,
+  onAutoModeToggle,
+  conversationId,
+  projectScope,
+  onNewProject,
+  selectedProjectId,
+  onSelectProject,
+  activeModeLabel,
 }: MessageInputProps) {
   return (
     <div style={{
@@ -59,7 +75,7 @@ export default function MessageInput({
       justifyContent: "center",
       flexShrink: 0,
     }}>
-      <div style={{ width: "100%", maxWidth: 768 }}>
+      <div style={{ width: "100%", maxWidth: 640 }}>
         <ChatInput
           compact
           onSubmit={(value, options) => onSubmit(value, options)}
@@ -78,6 +94,14 @@ export default function MessageInput({
           onIncognitoToggle={onIncognitoToggle}
           planMode={planMode}
           onPlanModeToggle={onPlanModeToggle}
+          autoMode={autoMode}
+          onAutoModeToggle={onAutoModeToggle}
+          conversationId={conversationId}
+          projectScope={projectScope}
+          onNewProject={onNewProject}
+          selectedProjectId={selectedProjectId}
+          onSelectProject={onSelectProject}
+          activeModeLabel={activeModeLabel}
         />
       </div>
     </div>

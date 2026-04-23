@@ -2,6 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import { getAuthData } from "~encore/auth";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { Subscription } from "encore.dev/pubsub";
+import { isDebugEnabled } from "./debug";
 
 // Re-export from isolated events file for backward compatibility
 export { agentReports, chatResponses, type AgentReport, type ChatResponse } from "./events";
@@ -71,10 +72,11 @@ import { deserializeMessage, mapReportStatusToPhase, buildStatusContent, deseria
 // Subscribe to agent reports and UPDATE existing agent_status (not create new agent_report)
 const _ = new Subscription(agentReports, "store-agent-report", {
   handler: async (report) => {
-    console.log("[DEBUG-AF] === PUB/SUB agent report received ===");
-    console.log("[DEBUG-AF] taskId:", report.taskId, "status:", report.status);
-    console.log("[DEBUG-AF] conversationId:", report.conversationId);
-    console.log("[DEBUG-AF] content:", report.content?.substring(0, 200));
+    const debug = await isDebugEnabled();
+    if (debug) console.log("[DEBUG-AF] === PUB/SUB agent report received ===");
+    if (debug) console.log("[DEBUG-AF] taskId:", report.taskId, "status:", report.status);
+    if (debug) console.log("[DEBUG-AF] conversationId:", report.conversationId);
+    if (debug) console.log("[DEBUG-AF] content:", report.content?.substring(0, 200));
 
     // === NEW CONTRACT: AgentProgress → single agent_progress row per task ===
     // Always handle type:"progress" regardless of feature flag — this is what reportProgress() emits
@@ -435,11 +437,76 @@ interface Message {
   conversationId: string;
   role: "user" | "assistant";
   content: string;
-  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress" | "memory_insight";
+  messageType: "chat" | "agent_report" | "task_start" | "context_transfer" | "agent_status" | "agent_thought" | "agent_progress" | "memory_insight" | "swarm_status";
   metadata: string | null;
   createdAt: string;
   updatedAt: string;
 }
+
+// --- Swarm message upsert (Fase H, Commit 41) ---
+// One message per parent-task, updated in place. Keyed by conversation_id +
+// metadata.parentTaskId so we never fragment the chat thread when sub-agents
+// flip state. messageId round-trips so the aggregator reuses the same row.
+
+import { api as apiDecorator } from "encore.dev/api";
+
+interface UpsertSwarmMessageRequest {
+  parentTaskId: string;
+  conversationId: string;
+  content: string;
+  /** When supplied, skip the lookup and UPDATE directly. */
+  messageId?: string;
+}
+
+interface UpsertSwarmMessageResponse {
+  messageId: string;
+}
+
+export const upsertSwarmMessage = apiDecorator(
+  { method: "POST", path: "/chat/swarm/upsert", expose: false },
+  async (req: UpsertSwarmMessageRequest): Promise<UpsertSwarmMessageResponse> => {
+    // Fast path: caller already knows the messageId.
+    if (req.messageId) {
+      await db.exec`
+        UPDATE messages
+        SET content = ${req.content}, updated_at = NOW()
+        WHERE id = ${req.messageId}::uuid
+      `;
+      return { messageId: req.messageId };
+    }
+
+    // Look up existing swarm_status message for this parent-task via metadata.
+    const existing = await db.queryRow<{ id: string }>`
+      SELECT id FROM messages
+      WHERE conversation_id = ${req.conversationId}
+        AND message_type = 'swarm_status'
+        AND metadata->>'parentTaskId' = ${req.parentTaskId}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+
+    if (existing) {
+      await db.exec`
+        UPDATE messages
+        SET content = ${req.content}, updated_at = NOW()
+        WHERE id = ${existing.id}::uuid
+      `;
+      return { messageId: existing.id };
+    }
+
+    const metadata = JSON.stringify({ parentTaskId: req.parentTaskId });
+    const inserted = await db.queryRow<{ id: string }>`
+      INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+      VALUES (${req.conversationId}, 'assistant', ${req.content}, 'swarm_status', ${metadata}::jsonb)
+      RETURNING id
+    `;
+    if (!inserted) {
+      const { APIError } = await import("encore.dev/api");
+      throw APIError.internal("failed to insert swarm_status message");
+    }
+    return { messageId: inserted.id };
+  },
+);
 
 // --- Helper: update message content in-place (for progress tracking) ---
 
@@ -496,6 +563,14 @@ interface SendRequest {
   source?: "web" | "slack" | "discord" | "api";
   // If true, agent only plans and creates tasks — skips code-gen and building
   planMode?: boolean;
+  // If true, enable web_scrape tool (Firecrawl) in this turn's tool list.
+  // Defaults true when user has a configured API key; false otherwise.
+  firecrawlEnabled?: boolean;
+  // Active project for this conversation — populated at creation time so
+  // uploads, scrapes and project-context resolve without joins later.
+  projectId?: string;
+  /** "cowork" | "designer" — scope of the chat. Populated at conversation creation. */
+  scope?: "cowork" | "designer";
 }
 
 interface SendResponse {
@@ -521,6 +596,8 @@ interface ConversationSummary {
   lastMessage: string;
   lastActivity: string;
   activeTask?: string;
+  scope?: "cowork" | "designer";
+  projectId?: string | null;
 }
 
 interface ConversationsResponse {
@@ -529,28 +606,48 @@ interface ConversationsResponse {
 
 // --- Ownership helpers (OWASP A01:2025 — Broken Access Control) ---
 
-/** Ensure the current user owns this conversation, or create ownership for new ones */
-async function ensureConversationOwner(conversationId: string): Promise<void> {
+/** Ensure the current user owns this conversation, or create ownership for new ones.
+ *  When `projectId` is provided on first-seen conversation, it's persisted so uploads
+ *  and scrapes within this chat resolve to the right project. */
+async function ensureConversationOwner(
+  conversationId: string,
+  projectId?: string | null,
+  scope?: "cowork" | "designer" | null,
+): Promise<void> {
   const auth = getAuthData();
   if (!auth) throw APIError.unauthenticated("not authenticated");
 
-  const existing = await db.queryRow<{ owner_email: string }>`
-    SELECT owner_email FROM conversations WHERE id = ${conversationId}
+  const existing = await db.queryRow<{ owner_email: string; project_id: string | null; scope: string | null }>`
+    SELECT owner_email, project_id, scope FROM conversations WHERE id = ${conversationId}
   `;
 
   if (existing) {
     if (existing.owner_email !== auth.email) {
       throw APIError.permissionDenied("du har ikke tilgang til denne samtalen");
     }
+    if (projectId && !existing.project_id) {
+      await db.exec`UPDATE conversations SET project_id = ${projectId}::uuid WHERE id = ${conversationId}`;
+    }
+    if (scope && !existing.scope) {
+      await db.exec`UPDATE conversations SET scope = ${scope} WHERE id = ${conversationId}`;
+    }
     return;
   }
 
-  // New conversation — register ownership
-  await db.exec`
-    INSERT INTO conversations (id, owner_email)
-    VALUES (${conversationId}, ${auth.email})
-    ON CONFLICT (id) DO NOTHING
-  `;
+  const effectiveScope = scope ?? "cowork";
+  if (projectId) {
+    await db.exec`
+      INSERT INTO conversations (id, owner_email, project_id, scope)
+      VALUES (${conversationId}, ${auth.email}, ${projectId}::uuid, ${effectiveScope})
+      ON CONFLICT (id) DO NOTHING
+    `;
+  } else {
+    await db.exec`
+      INSERT INTO conversations (id, owner_email, scope)
+      VALUES (${conversationId}, ${auth.email}, ${effectiveScope})
+      ON CONFLICT (id) DO NOTHING
+    `;
+  }
 }
 
 /** Verify the current user owns this conversation (read-only check) */
@@ -573,6 +670,7 @@ async function verifyConversationAccess(conversationId: string): Promise<void> {
 // --- Project Detection ---
 
 import { detectProjectRequest } from "./detection";
+import { buildProjectContextBlock } from "./project-context";
 
 // --- Endpoints ---
 
@@ -580,7 +678,7 @@ import { detectProjectRequest } from "./detection";
 export const send = api(
   { method: "POST", path: "/chat/send", expose: true, auth: true },
   async (req: SendRequest): Promise<SendResponse> => {
-    await ensureConversationOwner(req.conversationId);
+    await ensureConversationOwner(req.conversationId, req.projectId, req.scope);
 
     // Store user message (include skillIds in metadata if present)
     const userMetadata = req.skillIds && req.skillIds.length > 0
@@ -800,6 +898,7 @@ export const send = api(
         userAiName,
         req.modelOverride ?? undefined,
         req.repoOwner,
+        req.firecrawlEnabled,
       ).catch((err) => {
         console.error("AI processing failed:", err);
         updateMessageContent(placeholderMsg.id, "Beklager, noe gikk galt. Prøv igjen.").catch(() => {});
@@ -940,6 +1039,7 @@ async function processAIResponse(
   aiName?: string,
   modelOverride?: string,
   repoOwner?: string,
+  firecrawlEnabled?: boolean,
 ) {
   // Start heartbeat — updates updated_at every 10s so frontend knows we're alive
   const heartbeat = setInterval(async () => {
@@ -949,9 +1049,27 @@ async function processAIResponse(
   }, 10000);
 
   try {
-    console.log("[DEBUG-AF] processAIResponse started for conversation:", conversationId);
+    const debug = await isDebugEnabled();
+    if (debug) console.log("[DEBUG-AF] processAIResponse started for conversation:", conversationId);
 
     const { ai, memory, agent: agentEvt } = await import("~encore/clients");
+
+    // §3.3: Look up active project plan for this conversation (fail-soft).
+    // When a plan is running, we'll filter create_task/start_task from the
+    // chat tool-set so the AI can't spawn a parallel task that conflicts with it.
+    let activePlanId: string | undefined;
+    try {
+      const activePlan = await agentEvt.getActivePlanByConversation({ conversationId });
+      activePlanId = activePlan.plan?.id;
+      if (activePlanId) {
+        if (debug) console.log("[DEBUG-AF] active plan detected:", activePlanId, "status:", activePlan.plan?.status);
+      }
+    } catch (e) {
+      log.warn("chat: active-plan lookup failed — proceeding without plan context", {
+        error: e instanceof Error ? e.message : String(e),
+        conversationId,
+      });
+    }
 
     // Detect intent for richer context
     const intent = detectMessageIntent(userContent);
@@ -1123,7 +1241,7 @@ async function processAIResponse(
     // AI service's selectOptimalModel (DB-backed cache) handles actual model selection
     const complexity = quickComplexity(userContent);
     const selectedModel: string | undefined = modelOverride || undefined;
-    console.log("[DEBUG-AF] model:", selectedModel || "(auto via complexity)", "complexity:", complexity);
+    if (debug) console.log("[DEBUG-AF] model:", selectedModel || "(auto via complexity)", "complexity:", complexity);
 
     agentEvt.emitChatEvent({
       streamKey: conversationId,
@@ -1131,13 +1249,20 @@ async function processAIResponse(
       data: { status: "running", phase: "Genererer svar" },
     }).catch(() => {});
 
+    // Fase I.1 (regression fix) — Project context goes in its OWN system-prompt
+    // section with explicit "do not announce" instructions. NOT merged into
+    // memoryContext (where it would be listed as numbered "relevant context"
+    // and the AI would narrate it back on a simple greeting).
+    const projectContext = await buildProjectContextBlock(conversationId);
+
     // Call AI with tools (ALWAYS includes CHAT_TOOLS — AI decides whether to use them)
-    console.log("[DEBUG-AF] Calling ai.chat with", history.length, "messages, intent:", intent);
+    if (debug) console.log("[DEBUG-AF] Calling ai.chat with", history.length, "messages, intent:", intent);
     let aiResponse;
     try {
       aiResponse = await ai.chat({
         messages: history.map((m) => ({ role: m.role, content: m.content })),
         memoryContext: (memories.results || []).map((r) => r.content),
+        projectContext: projectContext?.systemPromptSnippet,
         systemContext: "direct_chat",
         model: selectedModel,        // explicit override or undefined (let AI service auto-route)
         complexity,                  // hint for selectOptimalModel in ai-endpoints.ts
@@ -1146,6 +1271,10 @@ async function processAIResponse(
         repoContext: repoContext || undefined,
         conversationId,
         aiName,
+        activePlanId,                // §3.3: filters create_task/start_task when plan is running
+        userEmail: auth.email,        // Fase E: propagated to ToolContext for role gates
+        firecrawlEnabled: firecrawlEnabled ?? false, // Default OFF — user must explicitly enable via "+" popup
+        projectType: projectContext?.projectType as ("code" | "framer" | "figma" | "framer_figma" | undefined),
       });
     } catch (e) {
       console.error("AI call failed:", e);
@@ -1176,9 +1305,9 @@ async function processAIResponse(
       };
     }
 
-    console.log("[DEBUG-AH] ai.chat returned content length:", aiResponse.content?.length);
-    console.log("[DEBUG-AH] Tools used:", aiResponse.toolsUsed || "none");
-    console.log("[DEBUG-AH] Stop reason:", aiResponse.stopReason);
+    if (debug) console.log("[DEBUG-AH] ai.chat returned content length:", aiResponse.content?.length);
+    if (debug) console.log("[DEBUG-AH] Tools used:", aiResponse.toolsUsed || "none");
+    if (debug) console.log("[DEBUG-AH] Stop reason:", aiResponse.stopReason);
 
     // Handle truncated responses
     if (aiResponse.truncated) {
@@ -1187,10 +1316,10 @@ async function processAIResponse(
 
     // Handle empty content — when tools were used but AI returned no text
     if (!aiResponse.content || !aiResponse.content.trim()) {
-      console.warn("[DEBUG-AH] AI returned empty content");
+      if (debug) console.warn("[DEBUG-AH] AI returned empty content");
       if (aiResponse.toolsUsed && aiResponse.toolsUsed.length > 0) {
         aiResponse.content = `Utførte: ${aiResponse.toolsUsed.join(", ")}`;
-        console.log("[DEBUG-AH] Using tool summary as fallback:", aiResponse.content);
+        if (debug) console.log("[DEBUG-AH] Using tool summary as fallback:", aiResponse.content);
       } else {
         aiResponse.content = "Beklager, jeg fikk ikke generert et svar. Prøv igjen.";
       }
@@ -1220,8 +1349,10 @@ async function processAIResponse(
     }).catch(() => {});
 
     // Save token/cost metadata (include lastCreatedTaskId so frontend can detect agent handoff)
+    // U11: modelSlug is the short human-readable form shown above the bubble.
     await db.exec`UPDATE messages SET metadata = ${JSON.stringify({
       model: aiResponse.modelUsed,
+      modelSlug: (aiResponse as { modelSlug?: string }).modelSlug,
       tokens: aiResponse.usage,
       cost: aiResponse.costUsd,
       stopReason: aiResponse.stopReason,
@@ -1399,6 +1530,8 @@ export const conversations = api(
         m.conversation_id as id,
         m.content as "lastMessage",
         m.created_at as "lastActivity",
+        c.scope as "scope",
+        c.project_id as "projectId",
         (SELECT content FROM messages
          WHERE conversation_id = m.conversation_id AND role = 'user'
          ORDER BY created_at ASC LIMIT 1) as "firstUserMessage"
@@ -1420,11 +1553,14 @@ export const conversations = api(
     for await (const row of rows) {
       const titleSource = (row.firstUserMessage as string) || (row.lastMessage as string);
       const lastMsg = row.lastMessage as string;
+      const scopeVal = row.scope as string | null;
       convList.push({
         id: row.id as string,
         title: titleSource.substring(0, 80) + (titleSource.length > 80 ? "..." : ""),
         lastMessage: lastMsg,
         lastActivity: row.lastActivity as string,
+        scope: scopeVal === "designer" ? "designer" : "cowork",
+        projectId: (row.projectId as string | null) ?? null,
       });
     }
 
@@ -1445,6 +1581,121 @@ export const conversations = api(
 
 interface ArchiveConversationRequest { conversationId: string; }
 interface ArchiveConversationResponse { success: boolean; }
+
+// --- Transfer a conversation to a specific project (moves an incognito/project-less
+// chat into a named project, preserving all messages). ---
+
+interface TransferConversationRequest {
+  conversationId: string;
+  targetProjectId: string;
+}
+
+interface TransferConversationResponse {
+  success: boolean;
+  projectName: string;
+  projectScope: "cowork" | "designer";
+}
+
+export const transferConversation = api(
+  { method: "POST", path: "/chat/conversations/transfer", expose: true, auth: true },
+  async (req: TransferConversationRequest): Promise<TransferConversationResponse> => {
+    const auth = getAuthData();
+    if (!auth) throw APIError.unauthenticated("not authenticated");
+
+    // Resolve target project — must belong to the authed user.
+    const proj = await db.queryRow<{ id: string; name: string; project_type: string; owner_email: string }>`
+      SELECT p.id, p.name, p.project_type, p.owner_email
+      FROM projects p
+      WHERE p.id = ${req.targetProjectId}::uuid AND p.archived_at IS NULL
+    `;
+    if (!proj) throw APIError.notFound("target project not found");
+    if (proj.owner_email !== auth.email) throw APIError.permissionDenied("not project owner");
+
+    const projScope: "cowork" | "designer" =
+      proj.project_type === "framer" || proj.project_type === "figma" || proj.project_type === "framer_figma"
+        ? "designer" : "cowork";
+
+    // Ensure the conversation exists + is owned by authed user.
+    const existing = await db.queryRow<{ owner_email: string | null }>`
+      SELECT owner_email FROM conversations WHERE id = ${req.conversationId}
+    `;
+    if (!existing) {
+      // Auto-create ownership row if conversation has messages but no ownership record yet.
+      await db.exec`
+        INSERT INTO conversations (id, owner_email, project_id, scope)
+        VALUES (${req.conversationId}, ${auth.email}, ${req.targetProjectId}::uuid, ${projScope})
+        ON CONFLICT (id) DO NOTHING
+      `;
+    } else {
+      if (existing.owner_email && existing.owner_email !== auth.email) {
+        throw APIError.permissionDenied("not conversation owner");
+      }
+      await db.exec`
+        UPDATE conversations
+        SET project_id = ${req.targetProjectId}::uuid, scope = ${projScope}
+        WHERE id = ${req.conversationId}
+      `;
+    }
+
+    // Also propagate to any already-uploaded files in this conversation.
+    await db.exec`
+      UPDATE chat_files SET project_id = ${req.targetProjectId}::uuid
+      WHERE conversation_id = ${req.conversationId} AND user_email = ${auth.email}
+        AND project_id IS NULL
+    `;
+
+    log.info("conversation transferred to project", {
+      conversationId: req.conversationId,
+      targetProjectId: req.targetProjectId,
+      scope: projScope,
+    });
+
+    return { success: true, projectName: proj.name, projectScope: projScope };
+  },
+);
+
+// --- Backfill: link legacy repo-named conversations to a freshly-created project ---
+// Called internally by projects.linkRepo so conversations with id-prefix
+// "repo-<reponame>-..." and project_id IS NULL inherit the new project binding.
+
+export const backfillProjectConversations = api(
+  { method: "POST", path: "/chat/backfill-project-conversations", expose: false },
+  async (req: {
+    ownerEmail: string;
+    projectId: string;
+    repoName: string;             // basename, e.g. "krakefjes" (lowercase match)
+    projectScope: "cowork" | "designer";
+  }): Promise<{ updated: number }> => {
+    const pattern = `repo-${req.repoName.toLowerCase()}-%`;
+    const row = await db.queryRow<{ count: number }>`
+      WITH updated AS (
+        UPDATE conversations
+        SET project_id = ${req.projectId}::uuid,
+            scope = COALESCE(scope, ${req.projectScope})
+        WHERE owner_email = ${req.ownerEmail}
+          AND LOWER(id) LIKE ${pattern}
+          AND project_id IS NULL
+          AND archived = false
+        RETURNING id
+      )
+      SELECT COUNT(*)::int AS count FROM updated
+    `.catch((err) => {
+      log.warn("backfillProjectConversations: query failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { count: 0 };
+    });
+
+    log.info("backfillProjectConversations: done", {
+      owner: req.ownerEmail,
+      projectId: req.projectId,
+      repoName: req.repoName,
+      scope: req.projectScope,
+      updated: row?.count ?? 0,
+    });
+    return { updated: row?.count ?? 0 };
+  },
+);
 
 export const archiveConversation = api(
   { method: "POST", path: "/chat/conversations/archive", expose: true, auth: true },

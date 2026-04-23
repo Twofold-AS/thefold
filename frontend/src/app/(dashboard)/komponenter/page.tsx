@@ -12,6 +12,7 @@ import { listComponents, healComponent, Component } from "@/lib/api";
 export default function KomponenterPage() {
   const { data, loading, refresh } = useApiData(() => listComponents(), []);
   const [fi, setFi] = useState("all");
+  const [platform, setPlatform] = useState<"all" | "code" | "framer" | "figma">("all");
   const [se, setSe] = useState("");
   const [healStatus, setHealStatus] = useState<Record<string, string>>({});
 
@@ -25,11 +26,16 @@ export default function KomponenterPage() {
         !(c.description ?? "").toLowerCase().includes(se.toLowerCase())
       )
         return false;
+      // Fase I.4 — platform-filter (code/framer/figma)
+      if (platform !== "all") {
+        const p = c.platform ?? "code";
+        if (p !== platform) return false;
+      }
       if (fi === "all") return true;
       if (c.category?.toLowerCase() === fi) return true;
       return (c.tags ?? []).some((tag) => tag.toLowerCase() === fi);
     });
-  }, [components, se, fi]);
+  }, [components, se, fi, platform]);
 
   const statusVariant = (s: string) => {
     if (s === "stable" || s === "valid" || s === "validated") return "success" as const;
@@ -103,6 +109,26 @@ export default function KomponenterPage() {
             }}
           />
           <div style={{ display: "flex", gap: 4 }}>
+            {(["all", "code", "framer", "figma"] as const).map((p) => (
+              <div
+                key={p}
+                onClick={() => setPlatform(p)}
+                style={{
+                  fontSize: 11,
+                  fontFamily: T.mono,
+                  padding: "4px 10px",
+                  background: platform === p ? T.accent : "transparent",
+                  color: platform === p ? "#fff" : T.textMuted,
+                  cursor: "pointer",
+                  border: `1px solid ${platform === p ? T.accent : "transparent"}`,
+                  borderRadius: 6,
+                }}
+                title={`Plattform: ${p}`}
+              >
+                {p}
+              </div>
+            ))}
+            <div style={{ width: 1, background: T.border, margin: "0 4px" }} />
             {["all", "frontend", "backend"].map((f) => (
               <div
                 key={f}

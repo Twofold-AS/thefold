@@ -1,23 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { T } from "@/lib/tokens";
+import { T, S } from "@/lib/tokens";
 import { GR } from "@/components/GridRow";
-import SectionLabel from "@/components/SectionLabel";
 import Btn from "@/components/Btn";
-import Tag from "@/components/Tag";
 import { useApiData } from "@/lib/hooks";
 import Skeleton from "@/components/Skeleton";
-import TabBar from "@/components/shared/TabBar";
-import { RefreshCw, Trash2, ChevronDown, Pencil } from "lucide-react";
-import TaskEditor from "@/components/tasks/TaskEditor";
-import LinearSync from "@/components/tasks/LinearSync";
+import { RefreshCw, ChevronDown } from "lucide-react";
 import ExpandableTaskCard from "@/components/tasks/ExpandableTaskCard";
 import TabWrapper from "@/components/TabWrapper";
-import { S } from "@/lib/tokens";
 import {
   listTheFoldTasks,
-
   listReviews,
   syncLinearTasks,
   approveReview,
@@ -30,47 +23,6 @@ import {
   type TheFoldTask,
   type ReviewSummary,
 } from "@/lib/api";
-
-function timeAgo(date: string): string {
-  const now = Date.now();
-  const then = new Date(date).getTime();
-  const diff = now - then;
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "na";
-  if (mins < 60) return `${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}t`;
-  const days = Math.floor(hrs / 24);
-  if (days < 30) return `${days}d`;
-  const months = Math.floor(days / 30);
-  return `${months}mnd`;
-}
-
-function mapStatus(status: string): "done" | "active" | "pending" {
-  if (status === "done" || status === "completed") return "done";
-  if (status === "in_progress" || status === "in_review") return "active";
-  return "pending";
-}
-
-function statusLabel(status: string): string {
-  switch (status) {
-    case "done":
-    case "completed":
-      return "done";
-    case "in_progress":
-      return "aktiv";
-    case "in_review":
-      return "review";
-    case "planned":
-      return "planlagt";
-    case "backlog":
-      return "backlog";
-    case "blocked":
-      return "blokkert";
-    default:
-      return status;
-  }
-}
 
 const inputStyle: React.CSSProperties = {
   background: T.subtle,
@@ -92,11 +44,9 @@ const textareaStyle: React.CSSProperties = {
 };
 
 export default function TasksPage() {
-  const [taskTab, setTaskTab] = useState<"tasks" | "reviews" | "linear">("tasks");
-  const [sel, setSel] = useState<string | null>(null);
-  const [editing, setEditing] = useState(false);
+  const [activeTasksTab, setActiveTasksTab] = useState<"cowork" | "designer">("cowork");
   const [syncing, setSyncing] = useState(false);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [, setActionLoading] = useState<string | null>(null);
 
   // Create dialog state
   const [showCreate, setShowCreate] = useState(false);
@@ -118,13 +68,13 @@ export default function TasksPage() {
   const [newSkillIds, setNewSkillIds] = useState<string[]>([]);
 
   // Only show top-level tasks — sub-tasks (parentId set) are visible inside ExpandableTaskCard
-  const tasks: TheFoldTask[] = (taskData?.tasks ?? []).filter((t: TheFoldTask) => !t.parentId);
+  const allTasks: TheFoldTask[] = (taskData?.tasks ?? []).filter((t: TheFoldTask) => !t.parentId);
   const reviews: ReviewSummary[] = reviewData?.reviews ?? [];
 
-
-  const t = sel !== null ? tasks.find((x) => x.id === sel) : null;
-  const tReview = t ? reviews.find((r) => r.taskId === t.id) : null;
-  const tStatus = t ? mapStatus(t.status) : "pending";
+  // Fase I.0.b — split tasks by scope per tab
+  const tasks: TheFoldTask[] = activeTasksTab === "cowork"
+    ? allTasks.filter((t) => (t.taskScope ?? "cowork") === "cowork")
+    : allTasks.filter((t) => t.taskScope === "designer");
 
   const handleSync = async () => {
     setSyncing(true);
@@ -136,63 +86,6 @@ export default function TasksPage() {
       alert(`Sync feilet: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSyncing(false);
-    }
-  };
-
-  const handleApprove = async () => {
-    const reviewId = t?.reviewId || tReview?.id;
-    if (!reviewId) {
-      alert("Ingen review tilgjengelig for denne oppgaven.");
-      return;
-    }
-    setActionLoading("approve");
-    try {
-      const result = await approveReview(reviewId);
-      alert(`Godkjent! PR: ${result.prUrl}`);
-      refreshTasks();
-    } catch (e) {
-      alert(`Feil: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleRequestChanges = async () => {
-    const reviewId = t?.reviewId || tReview?.id;
-    if (!reviewId) {
-      alert("Ingen review tilgjengelig for denne oppgaven.");
-      return;
-    }
-    const feedback = prompt("Hva skal endres?");
-    if (!feedback) return;
-    setActionLoading("changes");
-    try {
-      await requestReviewChanges(reviewId, feedback);
-      alert("Endringer forespurt.");
-      refreshTasks();
-    } catch (e) {
-      alert(`Feil: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const handleReject = async () => {
-    const reviewId = t?.reviewId || tReview?.id;
-    if (!reviewId) {
-      alert("Ingen review tilgjengelig for denne oppgaven.");
-      return;
-    }
-    const reason = prompt("Grunn for avvisning (valgfritt):");
-    setActionLoading("reject");
-    try {
-      await rejectReview(reviewId, reason || undefined);
-      alert("Avvist.");
-      refreshTasks();
-    } catch (e) {
-      alert(`Feil: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setActionLoading(null);
     }
   };
 
@@ -275,138 +168,71 @@ export default function TasksPage() {
       <div style={{ marginBottom: S.lg }}>
         <TabWrapper
           tabs={[
-            { id: "tasks", label: "Oppgaver", count: tasks.length },
-            { id: "reviews", label: "Reviews", count: reviews.filter(r => r.status === "pending" || r.status === "pending_review").length },
-            { id: "linear", label: "Linear" },
+            { id: "cowork", label: "CoWork", count: allTasks.filter(t => (t.taskScope ?? "cowork") === "cowork").length },
+            { id: "designer", label: "Designer", count: allTasks.filter(t => t.taskScope === "designer").length },
           ]}
-          active={taskTab}
-          onChange={(id) => setTaskTab(id as "tasks" | "reviews" | "linear")}
+          active={activeTasksTab}
+          onChange={(id) => setActiveTasksTab(id as "cowork" | "designer")}
         />
       </div>
 
-      {taskTab === "linear" && (
-        <GR mb={40}>
-          <div style={{ borderRadius: 12, border: `1px solid ${T.border}`, padding: 20 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: T.text, marginBottom: 12 }}>Linear Sync</div>
-            <p style={{ fontSize: 12, color: T.textMuted, marginBottom: 16 }}>
-              Synkroniser oppgaver fra Linear. Bruk &quot;Importer fra Linear&quot;-knappen ovenfor.
-            </p>
-            <Btn primary sm onClick={handleSync}>
-              <RefreshCw size={14} style={{ marginRight: 4 }} />
-              {syncing ? "Synkroniserer..." : "Synkroniser nå"}
-            </Btn>
-          </div>
-        </GR>
-      )}
-
-      {taskTab === "reviews" && (
-        <GR mb={40}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {reviews.length === 0 ? (
-              <div style={{ padding: 32, textAlign: "center", color: T.textMuted, fontSize: 13, border: `1px solid ${T.border}`, borderRadius: T.r }}>
-                Ingen reviews ennå
-              </div>
-            ) : (
-              reviews.map((r) => {
-                const task = tasks.find(tk => tk.id === r.taskId);
-                return (
-                  <ExpandableTaskCard
-                    key={r.id}
-                    task={{
-                      id: r.id,
-                      title: task?.title || r.taskId,
-                      description: task?.description || `Review — ${r.fileCount} filer, kvalitet: ${r.qualityScore ?? "—"}/10`,
-                      status: r.status === "pending" || r.status === "pending_review" ? "in_review" : r.status === "approved" ? "done" : r.status,
-                      source: "review",
-                      repo: task?.repo,
-                      reviewId: r.id,
-                      createdAt: task?.createdAt,
-                    }}
-                    showReviewActions={r.status === "pending" || r.status === "pending_review"}
-                    onApprove={async (revId) => {
-                      setActionLoading(`approve-${revId}`);
-                      try { await approveReview(revId); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                    }}
-                    onReject={async (revId) => {
-                      const reason = prompt("Begrunnelse for avvisning:");
-                      if (!reason) return;
-                      setActionLoading(`reject-${revId}`);
-                      try { await rejectReview(revId, reason); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                    }}
-                    onRequestChanges={async (revId) => {
-                      const feedback = prompt("Hva skal endres?");
-                      if (!feedback) return;
-                      setActionLoading(`changes-${revId}`);
-                      try { await requestReviewChanges(revId, feedback); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                    }}
-                  />
-                );
-              })
-            )}
-          </div>
-        </GR>
-      )}
-
-      {taskTab === "tasks" && (
-        <GR mb={40}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {tasksLoading ? (
-              <div style={{ padding: "40px 20px" }}>
-                <Skeleton rows={5} />
-              </div>
-            ) : tasks.length === 0 ? (
-              <div style={{ padding: 32, textAlign: "center", color: T.textMuted, fontSize: 13, border: `1px solid ${T.border}`, borderRadius: T.r }}>
-                Ingen oppgaver ennå
-              </div>
-            ) : (
-              tasks.map((tk) => (
-                <div key={tk.id}>
-                  <ExpandableTaskCard
-                    task={{
-                      id: tk.id,
-                      title: tk.title,
-                      description: tk.description,
-                      status: tk.status,
-                      source: tk.source,
-                      repo: tk.repo,
-                      complexity: tk.complexity,
-                      estimatedTokens: tk.estimatedTokens,
-                      createdAt: tk.createdAt,
-                      updatedAt: tk.updatedAt,
-                      reviewId: tk.reviewId || reviews.find(r => r.taskId === tk.id)?.id,
-                      prUrl: tk.prUrl,
-                      errorMessage: tk.errorMessage,
-                    }}
-                    review={(() => {
-                      const rev = reviews.find(r => r.taskId === tk.id);
-                      return rev ? { qualityScore: rev.qualityScore, fileCount: rev.fileCount, status: rev.status } : undefined;
-                    })()}
-                    showReviewActions={tk.status === "in_review"}
-                    onApprove={handleApprove ? async (revId) => {
-                      setActionLoading("approve");
-                      try { await approveReview(revId); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                    } : undefined}
-                    onReject={handleReject ? async (revId) => {
-                      const reason = prompt("Grunn for avvisning:");
-                      setActionLoading("reject");
-                      try { await rejectReview(revId, reason || undefined); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                    } : undefined}
-                    onRequestChanges={handleRequestChanges ? async (revId) => {
-                      const feedback = prompt("Hva skal endres?");
-                      if (!feedback) return;
-                      setActionLoading("changes");
-                      try { await requestReviewChanges(revId, feedback); refreshTasks(); } catch {} finally { setActionLoading(null); }
-                    } : undefined}
-                    onDelete={async (taskId) => {
-                      try { await softDeleteTask(taskId); refreshTasks(); } catch {}
-                    }}
-                  />
-                </div>
-              ))
-            )}
-          </div>
-        </GR>
-      )}
+      <GR mb={40}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {tasksLoading ? (
+            <div style={{ padding: "40px 20px" }}>
+              <Skeleton rows={5} />
+            </div>
+          ) : tasks.length === 0 ? (
+            <div style={{ padding: 32, textAlign: "center", color: T.textMuted, fontSize: 13, background: T.sidebar, border: `1px solid ${T.border}`, borderRadius: T.r }}>
+              Ingen oppgaver ennå
+            </div>
+          ) : (
+            tasks.map((tk) => (
+              <ExpandableTaskCard
+                key={tk.id}
+                task={{
+                  id: tk.id,
+                  title: tk.title,
+                  description: tk.description,
+                  status: tk.status,
+                  source: tk.source,
+                  repo: tk.repo,
+                  complexity: tk.complexity,
+                  estimatedTokens: tk.estimatedTokens,
+                  createdAt: tk.createdAt,
+                  updatedAt: tk.updatedAt,
+                  reviewId: tk.reviewId || reviews.find(r => r.taskId === tk.id)?.id,
+                  prUrl: tk.prUrl,
+                  errorMessage: tk.errorMessage,
+                }}
+                review={(() => {
+                  const rev = reviews.find(r => r.taskId === tk.id);
+                  return rev ? { qualityScore: rev.qualityScore, fileCount: rev.fileCount, status: rev.status } : undefined;
+                })()}
+                showReviewActions={tk.status === "in_review"}
+                onApprove={async (revId) => {
+                  setActionLoading("approve");
+                  try { await approveReview(revId); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                }}
+                onReject={async (revId) => {
+                  const reason = prompt("Grunn for avvisning:");
+                  setActionLoading("reject");
+                  try { await rejectReview(revId, reason || undefined); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                }}
+                onRequestChanges={async (revId) => {
+                  const feedback = prompt("Hva skal endres?");
+                  if (!feedback) return;
+                  setActionLoading("changes");
+                  try { await requestReviewChanges(revId, feedback); refreshTasks(); } catch {} finally { setActionLoading(null); }
+                }}
+                onDelete={async (taskId) => {
+                  try { await softDeleteTask(taskId); refreshTasks(); } catch {}
+                }}
+              />
+            ))
+          )}
+        </div>
+      </GR>
 
       {/* Create task dialog */}
       {showCreate && (

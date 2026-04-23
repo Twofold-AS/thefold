@@ -14,6 +14,9 @@ import type { AgentExecutionContext } from "./types";
 import type { PhaseTracker } from "./metrics";
 import type { BudgetMode } from "../ai/sub-agents";
 import type { ExecutionHelpers } from "./execution-retry";
+import { agentEventBus } from "./event-bus";
+import { createAgentEvent } from "./events";
+import { startSwarmAggregator, stopSwarmAggregator } from "./swarm-aggregator";
 
 /**
  * Smart model routing: when the user selects a specific model (modelOverride),
@@ -293,15 +296,61 @@ export async function runPlanPhase(
           repoName: `${ctx.repoOwner}/${ctx.repoName}`,
         });
 
-        // Per-agent real-time callbacks (9.3)
+        // Per-agent real-time callbacks (9.3) + Fase H aggregated swarm_status.
         const sharedCtx = createSharedAgentContext();
+        const parentTaskId = ctx.taskId;
+        const conversationId = ctx.conversationId ?? parentTaskId;
+        // Number agents 1..N in plan order so the UI sees stable "1#", "2#" ... labels.
+        const agentNum = new Map<string, number>();
+        subPlan.agents.forEach((a, i) => agentNum.set(a.id, i + 1));
+
+        startSwarmAggregator(parentTaskId, conversationId);
         const subResults = await executeSubAgents(subPlan, sharedCtx, {
+          onAgentQueued: async (agent) => {
+            agentEventBus.emit(
+              parentTaskId,
+              createAgentEvent("subagent.started", {
+                agentId: agent.id,
+                parentTaskId,
+                role: agent.role,
+                num: agentNum.get(agent.id) ?? 0,
+                startedAt: new Date().toISOString(),
+              }),
+            );
+            agentEventBus.emit(
+              parentTaskId,
+              createAgentEvent("subagent.status_change", {
+                agentId: agent.id,
+                parentTaskId,
+                role: agent.role,
+                status: "waiting",
+              }),
+            );
+          },
           onAgentStart: async (agent) => {
             const entry = liveDisplay.get(agent.id);
             if (entry) {
               entry.status = "working";
               entry.label = `${agent.role} — kjører...`;
             }
+            agentEventBus.emit(
+              parentTaskId,
+              createAgentEvent("subagent.status_change", {
+                agentId: agent.id,
+                parentTaskId,
+                role: agent.role,
+                status: "running",
+              }),
+            );
+            agentEventBus.emit(
+              parentTaskId,
+              createAgentEvent("subagent.progress", {
+                agentId: agent.id,
+                parentTaskId,
+                role: agent.role,
+                activity: `${agent.role} starter...`,
+              }),
+            );
             await reportProgress(ctx, {
               status: "working",
               phase: "building",
@@ -318,6 +367,28 @@ export async function runPlanPhase(
                 ? `${result.role} — ferdig ($${result.costUsd.toFixed(4)})`
                 : `${result.role} — feil: ${(result.error ?? "").substring(0, 40)}`;
             }
+            agentEventBus.emit(
+              parentTaskId,
+              createAgentEvent("subagent.completed", {
+                agentId: result.id,
+                parentTaskId,
+                role: result.role,
+                success: result.success,
+                completedAt: new Date().toISOString(),
+                durationMs: result.durationMs,
+                costUsd: result.costUsd,
+                resultPreview: result.output ? result.output.slice(0, 500) : undefined,
+              }),
+            );
+            agentEventBus.emit(
+              parentTaskId,
+              createAgentEvent("subagent.status_change", {
+                agentId: result.id,
+                parentTaskId,
+                role: result.role,
+                status: result.success ? "completed" : "failed",
+              }),
+            );
             await reportProgress(ctx, {
               status: "working",
               phase: "building",
@@ -327,6 +398,7 @@ export async function runPlanPhase(
             });
           },
         });
+        await stopSwarmAggregator(parentTaskId);
         const merged = await mergeResults(subResults, subPlan.mergeStrategy);
 
         ctx.subAgentResults = subResults;

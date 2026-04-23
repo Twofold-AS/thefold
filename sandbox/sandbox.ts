@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
 import log from "encore.dev/log";
+import { isDebugEnabled } from "./debug";
 import {
   createDockerSandbox,
   execInDocker,
@@ -16,6 +17,8 @@ import {
 } from "./docker";
 import { takeSnapshot, takeDockerSnapshot, compareSnapshots, type FileSnapshot, type SnapshotDiff } from "./snapshot";
 import { scanFile } from "./file-scanner";
+// Fase K.2 — stdout-bus for SSE-streaming av pågående validation.
+import { sandboxStdoutBus } from "./stdout-bus";
 
 const githubToken = secret("GitHubToken");
 const sandboxMode = secret("SandboxMode"); // "docker" | "filesystem"
@@ -82,6 +85,16 @@ interface ValidateResponse {
   success: boolean;
   output: string;
   errors: string[];
+  /** Fase K.4 — Per-fase resultater for performance/snapshot-visning. */
+  steps?: Array<{
+    step: string;
+    success: boolean;
+    errors: string[];
+    warnings: string[];
+    metrics?: Record<string, number>;
+    durationMs?: number;
+  }>;
+  totalDurationMs?: number;
 }
 
 interface DestroyRequest {
@@ -159,9 +172,9 @@ export const create = api(
           stdio: "pipe",
           env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
         });
-        console.log("[DEBUG-AJ] Clone with branch succeeded");
+        if (await isDebugEnabled()) console.log("[DEBUG-AJ] Clone with branch succeeded");
       } catch {
-        console.warn(`[DEBUG-AJ] Clone with --branch ${ref} failed, cleaning up...`);
+        if (await isDebugEnabled()) console.warn(`[DEBUG-AJ] Clone with --branch ${ref} failed, cleaning up...`);
 
         // Delete partial directory from failed clone
         if (fs.existsSync(repoPath)) {
@@ -174,9 +187,9 @@ export const create = api(
             stdio: "pipe",
             env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
           });
-          console.log("[DEBUG-AJ] Clone without branch succeeded");
+          if (await isDebugEnabled()) console.log("[DEBUG-AJ] Clone without branch succeeded");
         } catch {
-          console.warn("[DEBUG-AJ] Clone without branch failed, creating empty repo...");
+          if (await isDebugEnabled()) console.warn("[DEBUG-AJ] Clone without branch failed, creating empty repo...");
 
           // Delete partial directory again
           if (fs.existsSync(repoPath)) {
@@ -189,7 +202,7 @@ export const create = api(
           fs.writeFileSync(path.join(repoPath, ".gitkeep"), "");
           execSync("git add .", { cwd: repoPath, stdio: "pipe" });
           execSync('git commit -m "Initial commit"', { cwd: repoPath, stdio: "pipe" });
-          console.log("[DEBUG-AJ] Empty repo created with git init");
+          if (await isDebugEnabled()) console.log("[DEBUG-AJ] Empty repo created with git init");
         }
       }
 
@@ -702,20 +715,82 @@ export const validate = api(
     const pipelineStart = Date.now();
 
     const steps: ValidationStepResult[] = [];
+    const stepDurations: number[] = [];
     const allErrors: string[] = [];
 
     const runner = isDocker ? dockerRunner(req.sandboxId) : filesystemRunner(repoDir);
 
-    for (const step of VALIDATION_PIPELINE) {
+    for (let i = 0; i < VALIDATION_PIPELINE.length; i++) {
+      const step = VALIDATION_PIPELINE[i];
+      const phaseStart = Date.now();
+
+      // Fase K.2 — stdout-bus phase_start-event
+      sandboxStdoutBus.emit(req.sandboxId, {
+        kind: "stdout.phase_start",
+        ts: phaseStart,
+        phaseIndex: i,
+        phaseName: step.name,
+      });
+
       if (!step.enabled) {
         const stub = await step.run(runner, repoDir, isDocker, req.sandboxId);
         steps.push(stub);
+        const dur = Date.now() - phaseStart;
+        stepDurations.push(dur);
+        sandboxStdoutBus.emit(req.sandboxId, {
+          kind: "stdout.phase_end",
+          ts: Date.now(),
+          phaseIndex: i,
+          phaseName: step.name,
+          success: stub.success,
+          durationMs: dur,
+          metrics: stub.metrics,
+        });
         continue;
       }
 
-      const result = await step.run(runner, repoDir, isDocker, req.sandboxId);
+      let result: ValidationStepResult;
+      try {
+        result = await step.run(runner, repoDir, isDocker, req.sandboxId);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sandboxStdoutBus.emit(req.sandboxId, {
+          kind: "stdout.error",
+          ts: Date.now(),
+          phaseIndex: i,
+          phaseName: step.name,
+          message: msg,
+        });
+        result = { step: step.name, success: false, errors: [msg], warnings: [] };
+      }
       steps.push(result);
+      const dur = Date.now() - phaseStart;
+      stepDurations.push(dur);
       allErrors.push(...result.errors);
+
+      // Fase K.2 — emit warnings + errors som stdout.line-events
+      for (const w of result.warnings) {
+        sandboxStdoutBus.emit(req.sandboxId, {
+          kind: "stdout.line", ts: Date.now(),
+          phaseIndex: i, phaseName: step.name, stream: "stdout", line: w,
+        });
+      }
+      for (const e of result.errors) {
+        sandboxStdoutBus.emit(req.sandboxId, {
+          kind: "stdout.line", ts: Date.now(),
+          phaseIndex: i, phaseName: step.name, stream: "stderr", line: e,
+        });
+      }
+
+      sandboxStdoutBus.emit(req.sandboxId, {
+        kind: "stdout.phase_end",
+        ts: Date.now(),
+        phaseIndex: i,
+        phaseName: step.name,
+        success: result.success,
+        durationMs: dur,
+        metrics: result.metrics,
+      });
     }
 
     const pipelineResult: ValidationPipelineResult = {
@@ -741,6 +816,16 @@ export const validate = api(
       success: pipelineResult.success,
       output: output.substring(0, 100_000),
       errors: allErrors,
+      // Fase K.4 — Send hele step-resultatet tilbake for performance-panel
+      steps: steps.map((s, idx) => ({
+        step: s.step,
+        success: s.success,
+        errors: s.errors,
+        warnings: s.warnings,
+        metrics: s.metrics,
+        durationMs: stepDurations[idx],
+      })),
+      totalDurationMs: pipelineResult.totalDuration,
     };
   }
 );
