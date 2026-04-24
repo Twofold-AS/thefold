@@ -25,6 +25,7 @@ const CSRF_EXEMPT_ENDPOINTS = new Set<string>([
   "chat.listProjectUploads",
   "chat.listProjectScrapes",
   "chat.history",
+  "chat.getToolState",
   "projects.listApiKeys",
   "projects.listProjects",
   "projects.checkName",

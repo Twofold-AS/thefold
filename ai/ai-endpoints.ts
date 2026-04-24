@@ -114,6 +114,45 @@ export const chat = api(
     if (req.firecrawlEnabled === false) {
       filteredTools = filteredTools.filter((t) => t.name !== "web_scrape");
     }
+    // transfer_conversation is only relevant when the user explicitly asks
+    // to move/save this chat into a project. Showing it unconditionally
+    // caused experimental models to hallucinate a transfer-intent on
+    // unrelated messages like "Hei" and loop on the tool's error path.
+    {
+      const transferKeywords = /flytt|lagre.*samtal|overfør|transfer|move.*conversation|save.*(to|in)\b/i;
+      const recentUserText = [...req.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+      if (!transferKeywords.test(recentUserText)) {
+        filteredTools = filteredTools.filter((t) => t.name !== "transfer_conversation");
+      }
+    }
+
+    // Social-greeting hardening. On a "Hei"-class turn we strip every tool
+    // that can be abused for autonomous orientation — repo inspection,
+    // memory lookup, web scraping, task creation. Leaves only the truly
+    // conversational ones so the model has almost nothing to do except
+    // reply with a short greeting. Paired with the "Register Matching"
+    // rule in the CORE_PROMPT + a max_tokens cap below.
+    const HEAVY_TOOLS_TO_STRIP_ON_GREETING = new Set<string>([
+      "read_file",
+      "search_code",
+      "repo_get_tree",
+      "repo_read_file",
+      "repo_find_relevant_files",
+      "memory_search",
+      "recall_memory",
+      "web_scrape",
+      "list_scrapes",
+      "get_cached_scrape",
+      "create_task",
+      "start_task",
+      "list_tasks",
+      "find_component",
+      "use_component",
+    ]);
+    if (req.isSocialGreeting) {
+      filteredTools = filteredTools.filter((t) => !HEAVY_TOOLS_TO_STRIP_ON_GREETING.has(t.name));
+      system += "\n\n## Register: greeting\nThe user sent a short social greeting. Reply with 1-2 friendly lines in Norwegian and NOTHING else. Do NOT call tools. Do NOT list projects, tasks, files, or next steps. Do NOT ask if they want status checks.";
+    }
     const toolsForChat = toolRegistry
       .toAnthropicFormat(filteredTools)
       .map((t) => ({
@@ -124,11 +163,18 @@ export const chat = api(
 
     if (await isDebugEnabled()) console.log("[DEBUG-AG] ai.chat: using callWithTools, repoName:", req.repoName || "(none)",
       "activePlanId:", req.activePlanId || "(none)", "toolCount:", toolsForChat.length);
+    // Cap max_tokens at 2048 for chat turns. 8192 was overkill for
+    // conversational responses and, combined with some experimental models
+    // (MiniMax, Kimi) that can enter a repetition-loop mid-generation,
+    // produced pathological outputs of 40+ copies of the same paragraph in
+    // a single response. 2048 tokens ≈ ~400 words. Social greetings cap at
+    // 300 — two lines should suffice for "Hei" + a question back.
+    const turnMaxTokens = req.isSocialGreeting ? 300 : 2048;
     const toolResponse = await callWithTools({
       model,
       system,
       messages: req.messages,
-      maxTokens: 8192,
+      maxTokens: turnMaxTokens,
       tools: toolsForChat,
       repoName: req.repoName,
       repoOwner: req.repoOwner,
@@ -143,6 +189,15 @@ export const chat = api(
     await logSkillResults(pipeline.skillIds, true, toolResponse.tokensUsed);
 
     const modelSlug = await resolveModelSlug(toolResponse.modelUsed);
+
+    // Zip skill IDs + names for the frontend. skillNames is populated by
+    // buildSystemPromptWithPipeline in the v3 path; when it's empty (legacy
+    // resolver missed the newer API) we still emit IDs so the UI shows
+    // something.
+    const activeSkills = pipeline.skillIds.map((id, i) => ({
+      id,
+      name: pipeline.skillNames?.[i] ?? id,
+    }));
 
     return {
       content: toolResponse.content,
@@ -160,6 +215,7 @@ export const chat = api(
         totalTokens: toolResponse.inputTokens + toolResponse.outputTokens,
       },
       truncated: toolResponse.stopReason === "max_tokens",
+      activeSkills: activeSkills.length > 0 ? activeSkills : undefined,
     };
   }
 );
@@ -169,18 +225,14 @@ export const chat = api(
 export const reviewCode = api(
   { method: "POST", path: "/ai/review", expose: false },
   async (req: ReviewRequest): Promise<ReviewResponse> => {
-    // Use user-specified model, or select via reviewer role
-    let model: string;
-    if (req.model) {
-      model = req.model;
-    } else {
-      try {
-        model = await selectForRole("reviewer");
-      } catch {
-        // Fallback to default if role-based fails
-        model = DEFAULT_MODEL;
-      }
-    }
+    // Smart-select by "review" role-tag — picks the cheapest enabled model
+    // with supports_tools. Avoids hardcoded claude-sonnet-4-5-20250929 that
+    // may be disabled and causes cost=0 via missing-cache-entry.
+    const model = await smartSelect({
+      manualModelId: req.model,
+      context: "review",
+      complexity: 5,
+    });
 
     let prompt = `## Task\n${req.taskDescription}\n\n`;
     prompt += `## Files Changed\n`;

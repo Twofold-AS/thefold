@@ -16,6 +16,22 @@ interface SkillPipelineContext {
   userId: string;
   totalTokenBudget: number;
   taskType?: string; // 'all' | 'planning' | 'coding' | 'debugging' | 'reviewing'
+  // v3 file-based skills matching:
+  context?: string;            // chat | coding | planning | review
+  projectType?: string;        // code | framer | figma | framer_figma
+  complexity?: number;         // 1-10, matched against skills.min_complexity
+}
+
+// v3 result-shape extension. Existing fields (injectedPrompt, tokensUsed,
+// injectedSkillIds, preRunResults, postRunSkills) stay backward-compat.
+// The new `skillsDetails` + `totalTokens` aliases give the Fase 6 prompt
+// builder a richer payload without breaking legacy callers.
+interface ResolvedSkillDetail {
+  id: string;
+  name: string;
+  description: string;
+  promptText: string;
+  tokensUsed: number;
 }
 
 interface ResolvedSkill {
@@ -35,6 +51,9 @@ interface SkillPipelineResult {
   tokensUsed: number;
   postRunSkills: ResolvedSkill[];
   injectedKnowledgeIds?: string[];
+  // v3 additions — populated by the new file-based matcher.
+  skillsDetails?: ResolvedSkillDetail[];
+  totalTokens?: number;
 }
 
 interface SkillRunResult {
@@ -84,68 +103,160 @@ export const resolve = api(
       }
     } catch { /* cache miss — continue with DB query */ }
 
-    // 1. Fetch all enabled skills matching scope
+    // 1. Fetch all enabled skills matching scope. v3 adds project_types,
+    // trigger_keywords, min_complexity via migration 9.
     const rows = await db.query<{
       id: string;
       name: string;
+      description: string;
       prompt_fragment: string;
       task_phase: string;
       priority: number;
       token_estimate: number;
       routing_rules: Record<string, unknown>;
       scope: string;
+      applies_to: string[];
+      project_types: string[];
+      trigger_keywords: string[];
+      min_complexity: number;
+      always_on: boolean;
     }>`
-      SELECT id, name, prompt_fragment, task_phase, priority,
+      SELECT id, name, description, prompt_fragment, task_phase, priority,
              COALESCE(token_estimate, 0) as token_estimate,
              COALESCE(routing_rules, '{}'::jsonb) as routing_rules,
-             scope
+             scope,
+             COALESCE(applies_to, '{}'::text[]) as applies_to,
+             COALESCE(project_types, '{}'::text[]) as project_types,
+             COALESCE(trigger_keywords, '{}'::text[]) as trigger_keywords,
+             COALESCE(min_complexity, 0) as min_complexity,
+             COALESCE(always_on, FALSE) as always_on
       FROM skills
       WHERE enabled = TRUE
       AND (scope = 'global' OR scope = ${`repo:${ctx.repo || ""}`} OR scope = ${`user:${ctx.userId}`})
-      ORDER BY priority ASC
+      ORDER BY priority DESC
     `;
 
     const allSkills: Array<{
       id: string;
       name: string;
+      description: string;
       promptFragment: string;
       phase: ExecutionPhase;
       taskPhase: string;
       priority: number;
       tokenEstimate: number;
       routingRules: Record<string, unknown>;
+      appliesTo: string[];
+      projectTypes: string[];
+      triggerKeywords: string[];
+      minComplexity: number;
+      alwaysOn: boolean;
     }> = [];
 
     for await (const row of rows) {
       allSkills.push({
         id: row.id,
         name: row.name,
+        description: row.description ?? "",
         promptFragment: row.prompt_fragment,
         phase: "inject" as ExecutionPhase,
         taskPhase: row.task_phase || "all",
         priority: row.priority ?? 100,
         tokenEstimate: row.token_estimate ?? 0,
         routingRules: row.routing_rules ?? {},
+        appliesTo: row.applies_to ?? [],
+        projectTypes: row.project_types ?? [],
+        triggerKeywords: row.trigger_keywords ?? [],
+        minComplexity: row.min_complexity ?? 0,
+        alwaysOn: row.always_on ?? false,
       });
     }
 
     if (await isDebugEnabled()) console.log("[DEBUG-AF] skills.resolve found", allSkills.length, "enabled skills");
 
-    // 2. Filter on routing rules (keywords, file patterns, labels)
-    let matched = allSkills.filter((s) => matchesRoutingRules(s.routingRules, ctx));
+    // 2. v3 match logic — a skill is kept only if all checks pass:
+    //    - applies_to is empty OR contains ctx.context
+    //    - project_types is empty OR contains ctx.projectType
+    //    - min_complexity <= ctx.complexity (when complexity provided; otherwise skip)
+    //    - trigger_keywords is empty OR at least one keyword present in (task + labels + filenames)
+    // Legacy routing_rules check is also applied for backward-compat.
+    const haystack = [
+      ctx.task,
+      ...(ctx.labels ?? []),
+      ...(ctx.files ?? []),
+    ].join(" ").toLowerCase();
+
+    // v3.1 hardening: when complexity is low (< 3) AND the skill has no
+    // trigger_keywords that match the haystack AND the skill is NOT
+    // marked always_on, we drop it even if priority is high. This stops
+    // heavy skills (e.g. `security` priority 9) from inflating every
+    // "Hei" message. always_on is the explicit opt-out for rare cases
+    // where a skill MUST always load (e.g. a house-style rule that
+    // should never disappear).
+    const debugLog = await isDebugEnabled();
+    const LOW_COMPLEXITY_THRESHOLD = 3;
+    const isLowComplexity = ctx.complexity != null && ctx.complexity < LOW_COMPLEXITY_THRESHOLD;
+
+    let matched = allSkills.filter((s) => {
+      const keywordHit = s.triggerKeywords.length === 0
+        ? false
+        : s.triggerKeywords.some((kw) => haystack.includes(kw.toLowerCase()));
+
+      // applies_to gate
+      if (s.appliesTo.length > 0 && ctx.context) {
+        if (!s.appliesTo.includes(ctx.context)) {
+          if (debugLog) console.log(`[SKILLS-SKIP] ${s.name} reason=applies_to_mismatch expected=${s.appliesTo.join(",")} got=${ctx.context}`);
+          return false;
+        }
+      }
+      // project_types gate
+      if (s.projectTypes.length > 0 && ctx.projectType) {
+        if (!s.projectTypes.includes(ctx.projectType)) {
+          if (debugLog) console.log(`[SKILLS-SKIP] ${s.name} reason=project_types_mismatch expected=${s.projectTypes.join(",")} got=${ctx.projectType}`);
+          return false;
+        }
+      }
+      // min_complexity gate
+      if (ctx.complexity != null && s.minComplexity > ctx.complexity) {
+        if (debugLog) console.log(`[SKILLS-SKIP] ${s.name} reason=min_complexity_not_met skill=${s.minComplexity} ctx=${ctx.complexity}`);
+        return false;
+      }
+      // trigger_keywords gate — if the skill declares keywords, require a hit
+      if (s.triggerKeywords.length > 0 && !keywordHit) {
+        if (debugLog) console.log(`[SKILLS-SKIP] ${s.name} reason=no_keyword_match keywords=${s.triggerKeywords.join(",")}`);
+        return false;
+      }
+      // legacy routing_rules gate (kept for back-compat)
+      if (!matchesRoutingRules(s.routingRules, ctx)) {
+        if (debugLog) console.log(`[SKILLS-SKIP] ${s.name} reason=routing_rules_mismatch`);
+        return false;
+      }
+      // v3.1 NEW: low-complexity + empty trigger_keywords + no always_on →
+      // skip. Priority is only a tiebreaker among matches, never a license
+      // to include an unmatched skill.
+      if (isLowComplexity && s.triggerKeywords.length === 0 && !s.alwaysOn) {
+        if (debugLog) console.log(`[SKILLS-SKIP] ${s.name} reason=low_complexity_no_triggers priority=${s.priority} alwaysOn=false`);
+        return false;
+      }
+      if (debugLog) console.log(`[SKILLS-MATCH] ${s.name} priority=${s.priority} alwaysOn=${s.alwaysOn} keywordHit=${keywordHit}`);
+      return true;
+    });
 
     // 2.5. Filter on task phase if specified
     if (ctx.taskType && ctx.taskType !== "all") {
       matched = matched.filter((s) => s.taskPhase === "all" || s.taskPhase === ctx.taskType);
     }
 
-    // 3. Token budget: include skills until budget exhausted
+    // 3. Token budget: sorted by priority DESC already, include until budget full.
     const tokenBudget = ctx.totalTokenBudget || 4000;
     let tokensUsed = 0;
     const selected: typeof matched = [];
 
     for (const skill of matched) {
-      const estimate = skill.tokenEstimate || 200;
+      // When token_estimate is 0/unset, fall back to 1 token per 4 chars of the prompt.
+      const estimate = skill.tokenEstimate > 0
+        ? skill.tokenEstimate
+        : Math.max(50, Math.ceil(skill.promptFragment.length / 4));
       if (tokensUsed + estimate > tokenBudget) break;
       tokensUsed += estimate;
       selected.push(skill);
@@ -154,7 +265,18 @@ export const resolve = api(
     // 4. Build injected prompt from inject-phase skills
     const inject = selected.filter((s) => s.phase === "inject");
     const postRun = selected.filter((s) => s.phase === "post_run");
-    let injectedPrompt = inject.map((s) => s.promptFragment).join("\n\n");
+    let injectedPrompt = inject.length > 0
+      ? "\n\n## Active Skills\n\n" + inject.map((s) => s.promptFragment).join("\n\n")
+      : "";
+    const skillsDetails: ResolvedSkillDetail[] = inject.map((s) => ({
+      id: s.id,
+      name: s.name,
+      description: s.description,
+      promptText: s.promptFragment,
+      tokensUsed: s.tokenEstimate > 0
+        ? s.tokenEstimate
+        : Math.max(50, Math.ceil(s.promptFragment.length / 4)),
+    }));
 
     // 4.5. Inject learned knowledge rules (D14)
     const injectedKnowledgeIds: string[] = [];
@@ -183,6 +305,8 @@ export const resolve = api(
       tokensUsed,
       postRunSkills: postRun.map(toResolvedSkill),
       injectedKnowledgeIds,
+      skillsDetails,
+      totalTokens: tokensUsed,
     };
 
     // Store in cache for 5 minutes (non-critical)

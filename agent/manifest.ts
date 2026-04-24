@@ -1,6 +1,7 @@
 import log from "encore.dev/log";
 import { memory } from "~encore/clients";
 import { callAIWithFallback, stripMarkdownJson } from "../ai/call";
+import { smartSelect } from "../ai/router";
 
 export interface ProjectManifest {
   id: string;
@@ -52,10 +53,13 @@ export async function getOrCreateManifest(
 
   if (!treeString) return null;
 
-  // Generate via AI (Haiku — cheap, sufficient)
+  // Generate via AI — smartSelect picks the cheapest review-tagged model
+  // from the enabled-in-DB set (was hardcoded to "claude-haiku-4-5-20250929"
+  // which is disabled in DB → estimateCost=0 warning + silent bypass).
   try {
+    const model = await smartSelect({ context: "review", complexity: 2 });
     const response = await callAIWithFallback({
-      model: "claude-haiku-4-5-20250929",
+      model,
       system: "You are a code analysis assistant. Analyze repository structures and return concise JSON manifests.",
       messages: [
         {

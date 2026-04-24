@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from "react";
 import { T, S } from "@/lib/tokens";
 import Tag from "@/components/Tag";
 import Btn from "@/components/Btn";
-import { ChevronDown, ChevronUp, FileText, Clock, Terminal, Trash2, GitBranch } from "lucide-react";
+import ShimmerOverlay from "@/components/ShimmerOverlay";
+import { ChevronDown, ChevronUp, FileText, Clock, Terminal, Trash2, GitBranch, CheckSquare } from "lucide-react";
 import { getTaskMetrics } from "@/lib/api/agent";
 import { listSubTasks } from "@/lib/api";
 
@@ -24,7 +25,7 @@ export interface TaskData {
   errorMessage?: string | null;
 }
 
-type TaskTab = "detaljer" | "rapporter" | "logg" | "deloppgaver";
+type TaskTab = "detaljer" | "rapporter" | "review" | "logg" | "deloppgaver";
 
 export interface ReviewData {
   qualityScore: number | null;
@@ -109,14 +110,22 @@ export default function ExpandableTaskCard({
   }, [expanded, task.id]);
 
   const statusInfo = STATUS_COLORS[task.status] ?? { color: T.textMuted, variant: "default" as const };
+  // Shimmer fires while the task is blocked on an external signal the user
+  // controls: a pending review waiting for approval, or an in_progress task
+  // that is genuinely running server-side. When the review is resolved or
+  // task moves to done/failed, the shimmer goes away on its own.
+  const isWaiting = task.status === "in_review" || task.status === "pending_review";
 
   return (
-    <div style={{
-      background: T.sidebar,
-      border: `1px solid ${T.border}`,
-      borderRadius: T.r,
-      overflow: "hidden",
-    }}>
+    <ShimmerOverlay
+      active={isWaiting}
+      radius={T.r}
+      style={{
+        background: T.sidebar,
+        border: `1px solid ${T.border}`,
+        borderRadius: T.r,
+      }}
+    >
       {/* Header — always visible */}
       <div
         onClick={() => setExpanded(v => !v)}
@@ -171,6 +180,7 @@ export default function ExpandableTaskCard({
             {([
               { id: "detaljer" as TaskTab, label: "Detaljer", icon: <FileText size={12} /> },
               { id: "rapporter" as TaskTab, label: "Rapporter", icon: <Terminal size={12} /> },
+              { id: "review" as TaskTab, label: "Review", icon: <CheckSquare size={12} /> },
               { id: "logg" as TaskTab, label: "Logg", icon: <Clock size={12} /> },
               { id: "deloppgaver" as TaskTab, label: "Deloppgaver", icon: <GitBranch size={12} /> },
             ]).map((tab, i, arr) => (
@@ -427,6 +437,86 @@ export default function ExpandableTaskCard({
               </div>
             )}
 
+            {activeTab === "review" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: S.md }}>
+                {review ? (
+                  <ShimmerOverlay
+                    active={review.status === "pending"}
+                    radius={T.r}
+                    style={{
+                      border: `1px solid ${T.border}`,
+                      borderRadius: T.r,
+                    }}
+                  >
+                    <div style={{ padding: S.lg, display: "flex", flexDirection: "column", gap: S.md }}>
+                      {/* Summary row: score + files + status */}
+                      <div style={{ display: "flex", gap: S.lg, alignItems: "center", flexWrap: "wrap" }}>
+                        {review.qualityScore != null && (
+                          <div>
+                            <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 4 }}>Kvalitet</div>
+                            <div style={{
+                              fontSize: 28, fontWeight: 700,
+                              color: review.qualityScore >= 8 ? T.success : review.qualityScore >= 6 ? T.warning : T.error,
+                            }}>
+                              {review.qualityScore}/10
+                            </div>
+                          </div>
+                        )}
+                        <div>
+                          <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 4 }}>Filer</div>
+                          <div style={{ fontSize: 20, fontWeight: 600, color: T.text }}>{review.fileCount}</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 4 }}>Status</div>
+                          <Tag variant={review.status === "approved" ? "accent" : review.status === "rejected" ? "error" : "default"}>{review.status}</Tag>
+                        </div>
+                      </div>
+
+                      {review.concerns && review.concerns.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>Bekymringer</div>
+                          {review.concerns.map((c, i) => (
+                            <div key={i} style={{
+                              fontSize: 12, color: T.textSec, lineHeight: 1.5,
+                              paddingLeft: 10, borderLeft: `2px solid ${T.warning}`, marginBottom: 4,
+                            }}>{c}</div>
+                          ))}
+                        </div>
+                      )}
+
+                      {review.documentation && (
+                        <div>
+                          <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>Dokumentasjon</div>
+                          <div style={{ fontSize: 12, color: T.textSec, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                            {review.documentation}
+                          </div>
+                        </div>
+                      )}
+
+                      {showReviewActions && task.reviewId && (
+                        <div style={{ display: "flex", gap: S.sm, borderTop: `1px solid ${T.border}`, paddingTop: S.md }}>
+                          {onApprove && <Btn variant="primary" size="sm" onClick={() => onApprove(task.reviewId!)}>Godkjenn</Btn>}
+                          {onRequestChanges && <Btn size="sm" onClick={() => onRequestChanges(task.reviewId!)}>Be om endringer</Btn>}
+                          {onReject && <Btn size="sm" style={{ color: T.error }} onClick={() => onReject(task.reviewId!)}>Avvis</Btn>}
+                        </div>
+                      )}
+                    </div>
+                  </ShimmerOverlay>
+                ) : (
+                  <div style={{
+                    padding: `${S.lg}px ${S.md}px`,
+                    textAlign: "center",
+                    fontSize: 13,
+                    color: T.textFaint,
+                    border: `1px dashed ${T.border}`,
+                    borderRadius: T.r,
+                  }}>
+                    Ingen reviews enda
+                  </div>
+                )}
+              </div>
+            )}
+
             {activeTab === "logg" && (
               <div style={{ display: "flex", flexDirection: "column", gap: S.md }}>
                 {/* Timeline info */}
@@ -535,6 +625,6 @@ export default function ExpandableTaskCard({
           </div>
         </div>
       )}
-    </div>
+    </ShimmerOverlay>
   );
 }

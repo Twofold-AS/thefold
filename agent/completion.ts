@@ -573,11 +573,14 @@ export async function maybeDistill(
       `Attempts: ${ctx.totalAttempts}`,
     ].join("\n");
 
+    // Route model selection through smart-select (was hardcoded
+    // "claude-haiku-4-5" which missed the DB cache and silently fell back
+    // with cost=0 logs). ai.chat's internal smartSelect will pick a
+    // review-tagged model here since we pass no model.
     const response = await ai.chat({
       messages: [{ role: "user", content: prompt }],
       memoryContext: [],
       systemContext: "agent_review",
-      model: "claude-haiku-4-5",
     });
 
     // Parse JSON from AI response

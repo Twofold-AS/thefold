@@ -13,8 +13,9 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import log from "encore.dev/log";
-import { estimateCost } from "../ai/router";
+import { estimateCost, getCapabilities } from "../ai/router";
 import { logTokenUsage } from "../ai/call";
+import { formatImageBlock } from "../ai/vision";
 import type { AgentToolContext } from "./agent-tool-types";
 import { agentEventBus } from "./event-bus";
 import { createAgentEvent } from "./events";
@@ -24,7 +25,125 @@ import {
   getProviderApiKey,
 } from "../ai/provider-registry";
 import { toolRegistry } from "../ai/tools/index";
-import type { ToolContext } from "../ai/tools/index";
+import type { Tool, ToolContext } from "../ai/tools/index";
+
+/**
+ * Filter the agent tool-registry based on projectType. Keeps tool surface
+ * aligned with what the project can actually accept:
+ *
+ *   - code         → all tools except framer_*
+ *   - framer       → all tools except repo_* and github-write tools
+ *                    (framer projects have no companion repo yet — a lazy
+ *                     ensureProjectRepo happens inside repo_write_file if
+ *                     the agent ever calls it, but by default we steer the
+ *                     AI away from that path)
+ *   - framer_figma → both framer_* and repo_* available (hybrid)
+ *   - figma        → no framer_* (figma has its own MCP), repo_* allowed
+ *   - undefined    → no filter applied (legacy behaviour)
+ *
+ * The REPO_WRITE_TOOLS list is small because most "other code tools"
+ * (read-file, search-code, get-tree) are safe to keep available on framer
+ * projects — the AI might want to inspect an existing repo for reference.
+ * The write-side is what we gate.
+ */
+const REPO_WRITE_TOOLS = new Set<string>([
+  "repo_write_file",
+  "repo_create_pr",
+]);
+
+const FRAMER_TOOLS_PREFIX = "framer_";
+
+function filterByProjectType(
+  tools: Tool<unknown>[],
+  projectType: "code" | "framer" | "figma" | "framer_figma" | undefined,
+): Tool<unknown>[] {
+  if (!projectType) return tools;
+  return tools.filter((t) => {
+    const isFramerTool = t.name.startsWith(FRAMER_TOOLS_PREFIX);
+    const isRepoWriteTool = REPO_WRITE_TOOLS.has(t.name);
+
+    switch (projectType) {
+      case "code":
+        return !isFramerTool;
+      case "framer":
+        return !isRepoWriteTool;
+      case "framer_figma":
+        return true; // hybrid — both sets available
+      case "figma":
+        return !isFramerTool;
+      default:
+        return true;
+    }
+  });
+}
+
+/**
+ * Mode-based tool filter. Layered on top of filterByProjectType.
+ *
+ *  - "auto": hide request_human_clarification so the agent runs end-to-end
+ *  - "plan": only task_plan is visible — no side-effects, plan is the deliverable
+ *  - "incognito": read-only. Strip every persisting tool (writes, publishes,
+ *    memory saves, task create/start, plan mutations)
+ *  - "agents"/"default"/undefined: no filter
+ */
+const INCOGNITO_WRITE_TOOLS = new Set<string>([
+  "repo_write_file",
+  "repo_create_pr",
+  "framer_create_code_file",
+  "framer_set_file_content",
+  "framer_publish",
+  "framer_deploy",
+  "create_task",
+  "start_task",
+  "save_insight",
+  "save_decision",
+  "memory_store",
+  "execute_project_plan",
+  "revise_project_plan",
+]);
+
+function filterByMode(
+  tools: Tool<unknown>[],
+  mode: "auto" | "plan" | "agents" | "incognito" | "default" | undefined,
+): Tool<unknown>[] {
+  if (!mode || mode === "default" || mode === "agents") return tools;
+  if (mode === "auto") {
+    return tools.filter((t) => t.name !== "request_human_clarification");
+  }
+  if (mode === "plan") {
+    return tools.filter((t) => t.name === "task_plan");
+  }
+  if (mode === "incognito") {
+    return tools.filter((t) => !INCOGNITO_WRITE_TOOLS.has(t.name));
+  }
+  return tools;
+}
+
+/**
+ * Parse a JSON tool-result payload and return any image URLs the tool
+ * emitted. web_scrape emits `screenshotUrl` + `images[]`; future preview
+ * tools (Round 4d) may emit `previewScreenshotUrl` etc. Anything falsy is
+ * dropped. Caps at 3 images to keep the next turn from ballooning.
+ */
+function extractImageUrlsFromResult(resultJson: string): string[] {
+  try {
+    const parsed = JSON.parse(resultJson) as Record<string, unknown>;
+    const urls: string[] = [];
+    for (const key of ["screenshotUrl", "previewScreenshotUrl"]) {
+      const v = parsed[key];
+      if (typeof v === "string" && v.startsWith("http")) urls.push(v);
+    }
+    const imgs = parsed.images;
+    if (Array.isArray(imgs)) {
+      for (const u of imgs.slice(0, 2)) {
+        if (typeof u === "string" && u.startsWith("http")) urls.push(u);
+      }
+    }
+    return urls.slice(0, 3);
+  } catch {
+    return [];
+  }
+}
 
 // Internal shape returned by the dispatcher.
 interface DispatcherResult {
@@ -67,6 +186,9 @@ async function executeViaDispatcher(
     conversationId: toolCtx.conversationId,
     repoName: toolCtx.repoName,
     repoOwner: toolCtx.repoOwner,
+    projectId: toolCtx.projectId,
+    projectType: toolCtx.projectType,
+    mode: toolCtx.mode,
     emit: (eventType: string, data: unknown) => {
       agentEventBus.emit(
         streamKey,
@@ -112,6 +234,32 @@ async function executeViaDispatcher(
 // --- Constants ---
 export const MAX_TOOL_LOOPS = 20;
 
+/**
+ * Warn when cumulative message history grows past this threshold (in approx tokens).
+ * 1 token ≈ 4 chars. 150k tokens ≈ 600k chars — well above cache-friendly range.
+ * This helps diagnose monolithic-call blowups (e.g. the 946k-token events seen
+ * when the AI reads many large files and their full contents accumulate as
+ * tool_result blocks in the message history).
+ */
+const MESSAGE_HISTORY_WARN_TOKENS = 150_000;
+
+function estimateMessageTokens(messages: unknown[]): number {
+  let chars = 0;
+  for (const m of messages) {
+    if (!m || typeof m !== "object") continue;
+    const msg = m as { content?: unknown };
+    if (typeof msg.content === "string") {
+      chars += msg.content.length;
+    } else if (Array.isArray(msg.content)) {
+      for (const b of msg.content) {
+        if (typeof b === "string") chars += b.length;
+        else if (b && typeof b === "object") chars += JSON.stringify(b).length;
+      }
+    }
+  }
+  return Math.ceil(chars / 4);
+}
+
 // --- Types ---
 
 export interface ToolLoopMessage {
@@ -130,6 +278,9 @@ export interface ToolLoopOptions {
   toolContext: AgentToolContext;
   /** Override max loops (default: MAX_TOOL_LOOPS = 20) */
   maxLoops?: number;
+  /** When false, strip web_scrape tool from the tool list for this task.
+   *  Default: undefined → keep the tool available. Matches chat.firecrawlEnabled. */
+  firecrawlEnabled?: boolean;
 }
 
 export interface ToolLoopResult {
@@ -219,14 +370,35 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
   ];
 
   // All agent tools now registry-backed (Commit 12c).
-  const combinedAnthropicTools = toolRegistry.toAnthropicFormat(
-    toolRegistry.forSurface("agent"),
-  ) as Anthropic.Tool[];
+  // Strip web_scrape when user has explicitly disabled it — prevents the AI
+  // from trying to call a tool it can't actually use.
+  let agentTools = toolRegistry.forSurface("agent");
+  if (options.firecrawlEnabled === false) {
+    agentTools = agentTools.filter((t) => t.name !== "web_scrape");
+  }
+  // Filter by projectType — framer-only projects hide repo_write_*, code
+  // projects hide framer_*, framer_figma keeps both.
+  agentTools = filterByProjectType(agentTools, options.toolContext.projectType);
+  // Mode-based filter on top (auto/plan/incognito).
+  agentTools = filterByMode(agentTools, options.toolContext.mode);
+  const combinedAnthropicTools = toolRegistry.toAnthropicFormat(agentTools) as Anthropic.Tool[];
 
   for (let loop = 0; loop < maxLoops; loop++) {
+    const estInputTokens = estimateMessageTokens(messages);
+    if (estInputTokens > MESSAGE_HISTORY_WARN_TOKENS) {
+      log.warn("agent tool loop: message history is large", {
+        loop: loop + 1,
+        estInputTokens,
+        messageCount: messages.length,
+        toolsSoFar: toolsUsed.length,
+        conversationId: options.toolContext.conversationId,
+      });
+    }
+
     log.info("agent tool loop: iteration", {
       loop: loop + 1,
       maxLoops,
+      estInputTokens,
       toolsSoFar: toolsUsed.length,
       conversationId: options.toolContext.conversationId,
     });
@@ -367,10 +539,43 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
         } catch { /* non-critical */ }
       }
 
+      // Vision-plumbing: if the tool-result payload contains image URLs AND
+      // the routed model supports vision, attach the URLs as image blocks
+      // inside the tool_result content so the AI can see them on its next
+      // turn. Provider-agnostic: we route through formatImageBlock() so the
+      // same call site works for Anthropic, OpenAI, Moonshot, MiniMax, etc.
+      // Gemini returns null from formatImageBlock (needs base64 inline bytes,
+      // not URL) — in that case we keep text-only, and the URL is still
+      // visible to the model as part of the JSON payload.
+      let toolResultContent: Anthropic.ToolResultBlockParam["content"] = result.content;
+      if (!result.isError) {
+        const imageUrls = extractImageUrlsFromResult(result.content);
+        if (imageUrls.length > 0 && getCapabilities(options.model)?.vision === true) {
+          const imageBlocks = imageUrls
+            .map((url) => formatImageBlock("anthropic", url))
+            .filter((b): b is NonNullable<ReturnType<typeof formatImageBlock>> => b !== null);
+          if (imageBlocks.length > 0) {
+            // Anthropic tool_result content accepts a union of text + image
+            // blocks. formatImageBlock("anthropic", ...) produces the exact
+            // shape Anthropic expects, so the cast is safe.
+            toolResultContent = [
+              { type: "text", text: result.content },
+              ...(imageBlocks as Anthropic.ImageBlockParam[]),
+            ];
+            log.info("tool-loop: attached images to tool_result", {
+              toolName,
+              imageCount: imageBlocks.length,
+              provider: "anthropic",
+              model: options.model,
+            });
+          }
+        }
+      }
+
       toolResults.push({
         type: "tool_result",
         tool_use_id: block.id,
-        content: result.content,
+        content: toolResultContent,
         is_error: result.isError,
       });
 
@@ -490,13 +695,26 @@ async function runOpenAICompatAgentToolLoop(
   }));
 
   // All agent tools registry-backed (Commit 12c).
-  const tools = toolRegistry.toOpenAIFormat(
-    toolRegistry.forSurface("agent"),
-  );
+  // Same firecrawl + projectType gates as the Anthropic path above.
+  let agentToolsOai = toolRegistry.forSurface("agent");
+  if (options.firecrawlEnabled === false) {
+    agentToolsOai = agentToolsOai.filter((t) => t.name !== "web_scrape");
+  }
+  agentToolsOai = filterByProjectType(agentToolsOai, options.toolContext.projectType);
+  agentToolsOai = filterByMode(agentToolsOai, options.toolContext.mode);
+  const tools = toolRegistry.toOpenAIFormat(agentToolsOai);
 
+  // OpenAI-compat accepts either plain string content OR a content array
+  // of { type: "text" | "image_url", ... } blocks. The multi-part form is
+  // required for vision on OpenAI, Moonshot, MiniMax, OpenRouter — tool
+  // messages themselves stay string-only, so we inject images in a
+  // follow-up user turn.
+  type OAIMessagePart =
+    | { type: "text"; text: string }
+    | { type: "image_url"; image_url: { url: string } };
   type OAIMessage = {
     role: "system" | "user" | "assistant" | "tool";
-    content: string | null;
+    content: string | OAIMessagePart[] | null;
     tool_calls?: Array<{
       id: string;
       type: "function";
@@ -709,6 +927,37 @@ async function runOpenAICompatAgentToolLoop(
         content: result.content,
       });
 
+      // Vision-plumbing (provider-agnostic): tool messages in the OpenAI
+      // wire format must be plain strings, so we inject a follow-up user
+      // turn carrying the image blocks via formatImageBlock(). Gemini
+      // returns null (needs inline base64, not URL) → fall through to
+      // text-only; the URLs remain visible inside the tool JSON payload.
+      if (!result.isError) {
+        const imageUrls = extractImageUrlsFromResult(result.content);
+        if (imageUrls.length > 0 && getCapabilities(options.model)?.vision === true) {
+          const blocks = imageUrls
+            .map((url) => formatImageBlock(providerId, url))
+            .filter((b): b is NonNullable<ReturnType<typeof formatImageBlock>> => b !== null);
+          const imageUrlBlocks = blocks.filter(
+            (b): b is { type: "image_url"; image_url: { url: string } } =>
+              "type" in b && b.type === "image_url",
+          );
+          if (imageUrlBlocks.length > 0) {
+            const parts: OAIMessagePart[] = [
+              { type: "text", text: `Images returned by tool "${toolName}":` },
+              ...imageUrlBlocks,
+            ];
+            oaiMessages.push({ role: "user", content: parts });
+            log.info("tool-loop: attached images via follow-up user turn", {
+              toolName,
+              imageCount: imageUrlBlocks.length,
+              provider: providerId,
+              model: options.model,
+            });
+          }
+        }
+      }
+
       // Commit 20: pause signal from tool handler — exit the loop cleanly.
       if (result.stopReason === "paused_for_clarification") {
         agentEventBus.emit(streamKey, createAgentEvent("agent.status", {
@@ -811,9 +1060,11 @@ export function buildToolLoopInitialMessage(opts: {
   }
 
   if (opts.memoryContext && opts.memoryContext.length > 0) {
+    const PER_MEMORY_CAP = 1_200;
     msg += `## Relevant memories from previous tasks\n`;
     opts.memoryContext.slice(0, 5).forEach((m, i) => {
-      msg += `${i + 1}. ${m}\n`;
+      const capped = m.length > PER_MEMORY_CAP ? `${m.slice(0, PER_MEMORY_CAP)}…` : m;
+      msg += `${i + 1}. ${capped}\n`;
     });
     msg += "\n";
   }

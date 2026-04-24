@@ -66,6 +66,13 @@ import { listUploadsTool } from "./uploads/list-uploads";
 import { readUploadedContentTool } from "./uploads/read-uploaded-content";
 import { diffUploadsTool } from "./uploads/diff-uploads";
 
+// Framer tools — Server API integration (agent surface, framer projects only)
+import { framerCreateCodeFileTool } from "./framer/create-code-file";
+import { framerSetFileContentTool } from "./framer/set-file-content";
+import { framerListCodeFilesTool } from "./framer/list-code-files";
+import { framerPublishTool } from "./framer/publish";
+import { framerDeployTool } from "./framer/deploy";
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyTool = Tool<any>;
 
@@ -138,6 +145,12 @@ const registeredTools: AnyTool[] = [
   listUploadsTool,
   readUploadedContentTool,
   diffUploadsTool,
+  // Framer tools (filtered by projectType in tool-loop)
+  framerCreateCodeFileTool,
+  framerSetFileContentTool,
+  framerListCodeFilesTool,
+  framerPublishTool,
+  framerDeployTool,
 ];
 
 export const toolRegistry = new ToolRegistry(registeredTools);

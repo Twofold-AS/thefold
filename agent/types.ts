@@ -87,6 +87,11 @@ export interface AgentExecutionContext {
   jobId?: string;
   // Fast-path micro-decision (D8)
   fastPathPattern?: string;
+  // Active project (projects-service). Set on task-start when the task is
+  // scoped to a specific project. Drives tool-registry filtering and lazy
+  // ensureProjectRepo inside repo_write_file.
+  projectId?: string;
+  projectType?: "code" | "framer" | "figma" | "framer_figma";
 }
 
 export interface RetryProductivity {

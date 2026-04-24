@@ -13,6 +13,13 @@ export interface StreamMessage {
   role: "assistant";
   content: string;
   model?: string;
+  /** Signals a fully-finalised message (from chat.message_update) vs a
+   *  streaming delta. Allows MessageList to dedupe + merge in-place. */
+  completed?: boolean;
+  costUsd?: number;
+  tokens?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  activeSkills?: Array<{ id: string; name: string; description?: string }>;
+  toolsUsed?: string[];
 }
 
 export interface ToolCall {
@@ -25,6 +32,12 @@ export interface ToolCall {
   status: "running" | "done" | "error";
 }
 
+export interface ActiveSkill {
+  id: string;
+  name: string;
+  description?: string;
+}
+
 interface AgentStreamState {
   messages: StreamMessage[];
   toolCalls: ToolCall[];
@@ -34,6 +47,7 @@ interface AgentStreamState {
   thinkingText: string | null;
   agentStartedTaskId: string | null;
   stalled: boolean; // true when no SSE event received for STALL_TIMEOUT_MS
+  activeSkills: ActiveSkill[]; // populated by agent.skills_active event at task-start
 }
 
 interface UseAgentStreamOptions {
@@ -50,6 +64,7 @@ const INITIAL_STATE: AgentStreamState = {
   thinkingText: null,
   agentStartedTaskId: null,
   stalled: false,
+  activeSkills: [],
 };
 
 export function useAgentStream(
@@ -218,6 +233,67 @@ export function useAgentStream(
         }
       });
 
+      // Chat placeholder finalised — full response content + metadata. Used
+      // by MessageList to replace a "Tenker..."-placeholder bubble in-place
+      // without waiting for a DB re-fetch. Deduped by messageId: if the
+      // same ID already exists in state we update-in-place; otherwise we
+      // append. This is the canonical chat-flow completion signal now.
+      es.addEventListener("chat.message_update", (e: MessageEvent) => {
+        resetStallTimer();
+        try {
+          const raw = JSON.parse(e.data);
+          const data = raw.data ?? raw;
+          if (!data.messageId) return;
+          setState((prev) => {
+            const id = data.messageId as string;
+            const existing = prev.messages.findIndex((m) => m.id === id);
+            const incoming: StreamMessage = {
+              id,
+              role: "assistant",
+              content: data.content ?? "",
+              model: data.model,
+              completed: true,
+              costUsd: typeof data.costUsd === "number" ? data.costUsd : undefined,
+              tokens: data.tokens,
+              activeSkills: Array.isArray(data.activeSkills) ? data.activeSkills : undefined,
+              toolsUsed: Array.isArray(data.toolsUsed) ? data.toolsUsed : undefined,
+            };
+            const next = [...prev.messages];
+            if (existing >= 0) {
+              next[existing] = { ...next[existing], ...incoming };
+            } else {
+              next.push(incoming);
+            }
+            return { ...prev, messages: next, thinkingText: null };
+          });
+          retryCountRef.current = 0;
+        } catch {
+          // malformed event — ignore
+        }
+      });
+
+      // Active-skills announcement — emitted once at task-start by the agent
+      // after buildSystemPromptWithPipeline resolves the skill set. Drives
+      // the "Aktive skills:" badge row in AgentStream.
+      es.addEventListener("agent.skills_active", (e: MessageEvent) => {
+        resetStallTimer();
+        try {
+          const raw = JSON.parse(e.data);
+          const payload = raw.data ?? raw;
+          const skills = Array.isArray(payload.skills) ? payload.skills : [];
+          setState((prev) => ({
+            ...prev,
+            activeSkills: skills.map((s: { id: string; name: string; description?: string }) => ({
+              id: s.id,
+              name: s.name,
+              description: s.description,
+            })),
+          }));
+        } catch {
+          // ignore
+        }
+      });
+
       // Phase / status update.
       // Wire format: { timestamp, data: { status, phase, message, loop } }
       es.addEventListener("agent.status", (e: MessageEvent) => {
@@ -349,5 +425,6 @@ export function useAgentStream(
     thinkingText: state.thinkingText,
     agentStartedTaskId: state.agentStartedTaskId,
     stalled: state.stalled,
+    activeSkills: state.activeSkills,
   };
 }

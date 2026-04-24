@@ -216,6 +216,10 @@ export default function ChatInput({
   }, [v, autoResize]);
 
   const doSend = () => {
+    // Guard against double-submit: if a request is in-flight (`isLoading`),
+    // no-op. Users spamming Enter or clicking Send rapidly would otherwise
+    // emit two send() calls and produce duplicate backend rows + responses.
+    if (isLoading) return;
     if (v && onSubmit) {
       onSubmit(v, { planMode, firecrawlEnabled });
       setV("");
@@ -342,14 +346,15 @@ export default function ChatInput({
                 return;
               }
             }
-            // Cmd+Enter (Mac) or Ctrl+Enter (Windows) — always send
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && v) {
+            // Cmd+Enter (Mac) or Ctrl+Enter (Windows) — always send.
+            // Skip when a request is in-flight (prevents double-submit).
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && v && !isLoading) {
               e.preventDefault();
               doSend();
               return;
             }
-            // Plain Enter without Shift — send
-            if (e.key === "Enter" && !e.shiftKey && v) {
+            // Plain Enter without Shift — send. Same in-flight guard.
+            if (e.key === "Enter" && !e.shiftKey && v && !isLoading) {
               e.preventDefault();
               doSend();
               return;

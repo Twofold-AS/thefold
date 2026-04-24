@@ -8,7 +8,7 @@
 
 import { type CSSProperties, useState } from "react";
 import { T } from "@/lib/tokens";
-import { Check, AlertTriangle, Loader2, ChevronRight, MinusCircle, Info } from "lucide-react";
+import { Check, AlertTriangle, Loader2, ChevronRight, MinusCircle, Info, CornerDownRight } from "lucide-react";
 import type { LineStatus, ToolCallLineData } from "./types";
 
 export interface ToolCallLineProps {
@@ -208,10 +208,13 @@ export default function ToolCallLine({ data, onClick }: ToolCallLineProps) {
             flexShrink: 0,
             opacity: hovered ? 1 : 0,
             transition: "opacity 150ms ease",
-            textDecoration: "underline",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 3,
           }}
         >
-          Detaljer
+          <CornerDownRight size={12} />
+          <span style={{ textDecoration: "underline" }}>Detaljer</span>
         </span>
       </div>
     </>

@@ -8,6 +8,7 @@ import SectionLabel from "@/components/SectionLabel";
 import Btn from "@/components/Btn";
 import Tag from "@/components/Tag";
 import Skeleton from "@/components/Skeleton";
+import ShimmerOverlay from "@/components/ShimmerOverlay";
 import { useApiData } from "@/lib/hooks";
 import {
   getReview,
@@ -178,10 +179,17 @@ export default function ReviewDetailPage({ params }: { params: Promise<{ id: str
           </div>
         </Link>
 
-        {/* Header card */}
+        {/* Header card — shimmer while awaiting user decision */}
+        <ShimmerOverlay
+          active={isPending}
+          radius={T.r}
+          style={{
+            border: `1px solid ${T.border}`, borderRadius: T.r,
+            marginBottom: 20,
+          }}
+        >
         <div style={{
-          border: `1px solid ${T.border}`, borderRadius: T.r,
-          padding: "20px 24px", marginBottom: 20,
+          padding: "20px 24px",
           display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 20,
         }}>
           <div style={{ flex: 1, minWidth: 0 }}>
@@ -238,6 +246,7 @@ export default function ReviewDetailPage({ params }: { params: Promise<{ id: str
             </div>
           )}
         </div>
+        </ShimmerOverlay>
       </div>
 
       <GR>

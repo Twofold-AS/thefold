@@ -11,9 +11,15 @@ export interface PatternMatch {
 }
 
 // --- Model constants ---
-
-const FAST_MODEL = "claude-haiku-4-5";
-const STANDARD_MODEL = "claude-sonnet-4-5";
+//
+// Full DB-model-IDs so estimateCost finds cache entries + smartSelect can
+// route via the registry. Previously these were base slugs (e.g.
+// "claude-haiku-4-5") which produced `estimateCost: model not in cache,
+// cost defaults to 0` warnings because the DB only stores full versioned
+// IDs. If these models are disabled in DB, smartSelect's fallback picks the
+// cheapest enabled alternative instead of using these literally.
+const FAST_MODEL = "claude-haiku-4-5-20251001";
+const STANDARD_MODEL = "claude-sonnet-4-5-20250929";
 
 // --- Pattern definitions ---
 

@@ -25,7 +25,8 @@ export type ToolCategory =
   | "build"      // build_create_sandbox, validate_code, etc (agent)
   | "skills"     // search_skills, activate_skill (agent)
   | "web"        // web_scrape (Firecrawl), future: web_search
-  | "uploads";   // read_uploaded_content, list_uploads
+  | "uploads"    // read_uploaded_content, list_uploads
+  | "framer";    // framer_create_code_file, framer_publish, etc (agent, design-platform)
 
 /** Kontekst som passes til hver handler */
 export interface ToolContext {
@@ -39,6 +40,16 @@ export interface ToolContext {
   /** Repo-info, hvis verktøyet trenger det */
   repoOwner?: string;
   repoName?: string;
+  /** Aktivt prosjekt (fra projects-service). Brukt av framer_* og av
+   *  repo_write_file-tool for lazy ensureProjectRepo-oppretting. */
+  projectId?: string;
+  /** Prosjekt-type — code | framer | figma | framer_figma. Settes av agent
+   *  når den starter en oppgave i et prosjekt. Brukes til å filtrere tool-
+   *  registry (tool-filter i tool-loop). */
+  projectType?: "code" | "framer" | "figma" | "framer_figma";
+  /** Agent-mode (auto/plan/agents/incognito/default) — propageres for
+   *  informasjonsformål hvis et tool vil oppføre seg annerledes i incognito. */
+  mode?: "auto" | "plan" | "agents" | "incognito" | "default";
   /** Aktiv plan, hvis det kjører en */
   activePlanId?: string | null;
   /** Side-effekt-magi — set av tool-loopen mellom iterasjoner */

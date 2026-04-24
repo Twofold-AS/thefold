@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, Suspense, useCallback } from "react";
+import { useState, useEffect, useRef, useMemo, Suspense, useCallback } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { buildUrl } from "@/lib/url-utils";
 import { T } from "@/lib/tokens";
@@ -232,7 +232,7 @@ function ChatPageInner() {
   });
 
   // SSE streaming
-  const { messages: sseMessages, status: streamStatus, agentStartedTaskId, stalled: streamStalled } = useAgentStream(
+  const { messages: sseMessages, status: streamStatus, agentStartedTaskId, stalled: streamStalled, activeSkills: streamActiveSkills } = useAgentStream(
     sending ? (activeTaskId || ac) : null,
     {
       onDone: async () => {
@@ -282,25 +282,80 @@ function ChatPageInner() {
   // Note: trailing refresh timers removed — SSE delivers content immediately (agent.message)
   // and agent.done already calls refreshMsgs() once to sync DB state. No extra polling needed.
 
-  // Convert SSE messages to Message shape
-  const sseAsMsgs: Message[] = ac
-    ? sseMessages.map((sm) => ({
-        id: sm.id,
-        conversationId: ac,
-        role: sm.role,
+  // Merge DB messages + SSE messages. Regression from the prior round: the
+  // first cut of this logic could in theory touch user messages (role="user")
+  // during the map step, and the useMemo-less recomputation recreated the
+  // whole array on every SSE event — producing reference-instability that
+  // broke downstream memoisation + hid the optimistic user message in some
+  // render orders.
+  //
+  // Rules here, in order:
+  //   1. Build assistant-only SSE index — user messages NEVER come from SSE.
+  //   2. For each DB msg, only merge when ALL of these hold:
+  //        - the DB msg is assistant
+  //        - SSE has a matching id + the event was `chat.message_update`
+  //          (completed === true), NOT a mid-stream delta
+  //        - the DB content is empty (placeholder has not been re-fetched)
+  //     Anything else passes through untouched.
+  //   3. Append any SSE assistant message that has NO matching DB row.
+  //   4. Memoise on (msgs, sseMessages, ac) so identity is stable across
+  //      unrelated re-renders.
+  const merged: Message[] = useMemo(() => {
+    if (!ac) return msgs;
+
+    // Shape every SSE message as the DB Message type for the append path.
+    const ssEMsgs: Message[] = sseMessages.map((sm) => ({
+      id: sm.id,
+      conversationId: ac,
+      role: sm.role,
+      content: sm.content,
+      messageType: "chat" as const,
+      metadata: sm.completed
+        ? JSON.stringify({
+            model: sm.model,
+            cost: sm.costUsd,
+            tokens: sm.tokens,
+            activeSkills: sm.activeSkills,
+            toolsUsed: sm.toolsUsed,
+          })
+        : null,
+      createdAt: new Date().toISOString(),
+    }));
+
+    // Index ONLY completed SSE assistant messages — mid-stream deltas
+    // without `completed` must never overwrite anything.
+    const completedSseById = new Map<string, { content: string; metadata: string | null }>();
+    sseMessages.forEach((sm) => {
+      if (!sm.completed) return;
+      completedSseById.set(sm.id, {
         content: sm.content,
-        messageType: "chat" as const,
-        metadata: null,
-        createdAt: new Date().toISOString(),
-      }))
-    : [];
+        metadata: JSON.stringify({
+          model: sm.model,
+          cost: sm.costUsd,
+          tokens: sm.tokens,
+          activeSkills: sm.activeSkills,
+          toolsUsed: sm.toolsUsed,
+        }),
+      });
+    });
 
-  const dbIds = new Set(msgs.map((m) => m.id));
-  const filteredSseMsgs = sseAsMsgs.filter((m) => !dbIds.has(m.id));
+    // Enrich matching DB messages in-place (only empty-content assistants).
+    const enrichedMsgs = msgs.map((m) => {
+      if (m.role !== "assistant") return m;
+      const sseCompleted = completedSseById.get(m.id);
+      if (!sseCompleted) return m;
+      const dbHasContent = (m.content ?? "").trim().length > 0;
+      if (dbHasContent) return m;
+      return { ...m, content: sseCompleted.content, metadata: sseCompleted.metadata };
+    });
 
-  // Merge DB messages + SSE messages. Optimistic user messages live inside msgs
-  // (pushed there by setMsgData before sendMessage resolves), so no separate layer.
-  const merged = [...msgs, ...filteredSseMsgs];
+    // Append SSE messages that don't have a DB counterpart (streaming before
+    // refreshMsgs finishes). Still scoped to assistant role by type.
+    const dbIds = new Set(msgs.map((m) => m.id));
+    const newSseOnly = ssEMsgs.filter((m) => !dbIds.has(m.id));
+
+    return [...enrichedMsgs, ...newSseOnly];
+  }, [ac, msgs, sseMessages]);
 
   // Deduplicate user messages by trimmed content — optimistic copy in msgs and the
   // server-confirmed copy from refreshMsgs() can briefly co-exist with different ids.
@@ -419,7 +474,14 @@ function ChatPageInner() {
       optForNewConvRef.current = { convId, msg: optimisticMsg };
       skipNextFetchRef.current = true;
       setAc(convId);
-      router.replace(buildUrl(pathname, { conv: convId }), { scroll: false });
+      // Preserve any existing ?project= when swapping ?conv= so the sidebar
+      // doesn't reset to the projects-list after a send. Previously this
+      // blew away `project` because buildUrl overwrote the full search string.
+      const carryProject = selectedProjectId ?? projectParam ?? null;
+      router.replace(
+        buildUrl(pathname, carryProject ? { conv: convId, project: carryProject } : { conv: convId }),
+        { scroll: false },
+      );
       setMsgData({ messages: [optimisticMsg], hasMore: false });
 
       setSending(true);
@@ -456,8 +518,14 @@ function ChatPageInner() {
     skipNextFetchRef.current = true;
     setAc(convId);
     setNewChat(false);
-    // Persist convId in URL so refresh restores the conversation
-    router.replace(`?conv=${convId}`, { scroll: false });
+    // Persist convId in URL so refresh restores the conversation. Preserve
+    // ?project= so the sidebar keeps its project-focus instead of snapping
+    // back to the global /cowork view after the first send.
+    const carryProject2 = selectedProjectId ?? projectParam ?? null;
+    const nextUrl = carryProject2
+      ? `?conv=${convId}&project=${encodeURIComponent(carryProject2)}`
+      : `?conv=${convId}`;
+    router.replace(nextUrl, { scroll: false });
     setMsgData({ messages: [optimisticMsg], hasMore: false });
     hasSent.current = true;
     setSending(true);
@@ -726,6 +794,7 @@ function ChatPageInner() {
               else url.searchParams.delete("project");
               router.replace(url.pathname + url.search);
             }}
+            activeSkills={streamActiveSkills}
           />
         </div>
       )}

@@ -525,13 +525,15 @@ export const runRepoWatch = api(
           try {
             const pkgFile = await gh.getFile({ owner, repo: repoName, path: "package.json" });
             if (pkgFile?.content) {
+              // Model left unset — ai.chat's smartSelect will pick the
+              // cheapest review-tagged model from the DB. Previously
+              // hardcoded to disabled claude-haiku-4-5-20251001 → cost=0.
               const analysis = await aiClient.chat({
                 messages: [{
                   role: "user",
                   content: `Quickly scan this package.json for breaking version bumps or known CVE-affected packages (e.g. lodash<4.17.21, express<4.18, minimist<1.2.6). Reply JSON only: {"breakingChanges": ["..."], "cveRisks": ["..."]}.\n\n${pkgFile.content.slice(0, 3000)}`,
                 }],
                 systemContext: "direct_chat",
-                model: "claude-haiku-4-5-20251001",
                 memoryContext: [],
               });
 

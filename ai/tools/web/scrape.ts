@@ -17,12 +17,19 @@ const inputSchema = z.object({
     .positive()
     .optional()
     .describe("Max characters to return from page content (default 50000)"),
+  formats: z
+    .array(z.enum(["markdown", "links", "html", "screenshot", "images", "summary"]))
+    .optional()
+    .describe(
+      "Which Firecrawl formats to fetch. Default: ['markdown', 'links']. " +
+      "Add 'screenshot' (full-page image for vision models), 'html' (cleaned HTML), " +
+      "'images' (extracted <img> URLs), or 'summary' (AI-generated summary) as needed. " +
+      "For 'replicate this page' tasks, request all formats.",
+    ),
   screenshot: z
     .boolean()
     .optional()
-    .describe(
-      "When true, also capture a full-page screenshot. Firecrawl returns a hosted URL that vision-capable models can ingest as an image. Default false — costs extra time and money.",
-    ),
+    .describe("DEPRECATED: use formats: ['screenshot'] instead. Kept for back-compat."),
 });
 
 export const webScrapeTool: Tool<z.infer<typeof inputSchema>> = {
@@ -96,7 +103,8 @@ export const webScrapeTool: Tool<z.infer<typeof inputSchema>> = {
         url: input.url,
         maxLength: input.maxLength ?? 50000,
         apiKeyOverride,
-        screenshot: input.screenshot ?? false,
+        formats: input.formats,
+        screenshot: input.screenshot,
       });
 
       // Persist in cache (fire-and-forget).
@@ -108,6 +116,10 @@ export const webScrapeTool: Tool<z.infer<typeof inputSchema>> = {
               url: string; title?: string; contentMd: string;
               links: string[]; wordCount: number; ttlHours?: number;
               screenshotUrl?: string | null;
+              htmlCleaned?: string | null;
+              images?: string[] | null;
+              summary?: string | null;
+              rawResponse?: Record<string, unknown> | null;
             }) => Promise<unknown>;
           }).saveScrape({
             userEmail, conversationId: ctx.conversationId ?? null,
@@ -115,6 +127,10 @@ export const webScrapeTool: Tool<z.infer<typeof inputSchema>> = {
             contentMd: result.content, links: result.links ?? [],
             wordCount: result.metadata.wordCount, ttlHours: 24,
             screenshotUrl: result.screenshotUrl ?? null,
+            htmlCleaned: result.htmlCleaned ?? null,
+            images: result.images ?? null,
+            summary: result.summary ?? null,
+            rawResponse: result.rawResponse ?? null,
           });
         } catch (cacheErr) {
           ctx.log.warn("web_scrape: cache write failed", {
@@ -125,15 +141,31 @@ export const webScrapeTool: Tool<z.infer<typeof inputSchema>> = {
 
       const charCount = result.content.length;
       const truncated = charCount >= (input.maxLength ?? 50000);
+      const extras = [
+        result.screenshotUrl && "+screenshot",
+        result.htmlCleaned && "+html",
+        result.images && `+${result.images.length} images`,
+        result.summary && "+summary",
+      ].filter(Boolean).join(", ");
+
+      const HTML_CAP = 20_000;
+      const htmlForAI = result.htmlCleaned && result.htmlCleaned.length > HTML_CAP
+        ? result.htmlCleaned.slice(0, HTML_CAP) + `\n\n<!-- [truncated at ${HTML_CAP}/${result.htmlCleaned.length} chars] -->`
+        : result.htmlCleaned;
+      const imagesCapped = (result.images ?? []).slice(0, 20);
 
       return {
         success: true,
-        message: `Fetched ${result.title || input.url} (${result.metadata.wordCount} words, ${charCount} chars${truncated ? ", truncated" : ""}${result.screenshotUrl ? ", +screenshot" : ""})`,
+        message: `Fetched ${result.title || input.url} (${result.metadata.wordCount} words, ${charCount} chars${truncated ? ", truncated" : ""}${extras ? `, ${extras}` : ""})`,
         data: {
           url: input.url, title: result.title, content: result.content, links: result.links,
           wordCount: result.metadata.wordCount, language: result.metadata.language,
           truncated, cacheHit: false,
           screenshotUrl: result.screenshotUrl,
+          htmlCleaned: htmlForAI,
+          images: imagesCapped,
+          summary: result.summary,
+          sections: result.sections,
         },
       };
     } catch (err) {

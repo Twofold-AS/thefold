@@ -680,6 +680,35 @@ export const send = api(
   async (req: SendRequest): Promise<SendResponse> => {
     await ensureConversationOwner(req.conversationId, req.projectId, req.scope);
 
+    // Idempotency guard — reject duplicate sends within a 10s window so a
+    // double-submit from the client (retry storm, StrictMode double-render,
+    // rapid Enter-presses) doesn't create two rows + two agent runs. Match
+    // on (conversationId, role=user, exact content). If a matching row was
+    // inserted in the last 10 seconds, return that row instead of inserting
+    // again. Cheap — uses the existing (conversation_id, created_at) index.
+    {
+      const existing = await db.queryRow<Message>`
+        SELECT id, conversation_id as "conversationId", role, content,
+               message_type as "messageType", metadata, created_at as "createdAt",
+               updated_at as "updatedAt"
+        FROM messages
+        WHERE conversation_id = ${req.conversationId}
+          AND role = 'user'
+          AND content = ${req.message}
+          AND created_at > NOW() - INTERVAL '10 seconds'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+      if (existing) {
+        log.warn("chat.send: duplicate send ignored (idempotency window)", {
+          conversationId: req.conversationId,
+          existingMsgId: existing.id,
+          contentLength: req.message.length,
+        });
+        return { message: existing, agentTriggered: false };
+      }
+    }
+
     // Store user message (include skillIds in metadata if present)
     const userMetadata = req.skillIds && req.skillIds.length > 0
       ? JSON.stringify({ skillIds: req.skillIds })
@@ -723,6 +752,46 @@ export const send = api(
         }
       } catch {
         // Non-critical — fall through to normal chat flow
+      }
+    }
+
+    // Designer-scope with a projectId: the frontend's RepoContext may still
+    // hold a stale legacy repoName (e.g. "Krakefjes") from before the user
+    // switched into a Framer project. Override it with whatever github_repo
+    // the project currently holds — but DON'T proactively create a companion
+    // repo here. A pure-Framer conversation should not force a GitHub repo
+    // to exist; that decision is deferred to the first repo_write_file call
+    // inside the agent tool-loop, which calls ensureProjectRepo lazily.
+    if (req.scope === "designer" && req.projectId) {
+      try {
+        const { projects: projectsClient } = await import("~encore/clients");
+        const info = await projectsClient.getProjectInternal({ projectId: req.projectId });
+        const existingRepo = info.project?.githubRepo ?? "";
+        if (existingRepo) {
+          const [owner, name] = existingRepo.split("/");
+          if (owner && name) {
+            log.info("designer-scope: using existing project github_repo", {
+              projectId: req.projectId,
+              was: req.repoName ? `${req.repoOwner}/${req.repoName}` : "(unset)",
+              now: existingRepo,
+            });
+            req = { ...req, repoName: name, repoOwner: owner };
+          }
+        } else {
+          // No companion repo yet — clear stale legacy repo from the request
+          // so the agent sees an empty repoName. repo_write_file will
+          // ensureProjectRepo on demand if the AI actually tries to write.
+          log.info("designer-scope: no companion repo yet, clearing stale request repo", {
+            projectId: req.projectId,
+            stripped: req.repoName ? `${req.repoOwner}/${req.repoName}` : "(none)",
+          });
+          req = { ...req, repoName: "", repoOwner: "" };
+        }
+      } catch (err) {
+        log.warn("designer-scope: getProjectInternal failed, keeping request-provided repo", {
+          projectId: req.projectId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
 
@@ -912,7 +981,13 @@ export const send = api(
 );
 
 // --- Onboarding repo scan (7.4) ---
-
+//
+// DEPRECATED — no longer called from the send-path hot loop. Kept as an
+// intentional helper so cron / manual triggers can still request a full
+// index (e.g. from projects/manifest-updater.ts). The AI now orients itself
+// via repo_* tools when it actually needs repo context, and the background
+// manifest-updater refreshes project_manifests every 6h.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function performOnboardingScan(repoOwner: string, repoName: string, conversationId: string): Promise<void> {
   const { github: gh, memory: mem, ai: aiClient } = await import("~encore/clients");
   const repo = `${repoOwner}/${repoName}`;
@@ -1074,6 +1149,15 @@ async function processAIResponse(
     // Detect intent for richer context
     const intent = detectMessageIntent(userContent);
 
+    // Social-greeting fast-path. Short messages that match a greeting regex
+    // skip memory search, manifest-summary injection, knowledge-rule
+    // injection, and broad orientation. They also signal the prompt layer
+    // to stay in "short reply" register. Without this gate a 4-char "Hei"
+    // produced an 11k-token orient + respond cycle with task-status dumps
+    // and repo summaries.
+    const SOCIAL_GREETING_REGEX = /^(hei|hey|hallo|yo|hi|heisann|god\s?morgen|god\s?kveld|god\s?natt|takk|tack|ok|okay|ja|nei|jepp|yes|no)[\s.\!\?]*$/i;
+    const isSocialGreeting = userContent.length < 20 && SOCIAL_GREETING_REGEX.test(userContent.trim());
+
     // Emit "thinking" status to frontend via SSE (Bug 2 fix)
     agentEvt.emitChatEvent({
       streamKey: conversationId,
@@ -1096,7 +1180,11 @@ async function processAIResponse(
     for await (const row of historyRows) history.push(row);
     history.reverse();
 
-    // Step 3: Resolve skills (try/catch — don't crash on failure)
+    // Step 3: Resolve skills (try/catch — don't crash on failure).
+    // Social greetings cap token-budget at 300 so even heavy skills like
+    // `security` (priority 9) can't bloat the prompt. Complexity hint of 1
+    // lets the resolver's min_complexity gate suppress anything tagged for
+    // more involved work.
     let resolvedSkills = { result: { injectedPrompt: "", injectedSkillIds: [] as string[], tokensUsed: 0, preRunResults: [] as any[], postRunSkills: [] as any[] } };
     try {
       const { skills: skillsClient } = await import("~encore/clients");
@@ -1105,7 +1193,9 @@ async function processAIResponse(
           task: userContent,
           userId: auth.userID,
           repo: repoName,
-          totalTokenBudget: 4000,
+          totalTokenBudget: isSocialGreeting ? 300 : 4000,
+          context: isSocialGreeting ? "chat" : undefined,
+          complexity: isSocialGreeting ? 1 : undefined,
         },
       });
     } catch (e) {
@@ -1114,9 +1204,11 @@ async function processAIResponse(
 
     if (isCancelled(conversationId)) return;
 
-    // Step 4: Search memories — only for complex queries (saves tokens and time)
+    // Step 4: Search memories — only for complex queries (saves tokens and time).
+    // Social greetings never search: a 2-3s memory lookup on "Hei" is both
+    // wasteful and semantically noisy (returns random top-similarity hits).
     let memories: { results: Array<{ content: string; memoryType?: string; decayedScore?: number; createdAt?: string }> } = { results: [] };
-    if (intent === "task_request" || intent === "repo_review" || userContent.length > 100) {
+    if (!isSocialGreeting && (intent === "task_request" || intent === "repo_review" || userContent.length > 100)) {
       try {
         memories = await memory.search({ query: userContent, limit: 5 });
       } catch (e) {
@@ -1124,114 +1216,58 @@ async function processAIResponse(
       }
     }
 
-    // Step 4.1: Onboarding scan — if this is the first interaction with a repo, index it (7.4)
-    if (repoName && repoOwner) {
-      try {
-        const existingRepoMems = await memory.search({
-          query: `repo profile ${repoName}`,
-          limit: 1,
-          sourceRepo: `${repoOwner}/${repoName}`,
-        });
-        const hasRepoProfile = existingRepoMems.results && existingRepoMems.results.length > 0;
+    // Step 4.1: (REMOVED) Proactive onboarding scan on every send.
+    //
+    // Previously we kicked off performOnboardingScan() for every first
+    // interaction with a repo — 10+ github.getFile calls, memory searches,
+    // and two memory.store writes before the AI ever saw the input. That
+    // ran even for "Hei" messages that have nothing to do with the repo.
+    //
+    // Replacement (v3): the AI has repo_get_tree, repo_find_relevant_files,
+    // and repo_read_file as tools. It decides when repo context is actually
+    // needed. For passive context, project_manifests is refreshed in the
+    // background by a cron (see projects/manifest-updater.ts) and surfaced
+    // to the prompt as a small summary — no per-turn scanning.
 
-        if (!hasRepoProfile) {
-          // Fire-and-forget onboarding scan — don't block chat response
-          performOnboardingScan(repoOwner, repoName, conversationId).catch((e) =>
-            console.warn("[onboarding] scan failed:", e)
-          );
-        }
-      } catch {
-        // Non-critical
-      }
-    }
-
-    // Step 4.5: Fetch GitHub context if in repo-chat
+    // Step 4.5: Passive repo-context via cached manifest — NO github.getTree,
+    // NO findRelevantFiles, NO file-fetches on the hot path. The manifest
+    // updater (projects/manifest-updater.ts) keeps this fresh in the
+    // background (cron every 6h + stale-trigger fire-and-forget). When the
+    // AI needs actual file contents, it calls repo_get_tree / repo_read_file
+    // / repo_find_relevant_files itself.
     let repoContext = "";
-
-    if (repoName && repoOwner) {
-      if (isCancelled(conversationId)) return;
-
-      agentEvt.emitChatEvent({
-        streamKey: conversationId,
-        eventType: "agent.status",
-        data: { status: "running", phase: "Henter kontekst" },
-      }).catch(() => {});
-
+    // Social greetings skip manifest-injection entirely — the AI doesn't
+    // need to be primed with repo-summary to say "Hei tilbake".
+    if (!isSocialGreeting && repoName && repoOwner) {
       try {
-        const { github } = await import("~encore/clients");
-
-        // Fetch file tree + find relevant files in parallel
-        let tree: { tree: string[]; treeString: string; empty?: boolean } = { tree: [], treeString: "" };
-        let relevantPaths: string[] = [];
-
-        try {
-          // Step 1: get tree first (findRelevantFiles needs it)
-          tree = await github.getTree({ owner: repoOwner, repo: repoName });
-        } catch (e) {
-          console.warn(`getTree failed for ${repoOwner}/${repoName} (likely empty repo):`, e);
-        }
-
-        if (tree?.tree?.length > 0) {
-          repoContext += `\nFilstruktur for ${repoName} (${tree.tree.length} filer):\n${tree.treeString || tree.tree.join("\n")}`;
-
-          // Step 2: find relevant files (needs tree result)
-          try {
-            const relevant = await github.findRelevantFiles({
-              owner: repoOwner,
-              repo: repoName,
-              taskDescription: userContent,
-              tree: tree.tree,
-            });
-            relevantPaths = (relevant.paths || []).slice(0, 5);
-          } catch {
-            // Fallback to key files below
-          }
-        }
-
-        // Step 3: fetch all relevant files in parallel
-        if (relevantPaths.length > 0) {
-          const fileResults = await Promise.all(
-            relevantPaths.map(async (filePath) => {
-              try {
-                const file = await github.getFile({ owner: repoOwner, repo: repoName, path: filePath });
-                return file?.content ? { path: filePath, content: file.content } : null;
-              } catch {
-                return null;
-              }
-            })
-          );
-          for (const result of fileResults) {
-            if (result) {
-              const trimmed = result.content.split("\n").slice(0, 200).join("\n");
-              repoContext += `\n\n--- ${result.path} ---\n${trimmed}`;
-            }
-          }
-        } else if (tree?.tree?.length === 0 || !tree?.tree) {
-          // Fallback: fetch key files in parallel
-          const keyFiles = ["package.json", "README.md", "encore.app"];
-          const fallbackResults = await Promise.all(
-            keyFiles.map(async (keyFile) => {
-              try {
-                const file = await github.getFile({ owner: repoOwner, repo: repoName, path: keyFile });
-                return file?.content ? { path: keyFile, content: file.content } : null;
-              } catch {
-                return null;
-              }
-            })
-          );
-          for (const result of fallbackResults) {
-            if (result) {
-              repoContext += `\n\n--- ${result.path} ---\n${result.content.slice(0, 3000)}`;
-            }
-          }
+        const { ensureManifestIsFresh } = await import("../projects/manifest-updater");
+        const { manifest } = await ensureManifestIsFresh(repoOwner, repoName);
+        if (manifest) {
+          // First 10 file-paths from fileHashes act as a rough "key files"
+          // hint — the full manifest has more detail that the agent flow
+          // pulls when a task starts.
+          const keyFiles = manifest.fileHashes
+            ? Object.keys(manifest.fileHashes).slice(0, 10)
+            : [];
+          const techStack = (manifest.techStack ?? []).slice(0, 8);
+          repoContext = [
+            "",
+            "## Project Manifest",
+            `Repo: ${repoOwner}/${repoName}`,
+            manifest.summary ? `Summary: ${manifest.summary}` : "",
+            techStack.length > 0 ? `Tech: ${techStack.join(", ")}` : "",
+            manifest.fileCount != null ? `Files: ${manifest.fileCount}` : "",
+            keyFiles.length > 0 ? `Key files: ${keyFiles.join(", ")}` : "",
+            manifest.lastAnalyzedAt ? `Manifest updated: ${manifest.lastAnalyzedAt}` : "",
+            "",
+            "Use repo_get_tree / repo_read_file / repo_find_relevant_files when you need actual file contents. Do NOT guess — verify via tools.",
+          ].filter(Boolean).join("\n");
         }
       } catch (e) {
-        console.error("GitHub context fetch failed:", e);
-      }
-
-      // If repoContext is still empty after all attempts, tell AI the repo is empty
-      if (!repoContext || repoContext.length === 0) {
-        repoContext = "\n\nDette repoet er TOMT — det har ingen filer. GitHub returnerte at repoet er tomt. Du MÅ informere brukeren om at repoet er tomt. IKKE dikt opp filer.";
+        // Non-critical — the AI can still call repo_* tools itself.
+        log.warn("manifest-summary injection failed", {
+          error: e instanceof Error ? e.message : String(e),
+        });
       }
     }
 
@@ -1256,6 +1292,28 @@ async function processAIResponse(
     const projectContext = await buildProjectContextBlock(conversationId);
 
     // Call AI with tools (ALWAYS includes CHAT_TOOLS — AI decides whether to use them)
+    // Per-phase token-budget log. Rough estimate — 1 token ≈ 4 chars. Helps
+    // monitor prompt-bloat regressions. Example output for a social greeting
+    // should show orienting_tokens≈0, memory_tokens=0, skills_tokens<150,
+    // manifest_tokens=0, history_tokens≈<60 per message × N.
+    const est = (s: string | undefined | null): number =>
+      s ? Math.ceil(s.length / 4) : 0;
+    const skillsTokens = est(resolvedSkills?.result?.injectedPrompt);
+    const memoryTokens = (memories.results || []).reduce((sum, r) => sum + est(r.content), 0);
+    const historyTokens = history.reduce((sum, m) => sum + est(m.content), 0);
+    const manifestTokens = est(repoContext);
+    const projectCtxTokens = est(projectContext?.systemPromptSnippet);
+    console.log(
+      "[CHAT-BUDGET]",
+      `convId=${conversationId}`,
+      `isSocialGreeting=${isSocialGreeting}`,
+      `skills_tokens=${skillsTokens}`,
+      `memory_tokens=${memoryTokens}`,
+      `manifest_tokens=${manifestTokens}`,
+      `project_ctx_tokens=${projectCtxTokens}`,
+      `history_tokens=${historyTokens}`,
+      `history_msgs=${history.length}`,
+    );
     if (debug) console.log("[DEBUG-AF] Calling ai.chat with", history.length, "messages, intent:", intent);
     let aiResponse;
     try {
@@ -1273,8 +1331,9 @@ async function processAIResponse(
         aiName,
         activePlanId,                // §3.3: filters create_task/start_task when plan is running
         userEmail: auth.email,        // Fase E: propagated to ToolContext for role gates
-        firecrawlEnabled: firecrawlEnabled ?? false, // Default OFF — user must explicitly enable via "+" popup
+        firecrawlEnabled: firecrawlEnabled ?? true, // Per-turn toggle removed — web_scrape always available if API key exists (tool handler errors gracefully otherwise)
         projectType: projectContext?.projectType as ("code" | "framer" | "figma" | "framer_figma" | undefined),
+        isSocialGreeting,
       });
     } catch (e) {
       console.error("AI call failed:", e);
@@ -1350,6 +1409,9 @@ async function processAIResponse(
 
     // Save token/cost metadata (include lastCreatedTaskId so frontend can detect agent handoff)
     // U11: modelSlug is the short human-readable form shown above the bubble.
+    // v3 skills: persist activeSkills so the UI can render a SkillsCollapsible
+    // badge on the saved assistant message — not just while streaming.
+    const aiActiveSkills = (aiResponse as { activeSkills?: Array<{ id: string; name: string; description?: string }> }).activeSkills;
     await db.exec`UPDATE messages SET metadata = ${JSON.stringify({
       model: aiResponse.modelUsed,
       modelSlug: (aiResponse as { modelSlug?: string }).modelSlug,
@@ -1359,7 +1421,32 @@ async function processAIResponse(
       truncated: aiResponse.truncated,
       toolsUsed: aiResponse.toolsUsed || [],
       ...(aiResponse.lastCreatedTaskId ? { lastCreatedTaskId: aiResponse.lastCreatedTaskId } : {}),
+      ...(aiActiveSkills && aiActiveSkills.length > 0 ? { activeSkills: aiActiveSkills } : {}),
     })}::jsonb WHERE id = ${placeholderId}::uuid`;
+
+    // Emit chat.message_update — the canonical "placeholder is now finalised"
+    // signal. Previously the frontend relied on `agent.message` (delta-stream-
+    // oriented) or on `agent.done` + a DB re-fetch. That broke when the SSE
+    // connection closed before the message arrived: users saw the answer
+    // only after refreshing. This dedicated event carries the full final
+    // payload (content + skills + cost + tokens + model) on the chat stream
+    // so the frontend can update the placeholder bubble in-place without
+    // re-fetching. Keyed on conversationId (chat surface), not taskId.
+    agentEvt.emitChatEvent({
+      streamKey: conversationId,
+      eventType: "chat.message_update",
+      data: {
+        messageId: placeholderId,
+        role: "assistant",
+        content: aiResponse.content,
+        model: aiResponse.modelUsed,
+        costUsd: aiResponse.costUsd ?? 0,
+        tokens: aiResponse.usage,
+        activeSkills: aiActiveSkills,
+        toolsUsed: aiResponse.toolsUsed ?? [],
+        status: "completed",
+      },
+    }).catch(() => {});
 
     // When agent took over via start_task tool: emit agent_started so the frontend SSE hook
     // switches its stream key from conversationId → agent taskId. Do NOT emit agent.done here —

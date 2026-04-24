@@ -6,7 +6,7 @@ import {
   buildSystemPromptWithPipeline, logSkillResults,
 } from "./prompts";
 import { callAIWithFallback, stripMarkdownJson, DEFAULT_MODEL } from "./call";
-import { selectOptimalModel } from "./router";
+import { selectOptimalModel, smartSelect } from "./router";
 import { selectForRole } from "./roles";
 
 import type {
@@ -34,7 +34,13 @@ export interface AssessComplexityResponse {
 export const assessComplexity = api(
   { method: "POST", path: "/ai/assess-complexity", expose: false },
   async (req: AssessComplexityRequest): Promise<AssessComplexityResponse> => {
-    const model = req.model || DEFAULT_MODEL;
+    // Smart-select: cheap planning-tag model. Assessing complexity is simple,
+    // so pick the cheapest enabled model matching "planning" (complexity=1).
+    const model = await smartSelect({
+      manualModelId: req.model,
+      context: "planning",
+      complexity: 1,
+    });
 
     const prompt = `Assess the complexity of this task on a scale of 1-10.
 
@@ -708,7 +714,10 @@ interface ReviseProjectPhaseResponse {
 export const reviseProjectPhase = api(
   { method: "POST", path: "/ai/revise-project-phase", expose: false },
   async (req: ReviseProjectPhaseRequest): Promise<ReviseProjectPhaseResponse> => {
-    const model = "claude-haiku-4-5-20251001";
+    // smartSelect replaces hardcoded haiku — honours DB-enabled models and
+    // tags the request as "planning" context so tier-appropriate models
+    // take priority.
+    const model = await smartSelect({ context: "planning", complexity: 4 });
 
     const completedSummary = req.completedPhase.tasks.map((t) => {
       const status = t.status === "completed" ? "✅" : t.status === "failed" ? "❌" : "⏭️";
@@ -833,7 +842,9 @@ export const planTaskOrder = api(
       return { orderedTasks: [] };
     }
 
-    const model = "claude-haiku-4-5-20251001";
+    // smartSelect — replaces hardcoded haiku. Task-ordering is a planning
+    // decision so we tag accordingly.
+    const model = await smartSelect({ context: "planning", complexity: 3 });
 
     const taskList = req.tasks.map((t, i) => `${i + 1}. [${t.id}] ${t.title}${t.description ? ` — ${t.description}` : ""}${t.labels.length > 0 ? ` (labels: ${t.labels.join(", ")})` : ""}${t.dependsOn.length > 0 ? ` (depends on: ${t.dependsOn.join(", ")})` : ""}`).join("\n");
 

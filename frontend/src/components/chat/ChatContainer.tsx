@@ -63,6 +63,9 @@ interface ChatContainerProps {
   onNewProject?: () => void;
   selectedProjectId?: string | null;
   onSelectProject?: (id: string | null) => void;
+  /** Skills the agent resolved for the currently-running task — renders as
+   *  badge row in AgentStream. Sourced from the SSE agent.skills_active event. */
+  activeSkills?: Array<{ id: string; name: string; description?: string }>;
 }
 
 export default function ChatContainer({
@@ -107,6 +110,7 @@ export default function ChatContainer({
   onNewProject,
   selectedProjectId,
   onSelectProject,
+  activeSkills,
 }: ChatContainerProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -159,6 +163,7 @@ export default function ChatContainer({
         onRequestChanges={onRequestChanges}
         reviewInProgress={reviewInProgress}
         activePlanMsgId={activePlanMsgId}
+        activeSkills={activeSkills}
       />
 
       {/* Input */}

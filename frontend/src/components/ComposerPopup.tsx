@@ -217,15 +217,18 @@ export default function ComposerPopup({
                   onClick={() => setSection("skills")}
                 />
 
-                {/* 4. Web søk — enabled når bruker har konfigurert Firecrawl-nøkkel.
-                    Toggle bestemmer om web_scrape-tool er tilgjengelig for AI denne turen. */}
-                <ToggleRow
+                {/* 4. Web søk — ikke lenger toggle. Hvis API-nøkkel finnes
+                    er verktøyet alltid tilgjengelig for AI. Hvis ikke, rad
+                    fungerer som link til Innstillinger → Integrasjoner. */}
+                <StatusRow
                   icon={<Globe size={14} />}
                   label="Web søk"
-                  checked={webSearchEnabled}
-                  disabled={disabledItems.webSearch}
-                  disabledTooltip={disabledTooltips.webSearch}
-                  onChange={onToggleWebSearch}
+                  status={disabledItems.webSearch ? "missing" : "active"}
+                  onClickWhenMissing={() => {
+                    if (typeof window !== "undefined") {
+                      window.location.href = "/integrasjoner";
+                    }
+                  }}
                 />
 
                 {/* 5. Prosjekter — sub-popup */}
@@ -487,14 +490,56 @@ function NavRow({
   );
 }
 
+function StatusRow({
+  icon, label, status, onClickWhenMissing,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  status: "active" | "missing";
+  onClickWhenMissing?: () => void;
+}) {
+  const isActive = status === "active";
+  const subtitle = isActive ? "Aktiv — API-nøkkel konfigurert" : "Ikke konfigurert — klikk for å sette opp";
+  return (
+    <div
+      onClick={!isActive ? onClickWhenMissing : undefined}
+      style={{
+        ...baseRowStyle,
+        cursor: isActive ? "default" : "pointer",
+        opacity: 1,
+      }}
+      onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = T.subtle; }}
+      onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+    >
+      <span style={{ display: "inline-flex", width: 18, justifyContent: "center", color: isActive ? T.accent : T.textMuted }}>
+        {icon}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, color: T.text }}>{label}</div>
+        <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2, fontFamily: T.mono }}>
+          {subtitle}
+        </div>
+      </div>
+      <span style={{
+        width: 8, height: 8, borderRadius: "50%",
+        background: isActive ? T.success : T.textFaint,
+        flexShrink: 0,
+      }} />
+    </div>
+  );
+}
+
 function ToggleRow({
-  icon, label, checked, disabled, disabledTooltip, onChange,
+  icon, label, checked, disabled, disabledTooltip, subtitle, onChange,
 }: {
   icon: React.ReactNode;
   label: string;
   checked: boolean;
   disabled?: boolean;
   disabledTooltip?: string;
+  /** Optional secondary line (e.g. "Konfigurert — ikke aktiv").
+   *  Used to distinguish "credentials exist" from "enabled for this turn". */
+  subtitle?: string;
   onChange: (v: boolean) => void;
 }) {
   return (
@@ -511,7 +556,14 @@ function ToggleRow({
       <span style={{ display: "inline-flex", width: 18, justifyContent: "center", color: checked ? T.accent : T.textMuted }}>
         {icon}
       </span>
-      <span style={{ flex: 1, fontSize: 13, color: T.text }}>{label}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, color: T.text }}>{label}</div>
+        {subtitle && (
+          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2, fontFamily: T.mono }}>
+            {subtitle}
+          </div>
+        )}
+      </div>
       <input
         type="checkbox"
         checked={checked}

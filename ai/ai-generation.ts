@@ -4,6 +4,7 @@ import { sanitize } from "./sanitize";
 import { buildSystemPromptWithPipeline, logSkillResults } from "./prompts";
 import { callAIWithFallback, stripMarkdownJson, DEFAULT_MODEL } from "./call";
 import { selectForRole } from "./roles";
+import { smartSelect } from "./router";
 
 // --- File Generation (for builder service) ---
 
@@ -317,7 +318,9 @@ export const consolidateMemories = api(
       return { consolidatedContent: "", keyInsights: [], tokensUsed: 0, costUsd: 0 };
     }
 
-    const model = "claude-haiku-4-5-20250929";
+    // smartSelect — replaces hardcoded haiku. Memory consolidation is a
+    // review-flavoured task (summarise + prune) so we tag accordingly.
+    const model = await smartSelect({ context: "review", complexity: 2 });
 
     const memorySections = req.memories
       .map((m, i) => `[Memory ${i + 1}] (type: ${m.memoryType})\n${m.content}`)

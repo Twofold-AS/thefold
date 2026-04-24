@@ -34,6 +34,11 @@ export interface ChatRequest {
   /** Project type — when set to "framer" or "framer_figma", design-platform
    *  rules are appended to the system prompt. */
   projectType?: "code" | "framer" | "figma" | "framer_figma";
+  /** Chat.ts sets this when the user's message is a short social greeting.
+   *  The prompt layer uses it to inject a short-reply register-match rule
+   *  + caps max_tokens at a lower ceiling. Prevents "Hei" from producing
+   *  a full orientation dump. */
+  isSocialGreeting?: boolean;
 }
 
 export interface ChatResponse {
@@ -53,6 +58,10 @@ export interface ChatResponse {
     totalTokens: number;
   };
   truncated: boolean;
+  /** Skills resolved + injected for this turn. Mirrored from skills.resolve
+   *  so the chat layer can persist them in message.metadata and the UI can
+   *  render a SkillsCollapsible badge-row on the assistant message. */
+  activeSkills?: Array<{ id: string; name: string; description?: string }>;
 }
 
 // --- Agent Types ---

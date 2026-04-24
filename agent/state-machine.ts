@@ -17,19 +17,30 @@ export type AgentPhase =
   | "failed"
   | "stopped";
 
-// Legal transitions
+// Legal transitions.
+//
+// This matrix reflects ALL real code paths in the agent — including the
+// tool-loop-driven flow where planning → reviewing (skipping building/
+// validating because the AI orchestrates those internally via tools),
+// the fast-path context → planning (skips confidence when a cached decision
+// with confidence > 0.85 exists), and skipReview completion paths.
+//
+// Every active phase allows transitions to "failed" (recoverable) and
+// "stopped" (user cancellation) so cancel-mid-run works from anywhere.
+// "needs_input" can go back to "confidence" if the user's clarification
+// triggers a re-assessment rather than immediately resuming.
 export const VALID_TRANSITIONS: Record<AgentPhase, AgentPhase[]> = {
   idle:           ["preparing"],
-  preparing:      ["context", "failed"],
-  context:        ["confidence", "failed"],
-  confidence:     ["planning", "needs_input", "failed"],
-  needs_input:    ["planning", "stopped"],
-  planning:       ["building", "failed"],
-  building:       ["validating", "failed", "stopped"],
-  validating:     ["reviewing", "building", "failed"],  // building = retry
-  reviewing:      ["pending_review", "failed"],
-  pending_review: ["creating_pr", "building", "stopped"], // building = request changes
-  creating_pr:    ["completed", "failed"],
+  preparing:      ["context", "failed", "stopped"],
+  context:        ["confidence", "planning", "failed", "stopped"], // planning = fast-path skip
+  confidence:     ["planning", "needs_input", "failed", "stopped"],
+  needs_input:    ["confidence", "planning", "stopped"],             // confidence = re-assess
+  planning:       ["building", "reviewing", "completed", "failed", "stopped"], // reviewing = tool-loop direct; completed = collectOnly
+  building:       ["validating", "reviewing", "failed", "stopped"],   // reviewing = tool-loop direct
+  validating:     ["reviewing", "building", "failed", "stopped"],     // building = retry
+  reviewing:      ["pending_review", "completed", "failed", "stopped"], // completed = skipReview
+  pending_review: ["creating_pr", "building", "failed", "stopped"],   // building = request changes
+  creating_pr:    ["completed", "failed", "stopped"],
   completed:      ["idle"],
   failed:         ["idle"],
   stopped:        ["idle"],

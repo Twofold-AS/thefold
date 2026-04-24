@@ -31,6 +31,51 @@ export const CHAT_TOOLS: Array<{
 
 // --- Helpers ---
 
+/**
+ * Detect runaway repetition in model output and trim to the first occurrence.
+ * Triggered by Kimi/MiniMax sometimes entering a repeat-loop after a failed
+ * tool call — produced responses of "same paragraph × 40 copies" in a
+ * single final message. Heuristic: if the first 200 chars of any paragraph
+ * appear 3+ consecutive times, truncate to the first copy + a short note.
+ * Tokenless — runs on the text content only.
+ */
+function trimRepetitionLoop(text: string): string {
+  if (!text || text.length < 400) return text;
+  // Split on double-newlines (paragraph boundaries) — common for Norwegian
+  // prose replies. Falls back to single \n if the response never does
+  // blank-line separation (streaming-level runaway).
+  let paragraphs = text.split(/\n\n+/).map((p) => p.trim()).filter(Boolean);
+  if (paragraphs.length < 3) {
+    paragraphs = text.split(/\n/).map((p) => p.trim()).filter(Boolean);
+  }
+  if (paragraphs.length < 3) return text;
+
+  const fingerprint = (s: string) => s.slice(0, 200).replace(/\s+/g, " ").toLowerCase();
+  let repeatStart = -1;
+  let repeatCount = 1;
+  for (let i = 1; i < paragraphs.length; i++) {
+    if (fingerprint(paragraphs[i]) === fingerprint(paragraphs[i - 1])) {
+      repeatCount += 1;
+      if (repeatCount === 3) {
+        repeatStart = i - 2; // index of first copy in the run of dupes
+        break;
+      }
+    } else {
+      repeatCount = 1;
+    }
+  }
+  if (repeatStart < 0) return text;
+
+  const kept = paragraphs.slice(0, repeatStart + 1).join("\n\n");
+  log.warn("tools.ts: repetition-loop detected, trimming response", {
+    totalParagraphs: paragraphs.length,
+    repeatStart,
+    originalLength: text.length,
+    trimmedLength: kept.length,
+  });
+  return `${kept}\n\n[Svaret gjentok seg — avkortet automatisk.]`;
+}
+
 /** Build a ToolContext for registry.execute(). Loop-state fields like
  * lastCreatedTaskId/lastStartedTaskId are filled in per loop iteration. */
 function buildToolContext(opts: {
@@ -110,6 +155,13 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
   ];
 
   const MAX_TOOL_LOOPS = 10;
+  // Circuit-break if the model calls non-existent tools 2 iterations in a
+  // row. Prevents pathological spirals where the AI hallucinates a tool
+  // name, gets "Unknown tool" back, apologises, tries another hallucinated
+  // name, repeat — wasting the full MAX_TOOL_LOOPS budget + potentially
+  // triggering repetition-loops in the final text response.
+  const MAX_CONSECUTIVE_UNKNOWN_TOOLS = 2;
+  let consecutiveUnknownToolErrors = 0;
   const debug = await isDebugEnabled();
 
   for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
@@ -130,12 +182,15 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
     if (debug) console.log(`[DEBUG-AH] Stop reason: ${response.stop_reason}, content blocks: ${response.content.length}`);
 
     if (response.stop_reason !== "tool_use") {
-      const textContent = response.content
+      const rawText = response.content
         .filter((block: any) => block.type === "text")
         .map((block: any) => block.text)
         .join("");
+      // Defensive trim — experimental models sometimes emit 40× the same
+      // paragraph in a single response after a failed tool_use.
+      const textContent = trimRepetitionLoop(rawText);
 
-      if (debug) console.log(`[DEBUG-AH] Final content length: ${textContent.length}`);
+      if (debug) console.log(`[DEBUG-AH] Final content length: ${textContent.length}${rawText.length !== textContent.length ? ` (trimmed from ${rawText.length})` : ""}`);
 
       const cacheReadTokens = (response.usage as unknown as Record<string, number>).cache_read_input_tokens ?? 0;
       const cacheCreationTokens = (response.usage as unknown as Record<string, number>).cache_creation_input_tokens ?? 0;
@@ -265,6 +320,15 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
             lastStartedTaskId,
           });
           const result = await toolRegistry.execute(toolName, toolInput, ctx);
+          // Track hallucinated tool-names. registry.execute returns
+          // { success: false, message: "Unknown tool: X" } for unknown
+          // names — we count consecutive occurrences and break the loop
+          // below if the model keeps calling non-existent tools.
+          if (!result.success && typeof result.message === "string" && result.message.startsWith("Unknown tool:")) {
+            consecutiveUnknownToolErrors += 1;
+          } else {
+            consecutiveUnknownToolErrors = 0;
+          }
 
           // Commit 20b: surface handler-level failures (success: false) as a
           // per-tool SSE event so the UI can show which call failed without
@@ -361,6 +425,30 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
     });
 
     if (debug) console.log(`[DEBUG-AH] Sent tool results back, looping... (tools so far: ${allToolsUsed.join(", ")})`);
+
+    // Circuit break: N consecutive Unknown-tool errors → bail out with a
+    // clear message instead of letting the model keep hallucinating names.
+    if (consecutiveUnknownToolErrors >= MAX_CONSECUTIVE_UNKNOWN_TOOLS) {
+      log.warn("tools.ts: breaking loop after consecutive unknown-tool errors", {
+        consecutiveUnknownToolErrors,
+        loop,
+        toolsSoFar: allToolsUsed.join(", "),
+      });
+      return {
+        content: "Beklager — jeg forsøkte å kalle et verktøy som ikke finnes. Kan du omformulere spørsmålet?",
+        tokensUsed: totalInputTokens + totalOutputTokens,
+        stopReason: "unknown_tool_circuit_break",
+        modelUsed: options.model,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
+        toolsUsed: allToolsUsed,
+        lastCreatedTaskId: lastCreatedTaskId || undefined,
+        lastStartedTaskId: lastStartedTaskId || undefined,
+      };
+    }
   }
 
   // Max loops reached

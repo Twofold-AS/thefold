@@ -19,6 +19,15 @@ export type AgentEventType =
   | "agent.done"
   | "agent.progress"
   | "agent.heartbeat"
+  // v3 — skills selected for this task. Emitted once at task-start after
+  // the prompt-builder resolves the active skill set.
+  | "agent.skills_active"
+  // Direct-chat message completion — emitted when a placeholder assistant
+  // message has its final content written. Frontend uses this to replace
+  // an in-flight "Tenker..." bubble with the completed response in-place.
+  // Keyed on conversationId (not taskId) so it routes through the chat
+  // SSE stream.
+  | "chat.message_update"
   // Fase H — per-sub-agent events (Commit 40). Aggregated into swarm_status
   // by SwarmAggregator; available raw for debug mode + detail-modal history.
   | "subagent.started"
@@ -180,6 +189,39 @@ export interface AgentHeartbeatData {
   ts: number;
 }
 
+export interface AgentSkillsActiveData {
+  /** Skill IDs + names selected for this task. Names match SKILL.md frontmatter. */
+  skills: Array<{ id: string; name: string; description?: string }>;
+  /** Mode the task runs in — auto | plan | agents | incognito | default */
+  mode?: string;
+  /** Project type — code | framer | figma | framer_figma */
+  projectType?: string;
+  /** Total tokens estimated for the system prompt at start of task */
+  totalTokens?: number;
+}
+
+export interface ChatMessageUpdateData {
+  /** DB row ID of the placeholder assistant message being finalised. */
+  messageId: string;
+  /** Finished message role — always "assistant" for now. */
+  role: "assistant";
+  /** Final full content that was written to DB. */
+  content: string;
+  /** Model that produced this message. */
+  model?: string;
+  /** USD cost for this turn. */
+  costUsd?: number;
+  /** Token usage breakdown for footer rendering. */
+  tokens?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  /** Skills the chat turn used, mirrored from ai.chat response. */
+  activeSkills?: Array<{ id: string; name: string; description?: string }>;
+  /** Tools the chat turn used, e.g. ["read_file", "web_scrape"]. */
+  toolsUsed?: string[];
+  /** Always "completed" on this event type — kept as a discriminator for
+   *  future partial-update events. */
+  status: "completed";
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Discriminated union map — ties each event type to its data shape
 // ─────────────────────────────────────────────────────────────────────────────
@@ -195,6 +237,8 @@ export interface AgentEventDataMap {
   "agent.done": AgentDoneData;
   "agent.progress": AgentProgressData;
   "agent.heartbeat": AgentHeartbeatData;
+  "agent.skills_active": AgentSkillsActiveData;
+  "chat.message_update": ChatMessageUpdateData;
   "subagent.started": SubAgentStartedData;
   "subagent.progress": SubAgentProgressData;
   "subagent.status_change": SubAgentStatusChangeData;

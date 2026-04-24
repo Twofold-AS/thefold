@@ -196,6 +196,50 @@ export async function listAuditLog(filters?: {
   });
 }
 
+// --- Task Execution Log ---
+
+export interface TaskLogEvent {
+  id: string;
+  taskId: string;
+  timestamp: string;
+  type: string;
+  phase: string | null;
+  toolName: string | null;
+  subAgentRole: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface TaskLogSummary {
+  totalToolCalls: number;
+  totalTokens: { input: number; output: number };
+  totalCost: number;
+  subAgentsUsed: string[];
+  filesWritten: string[];
+  validationResults: Record<string, unknown> | null;
+}
+
+export interface TaskLogTaskMeta {
+  id: string;
+  title: string;
+  description: string;
+  status: string;
+  createdAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+}
+
+export interface TaskLogResponse {
+  task: TaskLogTaskMeta;
+  events: TaskLogEvent[];
+  summary: TaskLogSummary;
+}
+
+export async function getTaskLog(taskId: string): Promise<TaskLogResponse> {
+  return apiFetch<TaskLogResponse>(`/agent/task-log/${encodeURIComponent(taskId)}`, {
+    method: "GET",
+  });
+}
+
 export async function getTaskTrace(taskId: string) {
   return apiFetch<{
     taskId: string;

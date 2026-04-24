@@ -137,6 +137,33 @@ export async function apiFetch<T>(path: string, options?: FetchOptions): Promise
           throw new Error("Unauthenticated");
         }
 
+        // CSRF-retry: on a 403 that mentions CSRF, refresh the token once
+        // and retry. Previously this path hit shouldRetry(403)==false and
+        // threw — but the frontend also had no submit-lock, so users
+        // retried by hand and the server saw N duplicates with the same
+        // stale token. Cap at one refresh attempt per request to prevent
+        // infinite loops if the refresh endpoint itself rejects.
+        const lowerBody = (errBody || "").toLowerCase();
+        if (
+          res.status === 403
+          && isStateChanging
+          && (lowerBody.includes("csrf") || lowerBody.includes("x-csrf-token"))
+          && attempt === 0
+        ) {
+          try {
+            // Hit a short endpoint that sets a fresh CSRF cookie. Direct
+            // fetch to avoid apiFetch recursion.
+            await fetch(`${API_BASE}/gateway/csrf-token`, {
+              method: "GET",
+              credentials: "include",
+              headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+            });
+            continue; // retry immediately with the new cookie value
+          } catch {
+            // fall through to normal error handling
+          }
+        }
+
         const err = new Error(errBody || `API error ${res.status}`);
 
         if (!shouldRetry(status)) {

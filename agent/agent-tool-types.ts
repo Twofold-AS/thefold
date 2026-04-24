@@ -47,4 +47,23 @@ export interface AgentToolContext {
   conversationId: string;
   /** TheFold task ID (optional — available when running from /tasks) */
   thefoldTaskId?: string;
+  /**
+   * Active project ID (projects-service). Required for framer_* tools
+   * and enables lazy ensureProjectRepo inside repo_write_file.
+   */
+  projectId?: string;
+  /**
+   * Project type — drives tool-registry filtering. framer-only projects
+   * get the framer_* tools without repo/github tools; code projects get
+   * the repo tools without framer_* ; hybrids get both.
+   */
+  projectType?: "code" | "framer" | "figma" | "framer_figma";
+  /**
+   * Agent mode — further filters the tool registry on top of projectType.
+   *   - auto: no clarification tool
+   *   - plan: only task_plan visible
+   *   - incognito: read-only (no writes, no persistence)
+   *   - agents / default / undefined: no filter
+   */
+  mode?: "auto" | "plan" | "agents" | "incognito" | "default";
 }

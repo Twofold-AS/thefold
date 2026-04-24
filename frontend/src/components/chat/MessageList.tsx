@@ -5,6 +5,7 @@ import { T } from "@/lib/tokens";
 import AgentStream from "@/components/AgentStream";
 import AgentStatusBar from "@/components/chat/AgentStatusBar";
 import TypingIndicator from "@/components/chat/TypingIndicator";
+import SkillsCollapsible from "@/components/chat/SkillsCollapsible";
 import MemoryInsight from "@/components/chat/MemoryInsight";
 import ChangedFilesPanel from "@/components/chat/ChangedFilesPanel";
 import MarkdownText from "@/components/chat/MarkdownText";
@@ -116,6 +117,9 @@ interface MessageListProps {
   onRequestChanges: (reviewId: string, feedback?: string) => void;
   reviewInProgress?: ReviewActionType;
   activePlanMsgId?: string | null;
+  /** Active skills for the currently-running task. Only applied to the
+   *  last agent message (the one the user is watching). */
+  activeSkills?: Array<{ id: string; name: string; description?: string }>;
 }
 
 const MessageListComponent = function MessageList({
@@ -134,6 +138,7 @@ const MessageListComponent = function MessageList({
   onRequestChanges,
   reviewInProgress,
   activePlanMsgId,
+  activeSkills,
 }: MessageListProps) {
   const msgEndRef = useRef<HTMLDivElement>(null);
   const [modalPlanContent, setModalPlanContent] = useState<string | null>(null);
@@ -370,6 +375,8 @@ const MessageListComponent = function MessageList({
                         onRequestChanges={onRequestChanges}
                         reviewInProgress={reviewInProgress}
                         swarmGroups={m.id === lastAgentMsg?.id ? swarmGroupsForAgent : undefined}
+                        activeSkills={m.id === lastAgentMsg?.id ? activeSkills : undefined}
+                        taskId={(parseMeta(m.metadata) as { taskId?: string } | null)?.taskId ?? activeTaskId ?? null}
                       />
                       <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
                     </div>
@@ -377,8 +384,10 @@ const MessageListComponent = function MessageList({
                 );
               })()}
 
-              {/* ASSISTANT — chat message, with optional merged agent below */}
-              {m.role === "assistant" && !isAgent && (
+              {/* ASSISTANT — chat message, with optional merged agent below.
+                  memory_insight is rendered above via <MemoryInsight>; skip here
+                  so the raw JSON payload doesn't also render as a chat bubble. */}
+              {m.role === "assistant" && !isAgent && m.messageType !== "memory_insight" && (
                 <div style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "4px 0" }}>
                   
                   <div style={{ flex: 1, minWidth: 0 }}>
@@ -398,6 +407,16 @@ const MessageListComponent = function MessageList({
                           <MarkdownText content={sanitizeContent(m.content)} />
                           <TokenFooter metadata={m.metadata} />
                         </div>
+                        {(() => {
+                          const meta = parseMeta(m.metadata) as { activeSkills?: Array<{ id: string; name: string; description?: string }> } | null;
+                          const skills = meta?.activeSkills ?? [];
+                          if (skills.length === 0) return null;
+                          return (
+                            <div style={{ marginTop: 4, paddingLeft: 2 }}>
+                              <SkillsCollapsible skills={skills} />
+                            </div>
+                          );
+                        })()}
                       </>
                     ) : null}
 
@@ -410,6 +429,8 @@ const MessageListComponent = function MessageList({
                           onReject={onReject}
                           onRequestChanges={onRequestChanges}
                           swarmGroups={swarmGroupsForAgent}
+                          activeSkills={activeSkills}
+                          taskId={(parseMeta(lastAgentMsg.metadata) as { taskId?: string } | null)?.taskId ?? activeTaskId ?? null}
                         />
                       </div>
                     )}

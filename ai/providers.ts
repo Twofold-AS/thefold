@@ -2,7 +2,7 @@ import { api, APIError } from "encore.dev/api";
 import log from "encore.dev/log";
 import { db } from "./db";
 import { encryptApiKey, decryptApiKey } from "./lib/crypto";
-import { invalidateModelCache } from "./router";
+import { invalidateModelCache, refreshModelCache } from "./router";
 import { invalidateRoleCache, type AgentRole } from "./roles";
 
 // --- In-memory provider cache ---
@@ -228,6 +228,7 @@ export const saveModel = api(
         WHERE id = ${req.id}::uuid
       `;
       invalidateModelCache();
+      await refreshModelCache(); // ensure next estimateCost() sees the new price
       return { id: req.id };
     } else {
       const row = await db.queryRow<{ id: string }>`
@@ -236,6 +237,7 @@ export const saveModel = api(
         RETURNING id
       `;
       invalidateModelCache();
+      await refreshModelCache();
       return { id: row!.id };
     }
   }

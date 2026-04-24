@@ -120,23 +120,33 @@ export const saveScrape = api(
     wordCount: number;
     ttlHours?: number;
     screenshotUrl?: string | null;
+    htmlCleaned?: string | null;
+    images?: string[] | null;
+    summary?: string | null;
+    rawResponse?: Record<string, unknown> | null;
   }): Promise<{ record: ScrapeRecord }> => {
     const urlHash = sha256Hex(req.url);
     const contentHash = sha256Hex(req.contentMd);
     const ttl = req.ttlHours ?? 24;
     const screenshotUrl = req.screenshotUrl ?? null;
+    const htmlCleaned = req.htmlCleaned ?? null;
+    const imagesJson = req.images ? JSON.stringify(req.images) : null;
+    const summary = req.summary ?? null;
+    const rawJson = req.rawResponse ? JSON.stringify(req.rawResponse) : null;
 
     const row = req.projectId
       ? await db.queryRow<ScrapeRow>`
           INSERT INTO web_scrapes (
             user_email, project_id, conversation_id,
             url, url_hash, title, content_md, links, word_count, content_hash,
-            screenshot_url, expires_at
+            screenshot_url, html_cleaned, images, summary, raw_response,
+            expires_at
           ) VALUES (
             ${req.userEmail}, ${req.projectId}::uuid, ${req.conversationId ?? null},
             ${req.url}, ${urlHash}, ${req.title ?? null}, ${req.contentMd},
             ${JSON.stringify(req.links)}::jsonb, ${req.wordCount}, ${contentHash},
-            ${screenshotUrl}, NOW() + (${ttl} || ' hours')::interval
+            ${screenshotUrl}, ${htmlCleaned}, ${imagesJson}::jsonb, ${summary}, ${rawJson}::jsonb,
+            NOW() + (${ttl} || ' hours')::interval
           )
           RETURNING id, user_email, project_id, conversation_id, url, title,
                     content_md, links, word_count, content_hash, screenshot_url,
@@ -146,12 +156,14 @@ export const saveScrape = api(
           INSERT INTO web_scrapes (
             user_email, conversation_id,
             url, url_hash, title, content_md, links, word_count, content_hash,
-            screenshot_url, expires_at
+            screenshot_url, html_cleaned, images, summary, raw_response,
+            expires_at
           ) VALUES (
             ${req.userEmail}, ${req.conversationId ?? null},
             ${req.url}, ${urlHash}, ${req.title ?? null}, ${req.contentMd},
             ${JSON.stringify(req.links)}::jsonb, ${req.wordCount}, ${contentHash},
-            ${screenshotUrl}, NOW() + (${ttl} || ' hours')::interval
+            ${screenshotUrl}, ${htmlCleaned}, ${imagesJson}::jsonb, ${summary}, ${rawJson}::jsonb,
+            NOW() + (${ttl} || ' hours')::interval
           )
           RETURNING id, user_email, project_id, conversation_id, url, title,
                     content_md, links, word_count, content_hash, screenshot_url,

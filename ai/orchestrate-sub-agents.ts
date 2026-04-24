@@ -2,7 +2,7 @@
 
 import log from "encore.dev/log";
 import { callAIWithFallback } from "./call";
-import { estimateCost } from "./router";
+import { estimateCost, smartSelect } from "./router";
 import {
   type SubAgent,
   type SubAgentResult,
@@ -520,8 +520,10 @@ export async function mergeResults(
     .join("\n\n---\n\n");
 
   try {
+    // smartSelect — review-tagged merge. Replaces hardcoded haiku.
+    const mergeModel = await smartSelect({ context: "review", complexity: 3 });
     const mergeResponse = await callAIWithFallback({
-      model: "claude-haiku-4-5-20251001",
+      model: mergeModel,
       system: `You are a merge agent. Combine the following sub-agent outputs into a single coherent context document.
 Preserve all important information: plans, code, tests, reviews, documentation.
 Remove redundancy and organize logically. Output the merged result directly.`,

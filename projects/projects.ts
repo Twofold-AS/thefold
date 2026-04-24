@@ -374,3 +374,20 @@ export const setGithubRepo = api(
     return { success: true };
   },
 );
+
+// Internal lookup — used by agent to resolve projectType + metadata without
+// going through the user-auth'd getProject. No side effects.
+export const getProjectInternal = api(
+  { method: "POST", path: "/projects/get-internal", expose: false },
+  async (req: { projectId: string }): Promise<{ project: Project | null }> => {
+    const row = await db.queryRow<ProjectRow>`
+      SELECT id, name, project_type, description, owner_email,
+             github_repo, github_private, github_auto_merge, github_auto_pr,
+             framer_site_url, figma_file_url, source_of_truth,
+             archived_at, created_at, updated_at
+      FROM projects
+      WHERE id = ${req.projectId}::uuid AND archived_at IS NULL
+    `;
+    return { project: row ? parseProject(row) : null };
+  },
+);

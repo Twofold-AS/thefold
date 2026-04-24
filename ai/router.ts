@@ -340,10 +340,19 @@ export function estimateCost(
   outputTokens: number,
   modelId: string
 ): CostEstimate {
-  ensureCacheFresh();
+  // Fire-and-forget cache refresh — sync fn can't await, so next call benefits.
+  void ensureCacheFresh();
 
   const model = cachedModels.find((m) => m.id === modelId);
   if (!model) {
+    // Model not in cache (never loaded, or just added but cache stale, or
+    // provider.api_key_set=false so refresh query excluded it). Log once per
+    // call so users can see which model-id failed cost lookup.
+    log.warn("estimateCost: model not in cache, cost defaults to 0", {
+      modelId,
+      cacheSize: cachedModels.length,
+      hint: "Sjekk at modellen er enabled + provider har API-nøkkel konfigurert",
+    });
     return { model: modelId, inputTokens, outputTokens, inputCost: 0, outputCost: 0, totalCost: 0 };
   }
 

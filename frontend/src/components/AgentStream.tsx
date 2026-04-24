@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState, useEffect, useRef } from "react";
+import { ChevronDown, ChevronUp, CornerDownRight } from "lucide-react";
 import { T } from "@/lib/tokens";
 import CheckIcon from "@/components/icons/CheckIcon";
 import Btn from "@/components/Btn";
@@ -12,6 +13,8 @@ import ToolCallDetailModal from "@/components/chat/ToolCallDetailModal";
 import SubAgentLine from "@/components/chat/SubAgentLine";
 import ValidationPhaseLine from "@/components/chat/ValidationPhaseLine";
 import StdoutStreamModal from "@/components/chat/StdoutStreamModal";
+import TaskExecutionLogModal from "@/components/chat/TaskExecutionLogModal";
+import SkillsCollapsible from "@/components/chat/SkillsCollapsible";
 import type { ToolCallLineData, SwarmGroupLine, ValidationPhaseLine as ValidationPhaseLineData } from "@/components/chat/types";
 
 interface StepInfo {
@@ -63,6 +66,14 @@ interface AgentStreamProps {
   reviewInProgress?: ReviewActionType;
   /** Inline sub-agent swarm groups matched from swarm_status messages (Fase H refactor) */
   swarmGroups?: SwarmGroupLine[];
+  /** Active skills resolved for the current task. Rendered as a compact
+   *  muted badge row above the first tool-call. Populated by the
+   *  agent.skills_active SSE event via useAgentStream. */
+  activeSkills?: Array<{ id: string; name: string; description?: string }>;
+  /** Task ID for the agent run represented by this stream. When set and
+   *  the task is in a terminal state (done/failed), AgentStream renders a
+   *  "Vis full oppgave-logg" link that opens TaskExecutionLogModal. */
+  taskId?: string | null;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -219,13 +230,17 @@ type MergedLine =
   | { kind: "swarm"; data: SwarmGroupLine; timestamp: number }
   | { kind: "validation"; data: ValidationPhaseLineData; timestamp: number };
 
-export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges, reviewInProgress, swarmGroups }: AgentStreamProps) {
+// SkillsCollapsible moved to ./chat/SkillsCollapsible.tsx so chat-bubble-
+// level messages can share the same widget without importing this whole file.
+
+export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges, reviewInProgress, swarmGroups, activeSkills, taskId }: AgentStreamProps) {
   const progress = useMemo(() => parseProgress(content), [content]);
 
   // Tool-call detail modal state (U3)
   const [openToolCall, setOpenToolCall] = useState<ToolCallLineData | null>(null);
   // Fase K.1/K.3 — stdout-stream modal state
   const [openStdout, setOpenStdout] = useState<{ sandboxId: string; phaseIndex?: number } | null>(null);
+  const [taskLogOpen, setTaskLogOpen] = useState(false);
 
   // Merge steps + toolCalls + swarmGroups into one chronological stack
   // (U3/U8 + Fase H inline refactor). Swarm groups are appended at the tail
@@ -328,7 +343,6 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
   }
 
   const phaseLabel = PHASE_LABELS[progress.phase] ?? progress.phase;
-  const isWorking = progress.status === "working" || progress.status === "thinking";
   const isFailed = progress.status === "failed";
   const isDone = progress.status === "done";
 
@@ -342,29 +356,20 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
             fontWeight: 600,
             fontFamily: T.sans,
             color: isFailed ? T.error : isDone ? T.success : T.text,
-            position: "relative",
-            overflow: "hidden",
           }}
         >
           {phaseLabel}
-          {isWorking && (
-            <span
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                bottom: 0,
-                background:
-                  "linear-gradient(90deg,transparent 0%,rgba(99,102,241,0.18) 50%,transparent 100%)",
-                backgroundSize: "200% 100%",
-                animation: "shimmerMove 2s linear infinite",
-              }}
-            />
-          )}
         </span>
         {/* Stop button moved to send button in ChatInput */}
       </div>
+
+      {/* Active skills — collapsible row. One muted line ("Skills hentet")
+          by default, expands on click into a list where each skill lives on
+          its own CornerDownRight-prefixed row. ~24px footprint collapsed,
+          grows by skill count when open. */}
+      {activeSkills && activeSkills.length > 0 && (
+        <SkillsCollapsible skills={activeSkills} />
+      )}
 
       {/* Summary */}
       {progress.summary && (
@@ -659,6 +664,36 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
         }}
         thinkingText={(progress as any)?.reasoning?.thinkingText || (progress as any)?.thinking}
       />
+
+      {/* Full task-log link — only on terminal state and when we have a taskId
+          to query. Opens TaskExecutionLogModal as a portal. */}
+      {taskId && (isDone || isFailed) && (
+        <button
+          type="button"
+          onClick={() => setTaskLogOpen(true)}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            marginTop: 8,
+            padding: "4px 0",
+            background: "none",
+            border: "none",
+            color: T.textMuted,
+            fontFamily: T.mono,
+            fontSize: 11,
+            cursor: "pointer",
+            width: "fit-content",
+            textAlign: "left",
+          }}
+        >
+          <CornerDownRight size={14} color={T.textFaint} />
+          <span style={{ textDecoration: "underline" }}>Vis full oppgave-logg</span>
+        </button>
+      )}
+      {taskLogOpen && taskId && (
+        <TaskExecutionLogModal taskId={taskId} onClose={() => setTaskLogOpen(false)} />
+      )}
     </div>
   );
 }

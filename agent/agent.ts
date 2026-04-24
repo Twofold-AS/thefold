@@ -16,6 +16,11 @@ import { handleReview, type ReviewResult } from "./review-handler";
 import { completeTask, type CompletionResult } from "./completion";
 import { runAgentToolLoop, buildToolLoopInitialMessage } from "./tool-loop";
 import type { AgentToolContext } from "./agent-tool-types";
+import { buildSystemPromptWithPipeline } from "../ai/prompts";
+import { getCapabilities } from "../ai/router";
+import { agentEventBus } from "./event-bus";
+import { createAgentEvent } from "./events";
+import { startEventPersistence, stopEventPersistence } from "./task-log";
 
 // --- Helpers (extracted in XK) ---
 import {
@@ -229,6 +234,51 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
   const sm = createStateMachine(ctx.taskId);
   sm.transitionTo("preparing");
   ctx.phase = sm.current;
+
+  // Start mirroring audit-worthy agentEventBus events into agent_task_events
+  // so the UI can render a full retrospective timeline. Needs owner email —
+  // prefer the getAuthData() caller email; fall back to an empty string if
+  // the task runs from a cron/internal path (events still persist, just
+  // unfiltered by email). stopEventPersistence is invoked in the outer
+  // finally block at end of executeTask.
+  let persistenceStarted = false;
+  try {
+    const authData = getAuthData();
+    const ownerEmail = authData?.email ?? "";
+    startEventPersistence(ctx.taskId, ownerEmail);
+    persistenceStarted = true;
+  } catch (err) {
+    log.warn("executeTask: startEventPersistence failed (continuing)", {
+      taskId: ctx.taskId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Resolve projectType if a projectId is attached but projectType isn't.
+  // Drives tool-registry filtering in the tool-loop + FRAMER_RULES injection
+  // in the system prompt. Best-effort — failure to resolve logs a warning
+  // but doesn't abort the task (falls back to "code"-equivalent behaviour,
+  // i.e. no tool filter applied).
+  if (ctx.projectId && !ctx.projectType) {
+    try {
+      const { projects } = await import("~encore/clients");
+      const info = await projects.getProjectInternal({ projectId: ctx.projectId });
+      if (info.project) {
+        ctx.projectType = info.project.projectType as AgentExecutionContext["projectType"];
+        log.info("executeTask: resolved projectType from projectId", {
+          taskId: ctx.taskId,
+          projectId: ctx.projectId,
+          projectType: ctx.projectType,
+        });
+      }
+    } catch (err) {
+      log.warn("executeTask: failed to resolve projectType, continuing without filter", {
+        taskId: ctx.taskId,
+        projectId: ctx.projectId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   let treeString = "", treeArray: string[] = [], memoryStrings: string[] = [], docsStrings: string[] = [];
   let relevantFiles: Array<{ path: string; content: string }> = [];
@@ -528,6 +578,8 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         repoName:       ctx.repoName,
         conversationId: ctx.conversationId,
         thefoldTaskId:  ctx.thefoldTaskId,
+        projectId:      ctx.projectId,
+        projectType:    ctx.projectType,
       };
 
       const initialMsg = buildToolLoopInitialMessage({
@@ -538,9 +590,53 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         memoryContext:   planningContext.memoryStrings,
       });
 
+      // v3: layered prompt builder. CORE_PROMPT + mode + projectType +
+      // vision + active-plan + skills (DB, file-seeded) + worked examples.
+      // Failures fall through to CORE_PROMPT inside the builder — the run
+      // never aborts because of a skills-pipeline hiccup.
+      const capabilities = getCapabilities(ctx.selectedModel);
+      const promptBuildStart = Date.now();
+      const {
+        systemPrompt,
+        skillIds,
+        skillNames,
+        totalTokens: promptTokens,
+      } = await buildSystemPromptWithPipeline({
+        context:      "coding",
+        task:         ctx.taskDescription,
+        projectType:  ctx.projectType,
+        complexity:   undefined, // resolver treats undefined as "no floor"
+        capabilities,
+        labels:       [],
+        files:        relevantFiles.map((f) => f.path),
+        repo:         ctx.repoName,
+        userId:       ctx.conversationId,
+        tokenBudget:  1500,
+      });
+      log.info("agent: system-prompt built", {
+        taskId: ctx.taskId,
+        skillCount: skillIds.length,
+        promptTokens,
+        buildMs: Date.now() - promptBuildStart,
+      });
+
+      // Emit SSE so the frontend can render active-skills badges.
+      const streamKey = ctx.thefoldTaskId || ctx.conversationId;
+      if (streamKey && skillIds.length > 0) {
+        agentEventBus.emit(
+          streamKey,
+          createAgentEvent("agent.skills_active", {
+            skills: skillIds.map((id, i) => ({ id, name: skillNames[i] ?? id })),
+            mode: undefined, // mode plumbing from user prefs lands in a later commit
+            projectType: ctx.projectType,
+            totalTokens: promptTokens,
+          }),
+        );
+      }
+
       const loopResult = await runAgentToolLoop({
         model:       ctx.selectedModel,
-        system:      `You are TheFold, an autonomous coding agent. Complete the task using the available tools. Write files via repo_write_file after creating a sandbox with build_create_sandbox. Validate with build_validate when done.`,
+        system:      systemPrompt,
         messages:    [{ role: "user", content: initialMsg }],
         toolContext: toolCtx,
       });
@@ -692,6 +788,11 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
     sm.transitionTo("failed"); ctx.phase = sm.current;
     tracker.end();
     return handleTaskError(ctx, error, taskStart, tracker, options);
+  } finally {
+    // Tear down the event-persistence subscriber regardless of how the run
+    // ended (success, early-return, throw). Safe to call when it never
+    // started — stopEventPersistence is a no-op in that case.
+    if (persistenceStarted) stopEventPersistence(ctx.taskId);
   }
 }
 
