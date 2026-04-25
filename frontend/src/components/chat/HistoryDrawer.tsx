@@ -73,10 +73,11 @@ export default function HistoryDrawer({
     return true;
   });
 
-  const statusDot = (c: ConversationSummary) => {
-    if (c.activeTask) return T.success; // active
-    if ((c as any).hasPendingReview) return T.warning; // pending review
-    return "#6366F1"; // inactive
+  // Colour of the bullet. activeTask → green, pending review → amber, else indigo.
+  const statusColor = (c: ConversationSummary) => {
+    if (c.activeTask) return T.success;
+    if ((c as any).hasPendingReview) return T.warning;
+    return "#6366F1";
   };
 
   return (
@@ -187,15 +188,27 @@ export default function HistoryDrawer({
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: S.sm }}>
-                    <div
-                      style={{
-                        width: 8,
-                        height: 8,
-                        borderRadius: "50%",
-                        background: statusDot(c),
-                        flexShrink: 0,
-                      }}
-                    />
+                    {(() => {
+                      const color = statusColor(c);
+                      const isActive = c.id === selectedId;
+                      // Active → filled solid circle. Inactive → empty ring
+                      // (colored outline, transparent interior). Box-sizing
+                      // border-box so the visual diameter stays 8px in both
+                      // variants and list-items don't jump.
+                      return (
+                        <div
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: "50%",
+                            boxSizing: "border-box",
+                            background: isActive ? color : "transparent",
+                            border: isActive ? "none" : `1.5px solid ${color}`,
+                            flexShrink: 0,
+                          }}
+                        />
+                      );
+                    })()}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{
                         fontSize: 13,

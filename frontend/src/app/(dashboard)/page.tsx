@@ -1,12 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
-
-export default function HomePage() {
-  const router = useRouter();
-  useEffect(() => {
-    router.replace("/cowork");
-  }, [router]);
-  return null;
-}
+// Root-path (/) = Incognito-fanen. Deler chat-infrastrukturen med CoWork/Designer,
+// men sidebaren er tom (privat-modus) og `projectScope` settes til "incognito"
+// via pathname-detection i cowork/page.tsx.
+// TODO: wire up privat-samtale-innhold (ingen backend-logging) when decided.
+export { default } from "./cowork/page";

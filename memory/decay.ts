@@ -3,6 +3,15 @@
 
 export type MemoryType = 'skill' | 'task' | 'session' | 'error_pattern' | 'decision' | 'general' | 'strategy' | 'episode';
 
+/** Sprint A — permanence-grad. Mirror av memory.ts MemoryPermanence
+ *  for å unngå ~encore/clients-import i decay.ts. */
+export type MemoryPermanence = "task_transient" | "normal" | "project_fact" | "permanent";
+
+/** Sprint A — true når en memory er decay-immune (max-relevance always). */
+export function isPermanenceImmune(permanence: MemoryPermanence | undefined | null): boolean {
+  return permanence === "project_fact" || permanence === "permanent";
+}
+
 /** Calculate importance score (0.0–1.0) based on memory type and category */
 export function calculateImportanceScore(
   memoryType: MemoryType,
@@ -57,9 +66,12 @@ export function calculateDecayedRelevance(
   lastAccessedAt: Date,
   memoryType: MemoryType,
   pinned: boolean,
-  now?: Date
+  now?: Date,
+  /** Sprint A — project_fact + permanent er decay-immune. */
+  permanence?: MemoryPermanence | null,
 ): number {
   if (pinned) return 1.0;
+  if (isPermanenceImmune(permanence ?? undefined)) return 1.0;
 
   const currentTime = (now ?? new Date()).getTime();
 

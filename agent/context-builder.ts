@@ -10,6 +10,17 @@ import type { ProjectManifest } from "./manifest";
 // --- URL detection ---
 const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/gi;
 
+/**
+ * Strip trailing punctuation that tends to ride along when a URL is embedded
+ * in prose — markdown `(https://x.com)` gives us a `)` at the end, a
+ * sentence-ender leaves `.`, `!`, `?`, comma-separated lists leave `,`.
+ * Only chops syntactically-prose-punctuation from the end; URL_REGEX already
+ * excludes these from mid-URL so this is safe.
+ */
+function trimUrlTail(url: string): string {
+  return url.replace(/[.,!?:;)\]>"'`]+$/, "");
+}
+
 // --- File reading thresholds (re-exported so agent.ts can still reference them) ---
 
 export const SMALL_FILE_THRESHOLD = 100;  // lines: read full
@@ -85,6 +96,84 @@ export async function buildContext(
   let memoryStrings: string[] = [];
   let docsStrings: string[] = [];
   let manifest: ProjectManifest | undefined = undefined;
+
+  // Sprint A — Phase-arv: hent task_transient memories knyttet til denne
+  // master-task'en. Phase 0 leser filer/scraper, Phase N arver UTEN re-fetch.
+  // Også project-permanente fakta (brand color, font, layout) for system-
+  // prompt-injeksjon. P15 dedup: alle inheritedFiles caches her, slik at
+  // findRelevantFiles + buildImportGraph deler én Set istedenfor å re-fetche.
+  const inheritedFilesMap = new Map<string, string>();
+  const projectFactsList: string[] = [];
+  const inheritedScrapesList: Array<{ url: string; content: string; title?: string }> = [];
+
+  // Sprint A — Bruk masterTaskId først (sub-task-ctx har dette satt av
+  // master-iterator). Faller tilbake til thefoldTaskId / taskId for
+  // single-task-flyten der ingen master finnes.
+  const masterId = ctx.masterTaskId ?? ctx.thefoldTaskId ?? ctx.taskId;
+  if (masterId) {
+    try {
+      const transient = await memory.search({
+        tags: [`task:${masterId}`],
+        permanence: "task_transient",
+        limit: 50,
+      });
+      for (const r of transient.results ?? []) {
+        const fileTag = (r.tags ?? []).find((t) => t.startsWith("file:"));
+        const scrapeTag = (r.tags ?? []).find((t) => t.startsWith("scrape:"));
+        const urlTag = (r.tags ?? []).find((t) => t.startsWith("url:"));
+        if (fileTag) {
+          inheritedFilesMap.set(fileTag.slice("file:".length), r.content);
+        } else if (scrapeTag && urlTag) {
+          inheritedScrapesList.push({
+            url: urlTag.slice("url:".length),
+            content: r.content,
+          });
+        }
+      }
+      if (inheritedFilesMap.size > 0 || inheritedScrapesList.length > 0) {
+        log.info("Sprint A: inherited from previous phases", {
+          taskId: masterId,
+          inheritedFiles: inheritedFilesMap.size,
+          inheritedScrapes: inheritedScrapesList.length,
+        });
+      }
+    } catch (err) {
+      log.warn("Sprint A: failed to fetch task_transient memories", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (ctx.projectId) {
+    try {
+      const facts = await memory.search({
+        projectId: ctx.projectId,
+        permanence: "project_fact",
+        limit: 50,
+      });
+      for (const r of facts.results ?? []) {
+        projectFactsList.push(r.content);
+      }
+      if (projectFactsList.length > 0) {
+        log.info("Sprint A: project_fact memories injected", {
+          projectId: ctx.projectId,
+          factCount: projectFactsList.length,
+        });
+      }
+    } catch (err) {
+      log.warn("Sprint A: failed to fetch project_facts", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // P15 dedup-cache for fil-fetch. findRelevantFiles + buildImportGraph
+  // deler denne så samme path aldri leses to ganger.
+  const fetchedFileCache = new Map<string, string>();
+  // Pre-populer med inherited filer — disse slipper getFile-call helt.
+  for (const [path, content] of inheritedFilesMap) {
+    fetchedFileCache.set(path, content);
+  }
 
   // === STEP 2: Read the project ===
   log.info("STEP 2: Reading project tree", { owner: ctx.repoOwner, repo: ctx.repoName });
@@ -207,6 +296,14 @@ export async function buildContext(
 
     for (const path of relevantPaths.paths) {
       try {
+        // P15/Sprint A — sjekk inherited/fetched cache først.
+        // Sparer GitHub-roundtrip + tokens for filer Phase 0 allerede leste.
+        const cached = fetchedFileCache.get(path);
+        if (cached !== undefined) {
+          files.push({ path, content: cached });
+          continue;
+        }
+
         const meta = await github.getFileMetadata({
           owner: ctx.repoOwner,
           repo: ctx.repoName,
@@ -217,6 +314,7 @@ export async function buildContext(
           // Small file: read in full
           const file = await github.getFile({ owner: ctx.repoOwner, repo: ctx.repoName, path });
           files.push({ path, content: file.content });
+          fetchedFileCache.set(path, file.content);
         } else if (meta.totalLines <= MEDIUM_FILE_THRESHOLD) {
           // Medium file: read in chunks
           let content = "";
@@ -243,6 +341,7 @@ export async function buildContext(
           totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
 
           files.push({ path, content });
+          fetchedFileCache.set(path, content);
         } else {
           // Large file: read first + last chunk only
           const firstChunk = await github.getFileChunk({
@@ -271,6 +370,7 @@ export async function buildContext(
           totalTokensSaved += Math.max(0, fullTokenEstimate - readTokenEstimate);
 
           files.push({ path, content });
+          fetchedFileCache.set(path, content);
         }
       } catch (err) {
         // File doesn't exist yet (404) or other read error — skip it
@@ -316,10 +416,18 @@ export async function buildContext(
         newPaths: missingPaths.slice(0, 10), // log max 10
       });
 
-      // Fetch content for missing files (max 5 extra files)
+      // Fetch content for missing files (max 5 extra files).
+      // P15: del fetchedFileCache med relevantFiles-loopen så samme path
+      // aldri leses to ganger.
       for (const path of missingPaths.slice(0, 5)) {
         try {
           if (await checkCancelled(ctx)) break;
+
+          const cached = fetchedFileCache.get(path);
+          if (cached !== undefined) {
+            relevantFiles.push({ path, content: cached });
+            continue;
+          }
 
           const meta = await github.getFileMetadata({
             owner: ctx.repoOwner,
@@ -334,6 +442,7 @@ export async function buildContext(
               path,
             });
             relevantFiles.push({ path, content: file.content });
+            fetchedFileCache.set(path, file.content);
           } else if (meta.totalLines <= MEDIUM_FILE_THRESHOLD) {
             // Read first chunk for larger files
             const chunk = await github.getFileChunk({
@@ -344,6 +453,7 @@ export async function buildContext(
               maxLines: CHUNK_SIZE,
             });
             relevantFiles.push({ path, content: chunk.content });
+            fetchedFileCache.set(path, chunk.content);
           }
           // Files over MEDIUM_FILE_THRESHOLD are skipped (too large)
         } catch (err) {
@@ -428,7 +538,12 @@ export async function buildContext(
   }
 
   // === STEP 3.3: Scrape URLs from task description via Firecrawl ===
-  const urls = ctx.taskDescription.match(URL_REGEX) || [];
+  const rawUrls = ctx.taskDescription.match(URL_REGEX) || [];
+  // Trim trailing prose-punctuation — prior regression: markdown
+  // `(https://x.com)` left a ")" on the URL, scrape got "https://x.com)"
+  // and Firecrawl returned 404. Strip only the always-prose chars; mid-URL
+  // punctuation is already excluded by URL_REGEX.
+  const urls = rawUrls.map(trimUrlTail).filter(Boolean);
   const uniqueUrls = [...new Set(urls)].slice(0, 3); // Max 3 URLs
 
   if (uniqueUrls.length > 0) {
@@ -475,6 +590,30 @@ export async function buildContext(
   } catch (err) {
     log.warn("MCP setup failed", { error: String(err) });
     // Non-critical — fortsett uten MCP
+  }
+
+  // Sprint A — Inject project_facts som memoryStrings (synlig i system-
+  // prompt). Prefix '[Project Facts]' lar AI-en forstå at disse er
+  // stabile, ikke per-task-erfaringer.
+  if (projectFactsList.length > 0) {
+    const factsBlock =
+      `[Project Facts] Stable design tokens, conventions, and decisions for this project. Treat as authoritative — do not re-discover.\n` +
+      projectFactsList.map((f) => `- ${f}`).join("\n");
+    memoryStrings = [factsBlock, ...memoryStrings];
+  }
+
+  // Sprint A — Inject inherited scrapes som docs-blokk. Lar AI-en se at
+  // bestemte URL-er allerede er scraped, så den ikke kaller web_scrape
+  // på nytt for samme kilde innen samme master-task.
+  if (inheritedScrapesList.length > 0) {
+    const lines = inheritedScrapesList.map((s) => {
+      const preview = s.content.length > 800 ? s.content.slice(0, 800) + "..." : s.content;
+      return `URL: ${s.url}\n${preview}`;
+    });
+    docsStrings.unshift(
+      `[Already-scraped sources] Phase 0 (or earlier) already scraped these URLs in this task. Do NOT call web_scrape again unless the user explicitly requests fresh content.\n\n` +
+        lines.join("\n\n---\n\n"),
+    );
   }
 
   return { treeString, treeArray, packageJson, relevantFiles, memoryStrings, docsStrings, mcpTools, manifest };

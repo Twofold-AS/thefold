@@ -1,6 +1,6 @@
 import log from "encore.dev/log";
 import { ai, tasks } from "~encore/clients";
-import { selectOptimalModel } from "../ai/router";
+import { selectOptimalModel, smartSelect } from "../ai/router";
 import { updateJobCheckpoint } from "./db";
 
 import { addStep, reportProgress, buildSteps } from "./helpers";
@@ -235,6 +235,29 @@ export async function assessAndRoute(
   log.info("STEP 4.5: Selecting model");
   let selectedModel: string;
 
+  // Vision-preservation guard: when the task needs vision (framer-class
+  // project OR user pasted an external URL we've scraped), do NOT allow
+  // STEP 4.5 to downgrade away from a vision-capable model that the chat
+  // turn already picked. Previously this downgraded Kimi K2.6 (vision) →
+  // MiniMax M2 (no vision) mid-flight, which killed framer-design tasks
+  // that rely on a screenshot from web_scrape.
+  const { getCapabilities } = await import("../ai/router");
+  const isFramerTask = ctx.projectType === "framer" || ctx.projectType === "framer_figma";
+  const initialCaps = ctx.selectedModel ? getCapabilities(ctx.selectedModel) : null;
+  const initialHasVision = initialCaps?.vision === true;
+  if (isFramerTask && initialHasVision) {
+    log.info("STEP 4.5: keeping initial vision model for framer-class task", {
+      model: ctx.selectedModel,
+      projectType: ctx.projectType,
+    });
+    ctx.selectedModel = ctx.selectedModel; // explicit no-op
+    return {
+      shouldContinue: true,
+      selectedModel: ctx.selectedModel,
+      confidenceScore: treeArray.length === 0 ? 90 : 100,
+    };
+  }
+
   if (ctx.modelOverride) {
     // User has explicitly set a model (either per-task override or saved preference)
     selectedModel = ctx.modelOverride;
@@ -242,22 +265,39 @@ export async function assessAndRoute(
   } else if (ctx.modelMode === "manual") {
     // Manual mode but no preferred model saved — fall back to auto selection
     log.info("manual mode with no preferred model — falling back to auto");
-    const complexityResult = await auditedStep(ctx, "complexity_assessed", {
-      modelMode: ctx.modelMode,
-    }, () => ai.assessComplexity({
-      taskDescription: ctx.taskDescription,
-      projectStructure: contextData.treeString.substring(0, 2000),
-      fileCount: contextData.treeArray.length,
-    }));
-    selectedModel = await selectOptimalModel(complexityResult.complexity, "auto");
+    const cachedComplexity = await readCachedComplexity(ctx);
+    const complexityResult = cachedComplexity != null
+      ? { complexity: cachedComplexity, tokensUsed: 0, costUsd: 0 }
+      : await auditedStep(ctx, "complexity_assessed", {
+          modelMode: ctx.modelMode,
+        }, () => ai.assessComplexity({
+          taskDescription: ctx.taskDescription,
+          projectStructure: contextData.treeString.substring(0, 2000),
+          fileCount: contextData.treeArray.length,
+        }));
+    // Sprint A-finjustering — agent_loop purpose-routing.
+    // Framer/figma-prosjekter får Sonnet 4.6 (vision + quality);
+    // code-prosjekter får Haiku 4.5 (cheaper + cached). Falle tilbake
+    // til complexity-baserte selectOptimalModel hvis preferred mangler.
+    selectedModel = await smartSelect({
+      purpose: "agent_loop",
+      projectType: ctx.projectType,
+      complexity: complexityResult.complexity,
+    });
+    if (!selectedModel) {
+      selectedModel = await selectOptimalModel(complexityResult.complexity, "auto");
+    }
   } else {
-    const complexityResult = await auditedStep(ctx, "complexity_assessed", {
-      modelMode: ctx.modelMode,
-    }, () => ai.assessComplexity({
-      taskDescription: ctx.taskDescription,
-      projectStructure: treeString.substring(0, 2000),
-      fileCount: treeArray.length,
-    }));
+    const cachedComplexity = await readCachedComplexity(ctx);
+    const complexityResult = cachedComplexity != null
+      ? { complexity: cachedComplexity, tokensUsed: 0, costUsd: 0, reasoning: "cached from create_task enrichment", suggestedModel: undefined as string | undefined, modelUsed: "" }
+      : await auditedStep(ctx, "complexity_assessed", {
+          modelMode: ctx.modelMode,
+        }, () => ai.assessComplexity({
+          taskDescription: ctx.taskDescription,
+          projectStructure: treeString.substring(0, 2000),
+          fileCount: treeArray.length,
+        }));
 
     tracker.recordAICall({
       inputTokens: (complexityResult as { tokensUsed?: number }).tokensUsed || 0,
@@ -266,7 +306,18 @@ export async function assessAndRoute(
       modelUsed: (complexityResult as { modelUsed?: string }).modelUsed || "",
     });
 
-    selectedModel = await selectOptimalModel(complexityResult.complexity, "auto");
+    // Sprint A-finjustering — agent_loop purpose-routing.
+    // Framer/figma-prosjekter får Sonnet 4.6 (vision + quality);
+    // code-prosjekter får Haiku 4.5 (cheaper + cached). Falle tilbake
+    // til complexity-baserte selectOptimalModel hvis preferred mangler.
+    selectedModel = await smartSelect({
+      purpose: "agent_loop",
+      projectType: ctx.projectType,
+      complexity: complexityResult.complexity,
+    });
+    if (!selectedModel) {
+      selectedModel = await selectOptimalModel(complexityResult.complexity, "auto");
+    }
 
     await audit({
       sessionId: ctx.conversationId,
@@ -297,4 +348,35 @@ export async function assessAndRoute(
     selectedModel,
     confidenceScore: treeArray.length === 0 ? 90 : 100,
   };
+}
+
+/**
+ * Read the `estimated_complexity` field already computed by create_task's
+ * enrichTaskWithAI background fire-and-forget. Saves a second AI call in
+ * STEP 4.5 when the task already has a cached value. Returns null on any
+ * failure (not found, lookup error, 0-value) so the caller falls back to
+ * a fresh assessComplexity — fail-soft.
+ */
+async function readCachedComplexity(
+  ctx: AgentExecutionContext,
+): Promise<number | null> {
+  const taskId = ctx.thefoldTaskId;
+  if (!taskId) return null;
+  try {
+    const { tasks } = await import("~encore/clients");
+    const res = await tasks.getTaskInternal({ id: taskId });
+    const cached = res.task?.estimatedComplexity;
+    if (typeof cached === "number" && cached > 0) {
+      log.info("STEP 4.5: using cached complexity from task row", {
+        taskId,
+        complexity: cached,
+      });
+      return cached;
+    }
+    return null;
+  } catch {
+    // enrichTaskWithAI is fire-and-forget; if it hasn't completed yet
+    // or if the task isn't from the tasks-service, just fall through.
+    return null;
+  }
 }

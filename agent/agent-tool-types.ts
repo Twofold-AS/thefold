@@ -47,6 +47,10 @@ export interface AgentToolContext {
   conversationId: string;
   /** TheFold task ID (optional — available when running from /tasks) */
   thefoldTaskId?: string;
+  /** Sprint A — Master-task UUID når sub-task kjører i master-iterator-flow.
+   *  Web_scrape persisterer task_transient memories med `task:<masterId>`
+   *  så Phase N+ av samme master finner det. */
+  masterTaskId?: string;
   /**
    * Active project ID (projects-service). Required for framer_* tools
    * and enables lazy ensureProjectRepo inside repo_write_file.

@@ -15,6 +15,7 @@ import ValidationPhaseLine from "@/components/chat/ValidationPhaseLine";
 import StdoutStreamModal from "@/components/chat/StdoutStreamModal";
 import TaskExecutionLogModal from "@/components/chat/TaskExecutionLogModal";
 import SkillsCollapsible from "@/components/chat/SkillsCollapsible";
+import ConcernsCollapsible from "@/components/chat/ConcernsCollapsible";
 import type { ToolCallLineData, SwarmGroupLine, ValidationPhaseLine as ValidationPhaseLineData } from "@/components/chat/types";
 
 interface StepInfo {
@@ -74,6 +75,20 @@ interface AgentStreamProps {
    *  the task is in a terminal state (done/failed), AgentStream renders a
    *  "Vis full oppgave-logg" link that opens TaskExecutionLogModal. */
   taskId?: string | null;
+  /** Live tool-calls from the useAgentStream hook — these are SSE events
+   *  emitted by the agent during execution (repo_read_file, framer_create_code_file,
+   *  build_validate, etc). Rendered inline as they arrive so the user can
+   *  SEE what the agent is doing in real time. Replaces the generic
+   *  "Bygger..."-phase-label with actual activity. */
+  liveToolCalls?: Array<{
+    id: string;
+    toolName: string;
+    input: Record<string, unknown>;
+    result?: unknown;
+    durationMs?: number;
+    isError?: boolean;
+    status: "running" | "done" | "error";
+  }>;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -233,7 +248,7 @@ type MergedLine =
 // SkillsCollapsible moved to ./chat/SkillsCollapsible.tsx so chat-bubble-
 // level messages can share the same widget without importing this whole file.
 
-export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges, reviewInProgress, swarmGroups, activeSkills, taskId }: AgentStreamProps) {
+export default function AgentStream({ content, onCancel, onApprove, onReject, onRequestChanges, reviewInProgress, swarmGroups, activeSkills, taskId, liveToolCalls }: AgentStreamProps) {
   const progress = useMemo(() => parseProgress(content), [content]);
 
   // Tool-call detail modal state (U3)
@@ -242,12 +257,31 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
   const [openStdout, setOpenStdout] = useState<{ sandboxId: string; phaseIndex?: number } | null>(null);
   const [taskLogOpen, setTaskLogOpen] = useState(false);
 
+  // Convert the hook's live tool-call state to ToolCallLineData. Dedup by
+  // id so we don't double-count tools that also arrive inline via
+  // `progress.toolCalls`. Live events always win (newer state).
+  const liveToolLineData = useMemo<ToolCallLineData[]>(() => {
+    if (!liveToolCalls || liveToolCalls.length === 0) return [];
+    return liveToolCalls.map((tc, idx) => ({
+      kind: "tool_call" as const,
+      id: tc.id,
+      timestamp: idx, // arrival order from hook state
+      toolName: tc.toolName,
+      status: tc.status === "done" ? "done" : tc.status === "error" ? "error" : "running",
+      input: tc.input,
+      result: tc.result,
+      durationMs: tc.durationMs,
+      isError: tc.isError,
+    }));
+  }, [liveToolCalls]);
+
   // Merge steps + toolCalls + swarmGroups into one chronological stack
   // (U3/U8 + Fase H inline refactor). Swarm groups are appended at the tail
   // so they render below the most recent step/tool — they represent the
   // "currently running" swarm which should sit at the bottom of the stack.
   const mergedLines = useMemo<MergedLine[]>(() => {
     const lines: MergedLine[] = [];
+    const seenToolIds = new Set<string>();
     if (progress) {
       (progress.steps ?? []).forEach((s, i) => {
         lines.push({
@@ -259,6 +293,7 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
         });
       });
       (progress.toolCalls ?? []).forEach((t) => {
+        seenToolIds.add(t.id);
         lines.push({ kind: "tool", data: t, timestamp: t.timestamp });
       });
       // Fase K.1 — validation-phases merges kronologisk.
@@ -266,12 +301,19 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
         lines.push({ kind: "validation", data: v, timestamp: v.timestamp });
       });
     }
+    // Live tool-calls from SSE. Dedup against any inline tool-calls above.
+    // Base-timestamp set high so live entries append after historical steps.
+    const liveBase = (progress?.steps?.length ?? 0) + 1000;
+    liveToolLineData.forEach((t, i) => {
+      if (seenToolIds.has(t.id)) return;
+      lines.push({ kind: "tool", data: t, timestamp: liveBase + i });
+    });
     (swarmGroups ?? []).forEach((g) => {
       lines.push({ kind: "swarm", data: g, timestamp: g.timestamp });
     });
     lines.sort((a, b) => a.timestamp - b.timestamp);
     return lines;
-  }, [progress, swarmGroups]);
+  }, [progress, swarmGroups, liveToolLineData]);
 
   // Use page-level reviewInProgress (survives re-renders) with local fallback
   const reviewAction = reviewInProgress ?? null;
@@ -345,23 +387,34 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
   const phaseLabel = PHASE_LABELS[progress.phase] ?? progress.phase;
   const isFailed = progress.status === "failed";
   const isDone = progress.status === "done";
+  const isWaiting = progress.status === "waiting";
+  // Skjul "Bygger"/"Analyserer"/osv. phase-header mens agenten aktivt jobber.
+  // Live tool-calls (og steps) viser hva som faktisk skjer — generiske
+  // phase-labels er bare støy. Header beholdes for terminal-states (done/
+  // failed/waiting) og idle-states (thinking/preparing før noen tool-call
+  // har ankommet).
+  const hasLiveActivity = liveToolLineData.length > 0 || mergedLines.length > 0;
+  const isWorking = progress.status === "working";
+  const hidePhaseHeader = isWorking && hasLiveActivity;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 500 }}>
-      {/* Phase header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            fontFamily: T.sans,
-            color: isFailed ? T.error : isDone ? T.success : T.text,
-          }}
-        >
-          {phaseLabel}
-        </span>
-        {/* Stop button moved to send button in ChatInput */}
-      </div>
+      {/* Phase header — skjult mens aktiv for å la tool-calls fortelle
+          historien (UI-1: "få vekk denne 'bygger'-greia"). */}
+      {!hidePhaseHeader && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              fontFamily: T.sans,
+              color: isFailed ? T.error : isDone ? T.success : isWaiting ? T.accent : T.text,
+            }}
+          >
+            {phaseLabel}
+          </span>
+        </div>
+      )}
 
       {/* Active skills — collapsible row. One muted line ("Skills hentet")
           by default, expands on click into a list where each skill lives on
@@ -639,16 +692,10 @@ export default function AgentStream({ content, onCancel, onApprove, onReject, on
         </div>
       )}
 
-      {/* Concerns */}
+      {/* Concerns — collapsible (matcher SkillsCollapsible-stilen).
+          Default collapsed: "Bekymringer (N)" som en muted header-rad. */}
       {progress.report?.concerns && progress.report.concerns.length > 0 && (
-        <div style={{ marginTop: 8 }}>
-          <div style={{ fontSize: 10, color: T.textMuted, textTransform: "uppercase", marginBottom: 4 }}>Bekymringer</div>
-          {progress.report.concerns.map((c, i) => (
-            <div key={i} style={{ fontSize: 12, color: T.textSec, lineHeight: 1.5, paddingLeft: 8, borderLeft: `2px solid ${T.border}`, marginBottom: 4 }}>
-              {c}
-            </div>
-          ))}
-        </div>
+        <ConcernsCollapsible concerns={progress.report.concerns} />
       )}
 
       {/* Agent reasoning transparency — shows memories, skills, context, decisions */}

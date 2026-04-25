@@ -1,35 +1,40 @@
 "use client";
 
-// AgentAvatar — 3×3 grid of dots that slide through a 4s choreography.
-// The animation runs continuously (it's a decorative brand mark); the
-// "error" state adds a red tint + pulse over the dot motion.
-// Keyframes live in globals.css as .tf-agent-dot + @keyframes tf-moveDot-1..9,
-// so multiple avatars share one animation timeline.
+// AgentAvatar — triple-ring pulsing spinner.
+// Three concentric stroke-rings rotate at different speeds (outer slowest,
+// inner fastest) while the dash-offset breathes on each, giving the
+// "pulserende" look the user asked for. Pure SVG + inline keyframes so
+// multiple avatars share one animation timeline via CSS.
+//
+// Color: `#0B1D3A` (darkest stop from the ColorBends background gradient).
+// Override via the `color` prop when contrast against the backdrop is too
+// low (e.g. dark sidebar — pass "#aecbfa" to match the old shimmer tone).
 
 export type AgentAvatarState = "idle" | "working" | "error";
 
 interface AgentAvatarProps {
   size?: number;
   state?: AgentAvatarState;
-  /** Override the dot color. Defaults to #aecbfa (light-blue shimmer tone). */
+  /** Override the ring color. Defaults to #0B1D3A (darkest gradient stop). */
   color?: string;
 }
 
 export default function AgentAvatar({
   size = 28,
   state = "idle",
-  color,
+  color = "#0B1D3A",
 }: AgentAvatarProps) {
-  const wrapClass = state === "error" ? "tf-agent-error" : "";
-  // Default to the light-blue shimmer tone from SquigglyDivider (#aecbfa)
-  // so the loading indicator reads as part of the app's blue shimmer palette.
-  const resolvedColor = state === "error" ? undefined : (color ?? "#aecbfa");
+  const resolvedColor = state === "error" ? "#ef4444" : color;
+  // When working the rings spin + breathe. When idle they sit still but
+  // keep the breathing pulse so the mark never looks dead.
+  const animating = state !== "idle";
 
   return (
     <div
       role="img"
-      aria-label={state === "working" ? "Agent tenker" : state === "error" ? "Agent-feil" : "Agent"}
-      className={wrapClass}
+      aria-label={
+        state === "working" ? "Agent tenker" : state === "error" ? "Agent-feil" : "Agent"
+      }
       style={{
         display: "inline-block",
         width: size,
@@ -38,22 +43,88 @@ export default function AgentAvatar({
         color: resolvedColor,
       }}
     >
+      <style>{`
+        @keyframes tf-ring-outer { to { transform: rotate(360deg); } }
+        @keyframes tf-ring-mid { to { transform: rotate(-360deg); } }
+        @keyframes tf-ring-inner { to { transform: rotate(360deg); } }
+        @keyframes tf-ring-breath-outer {
+          0%, 100% { stroke-dashoffset: 0; opacity: 0.9; }
+          50% { stroke-dashoffset: 40; opacity: 0.55; }
+        }
+        @keyframes tf-ring-breath-mid {
+          0%, 100% { stroke-dashoffset: 0; opacity: 0.75; }
+          50% { stroke-dashoffset: -30; opacity: 1; }
+        }
+        @keyframes tf-ring-breath-inner {
+          0%, 100% { stroke-dashoffset: 0; opacity: 0.95; }
+          50% { stroke-dashoffset: 20; opacity: 0.7; }
+        }
+      `}</style>
       <svg
         width={size}
         height={size}
-        viewBox="-13 -13 45 45"
+        viewBox="0 0 44 44"
         xmlns="http://www.w3.org/2000/svg"
+        fill="none"
+        stroke="currentColor"
       >
-        {/* 9 dots — duplicates at (13,1) and (13,13) are intentional; animations reference them by nth-child. */}
-        <circle className="tf-agent-dot" cx="13" cy="1" r="5" />
-        <circle className="tf-agent-dot" cx="13" cy="1" r="5" />
-        <circle className="tf-agent-dot" cx="25" cy="25" r="5" />
-        <circle className="tf-agent-dot" cx="13" cy="13" r="5" />
-        <circle className="tf-agent-dot" cx="13" cy="13" r="5" />
-        <circle className="tf-agent-dot" cx="25" cy="13" r="5" />
-        <circle className="tf-agent-dot" cx="1" cy="25" r="5" />
-        <circle className="tf-agent-dot" cx="13" cy="25" r="5" />
-        <circle className="tf-agent-dot" cx="25" cy="25" r="5" />
+        {/* Outer ring — slowest rotation, widest gap */}
+        <g
+          style={{
+            transformOrigin: "22px 22px",
+            animation: animating ? "tf-ring-outer 3.6s linear infinite" : undefined,
+          }}
+        >
+          <circle
+            cx="22"
+            cy="22"
+            r="19"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray="45 75"
+            style={{
+              animation: "tf-ring-breath-outer 2.8s ease-in-out infinite",
+            }}
+          />
+        </g>
+        {/* Middle ring — counter-rotates for visual layering */}
+        <g
+          style={{
+            transformOrigin: "22px 22px",
+            animation: animating ? "tf-ring-mid 2.4s linear infinite" : undefined,
+          }}
+        >
+          <circle
+            cx="22"
+            cy="22"
+            r="13"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray="35 50"
+            style={{
+              animation: "tf-ring-breath-mid 2.2s ease-in-out infinite",
+            }}
+          />
+        </g>
+        {/* Inner ring — fastest, tightest arc */}
+        <g
+          style={{
+            transformOrigin: "22px 22px",
+            animation: animating ? "tf-ring-inner 1.6s linear infinite" : undefined,
+          }}
+        >
+          <circle
+            cx="22"
+            cy="22"
+            r="7"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray="18 26"
+            style={{
+              animation: "tf-ring-breath-inner 1.6s ease-in-out infinite",
+            }}
+          />
+        </g>
       </svg>
     </div>
   );

@@ -5,6 +5,7 @@ import { T } from "@/lib/tokens";
 import AgentStream from "@/components/AgentStream";
 import AgentStatusBar from "@/components/chat/AgentStatusBar";
 import TypingIndicator from "@/components/chat/TypingIndicator";
+import PlanPreview from "@/components/chat/PlanPreview";
 import SkillsCollapsible from "@/components/chat/SkillsCollapsible";
 import MemoryInsight from "@/components/chat/MemoryInsight";
 import ChangedFilesPanel from "@/components/chat/ChangedFilesPanel";
@@ -120,6 +121,43 @@ interface MessageListProps {
   /** Active skills for the currently-running task. Only applied to the
    *  last agent message (the one the user is watching). */
   activeSkills?: Array<{ id: string; name: string; description?: string }>;
+  /** Live tool-calls from useAgentStream (SSE). Applied to the last agent
+   *  message so user sees real-time "leser src/foo.tsx" lines etc. */
+  liveToolCalls?: Array<{
+    id: string;
+    toolName: string;
+    input: Record<string, unknown>;
+    result?: unknown;
+    durationMs?: number;
+    isError?: boolean;
+    status: "running" | "done" | "error";
+  }>;
+  /** True i Incognito-fane — TypingIndicator viser idle-avatar (ingen rotasjon). */
+  isIncognito?: boolean;
+  /** Runde 3-A — plan-preview state fra useAgentStream. Når satt rendres
+   *  <PlanPreview> inline nederst i meldingsfeeden. */
+  planPending?: null | {
+    masterTaskId: string;
+    subtasks: Array<{
+      id: string;
+      title: string;
+      phase: string | null;
+      description?: string | null;
+      targetFiles?: string[];
+      dependsOn?: string[];
+    }>;
+    countdownSec: number;
+    iteration: number;
+    receivedAt: number;
+  };
+  /** Runde 3-A — clear-callback fra hook (skjuler preview umiddelbart ved klikk). */
+  onClearPlanPending?: () => void;
+  /** Runde 3-B — interrupt-state fra useAgentStream. */
+  interrupted?: null | {
+    masterTaskId: string;
+    pausedSubTaskId?: string;
+    userMessage: string;
+  };
 }
 
 const MessageListComponent = function MessageList({
@@ -139,6 +177,11 @@ const MessageListComponent = function MessageList({
   reviewInProgress,
   activePlanMsgId,
   activeSkills,
+  liveToolCalls,
+  isIncognito,
+  planPending,
+  onClearPlanPending,
+  interrupted,
 }: MessageListProps) {
   const msgEndRef = useRef<HTMLDivElement>(null);
   const [modalPlanContent, setModalPlanContent] = useState<string | null>(null);
@@ -376,6 +419,7 @@ const MessageListComponent = function MessageList({
                         reviewInProgress={reviewInProgress}
                         swarmGroups={m.id === lastAgentMsg?.id ? swarmGroupsForAgent : undefined}
                         activeSkills={m.id === lastAgentMsg?.id ? activeSkills : undefined}
+                        liveToolCalls={m.id === lastAgentMsg?.id ? liveToolCalls : undefined}
                         taskId={(parseMeta(m.metadata) as { taskId?: string } | null)?.taskId ?? activeTaskId ?? null}
                       />
                       <div style={{ fontSize: 10, color: T.textFaint, marginTop: 2 }}>{time}</div>
@@ -430,6 +474,7 @@ const MessageListComponent = function MessageList({
                           onRequestChanges={onRequestChanges}
                           swarmGroups={swarmGroupsForAgent}
                           activeSkills={activeSkills}
+                          liveToolCalls={liveToolCalls}
                           taskId={(parseMeta(lastAgentMsg.metadata) as { taskId?: string } | null)?.taskId ?? activeTaskId ?? null}
                         />
                       </div>
@@ -444,13 +489,45 @@ const MessageListComponent = function MessageList({
         })
       )}
 
+      {/* Runde 3-A — plan-preview card. Render inline so the user sees the
+          full feed plus the plan card waiting at the bottom. */}
+      {planPending && (
+        <PlanPreview
+          masterTaskId={planPending.masterTaskId}
+          subtasks={planPending.subtasks}
+          countdownSec={planPending.countdownSec}
+          iteration={planPending.iteration}
+          receivedAt={planPending.receivedAt}
+          onClear={() => onClearPlanPending?.()}
+        />
+      )}
+
+      {/* Runde 3-B — interrupted-banner. Lavmælt info-tekst — neste
+          melding fra bruker rutes via chat.send + interruptingMaster. */}
+      {interrupted && (
+        <div
+          style={{
+            padding: "8px 12px",
+            background: "rgba(20,20,24,0.65)",
+            border: `1px solid ${T.border}`,
+            borderRadius: 8,
+            fontSize: 12,
+            color: T.textMuted,
+            fontFamily: T.sans,
+            marginTop: 4,
+          }}
+        >
+          Avbrutt etter din melding: «{interrupted.userMessage.substring(0, 120)}». Skriv hva du vil at agenten skal gjøre videre.
+        </div>
+      )}
+
       {/* Typing indicator for direct chat; AgentStatusBar handles agent tasks */}
       {sending && !activeTaskId && (() => {
         // Hide typing indicator if the last visible message is already from the assistant
         const lastMsg = visibleMsgs[visibleMsgs.length - 1];
         const assistantAlreadyReplied = lastMsg?.role === "assistant" && lastMsg.content?.trim();
         if (assistantAlreadyReplied) return null;
-        return <TypingIndicator statusText={streamStatusText ?? "Tenker..."} />;
+        return <TypingIndicator statusText={streamStatusText ?? "Tenker..."} idle={isIncognito} />;
       })()}
       {sending && activeTaskId && (
         <AgentStatusBar

@@ -578,6 +578,7 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
         repoName:       ctx.repoName,
         conversationId: ctx.conversationId,
         thefoldTaskId:  ctx.thefoldTaskId,
+        masterTaskId:   ctx.masterTaskId,
         projectId:      ctx.projectId,
         projectType:    ctx.projectType,
       };
@@ -633,6 +634,18 @@ export async function executeTask(ctx: TaskContext, options?: ExecuteTaskOptions
           }),
         );
       }
+
+      // Diagnostic log — the chat-turn that spawned this task might have
+      // used a different (vision-capable) model. Downgrading to the
+      // complexity-routed model here often loses vision, which breaks
+      // screenshot-driven tasks like "build a Framer page from this URL".
+      log.info("agent tool loop: model at entry", {
+        taskId: ctx.taskId,
+        selectedModel: ctx.selectedModel,
+        modelOverride: ctx.modelOverride,
+        projectType: ctx.projectType,
+        vision: getCapabilities(ctx.selectedModel)?.vision === true,
+      });
 
       const loopResult = await runAgentToolLoop({
         model:       ctx.selectedModel,
@@ -955,13 +968,259 @@ export const startTask = api(
       log.warn("persistent job creation failed", { error: err instanceof Error ? err.message : String(err) });
     }
 
-    // Fire and forget
-    executeTask(ctx, { planOnly: req.planOnly })
-      .catch(() => {})
-      .finally(() => releaseRepoLock(ctx.repoOwner, ctx.repoName));
+    // ─── BISECT-A: master-iterator routing midlertidig deaktivert ──
+    // Forrige isoleringstest viste at hele blokken hang boot. Re-aktiveres
+    // når vi har isolert det spesifikke uttrykket / call-en som encore-
+    // parser ikke liker. Block-comments fungerer ikke (nested */ inside),
+    // så vi sletter rett ut og re-introduserer fra git når vi vet hva som
+    // er rotårsaken.
+
+    // BISECT-A fallback: kjør original executeTask direkte (ingen sub-task-routing).
+    (async () => {
+      try {
+        await executeTask(ctx, { planOnly: req.planOnly });
+      } catch (err) {
+        log.warn("startTask: execution crashed", {
+          error: err instanceof Error ? err.message : String(err),
+          taskId: req.taskId,
+        });
+      } finally {
+        releaseRepoLock(ctx.repoOwner, ctx.repoName);
+      }
+    })();
 
     return { status: "started", taskId: req.taskId };
   }
+);
+
+// --- Resume master-task from sleep-mode (Runde 2d) ---
+//
+// Called from chat.send when the user replies to a `needs_input` master-
+// task. Picks up the first non-done sub-task, injects the user feedback
+// as extra task-description context, runs the master-iterator again.
+// Emits `agent.resumed` so the UI switches back to the working state.
+
+interface ResumeMasterTaskRequest {
+  masterTaskId: string;
+  conversationId: string;
+  userFeedback: string;
+  userId?: string;
+}
+
+interface ResumeMasterTaskResponse {
+  status: "resumed" | "no_sleeping_subtask" | "master_not_sleeping" | "missing_repo";
+  resumingSubTaskId?: string;
+}
+
+export const resumeMasterTask = api(
+  { method: "POST", path: "/agent/resume-master", expose: false },
+  async (req: ResumeMasterTaskRequest): Promise<ResumeMasterTaskResponse> => {
+    const masterRes = await tasks.getTaskInternal({ id: req.masterTaskId });
+    const master = masterRes.task;
+    if (!master) return { status: "master_not_sleeping" };
+    if (master.status !== "needs_input" && master.status !== "blocked") {
+      log.info("resumeMasterTask: master not in sleeping state", {
+        masterId: req.masterTaskId,
+        status: master.status,
+      });
+      return { status: "master_not_sleeping" };
+    }
+
+    // Find the first sub-task that's not `done` — that's the one we resume.
+    const subs = await tasks.listSubTasks({ parentId: req.masterTaskId });
+    const sleeping = subs.tasks.find((s) => s.status !== "done");
+    if (!sleeping) {
+      log.info("resumeMasterTask: all sub-tasks already done, marking master done", {
+        masterId: req.masterTaskId,
+      });
+      try {
+        await tasks.updateTaskStatus({ id: req.masterTaskId, status: "done" });
+      } catch {
+        /* non-critical */
+      }
+      return { status: "no_sleeping_subtask" };
+    }
+
+    // Reset sleeping sub-task to `planned` + append user feedback to its
+    // description so the next run sees the context.
+    const updatedDesc = [
+      sleeping.description ?? "",
+      "",
+      "--- Bruker-feedback etter sleep-mode ---",
+      req.userFeedback,
+    ].join("\n");
+    await tasks.updateTask({
+      id: sleeping.id,
+      description: updatedDesc,
+      status: "planned",
+    });
+    // Clear master errorMessage + set back to in_progress so the iterator
+    // picks it up cleanly.
+    await tasks.updateTaskStatus({
+      id: req.masterTaskId,
+      status: "in_progress",
+    });
+
+    // Emit resumed event. Caller (chat.send) has already stored the user
+    // message, so the frontend's current bubble is the user's reply.
+    agentEventBus.emit(
+      req.conversationId,
+      createAgentEvent("agent.resumed", {
+        taskId: req.masterTaskId,
+        resumingSubTaskId: sleeping.id,
+        userFeedback: req.userFeedback,
+      }),
+    );
+
+    // Re-enter startTask to rebuild ctx + route to the iterator again.
+    // Fire-and-forget; startTask handles lock/rate-limit itself.
+    startTask({
+      conversationId: req.conversationId,
+      taskId: req.masterTaskId,
+      userMessage: req.userFeedback,
+      userId: req.userId,
+    }).catch((err) => {
+      log.warn("resumeMasterTask: startTask failed", {
+        masterId: req.masterTaskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    return { status: "resumed", resumingSubTaskId: sleeping.id };
+  }
+);
+
+// --- Runde 3-A: Plan-preview confirm/cancel/edit endpoints ---
+
+export const confirmPlan = api(
+  { method: "POST", path: "/agent/confirm-plan", expose: true, auth: true },
+  async (req: { masterTaskId: string }): Promise<{ success: boolean }> => {
+    const { confirmPlan: confirmFn } = await import("./plan-coordinator");
+    const ok = confirmFn(req.masterTaskId);
+    if (!ok) {
+      log.info("confirmPlan: no pending plan for master", { masterTaskId: req.masterTaskId });
+    }
+    return { success: ok };
+  },
+);
+
+export const cancelPlan = api(
+  { method: "POST", path: "/agent/cancel-plan", expose: true, auth: true },
+  async (req: { masterTaskId: string }): Promise<{ success: boolean }> => {
+    const { cancelPlan: cancelFn } = await import("./plan-coordinator");
+    const ok = cancelFn(req.masterTaskId);
+    return { success: ok };
+  },
+);
+
+/**
+ * editPlan — user typed a chat message while plan-preview was visible.
+ * We feed the existing plan + their instruction back to the AI, which
+ * uses update_subtask/delete_subtask/create_subtask to revise. After the
+ * AI is done we re-emit `agent.plan_ready` and reset the countdown so the
+ * user sees the updated plan before we proceed.
+ */
+export const editPlan = api(
+  { method: "POST", path: "/agent/edit-plan", expose: true, auth: true },
+  async (req: {
+    masterTaskId: string;
+    userInstruction: string;
+    conversationId: string;
+  }): Promise<{ success: boolean; iteration: number }> => {
+    const { resetPlanCountdown, isPlanPending } = await import("./plan-coordinator");
+    if (!isPlanPending(req.masterTaskId)) {
+      return { success: false, iteration: 0 };
+    }
+
+    // Reset countdown immediately so AI has time to revise.
+    const iteration = resetPlanCountdown(req.masterTaskId, 30_000); // 30s while editing
+
+    try {
+      // Pull current plan + ask AI to revise.
+      const subRes = await tasks.listSubTasks({ parentId: req.masterTaskId });
+      const masterRes = await tasks.getTaskInternal({ id: req.masterTaskId });
+      const planSummary = subRes.tasks
+        .map(
+          (s) =>
+            `- ${s.phase ?? "?"}: ${s.title} (${s.id})${
+              s.description ? ` — ${s.description.substring(0, 100)}` : ""
+            }`,
+        )
+        .join("\n");
+      const editPrompt = [
+        `You previously planned the following sub-tasks for master task "${
+          masterRes.task?.title ?? "unknown"
+        }":`,
+        planSummary,
+        "",
+        "The user now says:",
+        req.userInstruction,
+        "",
+        "Use update_subtask, delete_subtask, or create_subtask to revise. Do not call start_task. Respond briefly when done.",
+      ].join("\n");
+
+      const { ai: aiClient } = await import("~encore/clients");
+      await aiClient.chat({
+        messages: [{ role: "user", content: editPrompt }],
+        memoryContext: [],
+        systemContext: "agent_planning",
+        complexity: 4,
+        conversationId: req.conversationId,
+      });
+
+      // After the AI's tool calls have run, re-fetch + re-emit plan_ready.
+      const refreshed = await tasks.listSubTasks({ parentId: req.masterTaskId });
+      const sortedSubs = [...refreshed.tasks].sort((a, b) => {
+        const ap = a.phase ?? "~";
+        const bp = b.phase ?? "~";
+        return ap < bp ? -1 : ap > bp ? 1 : 0;
+      });
+      agentEventBus.emit(
+        req.conversationId,
+        createAgentEvent("agent.plan_ready", {
+          masterTaskId: req.masterTaskId,
+          subtasks: sortedSubs.map((s) => ({
+            id: s.id,
+            title: s.title,
+            phase: s.phase ?? null,
+            description: s.description ?? null,
+            targetFiles: (s.labels ?? [])
+              .filter((l) => l.startsWith("target:"))
+              .map((l) => l.slice("target:".length)),
+            dependsOn: s.dependsOn ?? [],
+          })),
+          countdownSec: 5,
+          iteration,
+        }),
+      );
+      // After re-emit, drop back to 5s auto-confirm.
+      resetPlanCountdown(req.masterTaskId, 5000);
+    } catch (err) {
+      log.warn("editPlan failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return { success: true, iteration };
+  },
+);
+
+// --- Runde 3-B: Interrupt master-task during execution ---
+
+export const interruptMaster = api(
+  { method: "POST", path: "/agent/interrupt-master", expose: true, auth: true },
+  async (req: {
+    masterTaskId: string;
+    userMessage: string;
+    conversationId: string;
+  }): Promise<{ success: boolean }> => {
+    const { setInterrupt } = await import("./plan-coordinator");
+    setInterrupt(req.masterTaskId, req.userMessage);
+    log.info("interruptMaster: flag set", {
+      masterTaskId: req.masterTaskId,
+      messageLen: req.userMessage.length,
+    });
+    return { success: true };
+  },
 );
 
 // Manually trigger agent to pick up pending Linear tasks

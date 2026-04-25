@@ -33,7 +33,21 @@ export type AgentEventType =
   | "subagent.started"
   | "subagent.progress"
   | "subagent.status_change"
-  | "subagent.completed";
+  | "subagent.completed"
+  // Runde 2d — Sleep-mode for master-task phase failures. Emitted when a
+  // sub-task bails out and the master goes to `needs_input`. Frontend
+  // renders "Agent venter på input: <reason>". Any user message in the
+  // same conversation resumes the sleeping sub-task (`agent.resumed`).
+  | "agent.sleeping"
+  | "agent.resumed"
+  // Runde 3-A — Plan-preview before iteration. After AI has called
+  // create_subtask × N and start_task on master, the iterator emits
+  // plan_ready with the sub-task list + countdown. User can confirm,
+  // cancel, or send a chat-edit. Auto-confirms on countdown end.
+  | "agent.plan_ready"
+  // Runde 3-B — Soft-pause during iteration. User has interrupted via
+  // /agent/interrupt-master. Iterator stops at next subtask boundary.
+  | "agent.interrupted";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-type data shapes
@@ -172,6 +186,18 @@ export interface AgentDoneData {
   costEstimate?: number;
   /** Paths of files changed by repo_write_file calls */
   filesChanged?: string[];
+  /**
+   * Why the agent stopped. Lets the UI render a clear reason instead of
+   * a silent "done" when something went wrong.
+   *   - natural: end_turn, task complete
+   *   - user_cancelled: user clicked Stopp
+   *   - tool_failure: a tool emitted bailOut (auth/404/etc.)
+   *   - max_loops: hit MAX_TOOL_LOOPS
+   *   - truncated: finish_reason=length, couldn't recover
+   */
+  reason?: "natural" | "user_cancelled" | "tool_failure" | "max_loops" | "truncated";
+  /** Optional user-facing message that explains the reason (for non-natural stops) */
+  userMessage?: string;
 }
 
 export interface AgentProgressData {
@@ -243,6 +269,63 @@ export interface AgentEventDataMap {
   "subagent.progress": SubAgentProgressData;
   "subagent.status_change": SubAgentStatusChangeData;
   "subagent.completed": SubAgentCompletedData;
+  "agent.sleeping": AgentSleepingData;
+  "agent.resumed": AgentResumedData;
+  "agent.plan_ready": AgentPlanReadyData;
+  "agent.interrupted": AgentInterruptedData;
+}
+
+// Runde 2d — sleep-mode payloads
+export interface AgentSleepingData {
+  /** Master task ID that went to needs_input. */
+  taskId: string;
+  /** The sub-task that triggered the sleep (first non-done sub-task). */
+  pendingSubTaskId: string;
+  /** Short reason code or error string — internal. */
+  reason: string;
+  /** User-facing prompt explaining why we stopped + asking for input. */
+  userMessage: string;
+}
+
+export interface AgentResumedData {
+  /** Master task ID that woke up. */
+  taskId: string;
+  /** The sub-task we're resuming execution on. */
+  resumingSubTaskId: string;
+  /** User feedback that triggered the resume, surfaced to the agent. */
+  userFeedback: string;
+}
+
+// Runde 3-A — plan-preview payload. Frontend renders sub-task list +
+// "Kjør i gang" / "Avbryt" / chat-edit affordance. Auto-confirm at
+// countdownSec=0.
+export interface AgentPlanReadyData {
+  /** Master task ID the plan belongs to. */
+  masterTaskId: string;
+  /** Ordered (phase ASC) snapshot of the master's sub-tasks. */
+  subtasks: Array<{
+    id: string;
+    title: string;
+    phase: string | null;
+    description?: string | null;
+    targetFiles?: string[];
+    dependsOn?: string[];
+  }>;
+  /** Seconds before auto-confirm. UI may render a countdown. */
+  countdownSec: number;
+  /** Iteration counter — increments when user edits trigger a fresh
+   *  plan_ready. Lets the UI distinguish "first preview" from "edited". */
+  iteration: number;
+}
+
+// Runde 3-B — soft-pause payload.
+export interface AgentInterruptedData {
+  /** Master task ID that paused. */
+  masterTaskId: string;
+  /** Sub-task that was active when the pause hit (if any). */
+  pausedSubTaskId?: string;
+  /** Free-form user message that triggered the interrupt. */
+  userMessage: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

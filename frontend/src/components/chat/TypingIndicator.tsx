@@ -12,9 +12,12 @@ interface TypingIndicatorProps {
   statusText?: string | null;
   /** Retained for API back-compat — no longer influences rendering. */
   variant?: "wand" | "broom";
+  /** When true, avatar uses `idle`-state (breathing pulse, no rotation)
+   *  — used for incognito direct-chat where no agent is active. */
+  idle?: boolean;
 }
 
-export default function TypingIndicator({ statusText }: TypingIndicatorProps) {
+export default function TypingIndicator({ statusText, idle }: TypingIndicatorProps) {
   return (
     <div
       style={{
@@ -31,7 +34,7 @@ export default function TypingIndicator({ statusText }: TypingIndicatorProps) {
           to { opacity: 1; transform: translateY(0); }
         }
       `}</style>
-      <AgentAvatar size={28} state="working" />
+      <AgentAvatar size={28} state={idle ? "idle" : "working"} />
       <span
         style={{
           fontSize: 14,

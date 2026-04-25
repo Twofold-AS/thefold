@@ -35,7 +35,7 @@ interface MessageInputProps {
   autoMode?: boolean;
   onAutoModeToggle?: () => void;
   conversationId?: string;
-  projectScope?: "cowork" | "designer";
+  projectScope?: "incognito" | "cowork" | "designer";
   onNewProject?: () => void;
   selectedProjectId?: string | null;
   onSelectProject?: (id: string | null) => void;

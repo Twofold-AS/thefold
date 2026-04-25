@@ -107,22 +107,42 @@ export const deleteApiKey = api(
   }
 );
 
+// UUID v4 shape: 8-4-4-4-12 hex chars. Used to guard `project_id = $1::uuid`
+// queries — Postgres throws "invalid input syntax for type uuid" and
+// produces a nasty error-log otherwise. Callers outside the projects
+// context (agent tool-loop without an active project) routinely pass
+// empty-string or undefined here, so we short-circuit to a null result
+// instead of letting PG reject.
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Intern endpoint for andre services som trenger en dekryptert nøkkel.
 export const resolveApiKey = api(
   { method: "POST", path: "/projects/api-keys/resolve", expose: false },
   async (req: { projectId: string; keyName: string }): Promise<{ value: string | null }> => {
+    // Fail-soft on invalid/empty projectId. Tools like web_scrape call
+    // resolveApiKey opportunistically to find per-project overrides; for
+    // chats without an active project the projectId is empty, and
+    // previously we passed that through and let PG explode with
+    // "unable to parse uuid". Now we just return null.
+    const pid = (req.projectId ?? "").trim();
+    if (!pid || !UUID_REGEX.test(pid)) {
+      return { value: null };
+    }
+    const keyName = (req.keyName ?? "").trim();
+    if (!keyName) return { value: null };
+
     const row = await db.queryRow<{ encrypted: string }>`
       SELECT key_value_encrypted AS encrypted
       FROM project_api_keys
-      WHERE project_id = ${req.projectId} AND key_name = ${req.keyName}
+      WHERE project_id = ${pid}::uuid AND key_name = ${keyName}
     `;
     if (!row) return { value: null };
     try {
       return { value: decryptApiKey(row.encrypted) };
     } catch (err) {
       log.warn("api-key decrypt failed", {
-        projectId: req.projectId,
-        keyName: req.keyName,
+        projectId: pid,
+        keyName,
         error: err instanceof Error ? err.message : String(err),
       });
       return { value: null };

@@ -49,9 +49,15 @@ export const buildCreateSandboxTool: Tool<z.infer<typeof inputSchema>> = {
           }
         }
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         return {
           success: false,
-          message: `Could not ensure companion repo for project ${ctx.projectId}: ${err instanceof Error ? err.message : String(err)}`,
+          message: `Could not ensure companion repo for project ${ctx.projectId}: ${msg}`,
+          bailOut: {
+            reason: "repo_ensure_failed",
+            userMessage:
+              "Jeg klarte ikke å opprette eller finne et GitHub-repo for prosjektet. Sjekk at GitHub-tokenet er gyldig og har riktige tilganger.",
+          },
         };
       }
     }
@@ -60,14 +66,50 @@ export const buildCreateSandboxTool: Tool<z.infer<typeof inputSchema>> = {
       return {
         success: false,
         message: "build_create_sandbox requires repoName — provide it as input, set ctx.repoName, or supply a projectId that has (or can create) a companion repo.",
+        bailOut: {
+          reason: "no_repo_name",
+          userMessage:
+            "Jeg kan ikke lage en sandbox uten et tilknyttet GitHub-repo. Knytt prosjektet til et repo først, eller kjør dette fra et eksisterende prosjekt.",
+        },
       };
     }
 
-    const result = await sandbox.create({ repoOwner, repoName, ref });
-    return {
-      success: true,
-      data: { sandboxId: result.id, repoOwner, repoName },
-      mutationCount: 1,
-    };
+    try {
+      const result = await sandbox.create({ repoOwner, repoName, ref });
+      return {
+        success: true,
+        data: { sandboxId: result.id, repoOwner, repoName },
+        mutationCount: 1,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.log.warn("build_create_sandbox failed", { repoOwner, repoName, ref, error: msg });
+
+      const isAuth = /401|403|unauthori[sz]ed|forbidden|bad credentials|invalid.*token/i.test(msg);
+      const isMissing = /404|not found|repository.*(not found|does not exist)/i.test(msg);
+
+      if (isAuth) {
+        return {
+          success: false,
+          message: `Sandbox-oppretting feilet: ${msg}`,
+          bailOut: {
+            reason: "github_auth_failed",
+            userMessage:
+              "GitHub-tokenet er ugyldig eller mangler tilgang til dette reposet. Verifiser tokenet i innstillingene.",
+          },
+        };
+      }
+      if (isMissing) {
+        return {
+          success: false,
+          message: `Sandbox-oppretting feilet: ${msg}`,
+          bailOut: {
+            reason: "repo_not_found",
+            userMessage: `Repo ${repoOwner}/${repoName} finnes ikke eller er ikke tilgjengelig. Sjekk navn og tilganger.`,
+          },
+        };
+      }
+      return { success: false, message: `Sandbox-oppretting feilet: ${msg}` };
+    }
   },
 };

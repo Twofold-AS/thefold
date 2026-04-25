@@ -365,7 +365,19 @@ export async function autoInitRepo(ctx: AgentExecutionContext): Promise<void> {
   const repoName = ctx.repoName;
   const repoOwner = ctx.repoOwner;
 
-  // 0. Ensure the repo exists on GitHub — create if not found
+  // 0. Ensure the repo exists on GitHub — create if not found.
+  // Diagnostic log so we can trace who provided the name. Previously a user
+  // report showed "yamaha-framer" being created; the ensure-repo.ts helper
+  // produces the correct "framer-<slug>" form, so any inverted name must
+  // come from upstream (ctx.repoName set by chat.send / project create /
+  // older DB row). This log makes that traceable.
+  log.info("autoInitRepo: ensureRepoExists input", {
+    taskId: ctx.taskId,
+    repoOwner,
+    repoName,
+    projectId: ctx.projectId,
+    projectType: ctx.projectType,
+  });
   try {
     const ensureResult = await githubBreaker.call(() =>
       github.ensureRepoExists({

@@ -40,7 +40,7 @@ export default function TopBar({ notifCount = 0, onNotifClick, onNewChat }: TopB
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
-          onClick={() => router.push("/cowork")}
+          onClick={() => router.push("/")}
         >
           <img src="/logo/logo.svg" alt="TheFold" style={{ height: 27, width: "auto", display: "block" }} />
           <span
@@ -83,7 +83,17 @@ export default function TopBar({ notifCount = 0, onNotifClick, onNewChat }: TopB
           height: 40,
         }}
       >
-        <IconBtn title="Ny samtale" onClick={() => onNewChat ? onNewChat() : router.push("/cowork")}>
+        <IconBtn
+          title="Ny samtale"
+          onClick={() => {
+            if (onNewChat) { onNewChat(); return; }
+            // Defensive fallback: honour the current tab if no handler provided.
+            const basePath = pathname.startsWith("/cowork")
+              ? "/cowork"
+              : pathname.startsWith("/designer") ? "/designer" : "/";
+            router.push(basePath);
+          }}
+        >
           <MessageCircleMore size={18} strokeWidth={1.75} />
         </IconBtn>
         <IconBtn title="Oppgaver" active={pathname === "/tasks"} onClick={() => router.push("/tasks")}>

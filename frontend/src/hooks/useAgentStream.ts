@@ -48,11 +48,51 @@ interface AgentStreamState {
   agentStartedTaskId: string | null;
   stalled: boolean; // true when no SSE event received for STALL_TIMEOUT_MS
   activeSkills: ActiveSkill[]; // populated by agent.skills_active event at task-start
+  /** Runde 2d — populated when a master-task enters sleep-mode.
+   *  Cleared on `agent.resumed` or fresh stream. */
+  sleeping: null | { taskId: string; pendingSubTaskId: string; userMessage: string };
+  /** Runde 3-A — populated while the master-iterator is awaiting plan
+   *  confirmation. UI renders <PlanPreview> with countdown + buttons.
+   *  Cleared on confirm/cancel. */
+  planPending: null | {
+    masterTaskId: string;
+    subtasks: Array<{
+      id: string;
+      title: string;
+      phase: string | null;
+      description?: string | null;
+      targetFiles?: string[];
+      dependsOn?: string[];
+    }>;
+    countdownSec: number;
+    iteration: number;
+    /** Wall-clock ms when the countdown was (re)set — UI uses this with
+     *  countdownSec to compute live remaining seconds. */
+    receivedAt: number;
+  };
+  /** Runde 3-B — set when agent.interrupted event arrives. */
+  interrupted: null | {
+    masterTaskId: string;
+    pausedSubTaskId?: string;
+    userMessage: string;
+  };
+}
+
+export interface AgentDoneInfo {
+  reason?: "natural" | "user_cancelled" | "tool_failure" | "max_loops" | "truncated";
+  userMessage?: string;
+  finalText?: string;
+  filesWritten?: number;
 }
 
 interface UseAgentStreamOptions {
-  onDone?: () => void | Promise<void>;
+  onDone?: (info?: AgentDoneInfo) => void | Promise<void>;
   onError?: (error: string) => void;
+  /** Fires on every chat.message_update SSE event. Useful for refreshing
+   *  sidebar conversation lists when a brand-new conv's first exchange
+   *  finalises — the conv might not have been visible at send-time but is
+   *  guaranteed committed by the time we receive this. */
+  onMessageUpdate?: () => void;
 }
 
 const INITIAL_STATE: AgentStreamState = {
@@ -65,6 +105,9 @@ const INITIAL_STATE: AgentStreamState = {
   agentStartedTaskId: null,
   stalled: false,
   activeSkills: [],
+  sleeping: null,
+  planPending: null,
+  interrupted: null,
 };
 
 export function useAgentStream(
@@ -267,6 +310,10 @@ export function useAgentStream(
             return { ...prev, messages: next, thinkingText: null };
           });
           retryCountRef.current = 0;
+          // Fire the user-supplied update hook after state is queued. Used
+          // by the sidebar to refresh conversation lists — by this point
+          // the backend has definitely committed the conv row.
+          try { optionsRef.current?.onMessageUpdate?.(); } catch { /* non-critical */ }
         } catch {
           // malformed event — ignore
         }
@@ -288,6 +335,92 @@ export function useAgentStream(
               name: s.name,
               description: s.description,
             })),
+          }));
+        } catch {
+          // ignore
+        }
+      });
+
+      // Runde 2d — Sleep-mode events.
+      // agent.sleeping: master-task entered needs_input. UI shows a "venter
+      // på input"-bubble so user knows the next message resumes the task.
+      es.addEventListener("agent.sleeping", (e: MessageEvent) => {
+        resetStallTimer();
+        try {
+          const raw = JSON.parse(e.data);
+          const payload = raw.data ?? raw;
+          setState((prev) => ({
+            ...prev,
+            isStreaming: false,
+            status: "sleeping",
+            sleeping: {
+              taskId: payload.taskId ?? "",
+              pendingSubTaskId: payload.pendingSubTaskId ?? "",
+              userMessage: payload.userMessage ?? "Agenten venter på at du svarer.",
+            },
+          }));
+        } catch {
+          // ignore
+        }
+      });
+
+      // agent.resumed: user replied, master picked up again. Clear sleeping
+      // state so UI switches back to the working avatar.
+      es.addEventListener("agent.resumed", (e: MessageEvent) => {
+        resetStallTimer();
+        try {
+          JSON.parse(e.data); // validation; payload not persisted
+          setState((prev) => ({
+            ...prev,
+            isStreaming: true,
+            status: "working",
+            sleeping: null,
+            interrupted: null,
+          }));
+        } catch {
+          // ignore
+        }
+      });
+
+      // Runde 3-A — Plan-preview ready. Master-iterator paused, waiting
+      // for confirmation. UI renders <PlanPreview>.
+      es.addEventListener("agent.plan_ready", (e: MessageEvent) => {
+        resetStallTimer();
+        try {
+          const raw = JSON.parse(e.data);
+          const payload = raw.data ?? raw;
+          setState((prev) => ({
+            ...prev,
+            status: "plan_ready",
+            isStreaming: false,
+            planPending: {
+              masterTaskId: String(payload.masterTaskId ?? ""),
+              subtasks: Array.isArray(payload.subtasks) ? payload.subtasks : [],
+              countdownSec: typeof payload.countdownSec === "number" ? payload.countdownSec : 5,
+              iteration: typeof payload.iteration === "number" ? payload.iteration : 1,
+              receivedAt: Date.now(),
+            },
+          }));
+        } catch {
+          // ignore
+        }
+      });
+
+      // Runde 3-B — Interrupt landed. Iterator stopped between sub-tasks.
+      es.addEventListener("agent.interrupted", (e: MessageEvent) => {
+        resetStallTimer();
+        try {
+          const raw = JSON.parse(e.data);
+          const payload = raw.data ?? raw;
+          setState((prev) => ({
+            ...prev,
+            isStreaming: false,
+            status: "interrupted",
+            interrupted: {
+              masterTaskId: String(payload.masterTaskId ?? ""),
+              pausedSubTaskId: payload.pausedSubTaskId,
+              userMessage: String(payload.userMessage ?? ""),
+            },
           }));
         } catch {
           // ignore
@@ -355,14 +488,26 @@ export function useAgentStream(
       });
 
       // Clean task completion
-      es.addEventListener("agent.done", () => {
+      es.addEventListener("agent.done", (evt) => {
+        let info: AgentDoneInfo | undefined;
+        try {
+          const data = JSON.parse((evt as MessageEvent).data);
+          info = {
+            reason: data?.reason,
+            userMessage: data?.userMessage,
+            finalText: data?.finalText,
+            filesWritten: data?.filesWritten,
+          };
+        } catch {
+          // ignore — emit without info
+        }
         setState((prev) => ({
           ...prev,
           isStreaming: false,
           thinkingText: null,
           status: "done",
         }));
-        const maybePromise = optionsRef.current?.onDone?.();
+        const maybePromise = optionsRef.current?.onDone?.(info);
         if (maybePromise instanceof Promise) {
           maybePromise.catch(() => {});
         }
@@ -426,5 +571,14 @@ export function useAgentStream(
     agentStartedTaskId: state.agentStartedTaskId,
     stalled: state.stalled,
     activeSkills: state.activeSkills,
+    sleeping: state.sleeping,
+    planPending: state.planPending,
+    interrupted: state.interrupted,
+    /** Manually clear plan-preview state — called from confirm/cancel
+     *  click-handlers so UI hides the preview the moment the user acts. */
+    clearPlanPending: () =>
+      setState((prev) => ({ ...prev, planPending: null, status: "working" })),
+    clearInterrupted: () =>
+      setState((prev) => ({ ...prev, interrupted: null })),
   };
 }

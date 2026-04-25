@@ -83,6 +83,25 @@ function formatSubtitle(data: ToolCallLineData): string {
     case "create_task":
     case "start_task":
       return String(i.title ?? i.taskId ?? "");
+    case "framer_create_code_file":
+    case "framer_set_file_content":
+      return String(i.name ?? i.fileId ?? "");
+    case "framer_publish":
+    case "framer_deploy":
+      return String(i.projectId ?? "").slice(0, 8);
+    case "framer_list_code_files":
+      return "";
+    case "web_scrape":
+    case "get_cached_scrape":
+      return String(i.url ?? "");
+    case "list_scrapes":
+      return "";
+    case "search_code":
+      return String(i.query ?? i.pattern ?? "").slice(0, 60);
+    case "read_uploaded_content":
+      return String(i.uploadId ?? "").slice(0, 12);
+    case "list_uploads":
+      return "";
     default:
       return "";
   }

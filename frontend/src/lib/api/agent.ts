@@ -516,3 +516,19 @@ export async function getSuggestions(repo?: string, limit?: number) {
     body: { repo, limit },
   });
 }
+
+// --- Runde 3-A: Plan-preview controls ---
+
+export async function confirmPlan(masterTaskId: string) {
+  return apiFetch<{ success: boolean }>("/agent/confirm-plan", {
+    method: "POST",
+    body: { masterTaskId },
+  });
+}
+
+export async function cancelPlan(masterTaskId: string) {
+  return apiFetch<{ success: boolean }>("/agent/cancel-plan", {
+    method: "POST",
+    body: { masterTaskId },
+  });
+}

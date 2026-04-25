@@ -59,6 +59,11 @@ export interface AgentExecutionContext {
   branch: string;
   // TheFold task engine (optional — for tasks from /tasks service)
   thefoldTaskId?: string;
+  /** Sprint A — Master-task UUID når denne ctx er for en sub-task. Brukes
+   *  for task_transient memory-tagging slik at alle sub-tasks under samme
+   *  master deler samme `task:<masterId>`-tag (Phase 0 → N+ inheritance).
+   *  Hvis ikke satt: thefoldTaskId brukes som fallback (single-task case). */
+  masterTaskId?: string;
   // Model routing
   modelMode: 'auto' | 'manual';
   modelOverride?: string;

@@ -40,6 +40,7 @@ export const assessComplexity = api(
       manualModelId: req.model,
       context: "planning",
       complexity: 1,
+      purpose: "background", // complexity-assessment er en strukturert background-oppgave
     });
 
     const prompt = `Assess the complexity of this task on a scale of 1-10.

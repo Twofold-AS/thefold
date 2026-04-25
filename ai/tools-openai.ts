@@ -66,10 +66,44 @@ export async function callOpenAIWithTools(
   let lastStartedTaskId: string | null = null;
 
   const MAX_TOOL_LOOPS = 10;
+  let bailOut: { reason: string; userMessage: string } | null = null;
   const debug = await isDebugEnabled();
 
   for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
     if (debug) console.log(`[DEBUG-OPENAI] Loop ${loop + 1}, provider: ${providerId}, model: ${options.model}`);
+
+    // Cancel-checkpoint: if the user clicked Stopp, bail out before the
+    // next expensive generation.
+    if (options.conversationId) {
+      try {
+        const { chat } = await import("~encore/clients");
+        const res = await chat.peekCancellation({ conversationId: options.conversationId });
+        if (res.cancelled) {
+          log.info("tools-openai.ts: cancel detected mid-loop, breaking", {
+            conversationId: options.conversationId,
+            loop,
+          });
+          return {
+            content: "Generering avbrutt.",
+            tokensUsed: totalInputTokens + totalOutputTokens,
+            stopReason: "user_cancelled",
+            modelUsed: options.model,
+            inputTokens: totalInputTokens,
+            outputTokens: totalOutputTokens,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
+            toolsUsed: allToolsUsed,
+            lastCreatedTaskId: lastCreatedTaskId || undefined,
+            lastStartedTaskId: lastStartedTaskId || undefined,
+          };
+        }
+      } catch (err) {
+        log.warn("tools-openai.ts: peekCancellation failed (continuing)", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Fireworks rejects max_tokens > 4096 for non-streaming requests
     const maxTokensForBody = providerId === "fireworks"
@@ -128,7 +162,7 @@ export async function callOpenAIWithTools(
       // OpenAI-compat shim has parsed tool_calls correctly. Strip empty/self-
       // closing <tool_calls> blocks so the UI never shows them. The regex
       // catches both `<tool_calls></tool_calls>` and bare `</tool_calls>`.
-      const content = rawContent
+      let content = rawContent
         .replace(/<tool_calls>\s*<\/tool_calls>/g, "")
         .replace(/<\/tool_calls>/g, "")
         .replace(/<tool_calls>/g, "")
@@ -136,6 +170,35 @@ export async function callOpenAIWithTools(
         .replace(/<\/end_turn>/g, "")
         .replace(/\n{3,}/g, "\n\n")
         .trim();
+
+      // Anti-hallucination safety net (2026-04-24). Mirrors the Anthropic
+      // path in tools.ts. When start_task was just called, the background
+      // agent has done nothing yet — any "jeg har bygget X/Y/Z" or long
+      // enumerative response from the chat-turn is a lie. Replace with a
+      // canonical honest message. The SSE stream updates the bubble live
+      // as the agent actually makes progress.
+      if (lastStartedTaskId) {
+        const lower = content.toLowerCase();
+        const LYING_CLAIMS = [
+          /\bjeg har (bygget|hentet|opprettet|skrevet|implementert|lagt til)\b/,
+          /\bjeg bygger\s+(header|hero|footer|komponent|fil)/,
+          /\bi have (built|created|written|fetched|implemented|added)\b/,
+          /\boppdaterer deg når jeg er ferdig\b/,
+          /\bagenten jobber nå med å bygge\b/,
+        ];
+        const hasClaim = LYING_CLAIMS.some((r) => r.test(lower));
+        const suspiciouslyLong = content.length > 400;
+        if (hasClaim || suspiciouslyLong) {
+          log.warn("tools-openai.ts: overriding post-start_task hallucination", {
+            startedTaskId: lastStartedTaskId,
+            hasClaim,
+            suspiciouslyLong,
+            originalLen: content.length,
+            originalPreview: content.slice(0, 120),
+          });
+          content = "Oppgaven er startet. Agenten jobber nå i bakgrunnen — jeg oppdaterer deg her etter hvert som konkrete filer blir bygget.";
+        }
+      }
 
       logTokenUsage({
         inputTokens: totalInputTokens,
@@ -210,6 +273,8 @@ export async function callOpenAIWithTools(
             conversationId: options.conversationId,
             repoName: options.repoName,
             repoOwner: options.repoOwner,
+            projectId: options.projectId,
+            projectType: options.projectType,
             lastCreatedTaskId,
             lastStartedTaskId,
             emit: () => {},
@@ -217,6 +282,16 @@ export async function callOpenAIWithTools(
           };
           const toolResult = await toolRegistry.execute(toolName, toolInput, ctx);
           result = toolResult as unknown as Record<string, unknown>;
+
+          // Unrecoverable tool-failure — break loop after this iteration
+          // with a canonical user-facing message.
+          if (toolResult.bailOut) {
+            bailOut = toolResult.bailOut;
+            log.warn("tools-openai.ts: tool bail-out triggered", {
+              tool: toolName,
+              reason: toolResult.bailOut.reason,
+            });
+          }
 
           // Commit 20b: handler returned success: false — surface per-tool error.
           if (!toolResult.success && options.conversationId) {
@@ -303,6 +378,38 @@ export async function callOpenAIWithTools(
     if (debug) console.log(
       `[DEBUG-OPENAI] Loop ${loop + 1} complete, tools so far: ${allToolsUsed.join(", ")}`,
     );
+
+    // Tool-bailout: unrecoverable tool failure — break with canonical
+    // user message rather than letting the model spin.
+    if (bailOut) {
+      log.warn("tools-openai.ts: breaking loop after tool bailOut", {
+        reason: bailOut.reason,
+        loop,
+      });
+      logTokenUsage({
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        model: options.model,
+        endpoint: `${providerId}-tools`,
+      });
+      return {
+        content: bailOut.userMessage,
+        tokensUsed: totalInputTokens + totalOutputTokens,
+        stopReason: "tool_bailout",
+        modelUsed: options.model,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
+        toolsUsed: allToolsUsed,
+        lastCreatedTaskId: lastCreatedTaskId || undefined,
+        lastStartedTaskId: lastStartedTaskId || undefined,
+        bailOut,
+      };
+    }
   }
 
   // Max loops reached — return truncated response

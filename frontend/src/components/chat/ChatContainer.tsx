@@ -59,13 +59,46 @@ interface ChatContainerProps {
   onAutoModeToggle?: () => void;
   activePlanMsgId?: string | null;
   conversationId?: string;
-  projectScope?: "cowork" | "designer";
+  projectScope?: "incognito" | "cowork" | "designer";
   onNewProject?: () => void;
   selectedProjectId?: string | null;
   onSelectProject?: (id: string | null) => void;
   /** Skills the agent resolved for the currently-running task — renders as
    *  badge row in AgentStream. Sourced from the SSE agent.skills_active event. */
   activeSkills?: Array<{ id: string; name: string; description?: string }>;
+  /** Live tool-calls from useAgentStream — drives the real-time activity
+   *  stream in AgentStream (UI-1). */
+  liveToolCalls?: Array<{
+    id: string;
+    toolName: string;
+    input: Record<string, unknown>;
+    result?: unknown;
+    durationMs?: number;
+    isError?: boolean;
+    status: "running" | "done" | "error";
+  }>;
+  /** Runde 3-A — plan-preview state from useAgentStream. */
+  planPending?: null | {
+    masterTaskId: string;
+    subtasks: Array<{
+      id: string;
+      title: string;
+      phase: string | null;
+      description?: string | null;
+      targetFiles?: string[];
+      dependsOn?: string[];
+    }>;
+    countdownSec: number;
+    iteration: number;
+    receivedAt: number;
+  };
+  onClearPlanPending?: () => void;
+  /** Runde 3-B — interrupt state. */
+  interrupted?: null | {
+    masterTaskId: string;
+    pausedSubTaskId?: string;
+    userMessage: string;
+  };
 }
 
 export default function ChatContainer({
@@ -111,6 +144,10 @@ export default function ChatContainer({
   selectedProjectId,
   onSelectProject,
   activeSkills,
+  liveToolCalls,
+  planPending,
+  onClearPlanPending,
+  interrupted,
 }: ChatContainerProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -164,6 +201,11 @@ export default function ChatContainer({
         reviewInProgress={reviewInProgress}
         activePlanMsgId={activePlanMsgId}
         activeSkills={activeSkills}
+        liveToolCalls={liveToolCalls}
+        isIncognito={isIncognito}
+        planPending={planPending}
+        onClearPlanPending={onClearPlanPending}
+        interrupted={interrupted}
       />
 
       {/* Input */}

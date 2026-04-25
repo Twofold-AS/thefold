@@ -153,6 +153,8 @@ interface DispatcherResult {
   stopReason?: "paused_for_clarification";
   /** Data accompanying the pause signal (e.g. the clarification question). */
   pauseData?: { question: string; context?: string };
+  /** Signal an unrecoverable tool failure; loop should break with user message. */
+  bailOut?: { reason: string; userMessage: string };
 }
 
 // Route every tool call through toolRegistry.execute(). Serialises the
@@ -183,6 +185,7 @@ async function executeViaDispatcher(
   const ctx: ToolContext = {
     userId: toolCtx.thefoldTaskId || "agent",
     taskId: toolCtx.thefoldTaskId,
+    masterTaskId: toolCtx.masterTaskId,
     conversationId: toolCtx.conversationId,
     repoName: toolCtx.repoName,
     repoOwner: toolCtx.repoOwner,
@@ -213,12 +216,14 @@ async function executeViaDispatcher(
       };
     }
     // Handler returned { success: false } — surface the tool-level error
-    // without aborting the loop.
+    // without aborting the loop. If the tool flagged bailOut, propagate
+    // that signal up so the loop can terminate with a clear user message.
     const errorMsg = result.message ?? "Tool failed";
     emitToolError(errorMsg);
     return {
       content: JSON.stringify({ error: errorMsg }),
       isError: true,
+      bailOut: result.bailOut,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -267,10 +272,39 @@ export interface ToolLoopMessage {
   content: string | unknown[];
 }
 
+/** Split system prompt på project-bundle-markøren slik at vi kan plassere
+ *  to cache_control-breakpoints: én på CORE+skills+helpers (sjelden endrer
+ *  seg), én på project_bundle (endrer seg når project_facts oppdateres,
+ *  men er stabil innen task). Anthropic tillater inntil 4 breakpoints
+ *  totalt — vi bruker 3 av dem (system core, project bundle, tools). */
+function splitSystemForCaching(systemStr: string): Anthropic.TextBlockParam[] {
+  // Markører injiseres av context-builder ved project_facts/inheritedScrapes.
+  // Hvis prompten ikke har dem (single-task uten projectId), returner én blokk.
+  const facts = "[Project Facts]";
+  const scrapes = "[Already-scraped sources]";
+  const splitIdx = (() => {
+    const factIdx = systemStr.indexOf(facts);
+    const scrapeIdx = systemStr.indexOf(scrapes);
+    if (factIdx === -1 && scrapeIdx === -1) return -1;
+    if (factIdx === -1) return scrapeIdx;
+    if (scrapeIdx === -1) return factIdx;
+    return Math.min(factIdx, scrapeIdx);
+  })();
+  if (splitIdx <= 0) {
+    return [{ type: "text", text: systemStr, cache_control: { type: "ephemeral" } }];
+  }
+  const corePrompt = systemStr.slice(0, splitIdx).trimEnd();
+  const projectBundle = systemStr.slice(splitIdx).trimStart();
+  return [
+    { type: "text", text: corePrompt, cache_control: { type: "ephemeral" } },
+    { type: "text", text: projectBundle, cache_control: { type: "ephemeral" } },
+  ];
+}
+
 export interface ToolLoopOptions {
   /** Anthropic model ID */
   model: string;
-  /** System prompt (cached as ephemeral) */
+  /** System prompt (cached as ephemeral, split på [Project Facts]-markør) */
   system: string;
   /** Initial message history. Mutated internally — pass a copy if reuse is needed. */
   messages: ToolLoopMessage[];
@@ -365,9 +399,12 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
   // Working message list (mutated as we append assistant + tool_result turns)
   const messages: Anthropic.MessageParam[] = options.messages as Anthropic.MessageParam[];
 
-  const systemBlocks: Anthropic.TextBlockParam[] = [
-    { type: "text", text: options.system, cache_control: { type: "ephemeral" } },
-  ];
+  // Sprint A-finalisering — 3. cache-breakpoint på project-bundle.
+  // splitSystemForCaching deler system-prompten ved [Project Facts]- eller
+  // [Already-scraped sources]-markøren slik at CORE+skills caches separat
+  // fra project-bundle. Hvis ingen markør finnes, returneres én blokk
+  // (samme som før).
+  const systemBlocks: Anthropic.TextBlockParam[] = splitSystemForCaching(options.system);
 
   // All agent tools now registry-backed (Commit 12c).
   // Strip web_scrape when user has explicitly disabled it — prevents the AI
@@ -382,6 +419,18 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
   // Mode-based filter on top (auto/plan/incognito).
   agentTools = filterByMode(agentTools, options.toolContext.mode);
   const combinedAnthropicTools = toolRegistry.toAnthropicFormat(agentTools) as Anthropic.Tool[];
+
+  // Sprint A — cache_control på SISTE tool i array. Anthropic cacher
+  // ALLE tools-definisjoner før dette punktet (inntil 4 cache-breakpoints
+  // totalt på request — system-prompt bruker 1, tools tar nå 1 til).
+  // Ved iter 2+ får vi 90% rabatt på de 4-6k tokens med tool-defs.
+  if (combinedAnthropicTools.length > 0) {
+    const lastIdx = combinedAnthropicTools.length - 1;
+    combinedAnthropicTools[lastIdx] = {
+      ...combinedAnthropicTools[lastIdx],
+      cache_control: { type: "ephemeral" },
+    } as Anthropic.Tool;
+  }
 
   for (let loop = 0; loop < maxLoops; loop++) {
     const estInputTokens = estimateMessageTokens(messages);
@@ -407,13 +456,33 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
     let response: Anthropic.Message;
 
     try {
-      const stream = client.messages.stream({
-        model: options.model,
-        max_tokens: 8192,
-        system: systemBlocks,
-        messages,
-        tools: combinedAnthropicTools,
-      });
+      // Sprint A-finalisering — context-editing beta. clear_tool_uses-
+      // strategien rydder gamle tool_results server-side når kontekst
+      // vokser, slik at vi slipper å bygge egen rolling-summary. Beta-
+      // header context-management-2025-06-27 + edits-config aktiverer.
+      // clear_at_least: 5000 sikrer at vi rydder minst 5k tokens før
+      // cache invalideres — gjør cache-write verdt det.
+      const stream = client.messages.stream(
+        {
+          model: options.model,
+          max_tokens: 8192,
+          system: systemBlocks,
+          messages,
+          tools: combinedAnthropicTools,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          context_management: {
+            edits: [
+              {
+                type: "clear_tool_uses_20250919",
+                clear_at_least: 5000,
+              },
+            ],
+          },
+        } as unknown as Anthropic.MessageStreamParams,
+        {
+          headers: { "anthropic-beta": "context-management-2025-06-27" },
+        },
+      );
 
       // Emit text deltas as they arrive so the frontend can render streaming text
       stream.on("text", (text) => {
@@ -470,6 +539,7 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
         costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
         loopsUsed: loop + 1,
         stoppedAtMaxLoops: false,
+        reason: "natural",
       }));
 
       return {
@@ -616,6 +686,54 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
           pauseData: result.pauseData,
         };
       }
+
+      // Unrecoverable tool-failure — break loop with user-facing reason.
+      if (result.bailOut) {
+        messages.push({ role: "assistant", content: response.content });
+        messages.push({ role: "user", content: toolResults });
+
+        log.warn("agent tool-loop: breaking after tool bailOut", {
+          tool: toolName,
+          reason: result.bailOut.reason,
+          loop,
+        });
+
+        agentEventBus.emit(streamKey, createAgentEvent("agent.done", {
+          finalText: result.bailOut.userMessage,
+          toolsUsed,
+          filesChanged: filesWritten.map((f) => f.path),
+          filesWritten: filesWritten.length,
+          totalInputTokens,
+          totalOutputTokens,
+          costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
+          loopsUsed: loop + 1,
+          stoppedAtMaxLoops: false,
+          reason: "tool_failure",
+          userMessage: result.bailOut.userMessage,
+        }));
+
+        logTokenUsage({
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          model: options.model,
+          endpoint: "agent-tool-loop",
+        });
+
+        return {
+          finalText: result.bailOut.userMessage,
+          toolsUsed,
+          filesWritten,
+          sandboxId,
+          totalInputTokens,
+          totalOutputTokens,
+          costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
+          modelUsed: options.model,
+          loopsUsed: loop + 1,
+          stoppedAtMaxLoops: false,
+        };
+      }
     }
 
     // Append assistant turn + tool results before next iteration
@@ -639,8 +757,9 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
     endpoint: "agent-tool-loop",
   });
 
+  const maxLoopsFinalText = `[Agenten stoppet etter ${maxLoops} verktøy-kall uten å fullføre oppgaven. Prøv en enklere forespørsel eller splitt opp oppgaven.]`;
   agentEventBus.emit(streamKey, createAgentEvent("agent.done", {
-    finalText: `[Tool loop stopped after ${maxLoops} iterations. Tools used: ${toolsUsed.join(", ")}]`,
+    finalText: maxLoopsFinalText,
     toolsUsed,
     filesChanged: filesWritten.map((f) => f.path),
     filesWritten: filesWritten.length,
@@ -649,10 +768,12 @@ async function runAnthropicAgentToolLoop(options: ToolLoopOptions): Promise<Tool
     costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
     loopsUsed: maxLoops,
     stoppedAtMaxLoops: true,
+    reason: "max_loops",
+    userMessage: maxLoopsFinalText,
   }));
 
   return {
-    finalText: `[Tool loop stopped after ${maxLoops} iterations. Tools used: ${toolsUsed.join(", ")}]`,
+    finalText: maxLoopsFinalText,
     toolsUsed,
     filesWritten,
     sandboxId,
@@ -734,6 +855,10 @@ async function runOpenAICompatAgentToolLoop(
   // Fireworks rejects max_tokens > 4096 for non-streaming requests
   const maxTokens = providerId === "fireworks" ? 4096 : 8192;
 
+  // Track single-use length-rescue budget. If a model hits max_tokens
+  // mid-generation we get ONE retry before declaring the task truncated.
+  let lengthRescueUsed = false;
+
   for (let loop = 0; loop < maxLoops; loop++) {
     log.info("agent tool loop: iteration", {
       loop: loop + 1,
@@ -797,6 +922,64 @@ async function runOpenAICompatAgentToolLoop(
       toolCalls: toolCalls?.length ?? 0,
     });
 
+    // finish_reason === "length" means the model hit max_tokens mid-
+    // generation. Previously we treated this same as "stop" and returned
+    // the truncated text as final — task marked complete, zero files
+    // written. That's a silent failure. Instead: inject a synthetic
+    // "your previous response was truncated" user message and continue
+    // the loop. Gives the model a chance to recover. Only retry once
+    // per run to avoid infinite loops.
+    if (finishReason === "length" && !toolCalls?.length) {
+      log.warn("agent tool loop: response truncated by max_tokens, retrying once", {
+        loop: loop + 1,
+        outputTokens: raw.usage?.completion_tokens ?? 0,
+        maxTokens,
+        filesWrittenSoFar: filesWritten.length,
+      });
+      // Append truncated assistant turn so the model sees its own cut-off
+      // output, then a user nudge. Only do this rescue ONCE per run.
+      if (!lengthRescueUsed) {
+        lengthRescueUsed = true;
+        oaiMessages.push({
+          role: "assistant",
+          content: choice?.message?.content ?? "",
+        });
+        oaiMessages.push({
+          role: "user",
+          content: "Your previous response was truncated by a token limit before you finished. Continue with a tool_call if that's what you intended, or finish concisely. Do NOT claim you've built anything you have not actually written via tools.",
+        });
+        continue;
+      }
+      // Already retried — break the loop with a clear truncation signal
+      // in the final text instead of a silent success.
+      const truncatedFinal = "[Agenten ble avbrutt midt i generering — oppgaven er ikke fullført. Prøv igjen.]";
+      agentEventBus.emit(streamKey, createAgentEvent("agent.done", {
+        finalText: truncatedFinal,
+        toolsUsed,
+        filesChanged: filesWritten.map((f) => f.path),
+        filesWritten: filesWritten.length,
+        totalInputTokens,
+        totalOutputTokens,
+        costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
+        loopsUsed: loop + 1,
+        stoppedAtMaxLoops: true,
+        reason: "truncated",
+        userMessage: truncatedFinal,
+      }));
+      return {
+        finalText: truncatedFinal,
+        toolsUsed,
+        filesWritten,
+        sandboxId,
+        totalInputTokens,
+        totalOutputTokens,
+        costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
+        modelUsed: options.model,
+        loopsUsed: loop + 1,
+        stoppedAtMaxLoops: true,
+      };
+    }
+
     // Done — no more tool calls
     if (finishReason !== "tool_calls" || !toolCalls?.length) {
       const rawText = choice?.message?.content || "";
@@ -834,6 +1017,7 @@ async function runOpenAICompatAgentToolLoop(
         costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
         loopsUsed: loop + 1,
         stoppedAtMaxLoops: false,
+        reason: "natural",
       }));
 
       return {
@@ -990,6 +1174,51 @@ async function runOpenAICompatAgentToolLoop(
           pauseData: result.pauseData,
         };
       }
+
+      // Unrecoverable tool-failure — break loop with user-facing reason.
+      if (result.bailOut) {
+        log.warn("agent tool-loop (openai): breaking after tool bailOut", {
+          tool: toolName,
+          reason: result.bailOut.reason,
+          loop,
+        });
+
+        agentEventBus.emit(streamKey, createAgentEvent("agent.done", {
+          finalText: result.bailOut.userMessage,
+          toolsUsed,
+          filesChanged: filesWritten.map((f) => f.path),
+          filesWritten: filesWritten.length,
+          totalInputTokens,
+          totalOutputTokens,
+          costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
+          loopsUsed: loop + 1,
+          stoppedAtMaxLoops: false,
+          reason: "tool_failure",
+          userMessage: result.bailOut.userMessage,
+        }));
+
+        logTokenUsage({
+          inputTokens: totalInputTokens,
+          outputTokens: totalOutputTokens,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          model: options.model,
+          endpoint: "agent-tool-loop",
+        });
+
+        return {
+          finalText: result.bailOut.userMessage,
+          toolsUsed,
+          filesWritten,
+          sandboxId,
+          totalInputTokens,
+          totalOutputTokens,
+          costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
+          modelUsed: options.model,
+          loopsUsed: loop + 1,
+          stoppedAtMaxLoops: false,
+        };
+      }
     }
   }
 
@@ -1009,7 +1238,7 @@ async function runOpenAICompatAgentToolLoop(
     endpoint: "agent-tool-loop",
   });
 
-  const finalText = `[Tool loop stopped after ${maxLoops} iterations. Tools used: ${toolsUsed.join(", ")}]`;
+  const finalText = `[Agenten stoppet etter ${maxLoops} verktøy-kall uten å fullføre oppgaven. Prøv en enklere forespørsel eller splitt opp oppgaven.]`;
 
   agentEventBus.emit(streamKey, createAgentEvent("agent.done", {
     finalText,
@@ -1021,6 +1250,8 @@ async function runOpenAICompatAgentToolLoop(
     costUsd: estimateCost(totalInputTokens, totalOutputTokens, options.model).totalCost,
     loopsUsed: maxLoops,
     stoppedAtMaxLoops: true,
+    reason: "max_loops",
+    userMessage: finalText,
   }));
 
   return {
@@ -1053,10 +1284,12 @@ export function buildToolLoopInitialMessage(opts: {
   let msg = `## Task\n${opts.taskDescription}\n\n`;
   msg += `## Repository\n${opts.repoOwner}/${opts.repoName}\n\n`;
 
+  // Sprint A — Tree-duplikat fjernet. Hele treeString er allerede i
+  // system-prompt-context (via buildSystemPromptWithPipeline → relevant-
+  // files-blokk). Kort hint her erstatter de 1.5-2.5k tokens som ble
+  // gjentatt unødvendig.
   if (opts.treeString) {
-    // Limit tree to first 100 lines to avoid overwhelming the initial context
-    const lines = opts.treeString.split("\n").slice(0, 100);
-    msg += `## File Tree (first ${lines.length} entries)\n\`\`\`\n${lines.join("\n")}\n\`\`\`\n\n`;
+    msg += `## File Tree\n(Available in system context — call repo_get_tree for sub-paths if needed.)\n\n`;
   }
 
   if (opts.memoryContext && opts.memoryContext.length > 0) {

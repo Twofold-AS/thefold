@@ -34,6 +34,12 @@ export interface ChatRequest {
   /** Project type — when set to "framer" or "framer_figma", design-platform
    *  rules are appended to the system prompt. */
   projectType?: "code" | "framer" | "figma" | "framer_figma";
+  /** Active project (UUID) — propagated to ToolContext.projectId so that
+   *  tools like create_task can resolve the canonical github_repo via
+   *  projects.ensureProjectRepo. Without this, create_task guesses a repo
+   *  name from the AI prompt and the agent ends up creating a fresh
+   *  GitHub repo on every run (Runde 5 bug). */
+  projectId?: string;
   /** Chat.ts sets this when the user's message is a short social greeting.
    *  The prompt layer uses it to inject a short-reply register-match rule
    *  + caps max_tokens at a lower ceiling. Prevents "Hei" from producing

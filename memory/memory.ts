@@ -99,14 +99,25 @@ async function embed(text: string): Promise<number[]> {
   throw APIError.internal("OpenAI embedding API failed after retries");
 }
 
+/** Sprint A — Permanence-grad styrer både decay og cleanup-policy.
+ *  task_transient: Phase 0/N file/scrape-cache. TTL 24h via task-status-cron.
+ *  normal: eksisterende oppførsel (default).
+ *  project_fact: stabilt prosjekt-faktum, decay-immune, pinned.
+ *  permanent: org-nivå sannhet, decay-immune, cross-prosjekt. */
+export type MemoryPermanence = "task_transient" | "normal" | "project_fact" | "permanent";
+
 interface SearchRequest {
-  query: string;
+  query?: string;                   // Kan utelates ved tag-only-søk (task_transient lookup)
   limit?: number;
   memoryType?: MemoryType;
   sourceRepo?: string;
   tags?: string[];
   includeDecayed?: boolean;
   minTrustLevel?: "user" | "agent" | "system";
+  /** Sprint A — filter på prosjekt-anker. */
+  projectId?: string;
+  /** Sprint A — filter på permanence-grad. */
+  permanence?: MemoryPermanence;
 }
 
 interface SearchResult {
@@ -122,6 +133,9 @@ interface SearchResult {
   sourceRepo?: string;
   createdAt: string;
   trustLevel: "user" | "agent" | "system";
+  /** Sprint A — eksponert for konsumenter som filtrerer post-search. */
+  projectId?: string | null;
+  permanence?: MemoryPermanence;
 }
 
 interface SearchResponse {
@@ -139,6 +153,10 @@ interface StoreRequest {
   ttlDays?: number;
   pinned?: boolean;
   trustLevel?: "user" | "agent" | "system";
+  /** Sprint A — kobler memoryen til et prosjekt. */
+  projectId?: string;
+  /** Sprint A — bestemmer decay-policy + cleanup-policy. Default 'normal'. */
+  permanence?: MemoryPermanence;
 }
 
 interface StoreResponse {
@@ -182,16 +200,102 @@ export const search = api(
   { method: "POST", path: "/memory/search", expose: true, auth: true },
   async (req: SearchRequest): Promise<SearchResponse> => {
     const limit = req.limit ?? 5;
-    const embedding = await embed(req.query);
-    const vec = `[${embedding.join(",")}]`;
+    const queryText = (req.query ?? "").trim();
 
-    // Build filter conditions
+    // Build filter conditions (utvidet med Sprint A — projectId + permanence)
     const typeFilter = req.memoryType ? req.memoryType : null;
     const repoFilter = req.sourceRepo ? req.sourceRepo : null;
+    const projectIdFilter = req.projectId ? req.projectId : null;
+    const permanenceFilter = req.permanence ? req.permanence : null;
     const minRelevance = req.includeDecayed ? 0.0 : 0.1;
 
+    // Sprint A — Tag-only fast-path. Brukes for task_transient-arv
+    // (sub-task ber om "alt på master-X") og lignende ren-filter-spørringer.
+    // Ingen embedding-call (sparer tid + $), ingen BM25 (ikke nødvendig).
+    if (queryText.length === 0) {
+      const filterRows = await db.query`
+        SELECT
+          id, content, category, created_at, last_accessed_at, memory_type,
+          relevance_score::float as relevance_score, access_count, tags, source_repo, pinned,
+          content_hash, trust_level, project_id, permanence
+        FROM memories
+        WHERE superseded_by IS NULL
+          AND (${typeFilter}::text IS NULL OR memory_type = ${typeFilter})
+          AND (${repoFilter}::text IS NULL OR source_repo = ${repoFilter})
+          AND (${projectIdFilter}::uuid IS NULL OR project_id = ${projectIdFilter}::uuid)
+          AND (${permanenceFilter}::text IS NULL OR permanence = ${permanenceFilter})
+        ORDER BY created_at DESC
+        LIMIT ${limit * 2}
+      `;
+      const filterResults: SearchResult[] = [];
+      const filterIds: string[] = [];
+      for await (const row of filterRows) {
+        const id = row.id as string;
+        // Tag filter (post-fetch for å bruke samme @>-semantikk som hovedflyten)
+        if (req.tags && req.tags.length > 0) {
+          const rowTags = (row.tags as string[]) || [];
+          const hasMatch = req.tags.some((t) => rowTags.includes(t));
+          if (!hasMatch) continue;
+        }
+        // Integrity check (samme som hovedflyt)
+        const storedHash = row.content_hash as string | null;
+        const rowContent = row.content as string;
+        if (storedHash) {
+          const computedHash = hashContent(rowContent);
+          if (computedHash !== storedHash) {
+            log.warn("memory integrity check failed (tag-only path)", { id });
+            continue;
+          }
+        }
+        const trustLevel = (row.trust_level as "user" | "agent" | "system") || "user";
+        if (req.minTrustLevel) {
+          const trustOrder = { user: 0, agent: 1, system: 2 };
+          if (trustOrder[trustLevel] < trustOrder[req.minTrustLevel]) continue;
+        }
+        filterResults.push({
+          id,
+          content: rowContent,
+          category: row.category as string,
+          similarity: 1.0,
+          memoryType: row.memory_type as MemoryType,
+          relevanceScore: Number(row.relevance_score) || 0,
+          decayedScore: 1.0,
+          accessCount: Number(row.access_count) || 0,
+          tags: (row.tags as string[]) || [],
+          sourceRepo: (row.source_repo as string) || undefined,
+          createdAt: String(row.created_at),
+          trustLevel,
+          projectId: (row.project_id as string) || null,
+          permanence: ((row.permanence as MemoryPermanence) ?? "normal"),
+        });
+        filterIds.push(id);
+        if (filterResults.length >= limit) break;
+      }
+      // Update access tracking
+      if (filterIds.length > 0) {
+        for (const id of filterIds) {
+          await db.exec`
+            UPDATE memories
+            SET last_accessed_at = NOW(), access_count = access_count + 1
+            WHERE id = ${id}::uuid
+          `;
+        }
+      }
+      log.info("tag-only memory search", {
+        projectId: projectIdFilter,
+        permanence: permanenceFilter,
+        tags: req.tags,
+        results: filterResults.length,
+      });
+      return { results: filterResults };
+    }
+
+    // Vector + BM25 hybrid path (eksisterende oppførsel + nye filtre)
+    const embedding = await embed(queryText);
+    const vec = `[${embedding.join(",")}]`;
+
     // BM25 keyword search (only if query has searchable terms)
-    const bm25Query = req.query.trim();
+    const bm25Query = queryText;
     const bm25Scores = new Map<string, number>();
 
     if (bm25Query.length > 0) {
@@ -204,6 +308,8 @@ export const search = api(
           AND superseded_by IS NULL
           AND (${typeFilter}::text IS NULL OR memory_type = ${typeFilter})
           AND (${repoFilter}::text IS NULL OR source_repo = ${repoFilter})
+          AND (${projectIdFilter}::uuid IS NULL OR project_id = ${projectIdFilter}::uuid)
+          AND (${permanenceFilter}::text IS NULL OR permanence = ${permanenceFilter})
           AND relevance_score >= ${minRelevance}
         ORDER BY bm25_score DESC
         LIMIT ${limit * 2}
@@ -223,13 +329,16 @@ export const search = api(
       SELECT
         id, content, category, created_at, last_accessed_at, memory_type,
         relevance_score::float as relevance_score, access_count, tags, source_repo, pinned,
-        content_hash, trust_level,
+        content_hash, trust_level, project_id, permanence,
         1 - (embedding <=> ${vec}::vector) as similarity
       FROM memories
-      WHERE 1 - (embedding <=> ${vec}::vector) > 0.15
+      WHERE embedding IS NOT NULL
+        AND 1 - (embedding <=> ${vec}::vector) > 0.15
         AND superseded_by IS NULL
         AND (${typeFilter}::text IS NULL OR memory_type = ${typeFilter})
         AND (${repoFilter}::text IS NULL OR source_repo = ${repoFilter})
+        AND (${projectIdFilter}::uuid IS NULL OR project_id = ${projectIdFilter}::uuid)
+        AND (${permanenceFilter}::text IS NULL OR permanence = ${permanenceFilter})
         AND relevance_score >= ${minRelevance}
       ORDER BY (
         0.7 * (1 - (embedding <=> ${vec}::vector))
@@ -288,6 +397,8 @@ export const search = api(
         new Date((row.last_accessed_at ?? row.created_at) as string),
         row.memory_type as MemoryType,
         (row.pinned as boolean) ?? false,
+        undefined,
+        (row.permanence as MemoryPermanence) ?? "normal",
       );
 
       results.push({
@@ -303,6 +414,8 @@ export const search = api(
         sourceRepo: (row.source_repo as string) || undefined,
         createdAt: String(row.created_at),
         trustLevel,
+        projectId: (row.project_id as string) || null,
+        permanence: ((row.permanence as MemoryPermanence) ?? "normal"),
       });
     }
 
@@ -344,10 +457,12 @@ export const search = api(
           pinned: boolean;
           content_hash: string | null;
           trust_level: string | null;
+          project_id: string | null;
+          permanence: string | null;
         }>`
           SELECT id, content, category, created_at, last_accessed_at, memory_type,
             relevance_score::float as relevance_score, access_count, tags, source_repo, pinned,
-            content_hash, trust_level
+            content_hash, trust_level, project_id, permanence
           FROM memories WHERE id = ${id}::uuid
         `;
 
@@ -385,6 +500,8 @@ export const search = api(
             new Date(bm25OnlyRow.last_accessed_at ?? bm25OnlyRow.created_at),
             bm25OnlyRow.memory_type as MemoryType,
             bm25OnlyRow.pinned ?? false,
+            undefined,
+            (bm25OnlyRow.permanence as MemoryPermanence) ?? "normal",
           );
 
           results.push({
@@ -400,6 +517,8 @@ export const search = api(
             sourceRepo: bm25OnlyRow.source_repo || undefined,
             createdAt: String(bm25OnlyRow.created_at),
             trustLevel,
+            projectId: bm25OnlyRow.project_id ?? null,
+            permanence: ((bm25OnlyRow.permanence as MemoryPermanence) ?? "normal"),
           });
           bm25OnlyCount++;
           ids.push(id);
@@ -415,7 +534,7 @@ export const search = api(
 
     // Log hybrid search results
     log.info("hybrid search completed", {
-      query: req.query.substring(0, 100),
+      query: queryText.substring(0, 100),
       vectorResults: vectorResultCount,
       bm25Results: bm25Scores.size,
       bm25OnlyResults: bm25OnlyCount,
@@ -444,27 +563,39 @@ export const store = api(
     // Sanitize content before storing (OWASP ASI06)
     const content = sanitizeForMemory(req.content);
     const contentHash = hashContent(content);
-    const embedding = await embed(content);
-    const vec = `[${embedding.join(",")}]`;
     const memoryType = req.memoryType || "general";
     const ttlDays = req.ttlDays ?? 90;
     const pinned = req.pinned ?? false;
     const tags = req.tags ?? [];
     const trustLevel = req.trustLevel ?? "user";
+    const permanence = req.permanence ?? "normal";
+    const projectId = req.projectId ?? null;
     const relevanceScore = calculateImportanceScore(memoryType as MemoryType, req.category, pinned);
+
+    // Sprint A — task_transient skipper embedding-call.
+    // Disse memoryene konsulteres KUN via tag-filter, aldri via vector-
+    // similarity. embedText() koster $0.0001 per call — ved ~100 sub-tasks/dag
+    // × 5 filer × 2 pluss scrape-results = ~1000 calls/dag = $0.13/dag spart.
+    let vec: string | null = null;
+    if (permanence !== "task_transient") {
+      const embedding = await embed(content);
+      vec = `[${embedding.join(",")}]`;
+    }
 
     const row = await db.queryRow`
       INSERT INTO memories (
         content, category, conversation_id, linear_task_id, embedding,
         memory_type, source_repo,
-        tags, ttl_days, pinned, relevance_score, content_hash, trust_level
+        tags, ttl_days, pinned, relevance_score, content_hash, trust_level,
+        project_id, permanence
       )
       VALUES (
         ${content}, ${req.category},
         ${req.conversationId || null}, ${req.linearTaskId || null},
-        ${vec}::vector,
+        ${vec === null ? null : vec}::vector,
         ${memoryType}, ${req.sourceRepo || null},
-        ${tags}::text[], ${ttlDays}, ${pinned}, ${relevanceScore}, ${contentHash}, ${trustLevel}
+        ${tags}::text[], ${ttlDays}, ${pinned}, ${relevanceScore}, ${contentHash}, ${trustLevel},
+        ${projectId}::uuid, ${permanence}
       )
       RETURNING id
     `;
@@ -577,18 +708,239 @@ export const deleteMemory = api(
 export const cleanup = api(
   { method: "POST", path: "/memory/cleanup", expose: true, auth: true },
   async (): Promise<CleanupResponse> => {
+    // Eksisterende cleanup for permanence='normal' (TTL-basert)
     const result = await db.queryRow<{ count: number }>`
       WITH deleted AS (
         DELETE FROM memories
         WHERE ttl_days > 0
           AND pinned = false
+          AND permanence = 'normal'
           AND last_accessed_at < NOW() - INTERVAL '1 day' * ttl_days
         RETURNING id
       )
       SELECT COUNT(*)::int as count FROM deleted
     `;
 
-    return { deleted: result?.count ?? 0 };
+    // Sprint A — task_transient cleanup via task-status (Fix 1).
+    // Henter unike task-ID-er fra tags, spør tasks-service om status,
+    // sletter task_transient hvor master er done > 24h siden.
+    let transientDeleted = 0;
+    try {
+      transientDeleted = await cleanupTaskTransientMemories();
+    } catch (err) {
+      log.warn("task_transient cleanup failed (will retry next cron run)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // Backstop: task_transient-rows eldre enn 7 dager slettes uansett —
+    // beskyttelse mot at tasks-service-API-feil fyller DB-en med døde rader.
+    const stale = await db.queryRow<{ count: number }>`
+      WITH stale_deleted AS (
+        DELETE FROM memories
+        WHERE permanence = 'task_transient'
+          AND created_at < NOW() - INTERVAL '7 days'
+        RETURNING id
+      )
+      SELECT COUNT(*)::int as count FROM stale_deleted
+    `;
+
+    const total = (result?.count ?? 0) + transientDeleted + (stale?.count ?? 0);
+    log.info("memory.cleanup completed", {
+      normalDeleted: result?.count ?? 0,
+      transientDeleted,
+      staleTransientDeleted: stale?.count ?? 0,
+    });
+
+    return { deleted: total };
+  }
+);
+
+// Sprint A — Cleanup helper for task_transient.
+// Henter unike task-IDer fra tags, batcher API-call mot tasks-service,
+// sletter rader hvor master-task er done > 24h siden ELLER missing.
+// Watchdog: cron må fullføre <2 min, ellers timeout.
+async function cleanupTaskTransientMemories(): Promise<number> {
+  const startMs = Date.now();
+  const timeoutMs = 2 * 60_000;
+
+  // 1. Finn unike task-IDer fra tags-arrayen
+  const taskIdRows = await db.query<{ task_id: string }>`
+    SELECT DISTINCT regexp_replace(unnest(tags), '^task:', '') as task_id
+    FROM memories
+    WHERE permanence = 'task_transient'
+      AND tags && ARRAY['task:%']::text[] IS NOT NULL
+  `;
+  const taskIds: string[] = [];
+  for await (const row of taskIdRows) {
+    if (row.task_id && /^[0-9a-f-]{36}$/i.test(row.task_id)) taskIds.push(row.task_id);
+  }
+  if (taskIds.length === 0) return 0;
+
+  // 2. Spør tasks-service per task (batchet, parallell). Failure tolerert.
+  const { tasks: tasksClient } = await import("~encore/clients");
+  const BATCH = 50;
+  const idsToDelete: string[] = [];
+
+  for (let i = 0; i < taskIds.length; i += BATCH) {
+    if (Date.now() - startMs > timeoutMs) {
+      log.warn("cleanupTaskTransient: watchdog timeout, partial cleanup", {
+        processed: i,
+        total: taskIds.length,
+      });
+      break;
+    }
+    const slice = taskIds.slice(i, i + BATCH);
+    const results = await Promise.allSettled(
+      slice.map((id) => tasksClient.getTaskInternal({ id })),
+    );
+    for (let j = 0; j < slice.length; j++) {
+      const taskId = slice[j];
+      const r = results[j];
+      if (r.status === "rejected") {
+        // Task missing eller cross-service-feil — slett task_transient (orphaned)
+        idsToDelete.push(taskId);
+      } else {
+        const t = r.value.task;
+        if (!t) {
+          idsToDelete.push(taskId);
+        } else if (t.status === "done" && t.completedAt) {
+          const completedTime = new Date(t.completedAt).getTime();
+          if (Date.now() - completedTime > 24 * 60 * 60_000) {
+            idsToDelete.push(taskId);
+          }
+        }
+      }
+    }
+  }
+
+  if (idsToDelete.length === 0) return 0;
+
+  // 3. Slett task_transient-memories for alle done-task-IDer
+  const taskTags = idsToDelete.map((id) => `task:${id}`);
+  const deleted = await db.queryRow<{ count: number }>`
+    WITH deleted AS (
+      DELETE FROM memories
+      WHERE permanence = 'task_transient'
+        AND tags && ${taskTags}::text[]
+      RETURNING id
+    )
+    SELECT COUNT(*)::int as count FROM deleted
+  `;
+  return deleted?.count ?? 0;
+}
+
+// --- Sprint A: touchByTags ---
+//
+// Brukt av master-iterator for å gi task_transient-memories en frisk
+// last_accessed_at før neste sub-task starter. Beskytter mot at cleanup-
+// cron sletter en mid-task selv om master er ikke-done.
+
+interface TouchByTagsRequest {
+  tags: string[];
+}
+
+interface TouchByTagsResponse {
+  updated: number;
+}
+
+export const touchByTags = api(
+  { method: "POST", path: "/memory/touch-by-tags", expose: false },
+  async (req: TouchByTagsRequest): Promise<TouchByTagsResponse> => {
+    if (!req.tags || req.tags.length === 0) return { updated: 0 };
+    const result = await db.queryRow<{ count: number }>`
+      WITH updated AS (
+        UPDATE memories
+        SET last_accessed_at = NOW(), access_count = access_count + 1
+        WHERE tags && ${req.tags}::text[]
+        RETURNING id
+      )
+      SELECT COUNT(*)::int as count FROM updated
+    `;
+    return { updated: result?.count ?? 0 };
+  }
+);
+
+// --- Sprint A: update ---
+//
+// Trengs av save_project_fact-tool for dedup-update-flyten. Memory.update
+// fantes ikke før denne sprinten — vi har bare delete + store.
+
+interface UpdateMemoryRequest {
+  id: string;
+  content?: string;
+  trustLevel?: "user" | "agent" | "system";
+  tags?: string[];
+  pinned?: boolean;
+  ttlDays?: number;
+}
+
+interface UpdateMemoryResponse {
+  success: boolean;
+  updated: boolean;
+}
+
+export const update = api(
+  { method: "POST", path: "/memory/update", expose: true, auth: true },
+  async (req: UpdateMemoryRequest): Promise<UpdateMemoryResponse> => {
+    if (!req.id) throw APIError.invalidArgument("id required");
+
+    const existing = await db.queryRow<{ id: string }>`
+      SELECT id FROM memories WHERE id = ${req.id}::uuid
+    `;
+    if (!existing) throw APIError.notFound("memory not found");
+
+    // Per-felt-update for ikke å overskrive felter som ikke ble passet.
+    if (req.content !== undefined) {
+      const sanitized = sanitizeForMemory(req.content);
+      const newHash = hashContent(sanitized);
+      // Re-embed kun hvis ikke task_transient (samme regel som store).
+      const permRow = await db.queryRow<{ permanence: string | null }>`
+        SELECT permanence FROM memories WHERE id = ${req.id}::uuid
+      `;
+      if (permRow?.permanence === "task_transient") {
+        await db.exec`
+          UPDATE memories
+          SET content = ${sanitized}, content_hash = ${newHash}, embedding = NULL,
+              updated_at = NOW(), last_accessed_at = NOW()
+          WHERE id = ${req.id}::uuid
+        `;
+      } else {
+        const embedding = await embed(sanitized);
+        const vec = `[${embedding.join(",")}]`;
+        await db.exec`
+          UPDATE memories
+          SET content = ${sanitized}, content_hash = ${newHash}, embedding = ${vec}::vector,
+              updated_at = NOW(), last_accessed_at = NOW()
+          WHERE id = ${req.id}::uuid
+        `;
+      }
+    }
+    if (req.trustLevel !== undefined) {
+      await db.exec`
+        UPDATE memories SET trust_level = ${req.trustLevel}, updated_at = NOW()
+        WHERE id = ${req.id}::uuid
+      `;
+    }
+    if (req.tags !== undefined) {
+      await db.exec`
+        UPDATE memories SET tags = ${req.tags}::text[], updated_at = NOW()
+        WHERE id = ${req.id}::uuid
+      `;
+    }
+    if (req.pinned !== undefined) {
+      await db.exec`
+        UPDATE memories SET pinned = ${req.pinned}, updated_at = NOW()
+        WHERE id = ${req.id}::uuid
+      `;
+    }
+    if (req.ttlDays !== undefined) {
+      await db.exec`
+        UPDATE memories SET ttl_days = ${req.ttlDays}, updated_at = NOW()
+        WHERE id = ${req.id}::uuid
+      `;
+    }
+    return { success: true, updated: true };
   }
 );
 

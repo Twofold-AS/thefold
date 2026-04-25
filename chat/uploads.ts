@@ -1,4 +1,5 @@
 import { api, APIError } from "encore.dev/api";
+import { CronJob } from "encore.dev/cron";
 import { getAuthData } from "~encore/auth";
 import log from "encore.dev/log";
 import { createHash } from "crypto";
@@ -285,8 +286,30 @@ export const uploadZip = api(
 
       let contentText: string | null = null;
       let contentBase64: string | null = null;
+      // Rot-årsak (2026-04-24): Buffer.toString("utf8") replaces invalid
+      // sequences with U+FFFD silently — the previous try/catch never
+      // triggered, so null bytes (0x00) ended up in `contentText` and
+      // Postgres rejected the INSERT with "invalid byte sequence for
+      // encoding UTF8: 0x00". Fix: pre-scan for null bytes and also check
+      // for the U+FFFD replacement ratio after decode. Either signal →
+      // fall back to base64. This handles both real binaries misdetected
+      // as text AND text files with embedded null bytes.
       if (isTextCategory(category) || (category === "other" && buf.length <= 200_000)) {
-        try { contentText = buf.toString("utf8"); } catch { contentBase64 = buf.toString("base64"); }
+        const hasNullByte = buf.includes(0x00);
+        if (hasNullByte) {
+          contentBase64 = buf.toString("base64");
+        } else {
+          const decoded = buf.toString("utf8");
+          // If decode produced a lot of U+FFFD (>5% of chars), treat as
+          // binary too — encoding is lying to us.
+          const replacementCount = (decoded.match(/\uFFFD/g) || []).length;
+          const replacementRatio = decoded.length > 0 ? replacementCount / decoded.length : 0;
+          if (replacementRatio > 0.05) {
+            contentBase64 = buf.toString("base64");
+          } else {
+            contentText = decoded;
+          }
+        }
       } else {
         contentBase64 = buf.toString("base64");
       }
@@ -582,8 +605,6 @@ export const deleteUpload = api(
 
 // --- Retention cron: orphaned uploads ---
 
-import { CronJob } from "encore.dev/cron";
-
 export const cleanupOrphanedUploads = api(
   { method: "POST", path: "/chat/upload/cleanup-orphaned", expose: false },
   async (): Promise<{ deleted: number }> => {
@@ -607,4 +628,41 @@ const _cleanupUploadsCron = new CronJob("cleanup-orphaned-uploads", {
   title: "Delete uploads in archived projects older than 30 days",
   schedule: "0 3 * * *",
   endpoint: cleanupOrphanedUploads,
+});
+
+// Second pass: user-flow orphans. When a user stages an upload via the
+// file-badge, then navigates away without sending a message, the upload
+// row sits in chat_files with no downstream reference. We delete uploads
+// older than 24h when the parent conversation has had ZERO messages since
+// the upload was created (i.e. the user never followed through with a
+// send). Zip extractions CASCADE via FK.
+export const cleanupUnsentUploads = api(
+  { method: "POST", path: "/chat/upload/cleanup-unsent", expose: false },
+  async (): Promise<{ deleted: number }> => {
+    const row = await db.queryRow<{ count: number }>`
+      WITH stale AS (
+        SELECT cf.id
+        FROM chat_files cf
+        WHERE cf.created_at < NOW() - INTERVAL '24 hours'
+          AND NOT EXISTS (
+            SELECT 1 FROM messages m
+            WHERE m.conversation_id = cf.conversation_id
+              AND m.created_at >= cf.created_at
+          )
+      ),
+      deleted AS (
+        DELETE FROM chat_files WHERE id IN (SELECT id FROM stale)
+        RETURNING id
+      )
+      SELECT COUNT(*)::int AS count FROM deleted
+    `.catch(() => ({ count: 0 }));
+    log.info("cleanup-unsent-uploads complete", { deleted: row?.count ?? 0 });
+    return { deleted: row?.count ?? 0 };
+  },
+);
+
+const _cleanupUnsentUploadsCron = new CronJob("cleanup-unsent-uploads", {
+  title: "Delete uploads staged but never sent (>24h orphans)",
+  schedule: "15 * * * *",
+  endpoint: cleanupUnsentUploads,
 });

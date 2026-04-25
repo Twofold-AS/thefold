@@ -7,7 +7,7 @@ import { T, S, Layout } from "@/lib/tokens";
 import TopBar from "@/components/topbar";
 import NotifBell from "@/components/NotifBell";
 import GlobalBackground from "@/components/GlobalBackground";
-import { Menu, X, ArrowLeft, Circle, CircleDot, Projector } from "lucide-react";
+import { Menu, X, ArrowLeft, Circle, Projector, Ghost, Paintbrush, AppWindowMac } from "lucide-react";
 import { RepoProvider, useRepoContext } from "@/lib/repo-context";
 import { ErrorBoundary } from "@/components/shared/ErrorBoundary";
 import BrainActivityStripe from "@/components/BrainActivityStripe";
@@ -29,7 +29,7 @@ interface Conversation {
   createdAt?: string;
   updatedAt?: string;
   activeTask?: boolean;
-  scope?: "cowork" | "designer";
+  scope?: "incognito" | "cowork" | "designer";
   projectId?: string | null;
 }
 
@@ -62,7 +62,9 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [activeMode, setActiveMode] = useState<"cowork" | "designer">("cowork");
+  // Tre modi: Incognito (default, tom sidebar, privat-samtale-plassholder),
+  // CoWork (kode-prosjekter), Designer (design-prosjekter).
+  const [activeMode, setActiveMode] = useState<"incognito" | "cowork" | "designer">("incognito");
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifCount, setNotifCount] = useState(0);
@@ -83,12 +85,15 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   const { selectedRepo } = useRepoContext();
 
   useEffect(() => {
-    if (pathname.startsWith("/designer")) setActiveMode("designer");
+    if (pathname.startsWith("/cowork")) setActiveMode("cowork");
+    else if (pathname.startsWith("/designer")) setActiveMode("designer");
+    else if (pathname === "/") setActiveMode("incognito");
     else if (pathname.startsWith("/auto")) {
       // Legacy /auto-rute: redirect til /cowork?mode=auto
       router.replace("/cowork?mode=auto");
     }
-    else setActiveMode("cowork");
+    // Andre ruter (/tasks, /dreams, osv.) lar activeMode stå — den speiler
+    // bare sist aktive chat-fane uansett hvor bruker er.
   }, [pathname, router]);
 
   const convCacheRef = useRef<{ data: Conversation[]; time: number } | null>(null);
@@ -116,7 +121,9 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   // Fase I.0.d — Hent TFProjects filtrert pr. aktiv mode (cowork vs designer).
   // Caches per scope so tab-switch after first load shows instantly — no loader
   // flash. `force=true` re-fetches (used after mutations like link-repo/delete).
+  // Incognito har ingen prosjekter — fetchen hoppes over for den fanen.
   const fetchTFProjects = useCallback(async (force = false) => {
+    if (activeMode === "incognito") return;
     const scope = activeMode === "designer" ? "designer" : "cowork";
     // Skip fetch if we already have data for this scope and no force-refresh
     // is requested. Prevents loader flash on tab-switch.
@@ -136,8 +143,13 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
   }, [activeMode, tfProjectsByScope]);
 
   // Current-scope projects list (null until first load completes).
-  const tfProjects = tfProjectsByScope[activeMode] ?? [];
-  const loadingProjects = tfProjectsByScope[activeMode] === null;
+  // Incognito: alltid tom liste, ingen loader.
+  const tfProjects = activeMode === "incognito"
+    ? []
+    : tfProjectsByScope[activeMode] ?? [];
+  const loadingProjects = activeMode === "incognito"
+    ? false
+    : tfProjectsByScope[activeMode as "cowork" | "designer"] === null;
 
   useEffect(() => {
     fetchTFProjects();
@@ -153,6 +165,19 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     window.addEventListener("tf:new-project", handler);
     return () => window.removeEventListener("tf:new-project", handler);
   }, []);
+
+  // "tf:conv-list-changed" — fired by chat pages after send / SSE
+  // chat.message_update / agent.done. The sidebar's conversation cache is
+  // 30s-long so a new conv would otherwise not appear until the next
+  // natural fetch. forceRefresh=true bypasses the cache.
+  useEffect(() => {
+    const handler = () => {
+      console.log("[layout] tf:conv-list-changed received, force-refresh convs");
+      fetchConversations(true);
+    };
+    window.addEventListener("tf:conv-list-changed", handler);
+    return () => window.removeEventListener("tf:conv-list-changed", handler);
+  }, [fetchConversations]);
 
   // Fetch notification count once on mount for the badge (no polling loop).
   // NotifBell handles fresh data via its own 60s interval when the popup is open.
@@ -182,7 +207,11 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     : null;
   const drilledRepoName = drilledProjectForFilter?.githubRepo?.split("/")[1]?.toLowerCase() ?? null;
 
-  const filtered = conversations
+  // Incognito-fanen viser INGEN samtaler i sidebaren (privat-modus, plassholder).
+  // TODO: wire up content when decided — for nå returneres en tom liste.
+  const filtered = activeMode === "incognito"
+    ? []
+    : conversations
     .filter((c) => !c.id.startsWith("inkognito-"))
     .filter((c) => {
       const convScope = c.scope ?? "cowork";
@@ -226,7 +255,7 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
     ? new URLSearchParams(typeof window !== "undefined" ? window.location.search : "").get("conv")
     : null;
 
-  const isFullHeight = pathname === "/cowork" || pathname.startsWith("/cowork/") || pathname === "/designer" || pathname.startsWith("/designer/");
+  const isFullHeight = pathname === "/" || pathname === "/cowork" || pathname.startsWith("/cowork/") || pathname === "/designer" || pathname.startsWith("/designer/");
 
   return (
     <>
@@ -246,7 +275,13 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
         <TopBar
           notifCount={notifCount}
           onNotifClick={() => setNotifOpen((p) => !p)}
-          onNewChat={() => router.push(buildUrl("/cowork", { conv: null }))}
+          onNewChat={() => {
+            // Respect the current tab — Incognito (=/)/Designer/CoWork.
+            const basePath = activeMode === "incognito"
+              ? "/"
+              : activeMode === "designer" ? "/designer" : "/cowork";
+            router.push(buildUrl(basePath, { conv: null }));
+          }}
         />
 
         {notifOpen && (
@@ -283,7 +318,7 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
             }}
           >
             <BrainActivityStripe />
-            {/* CoWork / Auto tabs */}
+            {/* Incognito / CoWork / Designer tabs. Incognito er default landing. */}
             <div
               style={{
                 display: "flex",
@@ -294,6 +329,27 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
                 margin: "0 12px",
               }}
             >
+              {/* Ikon vises KUN på aktiv fane; inaktive har kun tekst.
+                  Aktiv-styling (farge + background) beholdes uendret. */}
+              <button
+                onClick={() => {
+                  setActiveMode("incognito");
+                  router.push(buildUrl("/", { project: null, conv: null }));
+                }}
+                title="Incognito"
+                style={{
+                  flex: 1, padding: "8px 0", fontSize: 13, fontWeight: 500,
+                  fontFamily: T.sans,
+                  color: activeMode === "incognito" ? T.text : T.textMuted,
+                  background: activeMode === "incognito" ? T.tabActive : "transparent",
+                  border: "none", borderRadius: 10, cursor: "pointer",
+                  transition: "background 0.15s, color 0.15s",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
+                }}
+              >
+                {activeMode === "incognito" && <Ghost size={14} strokeWidth={1.75} />}
+                <span>Incognito</span>
+              </button>
               <button
                 onClick={() => {
                   setActiveMode("cowork");
@@ -307,9 +363,11 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
                   background: activeMode === "cowork" ? T.tabActive : "transparent",
                   border: "none", borderRadius: 10, cursor: "pointer",
                   transition: "background 0.15s, color 0.15s",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
                 }}
               >
-                CoWork
+                {activeMode === "cowork" && <AppWindowMac size={14} strokeWidth={1.75} />}
+                <span>CoWork</span>
               </button>
               <button
                 onClick={() => {
@@ -323,18 +381,43 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
                   background: activeMode === "designer" ? T.tabActive : "transparent",
                   border: "none", borderRadius: 10, cursor: "pointer",
                   transition: "background 0.15s, color 0.15s",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
                 }}
               >
-                Designer
+                {activeMode === "designer" && <Paintbrush size={14} strokeWidth={1.75} />}
+                <span>Designer</span>
               </button>
             </div>
 
             {/* Sidebar content — drill-in pattern (2026-04-22 refactor).
                 Default: flat project list. After clicking a project: project header
-                + back button + scoped conversation list (no Historikk-wrapper). */}
+                + back button + scoped conversation list (no Historikk-wrapper).
+                Incognito-fane: tom plassholder (ingen convs, ingen prosjekter — privat-modus). */}
             <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2, padding: "0 8px", minHeight: 0, overflow: "hidden" }}>
               <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, marginTop: 4 }}>
-                {drilledProject ? (
+                {activeMode === "incognito" ? (
+                  /* ── INCOGNITO STATE ── tom plassholder, ingen logging. */
+                  /* TODO: wire up content when decided */
+                  <>
+                    <div style={{ ...sidebarHeaderStyle }}>
+                      <Ghost size={16} color={T.text} />
+                      <span>Incognito</span>
+                    </div>
+                    <div style={{ padding: "12px 6px", flexShrink: 0 }}>
+                      <SquigglyDivider height={16} mode="static" />
+                    </div>
+                    <div style={{
+                      padding: "24px 6px",
+                      textAlign: "center",
+                      fontSize: 12,
+                      color: T.textMuted,
+                      lineHeight: 1.6,
+                      fontFamily: T.sans,
+                    }}>
+                      Privat samtale.<br/>Ingenting lagres.
+                    </div>
+                  </>
+                ) : drilledProject ? (
                   /* ── PROJECT-DRILLED STATE ── */
                   <>
                     {/* Project title — sidebarHeaderStyle, ikon + navn + innstillinger */}
@@ -381,8 +464,13 @@ function DashboardLayoutInner({ children }: { children: React.ReactNode }) {
                               onMouseEnter={() => setHoveredConvId(conv.id)}
                               onMouseLeave={() => setHoveredConvId(null)}
                             >
+                              {/* Active conversation: solid filled circle.
+                                  Inactive: outline ring only (no dot).
+                                  Lucide's `Circle` paints fill=currentColor when
+                                  we set it explicitly; default is transparent
+                                  which gives us the outline-only variant. */}
                               {isActive
-                                ? <CircleDot size={11} color={T.text} style={{ flexShrink: 0 }} />
+                                ? <Circle size={11} color={T.text} fill={T.text} style={{ flexShrink: 0 }} />
                                 : <Circle size={11} color={T.text} style={{ flexShrink: 0 }} />}
                               <Link
                                 href={buildUrl(

@@ -320,7 +320,7 @@ export const consolidateMemories = api(
 
     // smartSelect — replaces hardcoded haiku. Memory consolidation is a
     // review-flavoured task (summarise + prune) so we tag accordingly.
-    const model = await smartSelect({ context: "review", complexity: 2 });
+    const model = await smartSelect({ context: "review", complexity: 2, purpose: "background" });
 
     const memorySections = req.memories
       .map((m, i) => `[Memory ${i + 1}] (type: ${m.memoryType})\n${m.content}`)

@@ -62,8 +62,12 @@ function ChatPageInner() {
   const convParam = searchParams.get("conv");
   const projectParam = searchParams.get("project");
   const pathname = usePathname();
-  // Fase I.0.c/f — samme side brukes av /cowork og /designer; scope bestemmes av ruten.
-  const projectScope: "cowork" | "designer" = pathname.startsWith("/designer") ? "designer" : "cowork";
+  // Fase I.0.c/f — samme side brukes av /, /cowork og /designer; scope
+  // bestemmes av ruten. Root-path (/) er Incognito-fanen (ingen lagring).
+  const projectScope: "incognito" | "cowork" | "designer" =
+    pathname.startsWith("/cowork") ? "cowork"
+    : pathname.startsWith("/designer") ? "designer"
+    : "incognito";
 
   const { selectedRepo } = useRepoContext();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(projectParam);
@@ -113,12 +117,14 @@ function ChatPageInner() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [skillsOpen, setSkillsOpen] = useState(false);
-  const [isIncognito, setIsIncognito] = useState(false);
+  // Incognito er KUN aktiv i /incognito-fanen — ingen per-chat-toggle.
+  // Ghost-ikonet i ChatInput er en snarvei (router.push /incognito), ikke
+  // en mode-switch innen gjeldende fane.
+  const isIncognito = projectScope === "incognito";
   const autoMsgSent = useRef(false);
   const hasSent = useRef(false);
   const wasSendingRef = useRef(false);
   const acPrevRef = useRef<string | null>(null);
-  const prevIncognitoRef = useRef(false);
   // When a brand-new conversation is created, useApiData refetches with empty result
   // and would wipe the optimistic user message. These refs let the fetcher serve the
   // optimistic msg instead of fetching, until agent.done triggers a real refresh.
@@ -136,15 +142,6 @@ function ChatPageInner() {
     acPrevRef.current = ac;
   }, [ac]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-reset to new chat when inkognito is turned off
-  useEffect(() => {
-    if (prevIncognitoRef.current && !isIncognito) {
-      setAc(null);
-      setNewChat(true);
-    }
-    prevIncognitoRef.current = isIncognito;
-  }, [isIncognito]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const { data: convData, loading: convsLoading, refresh: refreshConvs } = useApiData(
     () => getConversations(),
     [],
@@ -156,6 +153,33 @@ function ChatPageInner() {
   // when the user "drills out" to root while still in a conv owned by a project.
   const activeConv = ac ? conversations.find(c => c.id === ac) : null;
   const derivedProjectId: string | null = selectedProjectId ?? activeConv?.projectId ?? null;
+
+  // Scope-guard: if the URL has ?conv=X but X belongs to a different scope
+  // (e.g. /designer?conv=<cowork-conv-id>), clear the conv param so we land
+  // on a clean new-chat view in the current scope. Uses conversations list
+  // as source of truth since the backend stamps scope on insert.
+  // Incognito (=/) viser aldri convs i sidebaren, så enhver ?conv= på /
+  // regnes som scope-mismatch — dropper den.
+  useEffect(() => {
+    if (!ac) return;
+    if (projectScope === "incognito") {
+      router.replace(pathname, { scroll: false });
+      setAc(null);
+      setNewChat(true);
+      return;
+    }
+    if (conversations.length === 0) return;
+    const match = conversations.find((c) => c.id === ac);
+    if (!match) return;
+    const convScope = (match as { scope?: "incognito" | "cowork" | "designer" }).scope ?? "cowork";
+    if (convScope !== projectScope) {
+      const carry = selectedProjectId ?? projectParam ?? null;
+      const nextUrl = carry ? `?project=${encodeURIComponent(carry)}` : "";
+      router.replace(pathname + nextUrl, { scroll: false });
+      setAc(null);
+      setNewChat(true);
+    }
+  }, [ac, conversations, projectScope, pathname, router, selectedProjectId, projectParam]);
 
   // Resolve project name + type for SuggestionChips based on derivedProjectId.
   useEffect(() => {
@@ -232,22 +256,65 @@ function ChatPageInner() {
   });
 
   // SSE streaming
-  const { messages: sseMessages, status: streamStatus, agentStartedTaskId, stalled: streamStalled, activeSkills: streamActiveSkills } = useAgentStream(
-    sending ? (activeTaskId || ac) : null,
+  // Incognito-fanen går ren direkte AI-kall — ingen agent-loop, ingen
+  // tool-calls, ingen SSE-events å lytte på. Hopper over hele hook-en
+  // ved å gi `null` som task-id. useAgentStream returnerer tomt state
+  // og lukker eventuell åpen connection.
+  const {
+    messages: sseMessages,
+    status: streamStatus,
+    agentStartedTaskId,
+    stalled: streamStalled,
+    activeSkills: streamActiveSkills,
+    toolCalls: streamToolCalls,
+    sleeping: streamSleeping,
+    planPending: streamPlanPending,
+    interrupted: streamInterrupted,
+    clearPlanPending,
+    clearInterrupted,
+  } = useAgentStream(
+    isIncognito ? null : (sending ? (activeTaskId || ac) : null),
     {
-      onDone: async () => {
+      onDone: async (info) => {
+        // Surface non-natural stop reasons as an inline chat error so the
+        // user sees *why* the run ended. "natural" = happy-path, no banner.
+        if (info?.reason && info.reason !== "natural") {
+          const label = {
+            user_cancelled: "Stoppet av deg",
+            tool_failure: "Verktøyfeil",
+            max_loops: "For mange verktøy-kall",
+            truncated: "Avbrutt i generering",
+          }[info.reason] ?? "Avbrutt";
+          const detail = info.userMessage || info.finalText || "";
+          setChatError(classifyError(new Error(detail ? `${label}: ${detail}` : label)));
+        }
         // Await DB refresh BEFORE clearing sending so optimistic msg has a confirmed counterpart
         await refreshMsgs();
         setSending(false);
         setActiveTaskId(null);
         // Refresh sidebar when AI response finishes (title now available from first message)
         refreshConvs();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("tf:conv-list-changed"));
+        }
       },
       onError: (err) => {
         setSending(false);
         setActiveTaskId(null);
         setChatError(classifyError(new Error(err)));
         refreshMsgs();
+      },
+      // onSleeping-kallback trenges ikke eksplisitt — streamSleeping-state
+      // plukkes opp av useEffect nedenfor og vises som info-bubble.
+      // chat.message_update arrives the moment the AI's final placeholder
+      // is committed, which is guaranteed AFTER any newly-created
+      // conversation row. This is the earliest 100%-safe moment to
+      // refresh the sidebar list for brand-new convs.
+      onMessageUpdate: () => {
+        refreshConvs();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("tf:conv-list-changed"));
+        }
       },
     }
   );
@@ -271,6 +338,19 @@ function ChatPageInner() {
       refreshMsgs();
     }
   }, [streamStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Runde 2d — Sleep-mode: when master enters needs_input, show the
+  // sleeping message as an inline info-banner. Next user message in this
+  // conv triggers chat.send → resumeMasterTask on backend, and the hook
+  // emits `agent.resumed` that clears this state.
+  useEffect(() => {
+    if (!streamSleeping) return;
+    setSending(false);
+    setChatError({
+      type: "info",
+      message: `Agent venter på input: ${streamSleeping.userMessage}`,
+    } as unknown as ReturnType<typeof classifyError>);
+  }, [streamSleeping?.taskId, streamSleeping?.pendingSubTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll messages while agent task active
   useEffect(() => {
@@ -449,7 +529,19 @@ function ChatPageInner() {
     // Only refresh conversations list — do NOT call refreshMsgs() here.
     // Calling refreshMsgs() immediately overwrites the optimistic message with empty DB state
     // (the message hasn't been written yet). SSE streaming and the polling fallback handle updates.
+    //
+    // Triple notify:
+    //  1. refreshConvs()        — our own useApiData fetch (unused for sidebar
+    //                             but may affect other local consumers)
+    //  2. refreshConvs()+400ms  — absorb any DB commit race
+    //  3. tf:conv-list-changed  — broadcast to the dashboard layout, which
+    //                             owns the sidebar and has a 30s cache that
+    //                             otherwise would keep the old list visible
     refreshConvs();
+    setTimeout(() => { refreshConvs(); }, 400);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("tf:conv-list-changed"));
+    }
   };
 
   // Auto-send msg from search params
@@ -506,6 +598,9 @@ function ChatPageInner() {
 
   const startNewChat = useCallback((msg: string, options?: { firecrawlEnabled?: boolean; planMode?: boolean }) => {
     const repoName = selectedRepo?.name || null;
+    // Incognito-fanen (/) får inkognito-prefix på convId så sidebaren (som
+    // filtrerer bort `inkognito-*`) aldri viser samtalen. Plassholder
+    // inntil backend får "ingen logging"-støtte.
     const convId = isIncognito
       ? `inkognito-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       : repoName
@@ -552,6 +647,14 @@ function ChatPageInner() {
       return;
     }
 
+    // Runde 3-A — if a plan-preview is active, this message is plan-edit
+    // feedback, not a new chat turn. Backend routes via editingPlanFor.
+    const editingPlanFor = streamPlanPending?.masterTaskId;
+    // Runde 3-B — if an interrupt was emitted (and the user is composing
+    // their next message), route it to interrupt-handler. The first such
+    // message is "what to do next"; subsequent ones go through normal flow.
+    const interruptingMaster = streamInterrupted?.masterTaskId;
+
     const optimisticMsg = makeOptimisticMsg(ac, value);
     setMsgData(prev => ({
       messages: [...(prev?.messages ?? []), optimisticMsg],
@@ -568,10 +671,22 @@ function ChatPageInner() {
       planMode: options?.planMode || planMode || undefined,
       projectId: selectedProjectId ?? undefined,
       scope: projectScope,
+      editingPlanFor,
+      interruptingMaster,
     })
-      .then(handleSendResult)
+      .then((result) => {
+        // Clear UI banners when the routing actually fired.
+        if (editingPlanFor) {
+          // Don't clearPlanPending here — backend will re-emit plan_ready
+          // with iteration+1 once it's done revising. Just keep it visible.
+        }
+        if (interruptingMaster) {
+          clearInterrupted();
+        }
+        return handleSendResult(result);
+      })
       .catch((e) => { setSending(false); setChatError(classifyError(e)); });
-  }, [ac, pendingReviewId, selectedRepo, curRepo, selectedSkillIds, selectedModel, planMode, selectedProjectId, setMsgData, handleRequestChanges, handleSendResult]);
+  }, [ac, pendingReviewId, selectedRepo, curRepo, selectedSkillIds, selectedModel, planMode, selectedProjectId, setMsgData, handleRequestChanges, handleSendResult, streamPlanPending, streamInterrupted, clearInterrupted, projectScope]);
 
   const handleCancel = useCallback(() => {
     if (ac) cancelChatGeneration(ac).catch(() => {});
@@ -636,22 +751,6 @@ function ChatPageInner() {
             onModelChange={setSelectedModel}
             activeModeLabel={activeModeLabel}
             isIncognito={isIncognito}
-            onIncognitoToggle={() => {
-              // Ghost-click: leave project + start new chat + flag incognito.
-              const next = !isIncognito;
-              setIsIncognito(next);
-              if (next) {
-                setSelectedProjectId(null);
-                setAc(null);
-                setNewChat(true);
-                if (typeof window !== "undefined") {
-                  const url = new URL(window.location.href);
-                  url.searchParams.delete("conv");
-                  url.searchParams.delete("project");
-                  router.replace(url.pathname);
-                }
-              }
-            }}
             planMode={planMode}
             onPlanModeToggle={() => setPlanMode(p => !p)}
             autoMode={autoMode}
@@ -759,22 +858,6 @@ function ChatPageInner() {
             onNewChat={() => { setNewChat(true); setAc(null); }}
             activeModeLabel={activeModeLabel}
             isIncognito={isIncognito}
-            onIncognitoToggle={() => {
-              // Ghost-click: leave project + start new chat + flag incognito.
-              const next = !isIncognito;
-              setIsIncognito(next);
-              if (next) {
-                setSelectedProjectId(null);
-                setAc(null);
-                setNewChat(true);
-                if (typeof window !== "undefined") {
-                  const url = new URL(window.location.href);
-                  url.searchParams.delete("conv");
-                  url.searchParams.delete("project");
-                  router.replace(url.pathname);
-                }
-              }
-            }}
             planMode={planMode}
             onPlanModeToggle={() => setPlanMode(p => !p)}
             autoMode={autoMode}
@@ -795,6 +878,10 @@ function ChatPageInner() {
               router.replace(url.pathname + url.search);
             }}
             activeSkills={streamActiveSkills}
+            liveToolCalls={streamToolCalls}
+            planPending={streamPlanPending}
+            onClearPlanPending={clearPlanPending}
+            interrupted={streamInterrupted}
           />
         </div>
       )}

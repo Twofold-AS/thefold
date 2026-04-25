@@ -27,6 +27,11 @@ interface StaticIntegration {
   platform: string;
   desc: string;
   ev?: string[];
+  /** When true the row is shown in the list but rendered disabled with a
+   *  "Kommer snart"-tag instead of a "Koble til"-knapp. Used as a
+   *  placeholder for integrations we're considering but haven't built yet
+   *  — lets users see the direction without accidentally clicking. */
+  comingSoon?: boolean;
 }
 
 const staticIntegrations: StaticIntegration[] = [
@@ -79,6 +84,13 @@ const staticIntegrations: StaticIntegration[] = [
     cat: "e-post",
     platform: "resend",
     desc: "E-postvarsler for jobb-fullføring, healing-hendelser og kritiske feil.",
+  },
+  {
+    n: "iMessage (SendBlue)",
+    cat: "kommunikasjon",
+    platform: "sendblue",
+    desc: "Chat med agenten din via iMessage eller SMS. Under vurdering — ikke tilgjengelig enda.",
+    comingSoon: true,
   },
 ];
 
@@ -271,6 +283,9 @@ export default function IntegrasjonerPage() {
                     border: `1px solid ${T.border}`,
                     borderRadius: T.r,
                     overflow: "hidden",
+                    // Subtle muted state for placeholder integrations so
+                    // users see the intent without mistaking them for live.
+                    opacity: ig.comingSoon ? 0.6 : 1,
                   }}
                 >
                   {/* Header row */}
@@ -291,9 +306,10 @@ export default function IntegrasjonerPage() {
                       </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
-                      {ig.connected && <Tag variant="success">tilkoblet</Tag>}
-                      {!ig.connected && ig.serverSide && <Tag>via server</Tag>}
-                      {!ig.connected && !ig.serverSide && <Tag variant="default">frakoblet</Tag>}
+                      {ig.comingSoon && <Tag variant="default">Kommer snart</Tag>}
+                      {!ig.comingSoon && ig.connected && <Tag variant="success">tilkoblet</Tag>}
+                      {!ig.comingSoon && !ig.connected && ig.serverSide && <Tag>via server</Tag>}
+                      {!ig.comingSoon && !ig.connected && !ig.serverSide && <Tag variant="default">frakoblet</Tag>}
                     </div>
                   </div>
 
@@ -310,7 +326,9 @@ export default function IntegrasjonerPage() {
                           {ig.ev.map(e => (<Tag key={e}>{e}</Tag>))}
                         </div>
                       )}
-                      {ig.isGitHub ? (
+                      {ig.comingSoon ? (
+                        <Tag variant="default">Ikke tilgjengelig enda</Tag>
+                      ) : ig.isGitHub ? (
                         <Tag variant="success">Aktiv — GitHub App</Tag>
                       ) : ig.serverSide ? (
                         <Tag>Konfigurert via server</Tag>

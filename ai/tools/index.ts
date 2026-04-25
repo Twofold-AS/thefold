@@ -6,6 +6,9 @@ import { ToolRegistry } from "./registry";
 import type { Tool } from "./types";
 
 import { createTaskTool } from "./task/create-task";
+import { createSubtaskTool } from "./task/create-subtask";
+import { updateSubtaskTool } from "./task/update-subtask";
+import { deleteSubtaskTool } from "./task/delete-subtask";
 import { startTaskTool } from "./task/start-task";
 import { listTasksTool } from "./task/list-tasks";
 import { readFileTool } from "./code/read-file";
@@ -40,6 +43,7 @@ import { buildGetStatusTool } from "./build/get-status";
 // Phase C — new tools (Commits 15–22)
 import { recallMemoryTool } from "./memory/recall";
 import { saveInsightTool } from "./memory/save-insight";
+import { saveProjectFactTool } from "./memory/save-project-fact";
 import { findComponentTool } from "./component/find";
 import { useComponentTool } from "./component/use";
 import { saveDecisionTool } from "./memory/save-decision";
@@ -88,8 +92,11 @@ export type {
 export { zodToAnthropicSchema, zodToOpenAISchema } from "./format";
 
 const registeredTools: AnyTool[] = [
-  // Task tools (Commit 7)
+  // Task tools (Commit 7) + sub-task tools (Runde 2b + 3-C)
   createTaskTool,
+  createSubtaskTool,
+  updateSubtaskTool,
+  deleteSubtaskTool,
   startTaskTool,
   listTasksTool,
   // Code tools (Commit 8)
@@ -121,9 +128,10 @@ const registeredTools: AnyTool[] = [
   buildValidateTool,
   buildRunCommandTool,
   buildGetStatusTool,
-  // Phase C — new tools (Commits 15–22)
+  // Phase C — new tools (Commits 15–22) + save_project_fact (Sprint A)
   recallMemoryTool,
   saveInsightTool,
+  saveProjectFactTool,
   findComponentTool,
   useComponentTool,
   saveDecisionTool,

@@ -85,6 +85,8 @@ function buildToolContext(opts: {
   userEmail?: string;
   lastCreatedTaskId?: string | null;
   lastStartedTaskId?: string | null;
+  projectId?: string;
+  projectType?: "code" | "framer" | "figma" | "framer_figma";
 }): ToolContext {
   return {
     userId: "system", // legacy callers don't pass userId; OK for chat tools
@@ -94,6 +96,8 @@ function buildToolContext(opts: {
     repoOwner: opts.repoOwner,
     lastCreatedTaskId: opts.lastCreatedTaskId,
     lastStartedTaskId: opts.lastStartedTaskId,
+    projectId: opts.projectId,
+    projectType: opts.projectType,
     emit: () => {
       // No-op for legacy callers; tools that need SSE call agent.emitChatEvent directly
     },
@@ -111,6 +115,12 @@ export interface ToolCallOptions extends AICallOptions {
   repoOwner?: string;
   conversationId?: string;
   userEmail?: string;
+  /** Runde 5 — Active project (UUID). Threaded into every ToolContext
+   *  so create_task / framer_* / repo_* tools can resolve the canonical
+   *  project repo via projects.ensureProjectRepo. */
+  projectId?: string;
+  /** Runde 5 — Mirror of projectType from chat. */
+  projectType?: "code" | "framer" | "figma" | "framer_figma";
   assessComplexityFn?: (req: { taskDescription: string; projectStructure: string; fileCount: number }) => Promise<{ complexity: number; tokensUsed: number }>;
 }
 
@@ -118,6 +128,10 @@ export interface ToolCallResponse extends AICallResponse {
   toolsUsed: string[];
   lastCreatedTaskId?: string;
   lastStartedTaskId?: string;
+  /** Set when a tool emitted `bailOut` — loop terminated with a user-facing
+   *  error. The caller should render `userMessage` as the assistant reply
+   *  and set done-reason = "tool_failure". */
+  bailOut?: { reason: string; userMessage: string };
 }
 
 export async function callWithTools(options: ToolCallOptions): Promise<ToolCallResponse> {
@@ -162,17 +176,62 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
   // triggering repetition-loops in the final text response.
   const MAX_CONSECUTIVE_UNKNOWN_TOOLS = 2;
   let consecutiveUnknownToolErrors = 0;
+  let bailOut: { reason: string; userMessage: string } | null = null;
   const debug = await isDebugEnabled();
 
   for (let loop = 0; loop < MAX_TOOL_LOOPS; loop++) {
     if (debug) console.log(`[DEBUG-AH] Tool loop iteration ${loop + 1}`);
+
+    // Cancel-checkpoint: if the user clicked Stopp while we were running a
+    // tool or waiting for the previous AI response, bail out before the
+    // next expensive generation. Peeks the cancel-flag without consuming
+    // it — chat.ts end-of-turn cleanup still consumes it.
+    if (options.conversationId) {
+      try {
+        const { chat } = await import("~encore/clients");
+        const res = await chat.peekCancellation({ conversationId: options.conversationId });
+        if (res.cancelled) {
+          log.info("tools.ts: cancel detected mid-loop, breaking", {
+            conversationId: options.conversationId,
+            loop,
+          });
+          return {
+            content: "Generering avbrutt.",
+            tokensUsed: totalInputTokens + totalOutputTokens,
+            stopReason: "user_cancelled",
+            modelUsed: options.model,
+            inputTokens: totalInputTokens,
+            outputTokens: totalOutputTokens,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
+            toolsUsed: allToolsUsed,
+            lastCreatedTaskId: lastCreatedTaskId || undefined,
+            lastStartedTaskId: lastStartedTaskId || undefined,
+          };
+        }
+      } catch (err) {
+        log.warn("tools.ts: peekCancellation failed (continuing)", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Sprint A — cache_control på siste tool i array. Anthropic cacher
+    // tools-defs (4-6k tokens) → 90% rabatt på iter 2+.
+    const cachedTools: typeof options.tools = options.tools.length > 0
+      ? [
+          ...options.tools.slice(0, -1),
+          { ...options.tools[options.tools.length - 1], cache_control: { type: "ephemeral" } } as typeof options.tools[number],
+        ]
+      : options.tools;
 
     const responseStream = client.messages.stream({
       model: options.model,
       max_tokens: options.maxTokens,
       system: systemBlocks,
       messages,
-      tools: options.tools as any,
+      tools: cachedTools as any,
     });
     const response = await responseStream.finalMessage();
 
@@ -188,7 +247,39 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
         .join("");
       // Defensive trim — experimental models sometimes emit 40× the same
       // paragraph in a single response after a failed tool_use.
-      const textContent = trimRepetitionLoop(rawText);
+      let textContent = trimRepetitionLoop(rawText);
+
+      // Anti-hallucination safety net (2026-04-24). When the model has just
+      // called start_task, the resulting agent task runs asynchronously in
+      // the background — the MODEL has not done any building yet. Any
+      // claim like "jeg har bygget Header, Hero..." is a lie. We detect
+      // that pattern and replace with an honest canonical message. The
+      // frontend will update the bubble live via SSE as the agent actually
+      // makes progress.
+      if (lastStartedTaskId) {
+        const lower = textContent.toLowerCase();
+        const LYING_CLAIMS = [
+          /\bjeg har (bygget|hentet|opprettet|skrevet|implementert|lagt til)\b/,
+          /\bjeg bygger\s+(header|hero|footer|komponent|fil)/,
+          /\bi have (built|created|written|fetched|implemented|added)\b/,
+          /\boppdaterer deg når jeg er ferdig\b/,
+          /\bagenten jobber nå med å bygge\b/,
+        ];
+        const hasClaim = LYING_CLAIMS.some((r) => r.test(lower));
+        // Also treat very long (>400 chars) post-start_task responses as
+        // suspicious — the model tends to enumerate components there.
+        const suspiciouslyLong = textContent.length > 400;
+        if (hasClaim || suspiciouslyLong) {
+          log.warn("tools.ts: overriding post-start_task hallucination", {
+            startedTaskId: lastStartedTaskId,
+            hasClaim,
+            suspiciouslyLong,
+            originalLen: textContent.length,
+            originalPreview: textContent.slice(0, 120),
+          });
+          textContent = "Oppgaven er startet. Agenten jobber nå i bakgrunnen — jeg oppdaterer deg her etter hvert som konkrete filer blir bygget.";
+        }
+      }
 
       if (debug) console.log(`[DEBUG-AH] Final content length: ${textContent.length}${rawText.length !== textContent.length ? ` (trimmed from ${rawText.length})` : ""}`);
 
@@ -316,6 +407,8 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
             repoName: options.repoName,
             repoOwner: options.repoOwner,
             userEmail: options.userEmail,
+            projectId: options.projectId,
+            projectType: options.projectType,
             lastCreatedTaskId,
             lastStartedTaskId,
           });
@@ -328,6 +421,19 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
             consecutiveUnknownToolErrors += 1;
           } else {
             consecutiveUnknownToolErrors = 0;
+          }
+
+          // Unrecoverable tool-failure (e.g. 403/404/auth/DNS). The tool
+          // flagged bailOut — we capture the signal, push the tool_result
+          // back to the model (so the model knows something went wrong),
+          // but break the loop after this iteration with a canonical
+          // user-facing message instead of letting the model spin.
+          if (result.bailOut) {
+            bailOut = result.bailOut;
+            log.warn("tools.ts: tool bail-out triggered", {
+              tool: toolName,
+              reason: result.bailOut.reason,
+            });
           }
 
           // Commit 20b: surface handler-level failures (success: false) as a
@@ -425,6 +531,31 @@ async function callAnthropicWithToolsSDK(options: ToolCallOptions): Promise<Tool
     });
 
     if (debug) console.log(`[DEBUG-AH] Sent tool results back, looping... (tools so far: ${allToolsUsed.join(", ")})`);
+
+    // Tool-bailout: a tool flagged unrecoverable failure (auth, 404, etc.).
+    // Break the loop with a canonical user message so the UI shows the
+    // failure instead of the model spinning on retry attempts.
+    if (bailOut) {
+      log.warn("tools.ts: breaking loop after tool bailOut", {
+        reason: bailOut.reason,
+        loop,
+      });
+      return {
+        content: bailOut.userMessage,
+        tokensUsed: totalInputTokens + totalOutputTokens,
+        stopReason: "tool_bailout",
+        modelUsed: options.model,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costEstimate: estimateCost(totalInputTokens, totalOutputTokens, options.model),
+        toolsUsed: allToolsUsed,
+        lastCreatedTaskId: lastCreatedTaskId || undefined,
+        lastStartedTaskId: lastStartedTaskId || undefined,
+        bailOut,
+      };
+    }
 
     // Circuit break: N consecutive Unknown-tool errors → bail out with a
     // clear message instead of letting the model keep hallucinating names.

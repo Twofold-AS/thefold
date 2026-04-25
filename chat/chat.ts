@@ -540,6 +540,22 @@ function isCancelled(conversationId: string): boolean {
   return false;
 }
 
+// Non-consuming peek — used by the AI tool-loop to check mid-generation.
+// Does NOT remove the flag. The actual consume-on-check happens in
+// isCancelled() at the end-of-turn checkpoints in send().
+function peekCancelledLocal(conversationId: string): boolean {
+  return cancelledConversations.has(conversationId);
+}
+
+// Internal endpoint called by ai/tools.ts tool-loop between iterations.
+// Returns the cancel-state without consuming the flag.
+export const peekCancellation = api(
+  { method: "POST", path: "/chat/peek-cancellation", expose: false },
+  async (req: { conversationId: string }): Promise<{ cancelled: boolean }> => {
+    return { cancelled: peekCancelledLocal(req.conversationId) };
+  }
+);
+
 interface SendRequest {
   conversationId: string;
   message: string;
@@ -569,8 +585,16 @@ interface SendRequest {
   // Active project for this conversation — populated at creation time so
   // uploads, scrapes and project-context resolve without joins later.
   projectId?: string;
-  /** "cowork" | "designer" — scope of the chat. Populated at conversation creation. */
-  scope?: "cowork" | "designer";
+  /** "incognito" | "cowork" | "designer" — scope of the chat. Populated
+   *  at conversation creation. Incognito → direct-chat fast-path (no
+   *  agent, no tools, no memory/manifest). */
+  scope?: "incognito" | "cowork" | "designer";
+  /** Runde 3-A — set when frontend is in plan-preview state. Routes the
+   *  message to /agent/edit-plan instead of starting a new chat turn. */
+  editingPlanFor?: string;
+  /** Runde 3-B — set when frontend has issued an interrupt. Routes the
+   *  message to /agent/interrupt-master. */
+  interruptingMaster?: string;
 }
 
 interface SendResponse {
@@ -596,7 +620,7 @@ interface ConversationSummary {
   lastMessage: string;
   lastActivity: string;
   activeTask?: string;
-  scope?: "cowork" | "designer";
+  scope?: "incognito" | "cowork" | "designer";
   projectId?: string | null;
 }
 
@@ -612,7 +636,7 @@ interface ConversationsResponse {
 async function ensureConversationOwner(
   conversationId: string,
   projectId?: string | null,
-  scope?: "cowork" | "designer" | null,
+  scope?: "incognito" | "cowork" | "designer" | null,
 ): Promise<void> {
   const auth = getAuthData();
   if (!auth) throw APIError.unauthenticated("not authenticated");
@@ -723,6 +747,223 @@ export const send = api(
     `;
 
     if (!msg) throw APIError.internal("failed to store message");
+
+    // === Incognito fast-path ===
+    // Privat chat-modus: ingen tools, ingen memory-search, ingen repo-
+    // orientering, ingen phase/sub-task-system. Ren direkte AI-respons.
+    // Complexity hardkodes til 0 så selectOptimalModel velger raskeste/
+    // billigste modell (typisk Haiku). Ingen task opprettes.
+    if (req.scope === "incognito" && !req.chatOnly) {
+      try {
+        const { ai: aiClient } = await import("~encore/clients");
+        const authIncognito = getAuthData();
+        // Last de siste ~6 meldinger for kort samtalehukommelse (stadig
+        // innen én session — ingen persistert kunnskap på tvers).
+        const historyRows = await db.query<{ role: string; content: string }>`
+          SELECT role, content FROM messages
+          WHERE conversation_id = ${req.conversationId} AND message_type = 'chat'
+          ORDER BY created_at DESC LIMIT 6
+        `;
+        const historyList: Array<{ role: "user" | "assistant"; content: string }> = [];
+        for await (const r of historyRows) {
+          if (r.role === "user" || r.role === "assistant") {
+            historyList.push({ role: r.role, content: r.content });
+          }
+        }
+        historyList.reverse();
+
+        const aiResp = await aiClient.chat({
+          messages: historyList,
+          memoryContext: [],
+          systemContext: "direct_chat",
+          complexity: 0,
+          conversationId: req.conversationId,
+          userEmail: authIncognito?.email,
+          isSocialGreeting: true, // triggers short response + cheap model
+        });
+
+        const assistantMsg = await db.queryRow<Message>`
+          INSERT INTO messages (conversation_id, role, content, message_type, metadata)
+          VALUES (
+            ${req.conversationId},
+            'assistant',
+            ${aiResp.content},
+            'chat',
+            ${JSON.stringify({
+              model: aiResp.modelUsed,
+              modelSlug: aiResp.modelSlug,
+              tokens: { total: aiResp.tokensUsed },
+              costUsd: aiResp.costUsd,
+              incognito: true,
+            })}::jsonb
+          )
+          RETURNING id, conversation_id as "conversationId", role, content,
+                    message_type as "messageType", metadata, created_at as "createdAt",
+                    updated_at as "updatedAt"
+        `;
+
+        log.info("chat.send: incognito fast-path", {
+          conversationId: req.conversationId,
+          tokens: aiResp.tokensUsed,
+        });
+
+        return { message: assistantMsg ?? msg, agentTriggered: false };
+      } catch (err) {
+        log.warn("incognito fast-path failed, falling through to standard flow", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        // Fallthrough to normal flow as safety net.
+      }
+    }
+
+    // Runde 3-A — Plan-edit: user typed during plan-preview window.
+    // Frontend tags the request with editingPlanFor=<masterId>. We route
+    // it to agent.editPlan, which revises the plan and re-emits
+    // agent.plan_ready. No assistant chat-message is generated here —
+    // the AI's tool-use side-effects + new plan_ready event are the
+    // visible response.
+    if (req.editingPlanFor && !req.chatOnly) {
+      try {
+        const { agent: agentClient } = await import("~encore/clients");
+        await agentClient.editPlan({
+          masterTaskId: req.editingPlanFor,
+          userInstruction: req.message,
+          conversationId: req.conversationId,
+        });
+        return { message: msg, agentTriggered: true, taskId: req.editingPlanFor };
+      } catch (err) {
+        log.warn("plan-edit routing failed (continuing to standard flow)", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Runde 3-B — Interrupt: user wants to stop a running master-task.
+    // Sets the in-memory interrupt flag — iterator picks it up at the
+    // next sub-task boundary.
+    if (req.interruptingMaster && !req.chatOnly) {
+      try {
+        const { agent: agentClient } = await import("~encore/clients");
+        await agentClient.interruptMaster({
+          masterTaskId: req.interruptingMaster,
+          userMessage: req.message,
+          conversationId: req.conversationId,
+        });
+        return { message: msg, agentTriggered: true, taskId: req.interruptingMaster };
+      } catch (err) {
+        log.warn("interrupt routing failed (continuing to standard flow)", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Runde 3-D — Post-done revision detection. If a master-task with
+    // sub-tasks completed recently (last 30 min), the user's next chat
+    // message is most likely a revision request ("change the hero color",
+    // "remove the footer", etc). Add a phase=revision-N sub-task and
+    // re-route through start_task to iterate it.
+    if (!req.chatOnly && !req.editingPlanFor && !req.interruptingMaster) {
+      try {
+        const { tasks: tasksClient, agent: agentClient } = await import("~encore/clients");
+        const recentMasters = await tasksClient.listTasks({
+          status: "done",
+          rootOnly: true,
+          limit: 5,
+        });
+        const within30Min = (t: { completedAt?: string | null; updatedAt?: string }) => {
+          const ts = t.completedAt || t.updatedAt;
+          if (!ts) return false;
+          return Date.now() - new Date(ts).getTime() < 30 * 60_000;
+        };
+        const candidate = recentMasters.tasks.find(within30Min);
+        if (candidate) {
+          const subCheck = await tasksClient.listSubTasks({ parentId: candidate.id });
+          if (subCheck.tasks.length > 0) {
+            // Compute next revision number based on existing revision-* phases.
+            const revs = subCheck.tasks
+              .map((s) => s.phase ?? "")
+              .filter((p) => p.startsWith("revision-"))
+              .map((p) => parseInt(p.slice("revision-".length), 10))
+              .filter((n) => !Number.isNaN(n));
+            const nextN = (revs.length === 0 ? 0 : Math.max(...revs)) + 1;
+            const phase = `revision-${nextN}`;
+            log.info("chat.send: routing as revision sub-task", {
+              masterId: candidate.id,
+              phase,
+              userMsgLen: req.message.length,
+            });
+            await tasksClient.createSubTask({
+              parentId: candidate.id,
+              title: `Revision ${nextN}: ${req.message.substring(0, 80)}`,
+              description: req.message,
+              phase,
+              source: "chat",
+            });
+            // Fire start_task on the master — iterator picks up the new
+            // pending sub-task. Use [resume] sentinel so the plan-preview
+            // gate is skipped (we don't need user confirmation for a
+            // single-revision sub-task).
+            await agentClient.startTask({
+              conversationId: req.conversationId,
+              taskId: candidate.id,
+              userMessage: `[resume] ${req.message}`,
+            });
+            return { message: msg, agentTriggered: true, taskId: candidate.id };
+          }
+        }
+      } catch (err) {
+        log.warn("revision-detection failed (continuing to standard flow)", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Runde 2d — Check if a master-task in this conversation is in sleep-
+    // mode (needs_input) because a sub-task bailed. If so, the user's
+    // message is resume-feedback, not a new chat message. Route to
+    // resumeMasterTask. We look up the most recent master by join via the
+    // conversation's attached task/project (best-effort; if we can't find
+    // one we fall through to the usual clarification path below).
+    if (!req.chatOnly && req.conversationId) {
+      try {
+        const { tasks: tasksClient, agent: agentClient } = await import("~encore/clients");
+        // Find the most recently-updated master (parent_id IS NULL) for
+        // this conversation sitting in needs_input. Uses rootOnly so we
+        // don't accidentally grab a sub-task.
+        const masterCandidates = await tasksClient.listTasks({
+          status: "needs_input",
+          rootOnly: true,
+          limit: 5,
+        });
+        // filter to tasks referenced by this conversation via source/chat
+        // heuristic — a master created via chat-tool will have source="chat".
+        // Without an explicit conversation_id column on tasks, we fall back
+        // to the newest needs_input master. Good enough for a single-user
+        // session; a per-conversation task-link is a follow-up refinement.
+        const sleeping = masterCandidates.tasks[0];
+        if (sleeping) {
+          // Verify it actually has sub-tasks (else it's a regular needs_input
+          // task using the old clarification flow — let that one handle it).
+          const subCheck = await tasksClient.listSubTasks({ parentId: sleeping.id });
+          if (subCheck.tasks.length > 0) {
+            log.info("chat.send: resuming sleeping master-task", {
+              masterId: sleeping.id,
+              conversationId: req.conversationId,
+            });
+            await agentClient.resumeMasterTask({
+              masterTaskId: sleeping.id,
+              conversationId: req.conversationId,
+              userFeedback: req.message,
+            });
+            return { message: msg, agentTriggered: true, taskId: sleeping.id };
+          }
+        }
+      } catch (err) {
+        log.warn("sleep-mode resume check failed (continuing to clarification path)", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // DEL 4: Check if there's an active needs_input task for this conversation
     // If so, route the message as a clarification response
@@ -968,6 +1209,7 @@ export const send = api(
         req.modelOverride ?? undefined,
         req.repoOwner,
         req.firecrawlEnabled,
+        req.projectId,
       ).catch((err) => {
         console.error("AI processing failed:", err);
         updateMessageContent(placeholderMsg.id, "Beklager, noe gikk galt. Prøv igjen.").catch(() => {});
@@ -1115,6 +1357,7 @@ async function processAIResponse(
   modelOverride?: string,
   repoOwner?: string,
   firecrawlEnabled?: boolean,
+  projectId?: string,
 ) {
   // Start heartbeat — updates updated_at every 10s so frontend knows we're alive
   const heartbeat = setInterval(async () => {
@@ -1155,8 +1398,45 @@ async function processAIResponse(
     // to stay in "short reply" register. Without this gate a 4-char "Hei"
     // produced an 11k-token orient + respond cycle with task-status dumps
     // and repo summaries.
-    const SOCIAL_GREETING_REGEX = /^(hei|hey|hallo|yo|hi|heisann|god\s?morgen|god\s?kveld|god\s?natt|takk|tack|ok|okay|ja|nei|jepp|yes|no)[\s.\!\?]*$/i;
-    const isSocialGreeting = userContent.length < 20 && SOCIAL_GREETING_REGEX.test(userContent.trim());
+    //
+    // Normalisation (regression-fix 2026-04-24): the previous regex failed
+    // to match live inputs because it:
+    //   (a) relied on .length < 20 on the *raw* string before trimming, so
+    //       a trailing "\n" or BOM still inflated length past the gate
+    //       (unlikely but observed with paste-in)
+    //   (b) only accepted a handful of trailing punctuation, not emoji or
+    //       multiple whitespace, so "Hei :)" or "Hei!!" both fell through
+    //   (c) didn't strip zero-width/BOM/NBSP characters that some browsers
+    //       and IMEs emit on first keystroke
+    // Fix: normalise first (strip BOM/zero-width, NBSP→space, NFC), then
+    // test length and regex on the normalised string. Added a dedicated
+    // debug log so future mismatches can be diagnosed from the trace.
+    const normalisedUserContent = (() => {
+      if (!userContent) return "";
+      return userContent
+        .normalize("NFC")
+        // BOM + zero-width space/joiner/nbsp → drop or single-space
+        .replace(/[\uFEFF\u200B\u200C\u200D]/g, "")
+        .replace(/\u00A0/g, " ")
+        // Collapse runs of whitespace
+        .replace(/\s+/g, " ")
+        .trim();
+    })();
+    const SOCIAL_GREETING_REGEX = /^(hei|hey|hallo|yo|hi|heisann|heia|halla|god\s?morgen|god\s?kveld|god\s?natt|takk|tack|ok|okay|ja|nei|jepp|yes|no|yep|nope)[\s.!?,:;]*(\p{Emoji_Presentation}|[\uD83D\uDE00-\uD83D\uDE4F])?[\s.!?,:;]*$/iu;
+    const isSocialGreeting =
+      normalisedUserContent.length > 0
+      && normalisedUserContent.length < 30
+      && SOCIAL_GREETING_REGEX.test(normalisedUserContent);
+
+    // Loud diagnostic so future mismatches are explainable from the trace.
+    log.info("chat.send: greeting-detection", {
+      conversationId,
+      raw: userContent.slice(0, 30),
+      rawLen: userContent.length,
+      normalised: normalisedUserContent.slice(0, 30),
+      normalisedLen: normalisedUserContent.length,
+      isSocialGreeting,
+    });
 
     // Emit "thinking" status to frontend via SSE (Bug 2 fix)
     agentEvt.emitChatEvent({
@@ -1185,6 +1465,13 @@ async function processAIResponse(
     // `security` (priority 9) can't bloat the prompt. Complexity hint of 1
     // lets the resolver's min_complexity gate suppress anything tagged for
     // more involved work.
+    // Always pass complexity — NOT just for greetings. The resolver's
+    // v3.1 gate "low-complexity + no-triggers + !always_on → skip" only
+    // fires when ctx.complexity is a number. Previously we passed
+    // `undefined` for every non-greeting message, so skills like
+    // `security` (priority 9, empty triggers) loaded on "Halla balla!"
+    // and similar noise.
+    const estimatedComplexity = quickComplexity(userContent);
     let resolvedSkills = { result: { injectedPrompt: "", injectedSkillIds: [] as string[], tokensUsed: 0, preRunResults: [] as any[], postRunSkills: [] as any[] } };
     try {
       const { skills: skillsClient } = await import("~encore/clients");
@@ -1195,7 +1482,7 @@ async function processAIResponse(
           repo: repoName,
           totalTokenBudget: isSocialGreeting ? 300 : 4000,
           context: isSocialGreeting ? "chat" : undefined,
-          complexity: isSocialGreeting ? 1 : undefined,
+          complexity: estimatedComplexity,
         },
       });
     } catch (e) {
@@ -1333,6 +1620,10 @@ async function processAIResponse(
         userEmail: auth.email,        // Fase E: propagated to ToolContext for role gates
         firecrawlEnabled: firecrawlEnabled ?? true, // Per-turn toggle removed — web_scrape always available if API key exists (tool handler errors gracefully otherwise)
         projectType: projectContext?.projectType as ("code" | "framer" | "figma" | "framer_figma" | undefined),
+        // Runde 5 — propagate projectId so create_task can resolve the
+        // canonical project github_repo via projects.ensureProjectRepo
+        // instead of guessing a name from the AI's title.
+        projectId,
         isSocialGreeting,
       });
     } catch (e) {

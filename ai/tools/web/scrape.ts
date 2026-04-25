@@ -139,6 +139,62 @@ export const webScrapeTool: Tool<z.infer<typeof inputSchema>> = {
         }
       })();
 
+      // Sprint A-finalisering — persister scrape som task_transient memory
+      // hvis vi kjører i master-iterator-flow. Phase N+ av samme master får
+      // full layout/spacing/HTML uten å re-kalle Firecrawl. TTL 24h.
+      const masterTaskId = ctx.masterTaskId ?? ctx.taskId;
+      if (masterTaskId) {
+        (async () => {
+          try {
+            const { memory: memoryClient } = await import("~encore/clients");
+            const crypto = await import("node:crypto");
+            const urlHash = crypto.createHash("sha256").update(input.url).digest("hex").slice(0, 12);
+
+            // Cap content til 50k chars (samme som web_scrape default
+            // maxLength). Stort nok for layout, lite nok for DB-row-sanity.
+            const fullPayload = JSON.stringify({
+              url: input.url,
+              title: result.title,
+              content: result.content,
+              screenshotUrl: result.screenshotUrl,
+              htmlCleaned: result.htmlCleaned,
+              wordCount: result.metadata.wordCount,
+              sections: result.sections,
+            });
+            const capped = fullPayload.length > 50_000
+              ? fullPayload.slice(0, 50_000) + '"[truncated]"}'
+              : fullPayload;
+
+            await memoryClient.store({
+              content: capped,
+              category: "task_scrape",
+              memoryType: "session",
+              projectId: ctx.projectId,
+              sourceRepo: ctx.repoName,
+              tags: [
+                `task:${masterTaskId}`,
+                `scrape:${urlHash}`,
+                `url:${input.url}`,
+              ],
+              permanence: "task_transient",
+              ttlDays: 1,
+              trustLevel: "agent",
+            });
+            ctx.log.info("web_scrape: persisted as task_transient memory", {
+              url: input.url,
+              urlHash,
+              masterTaskId,
+              contentLen: capped.length,
+            });
+          } catch (memErr) {
+            ctx.log.warn("web_scrape: task_transient persistence failed (non-critical)", {
+              url: input.url,
+              error: memErr instanceof Error ? memErr.message : String(memErr),
+            });
+          }
+        })();
+      }
+
       const charCount = result.content.length;
       const truncated = charCount >= (input.maxLength ?? 50000);
       const extras = [
@@ -171,6 +227,44 @@ export const webScrapeTool: Tool<z.infer<typeof inputSchema>> = {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       ctx.log.warn("web_scrape failed", { url: input.url, error: msg });
+
+      // Detect unrecoverable errors — no point retrying.
+      const lower = msg.toLowerCase();
+      const isAuth = /401|403|unauthori[sz]ed|forbidden|invalid api key|missing.*key/i.test(msg);
+      const isNotFound = /404|not found/i.test(msg);
+      const isBlocked = /blocked|captcha|cloudflare|bot detection/i.test(lower);
+      const isDns = /enotfound|eai_again|getaddrinfo|dns/i.test(lower);
+
+      if (isAuth) {
+        return {
+          success: false,
+          message: `Kunne ikke hente ${input.url}: ${msg}`,
+          bailOut: {
+            reason: "firecrawl_auth_failed",
+            userMessage: `Firecrawl API-nøkkelen er ugyldig eller mangler. Legg inn en gyldig nøkkel under Innstillinger → Integrasjoner.`,
+          },
+        };
+      }
+      if (isNotFound || isDns) {
+        return {
+          success: false,
+          message: `Kunne ikke hente ${input.url}: ${msg}`,
+          bailOut: {
+            reason: "url_not_reachable",
+            userMessage: `URL-en ${input.url} kan ikke nås (${isDns ? "DNS-oppslag feilet" : "404"}). Sjekk at lenken er riktig.`,
+          },
+        };
+      }
+      if (isBlocked) {
+        return {
+          success: false,
+          message: `Kunne ikke hente ${input.url}: ${msg}`,
+          bailOut: {
+            reason: "url_blocked",
+            userMessage: `Siden ${input.url} blokkerer scraping (captcha/bot-deteksjon). Vi kan ikke hente innholdet automatisk.`,
+          },
+        };
+      }
       return { success: false, message: `Kunne ikke hente ${input.url}: ${msg}` };
     }
   },

@@ -261,16 +261,143 @@ export async function selectOptimalModel(
  * Picks the cheapest (input_price) model remaining after filters.
  * Degrades gracefully: if no vision-model matches, drops the vision filter.
  */
+/** Eksplisitt rolle for modell-routing. Smart-select bruker dette FØR
+ *  context/complexity for å velge modell som passer per use-case.
+ *
+ *  - agent_loop: tool-loop med mange iter — Anthropic Haiku 4.5 er optimal
+ *    fordi tool-defs+system caches (90% rabatt på iter 2+). Cached-portion
+ *    blir billigere enn Kimi K2.6 selv om Kimi har lavere base-rate.
+ *  - vision_task: framer/design-tasks — Kimi K2.6 (billig + vision), Sonnet
+ *    4.6 ved complexity ≥ 6.
+ *  - chat_turn: standard chat-respons — Kimi K2.6 (default).
+ *  - greeting: ultra-korte chat-svar — MiniMax M2 (billigst).
+ *  - background: memory-extraction, complexity-assessment — Haiku 4.5.
+ *  - reasoning: arkitektur-beslutninger — Sonnet 4.5/4.6.
+ *
+ *  Fallback-rekkefølge ved manglende match: complexity-baserte default. */
+export type SmartSelectPurpose =
+  | "agent_loop"
+  | "vision_task"
+  | "chat_turn"
+  | "greeting"
+  | "background"
+  | "reasoning";
+
+/** Per-purpose preferred model. Brukes når purpose er satt og modellen
+ *  finnes (enabled) i cachedModels. Falle tilbake til complexity-routing
+ *  hvis ikke tilgjengelig. */
+const PURPOSE_PREFERENCES: Record<SmartSelectPurpose, string[]> = {
+  // Cache-friendly Anthropic-modell — tool-loop får 90% rabatt på cached
+  // tools+system. Sonnet 4.6 som fallback hvis Haiku ikke er enabled.
+  agent_loop: ["claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-sonnet-4-5-20250929"],
+  // Kimi K2.6 har vision og er billig. Sonnet 4.6 ved høy complexity.
+  vision_task: ["moonshot-v1-128k", "claude-sonnet-4-6", "claude-sonnet-4-5-20250929"],
+  // Standard chat — Kimi K2.6 default, Haiku ved Anthropic-prefer.
+  chat_turn: ["moonshot-v1-128k", "claude-haiku-4-5-20251001"],
+  // MiniMax M2 ultra-billig for "Hei"-svar.
+  greeting: ["minimax-m2", "moonshot-v1-32k", "gpt-4o-mini"],
+  // Background work — Haiku struktur-fokusert + billig.
+  background: ["claude-haiku-4-5-20251001", "moonshot-v1-32k", "gpt-4o-mini"],
+  // Tunge resonnerings-tasks — Sonnet er sweet-spot.
+  reasoning: ["claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-opus-4-7"],
+};
+
 export interface SmartSelectParams {
   manualModelId?: string | null;
   needsVision?: boolean;
   context?: string;
   complexity?: number;
+  /** Sprint A-finalisering — eksplisitt rolle. Tar prioritet over context
+   *  + complexity. Default chat_turn (backwards-compat). */
+  purpose?: SmartSelectPurpose;
+  /** Project-type for purpose=agent_loop. Framer/figma-prosjekter får
+   *  Sonnet 4.6 (vision + quality). Code-prosjekter får Haiku 4.5
+   *  (cheaper + cached). */
+  projectType?: "code" | "framer" | "figma" | "framer_figma";
 }
+
 export async function smartSelect(params: SmartSelectParams): Promise<string> {
   if (params.manualModelId) return params.manualModelId;
 
   await ensureCacheFresh();
+
+  // Purpose-routing først (Sprint A-finalisering). Hvis purpose er satt og
+  // den foretrukne modellen er tilgjengelig + enabled, bruk den. Logg
+  // beslutningen så token-budget-rapporten kan korrelere.
+  const purpose = params.purpose ?? "chat_turn";
+
+  // Sprint A-finjustering — agent_loop er projectType-aware.
+  //
+  // Framer/figma-prosjekter → Kimi K2.6 (moonshot-v1-128k):
+  //   - Cheap base-rate ($0.60/1M)
+  //   - Has vision (verifisert i DB)
+  //   - Quality god nok for Framer-design-arbeid
+  //   - Cache-rabatt mistes (Fireworks har ingen cache), men net-billigere
+  //     enn Sonnet 4.6 selv uten cache.
+  //
+  // Code-prosjekter → Haiku 4.5:
+  //   - Anthropic-cache aktiv (90% rabatt på cached read)
+  //   - Cheaper enn Kimi når cache-traff er hyppig
+  //
+  // Default → Kimi K2.6 (cheap fallback for ukjent projectType).
+  if (purpose === "agent_loop") {
+    const isDesign =
+      params.projectType === "framer" || params.projectType === "framer_figma";
+    const isCode = params.projectType === "code";
+    // Kimi K2.6 først for design (vision + cheap), Haiku som fallback hvis
+    // Kimi disabled. Sonnet 4.6 som siste fallback.
+    const designPreferred = ["moonshot-v1-128k", "claude-haiku-4-5-20251001", "claude-sonnet-4-6"];
+    // Haiku 4.5 først for code (cache + cheap), Kimi som fallback for vision-needs.
+    const codePreferred = ["claude-haiku-4-5-20251001", "moonshot-v1-128k", "claude-sonnet-4-6"];
+    // Default (ukjent projectType): cheap-first.
+    const defaultPreferred = ["moonshot-v1-128k", "claude-haiku-4-5-20251001"];
+    const candidates = isDesign
+      ? designPreferred
+      : isCode
+        ? codePreferred
+        : defaultPreferred;
+    for (const modelId of candidates) {
+      const model = cachedModels.find((m) => m.id === modelId);
+      if (model) {
+        if (params.needsVision && !model.supportsVision) continue;
+        const reason = isDesign
+          ? "framer_kimi_cheap_vision"
+          : isCode
+            ? "code_haiku_cached"
+            : "default_kimi_cheap";
+        // eslint-disable-next-line no-console
+        console.log(
+          `[SMART-SELECT-AGENT-LOOP] projectType=${params.projectType ?? "unknown"} ` +
+            `selected_model=${modelId} reason=${reason}`,
+        );
+        return modelId;
+      }
+    }
+    // Ingen preferred-modell tilgjengelig — fall ned til legacy-routing
+    // eslint-disable-next-line no-console
+    console.log(
+      `[SMART-SELECT-AGENT-LOOP] projectType=${params.projectType ?? "unknown"} ` +
+        `fallback=legacy (no preferred model available)`,
+    );
+  }
+
+  const preferred = PURPOSE_PREFERENCES[purpose];
+  if (preferred && preferred.length > 0) {
+    for (const modelId of preferred) {
+      const model = cachedModels.find((m) => m.id === modelId);
+      if (model) {
+        // Hvis vision er nødvendig, hopp over modeller som ikke støtter det
+        if (params.needsVision && !model.supportsVision) continue;
+        // Logg [SMART-SELECT] for synlighet i token-budget-rapporten
+        // eslint-disable-next-line no-console
+        console.log(`[SMART-SELECT] purpose=${purpose} model=${modelId} (preferred match)`);
+        return modelId;
+      }
+    }
+    // Ingen preferred-match — fall til legacy-pipeline
+    // eslint-disable-next-line no-console
+    console.log(`[SMART-SELECT] purpose=${purpose} fallback (no preferred match available)`);
+  }
 
   let pool = [...cachedModels];
 
@@ -293,10 +420,17 @@ export async function smartSelect(params: SmartSelectParams): Promise<string> {
 
   // Pick cheapest by input_price
   pool.sort((a, b) => a.inputCostPer1M - b.inputCostPer1M);
-  if (pool.length > 0) return pool[0].id;
+  if (pool.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[SMART-SELECT] purpose=${purpose} model=${pool[0].id} (cheapest in pool)`);
+    return pool[0].id;
+  }
 
   // Nothing in cache — fall back to complexity-based default
-  return selectOptimalModel(params.complexity ?? 5, "auto");
+  const fallback = selectOptimalModel(params.complexity ?? 5, "auto");
+  // eslint-disable-next-line no-console
+  console.log(`[SMART-SELECT] purpose=${purpose} model=${fallback} (complexity-based fallback)`);
+  return fallback;
 }
 
 /** Heuristic: does the user message or task description imply a need for

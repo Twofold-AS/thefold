@@ -129,7 +129,9 @@ export const cleanupRateLimits = api(
   }
 );
 
-const _cleanupCron = new CronJob("cleanup-rate-limits", {
+// Renamed from "cleanup-rate-limits" — collided with agent/rate-limiter.ts's
+// CronJob of the same name. Encore 1.56+ rejects duplicate cron names.
+const _cleanupCron = new CronJob("gateway-cleanup-rate-limits", {
   title: "Clean up old rate-limit counters",
   every: "30m",
   endpoint: cleanupRateLimits,

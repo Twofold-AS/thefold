@@ -120,6 +120,12 @@ interface CreateTaskRequest {
   externalId?: string;
   externalSource?: string;
   parentId?: string;
+  /** Runde 5/6 — link the task to a project. Drives repo-resolution
+   *  via projects.ensureProjectRepo + scope-routing in the tasks tab. */
+  projectId?: string;
+  /** Runde 6 — task scope ("cowork" | "designer"). Frontend filter uses
+   *  this to split tasks between fane-tabs. */
+  taskScope?: "cowork" | "designer";
 }
 
 interface CreateTaskResponse {
@@ -148,7 +154,7 @@ export const createTask = api(
     }
 
     const row = await db.queryRow<TaskRow>`
-      INSERT INTO tasks (title, description, repo, labels, priority, phase, depends_on, source, linear_task_id, assigned_to, created_by, external_id, external_source, parent_id)
+      INSERT INTO tasks (title, description, repo, labels, priority, phase, depends_on, source, linear_task_id, assigned_to, created_by, external_id, external_source, parent_id, project_id, task_scope)
       VALUES (
         ${req.title},
         ${req.description ?? null},
@@ -163,7 +169,9 @@ export const createTask = api(
         ${req.createdBy ?? null},
         ${req.externalId ?? null},
         ${req.externalSource ?? null},
-        ${req.parentId ?? null}
+        ${req.parentId ?? null},
+        ${req.projectId ?? null},
+        ${req.taskScope ?? null}
       )
       RETURNING id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at, task_scope, project_id
     `;
@@ -195,6 +203,17 @@ interface CreateSubTaskRequest {
   source?: TaskSource;
   assignedTo?: string;
   createdBy?: string;
+  /** Which phase this sub-task belongs to. Free-form string (e.g. "0-read",
+   *  "1-scaffold", "2-implement", "3-test"). Agent iterates sub-tasks
+   *  sorted by phase, then createdAt. */
+  phase?: string;
+  /** Ids of other sub-tasks (of the same parent) that must complete first. */
+  dependsOn?: string[];
+  /** Files the sub-task will read/modify — hint for context curation. */
+  targetFiles?: string[];
+  /** Whether the sub-task needs vision-capable model (e.g. "Phase 0: read
+   *  screenshots"). Flags context-builder to include image-tools. */
+  needsVision?: boolean;
 }
 
 export const createSubTask = api(
@@ -205,24 +224,39 @@ export const createSubTask = api(
       throw APIError.invalidArgument("title is required");
     }
 
-    // Verify parent exists
-    const parent = await db.queryRow<{ id: string }>`
-      SELECT id FROM tasks WHERE id = ${req.parentId}::uuid AND status != 'deleted'
+    // Verify parent exists + load project_id/task_scope so the sub-task
+    // inherits the same project + fane-routing (Runde 5/6).
+    const parent = await db.queryRow<{ id: string; project_id: string | null; task_scope: string | null }>`
+      SELECT id, project_id, task_scope FROM tasks WHERE id = ${req.parentId}::uuid AND status != 'deleted'
     `;
     if (!parent) throw APIError.notFound("parent task not found");
 
+    // `phase` + `depends_on` lets the master-task iterator sort sub-tasks
+    // correctly. `targetFiles` + `needsVision` are stored in labels[] as
+    // structured tags (prefixed) since we don't have dedicated columns —
+    // context-builder can re-parse them at execution time.
+    const extraLabels: string[] = [...(req.labels ?? [])];
+    if (req.targetFiles && req.targetFiles.length > 0) {
+      for (const f of req.targetFiles) extraLabels.push(`target:${f}`);
+    }
+    if (req.needsVision) extraLabels.push("needs-vision");
+
     const row = await db.queryRow<TaskRow>`
-      INSERT INTO tasks (title, description, repo, labels, priority, source, assigned_to, created_by, parent_id)
+      INSERT INTO tasks (title, description, repo, labels, priority, phase, depends_on, source, assigned_to, created_by, parent_id, project_id, task_scope)
       VALUES (
         ${req.title},
         ${req.description ?? null},
         ${req.repo ?? null},
-        ${req.labels ?? []}::text[],
+        ${extraLabels}::text[],
         ${req.priority ?? 3},
+        ${req.phase ?? null},
+        ${req.dependsOn ?? []}::uuid[],
         ${req.source ?? "manual"},
         ${req.assignedTo ?? "agent"},
         ${req.createdBy ?? null},
-        ${req.parentId}::uuid
+        ${req.parentId}::uuid,
+        ${parent.project_id},
+        ${parent.task_scope}
       )
       RETURNING id, title, description, repo, status, priority, labels::text[] as labels, phase, depends_on::text[] as depends_on, source, linear_task_id, linear_synced_at, healing_source_id, estimated_complexity, estimated_tokens, planned_order, assigned_to, build_job_id, pr_url, review_id, error_message, external_id, external_source, parent_id, created_by, created_at, updated_at, completed_at, task_scope, project_id
     `;

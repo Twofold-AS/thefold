@@ -37,6 +37,10 @@ export interface ToolContext {
   userEmail?: string;
   /** TheFold task ID — set når tool-loopen kjører i en task-kontekst */
   taskId?: string;
+  /** Sprint A — Master-task UUID hvis vi er inne i en master-iterator
+   *  sub-task. Brukes av web_scrape-toolet for å tagge persistens med
+   *  `task:<masterId>` slik at andre sub-tasks finner det. */
+  masterTaskId?: string;
   /** Repo-info, hvis verktøyet trenger det */
   repoOwner?: string;
   repoName?: string;
@@ -81,6 +85,13 @@ export interface ToolResult {
   stopReason?: "paused_for_clarification";
   /** Data som loopen propagerer til orchestrator (vises i UI) */
   pauseData?: { question: string; context?: string };
+  /**
+   * Signal til tool-loopen: uopprettelig feil — bryt loopen og rapporter til bruker.
+   * Brukes når et tool oppdager at videre forsøk er meningsløse (403/404/auth-feil,
+   * manglende secret, ekstern tjeneste nede). Loopen emitter agent.done med
+   * reason="tool_failure" + userMessage. Handleren setter success=false.
+   */
+  bailOut?: { reason: string; userMessage: string };
 }
 
 /** Hovedkontrakt — alle verktøy implementerer denne */

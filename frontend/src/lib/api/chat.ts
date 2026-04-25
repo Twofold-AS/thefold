@@ -19,7 +19,7 @@ export interface ConversationSummary {
   lastMessage: string;
   lastActivity: string;
   activeTask?: string;
-  scope?: "cowork" | "designer";
+  scope?: "incognito" | "cowork" | "designer";
   projectId?: string | null;
 }
 
@@ -87,7 +87,11 @@ export async function sendMessage(conversationId: string, message: string, optio
   planMode?: boolean;
   firecrawlEnabled?: boolean;
   projectId?: string;
-  scope?: "cowork" | "designer";
+  scope?: "incognito" | "cowork" | "designer";
+  /** Runde 3-A — set when in plan-preview state. Routes to /agent/edit-plan. */
+  editingPlanFor?: string;
+  /** Runde 3-B — set when interrupting a running master. Routes to /agent/interrupt-master. */
+  interruptingMaster?: string;
 }) {
   return apiFetch<{
     message: Message;

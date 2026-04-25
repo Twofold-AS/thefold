@@ -57,7 +57,7 @@ export async function getOrCreateManifest(
   // from the enabled-in-DB set (was hardcoded to "claude-haiku-4-5-20250929"
   // which is disabled in DB → estimateCost=0 warning + silent bypass).
   try {
-    const model = await smartSelect({ context: "review", complexity: 2 });
+    const model = await smartSelect({ context: "review", complexity: 2, purpose: "background" });
     const response = await callAIWithFallback({
       model,
       system: "You are a code analysis assistant. Analyze repository structures and return concise JSON manifests.",

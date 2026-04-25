@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, { useState, useRef, useCallback, useEffect, useId } from "react";
+import { useRouter } from "next/navigation";
 import { T } from "@/lib/tokens";
 import PillIcon from "@/components/PillIcon";
 import TypewriterPlaceholder from "@/components/TypewriterPlaceholder";
-import { Ghost } from "lucide-react";
 import ComposerPopup, { type ComposerMode } from "@/components/ComposerPopup";
 import SlashCommandDropdown from "@/components/SlashCommandDropdown";
 import { matchSlashCommands, type SlashCommand } from "@/lib/slash-commands";
@@ -14,8 +14,10 @@ import {
   listTFProjects,
   getIntegrationApiKeyStatus,
   uploadZip,
+  deleteUpload,
   type TFProject,
 } from "@/lib/api";
+import { X as XIcon, Paperclip } from "lucide-react";
 
 /** ArrayBuffer → base64 (browser-safe, chunked to avoid stack overflow on large bufs). */
 function arrayBufferToBase64(buf: ArrayBuffer): string {
@@ -51,7 +53,7 @@ interface ChatInputProps {
   /** Fase I.0.e — per-samtale tool-state persistence */
   conversationId?: string;
   /** Fase I.0.f — filtrerer prosjekt-liste i "+"-popup */
-  projectScope?: "cowork" | "designer";
+  projectScope?: "incognito" | "cowork" | "designer";
   /** Fase I.0.f — kaller opp CodeProjectModal/DesignProjectModal (I.3) */
   onNewProject?: () => void;
   /** Fase I.0.e — valgt prosjekt for denne samtalen */
@@ -89,6 +91,7 @@ export default function ChatInput({
   onSelectProject,
   activeModeLabel,
 }: ChatInputProps) {
+  const router = useRouter();
   const [v, setV] = useState("");
   const [isFocused, setIsFocused] = useState(false);
   const ty = v.length > 0;
@@ -105,11 +108,25 @@ export default function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  /**
+   * Uploads staged for the next outbound message. Each entry is an active
+   * row in `chat_files` (upload_type=zip). X-button calls deleteUpload and
+   * removes from state. Leftover uploads (navigation away without send)
+   * are garbage-collected by the server-side cron after TTL.
+   */
+  const [uploadedFiles, setUploadedFiles] = useState<Array<{
+    uploadId: string;
+    filename: string;
+    fileCount: number;
+  }>>([]);
 
   // Fase I.8 — Slash-command dropdown state
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashOpen, setSlashOpen] = useState(true);
-  const slashScope = (projectScope ?? "cowork") as "cowork" | "designer";
+  // Slash-commands finnes bare for cowork/designer — incognito mapper til "cowork"
+  // (placeholder, til vi bestemmer om incognito får egne slash-commands).
+  const slashScope: "cowork" | "designer" =
+    projectScope === "designer" ? "designer" : "cowork";
   const slashMatches: SlashCommand[] =
     slashOpen && v.trimStart().startsWith("/") ? matchSlashCommands(v, slashScope) : [];
   const slashActive = slashMatches.length > 0;
@@ -121,6 +138,11 @@ export default function ChatInput({
   };
 
   useEffect(() => {
+    // Incognito har ingen prosjekter — tom liste uten backend-kall.
+    if (projectScope === "incognito") {
+      setTfProjects([]);
+      return;
+    }
     const scope = projectScope ?? "cowork";
     listTFProjects(scope).then((r) => setTfProjects(r.projects ?? [])).catch(() => setTfProjects([]));
   }, [projectScope]);
@@ -263,11 +285,17 @@ export default function ChatInput({
         const arrayBuf = await file.arrayBuffer();
         const base64 = arrayBufferToBase64(arrayBuf);
         const result = await uploadZip(conversationId, file.name, base64);
-        const summary = Object.entries(result.byCategory)
-          .map(([cat, n]) => `${n} ${cat}`)
-          .join(", ");
-        const msg = `Lastet opp ${file.name}: ${result.filesExtracted} filer${summary ? ` (${summary})` : ""}. upload-id: ${result.uploadId}`;
-        setV((prev) => (prev ? `${msg}\n\n${prev}` : msg));
+        // Push to badge state instead of inlining text in the prompt. The
+        // agent reads the upload via list_uploads / read_uploaded_content
+        // tools when it needs the contents — no prompt-bloat.
+        setUploadedFiles((prev) => [
+          ...prev,
+          {
+            uploadId: result.uploadId,
+            filename: file.name,
+            fileCount: result.filesExtracted,
+          },
+        ]);
       } catch (err) {
         setFileError(err instanceof Error ? err.message : "Zip-opplasting feilet");
       } finally {
@@ -433,47 +461,29 @@ export default function ChatInput({
             }}
           />
 
-          {/* Ghost-ikon: sticky inkognito-innganspunkt.
-              - Når bruker ALLEREDE er i inkognito (enten via auto — ingen prosjekt — eller
-                eksplisitt toggle): disabled, grå, ikke klikkbar. Ingen toggle-ut.
-              - Når bruker er i et prosjekt: klikkbar → starter ny inkognito-samtale (forlater
-                prosjektet, rydder URL, åpner ny chat).
-              Inkognito er dermed "sticky per samtale" — forlates kun ved ny samtale i et prosjekt. */}
-          {(() => {
-            const alreadyIncognito = isIncognito || !selectedProjectId;
-            return (
-              <button
-                type="button"
-                onClick={alreadyIncognito ? undefined : () => onIncognitoToggle?.()}
-                disabled={alreadyIncognito}
-                title={
-                  alreadyIncognito
-                    ? "Du er allerede i inkognito"
-                    : "Start ny inkognito-samtale"
-                }
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 24,
-                  height: 24,
-                  padding: 0,
-                  border: "none",
-                  background: "transparent",
-                  color: alreadyIncognito ? T.accent : T.textMuted,
-                  cursor: alreadyIncognito ? "not-allowed" : "pointer",
-                  opacity: alreadyIncognito ? 0.4 : 1,
-                  flexShrink: 0,
-                }}
-              >
-                <Ghost
-                  size={16}
-                  fill={alreadyIncognito ? T.accent : "none"}
-                  strokeWidth={alreadyIncognito ? 2 : 1.5}
-                />
-              </button>
-            );
-          })()}
+          {/* Ghost-ikon: snarvei til Incognito-fanen. Alltid synlig i alle
+              faner (incognito/cowork/designer) som "gå til privat"-innganspunkt.
+              Ingen mode-toggle innen gjeldende fane — kun navigasjon.
+              Shimmer-stroke (OPPGAVE A): aldri solid blå fill. */}
+          <button
+            type="button"
+            onClick={() => router.push("/")}
+            title="Gå til Incognito"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 24,
+              height: 24,
+              padding: 0,
+              border: "none",
+              background: "transparent",
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            <ShimmerGhost size={16} />
+          </button>
           {/* Active mode + model labels — shimmer text beside the ghost icon.
               Shown when planMode / autoMode / subAgentsEnabled is active,
               or when the user has picked a specific model (not "Smart"). */}
@@ -520,6 +530,77 @@ export default function ChatInput({
               {fileError}
             </span>
           )}
+          {uploadedFiles.length > 0 && (
+            <div style={{
+              display: "flex", flexWrap: "wrap", gap: 6,
+              paddingLeft: 8, paddingTop: 4,
+            }}>
+              {uploadedFiles.map((f) => (
+                <span
+                  key={f.uploadId}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "3px 6px 3px 8px",
+                    background: T.subtle,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: 999,
+                    fontSize: 11,
+                    fontFamily: T.mono,
+                    color: T.textSec,
+                    maxWidth: 260,
+                  }}
+                  title={`${f.filename} — ${f.fileCount} filer`}
+                >
+                  <Paperclip size={11} color={T.textFaint} style={{ flexShrink: 0 }} />
+                  <span style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}>
+                    {f.filename}
+                  </span>
+                  <span style={{ color: T.textFaint, fontSize: 10 }}>
+                    ({f.fileCount})
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Fjern ${f.filename}`}
+                    onClick={async (ev) => {
+                      ev.preventDefault();
+                      ev.stopPropagation();
+                      // Optimistic remove — restore on failure so user can retry
+                      const previous = uploadedFiles;
+                      setUploadedFiles((prev) => prev.filter((x) => x.uploadId !== f.uploadId));
+                      try {
+                        await deleteUpload(f.uploadId);
+                      } catch (err) {
+                        setFileError(err instanceof Error ? err.message : "Kunne ikke slette opplasting");
+                        setUploadedFiles(previous);
+                      }
+                    }}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 14,
+                      height: 14,
+                      padding: 0,
+                      marginLeft: 2,
+                      background: "transparent",
+                      border: "none",
+                      borderRadius: "50%",
+                      color: T.textMuted,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <XIcon size={11} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <PillIcon
@@ -558,5 +639,42 @@ export default function ChatInput({
       />
     )}
     </>
+  );
+}
+
+// Ghost-ikon med horisontalt shimmer-sveip i stroke — samme visuelle
+// sprÃ¥k som tf-shimmer-teksten ("Tenker...", aktiv-modus-labels). Bruker
+// animert linearGradient-stroke istedenfor `background-clip: text` som
+// ikke virker for SVG-ikoner. useId sikrer unik gradient-id når flere
+// instanser rendres samtidig.
+function ShimmerGhost({ size = 16 }: { size?: number }) {
+  const rawId = useId();
+  const gradId = `shimmer-ghost-${rawId.replace(/:/g, "")}`;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      strokeWidth={1.75}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <defs>
+        <linearGradient id={gradId} x1="0%" x2="100%" y1="0" y2="0">
+          <stop offset="0%" stopColor="rgba(255,255,255,0.3)" />
+          <stop offset="50%" stopColor="rgba(255,255,255,1)" />
+          <stop offset="100%" stopColor="rgba(255,255,255,0.3)" />
+          <animate attributeName="x1" values="-100%;100%" dur="2.5s" repeatCount="indefinite" />
+          <animate attributeName="x2" values="0%;200%" dur="2.5s" repeatCount="indefinite" />
+        </linearGradient>
+      </defs>
+      <g stroke={`url(#${gradId})`}>
+        <path d="M9 10h.01" />
+        <path d="M15 10h.01" />
+        <path d="M12 2a8 8 0 0 0-8 8v12l3-3 2.5 2.5L12 19l2.5 2.5L17 19l3 3V10a8 8 0 0 0-8-8z" />
+      </g>
+    </svg>
   );
 }

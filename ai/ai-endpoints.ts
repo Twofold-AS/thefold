@@ -26,11 +26,19 @@ export const chat = api(
     const lastUserText = [...req.messages].reverse().find((m) => m.role === "user")?.content ?? "";
     const isDesignProject = req.projectType === "framer" || req.projectType === "framer_figma";
     const needsVision = isDesignProject && inferNeedsVision(lastUserText);
+    // OPPDRAG 2 — purpose-routing. Greeting → MiniMax M2 (billigst).
+    // Vision-tasks → Kimi K2.6 / Sonnet ladder. Standard chat → Kimi K2.6.
+    const purpose: "greeting" | "vision_task" | "chat_turn" = req.isSocialGreeting
+      ? "greeting"
+      : needsVision
+        ? "vision_task"
+        : "chat_turn";
     const model = await smartSelect({
       manualModelId: req.model,
       needsVision,
       context: "chat",
       complexity: req.complexity ?? 2,
+      purpose,
     });
     if (!req.model) {
       log.info("smart-select routed chat", {
@@ -180,6 +188,8 @@ export const chat = api(
       repoOwner: req.repoOwner,
       conversationId: req.conversationId,
       userEmail: req.userEmail,
+      projectId: req.projectId,
+      projectType: req.projectType,
       assessComplexityFn: async (r) => {
         const result = await assessComplexity(r);
         return { complexity: result.complexity, tokensUsed: result.tokensUsed };
@@ -232,6 +242,7 @@ export const reviewCode = api(
       manualModelId: req.model,
       context: "review",
       complexity: 5,
+      purpose: "reasoning",
     });
 
     let prompt = `## Task\n${req.taskDescription}\n\n`;
@@ -277,11 +288,17 @@ export const reviewCode = api(
         }
       }
 
+      // Encore.ts decoder rejects the response if a required field is
+      // undefined. The AI occasionally omits `documentation` (or emits it
+      // as null) — coerce to empty string so the contract stays valid.
+      const doc = typeof parsed.documentation === "string"
+        ? parsed.documentation
+        : "";
       return {
-        documentation: parsed.documentation as string,
-        memoriesExtracted: (parsed.memoriesExtracted as string[]) || [],
-        qualityScore: (parsed.qualityScore as number) ?? 0,
-        concerns: (parsed.concerns as string[]) || [],
+        documentation: doc,
+        memoriesExtracted: Array.isArray(parsed.memoriesExtracted) ? (parsed.memoriesExtracted as string[]) : [],
+        qualityScore: typeof parsed.qualityScore === "number" ? parsed.qualityScore : 0,
+        concerns: Array.isArray(parsed.concerns) ? (parsed.concerns as string[]) : [],
         tokensUsed: response.tokensUsed,
         modelUsed: response.modelUsed,
         costUsd: response.costEstimate.totalCost,
